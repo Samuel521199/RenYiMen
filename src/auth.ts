@@ -41,13 +41,26 @@ export const authConfig = {
           return null;
         }
 
-        const user = await prisma.user.findUnique({ where: { email: emailNorm } });
-        if (!user?.passwordHash) {
+        let user: { id: string; email: string; name: string | null; image: string | null; passwordHash: string | null } | null = null;
+        try {
+          user = await prisma.user.findUnique({ where: { email: emailNorm } });
+        } catch (dbErr) {
+          console.error("[auth/authorize] DB查询失败", { email: emailNorm, err: dbErr });
+          return null;
+        }
+
+        if (!user) {
+          console.warn("[auth/authorize] 用户不存在", { email: emailNorm });
+          return null;
+        }
+        if (!user.passwordHash) {
+          console.warn("[auth/authorize] 该账号未设置密码登录（可能是OAuth账号）", { email: emailNorm });
           return null;
         }
 
         const ok = await bcrypt.compare(password, user.passwordHash);
         if (!ok) {
+          console.warn("[auth/authorize] 密码错误", { email: emailNorm });
           return null;
         }
 
