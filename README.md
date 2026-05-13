@@ -1,4 +1,4 @@
-# Workflow Frontend
+# RenYiMen · Ren Yi Men AI
 
 面向 **AI 工作流 SaaS** 的前端应用：将 ComfyUI / RunningHub 的复杂 JSON 工作流动态封装为图生视频、文生图等友好界面。技术栈遵循项目根目录 `.cursorrules`（Next.js App Router、TypeScript 严格模式、Tailwind CSS、Zustand、面向 Docker/K8s 的无状态部署）。
 
