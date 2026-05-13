@@ -41,7 +41,7 @@ export const authConfig = {
           return null;
         }
 
-        let user: { id: string; email: string; name: string | null; image: string | null; passwordHash: string | null } | null = null;
+        let user: Awaited<ReturnType<typeof prisma.user.findUnique>> | null = null;
         try {
           user = await prisma.user.findUnique({ where: { email: emailNorm } });
         } catch (dbErr) {

@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
 import { downloadResultImageAsPng } from "@/lib/download-result-image-png";
 import { downloadResultVideoAsFile } from "@/lib/download-result-video";
-import { computePseudoProgressPercent, inferMediaTypeFromResultUrl } from "@/lib/task-status-view";
+import { computePseudoProgressPercent } from "@/lib/task-status-view";
 import { cn } from "@/lib/utils";
 import type { TaskStatusViewModel } from "@/types/task-status";
 
