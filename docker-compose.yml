@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: workflow-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: workflow
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    ports:
+      # 宿主机 5432 常被本机 PostgreSQL 占用；对外映射改为 5433，容器内仍为 5432（DATABASE_URL 用 db:5432 不变）
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+
+  web:
+    container_name: workflow-web
+    image: workflow-web:latest
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    ports:
+      # 宿主机端口 : 容器内 3000（NEXT 监听 PORT=3000）；宿主机 3000 被占用时改左侧即可
+      - "${WEB_PORT:-3001}:3000"
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/workflow?schema=public
+      NODE_ENV: production
+
+  # 一次性执行迁移（不会随 docker compose up 自动跑）
+  # 宿主必须存在：./prisma/schema.prisma 与 ./prisma/migrations/（从本仓库原样上传整个 prisma 目录）
+  migrate:
+    profiles: ["migrate"]
+    image: node:18-alpine
+    working_dir: /work
+    volumes:
+      - ./prisma:/work/prisma:ro
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/workflow?schema=public
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache openssl libc6-compat
+        if [ ! -f /work/prisma/schema.prisma ]; then
+          echo "[migrate] 未找到 /work/prisma/schema.prisma"
+          echo "[migrate] 请在 compose 所在目录确认宿主文件存在: prisma/schema.prisma"
+          ls -la /work/prisma 2>/dev/null || echo "[migrate] 宿主 ./prisma 未挂载或目录为空（请上传整个 prisma 文件夹）"
+          exit 1
+        fi
+        cd /work
+        npm install prisma@6.19.3
+        exec npx prisma migrate deploy --schema=/work/prisma/schema.prisma
+    depends_on:
+      - db
+    restart: "no"

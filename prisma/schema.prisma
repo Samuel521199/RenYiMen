@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+/// 积分流水类型：充值 / 消耗
+enum PointsTransactionType {
+  RECHARGE
+  CONSUME
+}
+
+/// 网关生成任务在库中的生命周期（与上游 taskId 对齐）
+enum GenerationHistoryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime? @map("email_verified")
+  image         String?
+  /// Credentials 登录用（OAuth 用户可为空）
+  passwordHash  String?   @map("password_hash")
+  role          Role      @default(USER)
+  /// 当前积分余额（整数）
+  balance       Int       @default(0)
+
+  accounts              Account[]
+  sessions              Session[]
+  transactions          Transaction[]
+  apiLogs               ApiLog[]
+  generationHistories   GenerationHistory[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+/// 积分流水：每一笔充值或消耗（amount 为带符号整数，消耗一般为负）
+model Transaction {
+  id          String                @id @default(cuid())
+  userId      String                @map("user_id")
+  type        PointsTransactionType
+  amount      Int
+  taskId      String?               @map("task_id")
+  description String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("transactions")
+}
+
+/// API 调用日志（成本价 / 售价 / 毛利）
+model ApiLog {
+  id              String  @id @default(cuid())
+  userId          String? @map("user_id")
+  endpoint        String
+  requestPayload  Json?   @map("request_payload")
+  responseStatus  Int?    @map("response_status")
+  /// 上游任务 ID（如 RunningHub taskId）
+  externalTaskId  String? @map("external_task_id")
+  /// 网关处理耗时（毫秒）
+  durationMs      Int?    @map("duration_ms")
+  costPrice       Decimal? @map("cost_price") @db.Decimal(18, 6)
+  sellPrice       Decimal? @map("sell_price") @db.Decimal(18, 6)
+  profit          Decimal? @db.Decimal(18, 6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([endpoint, createdAt])
+  @@map("api_logs")
+}
+
+/// 网关提单与终态落库（按上游 taskId 唯一；与 User 外键关联）
+model GenerationHistory {
+  id             String                  @id @default(cuid())
+  userId         String                  @map("user_id")
+  taskId         String                  @unique @map("task_id")
+  skuId          String                  @map("sku_id")
+  providerCode   String                  @default("") @map("provider_code")
+  status         GenerationHistoryStatus @default(PENDING)
+  mediaType      String                  @default("") @map("media_type")
+  resultUrl      String?                 @map("result_url") @db.Text
+  /// 成功终态前为提单参考成本；成功后与实扣积分一致（与余额扣减对齐）
+  cost           Int                     @default(0)
+  /// 上游 RunningHub 实际消耗 RH 币（若状态/输出接口可解析）
+  actualCost     Int?                    @map("actual_cost")
+  /// 提单时登记的底图/素材大小（字节），供终态与上游解析值合并计费
+  sourceAssetBytes Int?                  @map("source_asset_bytes")
+  /// 上游任务实际执行耗时（秒），如 RunningHub `usage.taskCostTime`
+  durationInt      Int                    @default(0) @map("duration_int")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId, createdAt])
+  @@map("generation_histories")
+}

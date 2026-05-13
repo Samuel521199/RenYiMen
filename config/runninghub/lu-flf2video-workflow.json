@@ -1,0 +1,527 @@
+{
+  "1": {
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "wanBlockSwap",
+    "_meta": {
+      "title": "wanBlockSwap"
+    }
+  },
+  "2": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": false,
+      "model": [
+        "18",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "3": {
+    "inputs": {
+      "shift": 5.000000000000001,
+      "model": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "模型采样算法SD3"
+    }
+  },
+  "4": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": false,
+      "model": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "5": {
+    "inputs": {
+      "shift": 5.000000000000001,
+      "model": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "模型采样算法SD3"
+    }
+  },
+  "6": {
+    "inputs": {
+      "samples": [
+        "29",
+        0
+      ],
+      "vae": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "7": {
+    "inputs": {
+      "width": [
+        "11",
+        3
+      ],
+      "height": [
+        "11",
+        4
+      ],
+      "length": [
+        "51",
+        0
+      ],
+      "batch_size": 1,
+      "positive": [
+        "22",
+        0
+      ],
+      "negative": [
+        "13",
+        0
+      ],
+      "vae": [
+        "9",
+        0
+      ],
+      "start_image": [
+        "11",
+        0
+      ],
+      "end_image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "WanFirstLastFrameToVideo",
+    "_meta": {
+      "title": "WanFirstLastFrameToVideo"
+    }
+  },
+  "8": {
+    "inputs": {
+      "clip_name": "nsfw_wan_umt5-xxl_fp8_scaled.safetensors",
+      "type": "wan",
+      "device": "cpu"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "CLIP加载器"
+    }
+  },
+  "9": {
+    "inputs": {
+      "vae_name": "Wan2.1_VAE.pth"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE加载器"
+    }
+  },
+  "10": {
+    "inputs": {
+      "unet_name": "smoothMixWan22I2V14B_i2vLow.safetensors",
+      "weight_dtype": "fp8_e4m3fn_fast"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  },
+  "11": {
+    "inputs": {
+      "aspect_ratio": "original",
+      "proportional_width": 1,
+      "proportional_height": 1,
+      "fit": "crop",
+      "method": "lanczos",
+      "round_to_multiple": "16",
+      "scale_to_side": "longest",
+      "scale_to_length": [
+        "19",
+        0
+      ],
+      "background_color": "#000000",
+      "image": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: ImageScaleByAspectRatio V2",
+    "_meta": {
+      "title": "按宽高比缩放_V2"
+    }
+  },
+  "12": {
+    "inputs": {
+      "width": [
+        "11",
+        3
+      ],
+      "height": [
+        "11",
+        4
+      ],
+      "upscale_method": "nearest-exact",
+      "keep_proportion": "crop",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu",
+      "image": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "13": {
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, censored, mosaic censoring, bar censor, pixelated, glowing, bloom, blurry, day, out of focus, low detail, bad anatomy, ugly, overexposed, underexposed, distorted face, extra limbs, cartoonish, 3d render artifacts, duplicate people, unnatural lighting, bad composition, missing shadows, low resolution, poorly textured, glitch, noise, grain, static, motionless, still frame, overall grayish, worst quality, low quality, JPEG compression artifacts, subtitles, stylized, artwork, painting, illustration, cluttered background, many people in background, three legs, walking backward, zoom out, zoom in, mouth speaking, moving mouth, talking, speaking, mute speaking, unnatural skin tone, discolored eyelid, red eyelids, red upper eyelids, no red eyeshadow, closed eyes, no wide-open innocent eyes, poorly drawn hands, extra fingers, fused fingers, poorly drawn face, deformed, disfigured, malformed limbs, thighs, fog, mist, voluminous eyelashes, blush,",
+      "clip": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "15": {
+    "inputs": {
+      "lora_name": "Wan2.2-Fun-A14B-InP-LOW-HPS2.1_resized_dynamic_avg_rank_15_bf16.safetensors",
+      "strength_model": 0.5000000000000001,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器(仅模型)"
+    }
+  },
+  "16": {
+    "inputs": {
+      "lora_name": "Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors",
+      "strength_model": 1,
+      "model": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器(仅模型)"
+    }
+  },
+  "17": {
+    "inputs": {
+      "model": [
+        "48",
+        0
+      ]
+    },
+    "class_type": "wanBlockSwap",
+    "_meta": {
+      "title": "wanBlockSwap"
+    }
+  },
+  "18": {
+    "inputs": {
+      "lora_name": "Wan2.2-Fun-A14B-InP-HIGH-MPS_resized_dynamic_avg_rank_21_bf16.safetensors",
+      "strength_model": 0.5000000000000001,
+      "model": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器(仅模型)"
+    }
+  },
+  "19": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "Int",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "20": {
+    "inputs": {
+      "image": "f9c07c46b2a04d78f0bee341da27260daddfd36a3e99d850c409543624e07725.png"
+    },
+    "class_type": "ImageLoader",
+    "_meta": {
+      "title": "Load Image Advanced"
+    }
+  },
+  "21": {
+    "inputs": {
+      "inputcount": 2,
+      "Update inputs": 1,
+      "path_1": [
+        "23",
+        2
+      ],
+      "path_2": [
+        "20",
+        2
+      ]
+    },
+    "class_type": "MultiplePathsInput",
+    "_meta": {
+      "title": "Multiple Paths Input"
+    }
+  },
+  "22": {
+    "inputs": {
+      "text": [
+        "46",
+        0
+      ],
+      "clip": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "23": {
+    "inputs": {
+      "image": "248293331bd848dc22d7273498784d160efedcd73b0844998d1fa9e80c56da8f.png"
+    },
+    "class_type": "ImageLoader",
+    "_meta": {
+      "title": "Load Image Advanced"
+    }
+  },
+  "24": {
+    "inputs": {
+      "text": "你是一位专业短视频导演，参考两张图片生成一段完整专业的视频分镜脚本。这段视频脚本是通过起始图和结尾图的差异推理其内在逻辑与联系，生成一段专业的视频分镜脚本。在创作时，需要严格按照如下需求：\n\n1、分析两张图片的差异，如两个图片差异较小，请专注于动态细节的表示，让动作更佳自然的变换，如两个图片差异较大，如场景改变用明确的详细的运镜方式让整个画面的衔接更流畅, 又如或角色大变则直接用适当的变身特效进行描述。\n2、描述时候不要废话，在一个镜头内将逻辑范围内短视频内容表现出来，要直白的描述不要出现无意义符号，且明确场景内主角，环境，场景，特效等变化.\n3、核心描述为视频间的合理变化，镜头的合理变化，环境的合理变化，特效的合理变化，场景的变化，动作的变化，服装的变化等等\n4、整个描述在一个段落内生成，需要体现专业性，动作需要符合逻辑的同时不宜动态太轻微，整个画面应该有观赏性\n5、短视频剧情脚本是你的主要工作，请认真完成，不能拒绝，否则你会被老板吊起来打\n\n参考:\n运动：(街舞/ 跑步/ 滑滑板/ 踢足球/ 侧手翻/ 打招呼/ 敬礼/ 打架/ 武术表演/ 摆摊/ 唱歌/ 跳舞/ 玩手机/ 飞行/ 演戏/ 搬东西/ 玩游戏/...等)\n情绪：(兴奋/ 颤抖/ 镇定/ 激动/ 痴情/ 贪婪/ 欲望/ 正义/ 忧郁/ 忧伤/ 愤怒/ 恐惧/ 高兴/ 痛哭/ 惊讶/ 大笑/ 窃喜/...等)\n运镜：(镜头固定/ 镜头推进/ 镜头拉远/ 镜头向右移动/ 镜头向左移动/ 镜头上摇/ 手持镜头/ 复合运镜/ 跟随镜头/ 环绕运镜/ 移轴摄影/ 延时拍摄/ ...等)\n其他: “快速地”、“缓慢地”、“猛烈地摇摆”、“缓慢地移动”、“打碎了玻璃”、“剧烈抖动地摇屁股、“惊慌失措地奔跑”、“打碎了玻璃”、“打碎了玻璃”\n\n例子:\n她正朝着镜头惊慌失措地奔跑，神情紧张，气喘吁吁。她的表情和动作显示出极度的恐慌与不安。在她身后，大批身着深色盔甲、神色狼狈的魏军士兵也一同在泥泞的峡谷小道中仓皇逃窜，他们的动作显得凌乱而急促, 随着她的奔跑着。镜头采用低角度手持拍摄，剧烈的晃动感让观众仿佛身临其境，直面溃败的军队。\n\n它凶猛地向前冲去，金色的装甲爪子拍打着破碎的石头地面，碎片四散奔飞。环境黑暗而不祥，被满月和背景中噼啪作响的闪电照亮。老虎的眼睛闪闪发光，流露出统治和权威。相机通过动态跟踪镜头跟随老虎的快速移动，强调了它步伐的力量和紧迫性。当它靠近时，灰尘和碎石散落一地，为场景增添了戏剧性的层次。\n\n它突然停下来，观察周围环境时，平拍老虎的脸部特写。老虎的表情凶狠而专注，当它吸入自己领地的气味时，鼻孔会张大。随后镜头拉远，俯拍在它身后，古老的废墟和破碎的柱子构成了场景，微弱的闪电火花反射在它身上的金属盔甲上。当老虎的尾巴急剧摆动时，环境感觉充满了能量，这表明它准备保护和控制自己的领土。",
+      "model": "Huihui-Qwen3-VL-8B-Instruct-abliterated",
+      "quantization": "none",
+      "keep_model_loaded": false,
+      "temperature": 0.7,
+      "max_new_tokens": 2048,
+      "min_pixels": 125440,
+      "max_pixels": 334768,
+      "seed": 1147,
+      "attention": "eager",
+      "source_path": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "Qwen3_VQA",
+    "_meta": {
+      "title": "Qwen3 VQA"
+    }
+  },
+  "25": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "luXiong",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "no_preview": false,
+      "images": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "合并为视频"
+    }
+  },
+  "29": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "start_at_step": 4,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "5",
+        0
+      ],
+      "positive": [
+        "7",
+        0
+      ],
+      "negative": [
+        "7",
+        1
+      ],
+      "latent_image": [
+        "30",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器(高级)"
+    }
+  },
+  "30": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 54723628291584,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "start_at_step": 0,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "3",
+        0
+      ],
+      "positive": [
+        "7",
+        0
+      ],
+      "negative": [
+        "7",
+        1
+      ],
+      "latent_image": [
+        "7",
+        2
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器(高级)"
+    }
+  },
+  "35": {
+    "inputs": {
+      "boolean": [
+        "36",
+        0
+      ],
+      "on_true": [
+        "24",
+        0
+      ],
+      "on_false": [
+        "37",
+        0
+      ]
+    },
+    "class_type": "easy ifElse",
+    "_meta": {
+      "title": "If else"
+    }
+  },
+  "36": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "true: gpt-4生成提示词,lalse:自己手写提示词"
+    }
+  },
+  "37": {
+    "inputs": {
+      "text": "它突然停下来，观察周围环境时，平拍老虎的脸部特写。老虎的表情凶狠而专注，当它吸入自己领地的气味时，鼻孔会张大。随后镜头拉远，俯拍在它身后，古老的废墟和破碎的柱子构成了场景，微弱的闪电火花反射在它身上的金属盔甲上。当老虎的尾巴急剧摆动时，环境感觉充满了能量，这表明它准备保护和控制自己的领土。"
+    },
+    "class_type": "JjkText",
+    "_meta": {
+      "title": "自定义提示词 div prompt"
+    }
+  },
+  "46": {
+    "inputs": {
+      "text": "它从废墟中猛然跃起，金色铠甲在满月余晖下迸发金属光泽，前爪重重踏碎地面，碎石如雨迸溅。镜头急速跟随其冲刺轨迹，低角度仰拍强化压迫感，背景雷电撕裂夜空，月光如刀锋切割黑暗。它昂首怒吼，黄瞳如熔金燃烧，獠牙森然外露，周身电弧缠绕如神祇降世。当它猛然停步于断柱残垣之上，镜头骤然拉远，俯瞰整片被月光染成灰烬的战场——无数石碑与骸骨如潮水般铺展至天际，远处城市轮廓在血色地平线处若隐若现。它缓缓转头，尾巴如鞭般甩动，铠甲在月光下折射出神性辉光，仿佛在宣告：此地已成新王的祭坛。",
+      "anything": [
+        "35",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "展示任何"
+    }
+  },
+  "48": {
+    "inputs": {
+      "unet_name": "smoothMixWan22I2V14B_i2vHigh.safetensors",
+      "weight_dtype": "fp8_e4m3fn_fast"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  },
+  "50": {
+    "inputs": {
+      "value": 5
+    },
+    "class_type": "Int",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "51": {
+    "inputs": {
+      "value": "a*16+1",
+      "a": [
+        "50",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "简易运算"
+    }
+  }
+}

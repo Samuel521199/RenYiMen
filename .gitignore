@@ -1,0 +1,36 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build / Next
+.next
+out
+build
+dist
+
+# Env — real secrets / local overrides (never commit; .env.example may be tracked)
+.env
+.env.server
+.env.local
+.env*.local
+
+# Debug / IDE
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+*.pem
+.idea
+.vscode
+
+# TypeScript
+*.tsbuildinfo
+
+# Vercel
+.vercel
+
+# Test
+coverage
+
+postgres-data/

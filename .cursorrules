@@ -1,0 +1,15 @@
+# Project Context
+This is a frontend application for an AI workflow SaaS platform. The core feature is dynamically wrapping complex ComfyUI/RunningHub JSON workflows into user-friendly UI interfaces (like image-to-video, text-to-image).
+
+# Tech Stack & Standards
+- Framework: Next.js (App Router) / React (or substitute with your preferred framework like Vue3/Nuxt)
+- Language: TypeScript (Strict mode)
+- Styling: Tailwind CSS + Shadcn UI (for fast, clean component composition)
+- State Management: Zustand (for handling complex, deeply nested workflow parameters)
+- Containerization: All code must be written with Docker and Kubernetes deployment in mind (stateless frontend, environment variables for API endpoints).
+
+# Architectural Rules
+1. **Schema-Driven UI**: Forms must not be hardcoded. They should be generated dynamically based on a JSON schema defining the workflow inputs (e.g., type: 'image', 'slider', 'text').
+2. **Component Separation**: Keep presentational components strictly separated from business logic and state mapping.
+3. **API Handling**: Extract all API calls into a dedicated service layer. Handle loading states, timeouts (crucial for long AI generation tasks), and errors gracefully.
+4. **Clean Code**: Use early returns, avoid deeply nested ternaries, and write self-documenting function names. Add JSDoc comments for complex data transformations.

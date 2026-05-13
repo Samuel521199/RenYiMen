@@ -1,0 +1,4 @@
+/** 单次网关生成调用的计费常量（积分制，0 利润：售价=成本） */
+export const GATEWAY_GENERATE_COST_CREDITS = 8;
+export const GATEWAY_GENERATE_SELL_CREDITS = GATEWAY_GENERATE_COST_CREDITS;
+export const GATEWAY_GENERATE_PROFIT_CREDITS = 0;

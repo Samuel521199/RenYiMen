@@ -1,0 +1,118 @@
+{
+  "58": {
+    "inputs": {
+      "width": 720,
+      "height": 1440,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "空Latent_SD3"
+    }
+  },
+  "82": {
+    "inputs": {
+      "prompt": "1 girl"
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "提示词文本"
+    }
+  },
+  "127": {
+    "inputs": {
+      "unet_name": "z_image_turbo_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  },
+  "128": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "CLIP加载器"
+    }
+  },
+  "129": {
+    "inputs": {
+      "samples": ["131", 0],
+      "vae": ["130", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "130": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE加载器"
+    }
+  },
+  "131": {
+    "inputs": {
+      "seed": 94421920840358,
+      "steps": 10,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["127", 0],
+      "positive": ["136", 0],
+      "negative": ["138", 0],
+      "latent_image": ["58", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "132": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": ["129", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "136": {
+    "inputs": {
+      "text": ["82", 0],
+      "clip": ["128", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "138": {
+    "inputs": {
+      "conditioning": ["136", 0]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "140": {
+    "inputs": {
+      "anything": ["129", 0]
+    },
+    "class_type": "easy clearCacheAll",
+    "_meta": {
+      "title": "清除全部缓存"
+    }
+  }
+}

@@ -1,0 +1,510 @@
+{
+  "1": {
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, censored, mosaic censoring, bar censor, pixelated, glowing, bloom, blurry, day, out of focus, low detail, bad anatomy, ugly, overexposed, underexposed, distorted face, extra limbs, cartoonish, 3d render artifacts, duplicate people, unnatural lighting, bad composition, missing shadows, low resolution, poorly textured, glitch, noise, grain, static, motionless, still frame, overall grayish, worst quality, low quality, JPEG compression artifacts, subtitles, stylized, artwork, painting, illustration, cluttered background, many people in background, three legs, walking backward, zoom out, zoom in, mouth speaking, moving mouth, talking, speaking, mute speaking, unnatural skin tone, discolored eyelid, red eyelids, red upper eyelids, no red eyeshadow, closed eyes, no wide-open innocent eyes, poorly drawn hands, extra fingers, fused fingers, poorly drawn face, deformed, disfigured, malformed limbs, thighs, fog, mist, voluminous eyelashes, blush,",
+      "clip": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "3": {
+    "inputs": {
+      "crop": "none",
+      "clip_vision": [
+        "86",
+        0
+      ],
+      "image": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "CLIPVisionEncode",
+    "_meta": {
+      "title": "CLIP视觉编码"
+    }
+  },
+  "6": {
+    "inputs": {
+      "samples": [
+        "17",
+        0
+      ],
+      "vae": [
+        "81",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "16": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 263307324475366,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "113",
+        0
+      ],
+      "positive": [
+        "85",
+        0
+      ],
+      "negative": [
+        "85",
+        1
+      ],
+      "latent_image": [
+        "85",
+        2
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器(高级)"
+    }
+  },
+  "17": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 295394427696199,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "simple",
+      "start_at_step": 4,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "114",
+        0
+      ],
+      "positive": [
+        "85",
+        0
+      ],
+      "negative": [
+        "85",
+        1
+      ],
+      "latent_image": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器(高级)"
+    }
+  },
+  "20": {
+    "inputs": {
+      "aspect_ratio": "original",
+      "proportional_width": 1,
+      "proportional_height": 1,
+      "fit": "crop",
+      "method": "lanczos",
+      "round_to_multiple": "16",
+      "scale_to_side": "longest",
+      "scale_to_length": [
+        "28",
+        0
+      ],
+      "background_color": "#000000",
+      "image": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: ImageScaleByAspectRatio V2",
+    "_meta": {
+      "title": "按宽高比缩放_V2"
+    }
+  },
+  "21": {
+    "inputs": {
+      "image": "pasted/4b0a472ded7bf77e9283f17bcbede09e9f4bea5c5631d316dec729341c19f743.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "24": {
+    "inputs": {
+      "anything": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "清理GPU占用"
+    }
+  },
+  "26": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "luXiong",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "no_preview": false,
+      "images": [
+        "24",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "合并为视频"
+    }
+  },
+  "28": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "JWInteger",
+    "_meta": {
+      "title": "Integer"
+    }
+  },
+  "30": {
+    "inputs": {
+      "text": [
+        "84",
+        0
+      ],
+      "clip": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "69": {
+    "inputs": {
+      "text": "帮我生成1个分镜脚本提示词"
+    },
+    "class_type": "JjkText",
+    "_meta": {
+      "title": "多少个分镜脚本提示词, 建议1-3个"
+    }
+  },
+  "70": {
+    "inputs": {
+      "text": "镜头晃动, 美女在跳舞"
+    },
+    "class_type": "JjkText",
+    "_meta": {
+      "title": "主题"
+    }
+  },
+  "71": {
+    "inputs": {
+      "delimiter": ", 主题是:",
+      "clean_whitespace": "true",
+      "text_a": [
+        "69",
+        0
+      ],
+      "text_b": [
+        "70",
+        0
+      ]
+    },
+    "class_type": "Text Concatenate",
+    "_meta": {
+      "title": "文本连锁"
+    }
+  },
+  "76": {
+    "inputs": {
+      "api_baseurl": "",
+      "api_key": "",
+      "model": "",
+      "role": "【输入方式】：参考图 + 主题\n\n【延展目标】：通过图片和主题判断其短视频内部的变化逻辑, 生成一段连贯的，有逻辑的专业的短视频分镜脚本，脚本一共1-2个镜头.\n\n【要求】：\n1、分析图片，关于主角,动作,景别, 运镜包括但不限于以上内容进行详细的拆分都推测镜头的剧本变化\n2、描述时候不要废话，1-2个镜头，需要在逻辑范围内视频可以表现出短时间的镜头，要直白的描述不要出现无意义符号，且明确场景内主角，环境，场景，特效等变化\n3、核心描述为图像间的合理变化，动作表情的合理变化, 镜头的合理变化，环境的合理变化，特效的合理变化，场景的变化，动作的变化，服装的变化等等\n4、构图具备电影感（景别 / 光影 / 空间层次）\n5、整个描述在一个段落内生成，需要体现专业性，动作需要符合逻辑的同时不宜动态太轻微，整个画面应该有观赏性\n\n景别：(特写/ 近景/ 中景/ 远景/ 超远景/ 全景/ 大特写/ ...等)\n运镜：(镜头固定/ 镜头推进/ 镜头拉远/ 镜头向右移动/ 镜头向左移动/ 镜头上摇/ 手持镜头/ 复合运镜/ 跟随镜头/ 环绕运镜/ 移轴摄影/ 延时拍摄/ ...等)\n运动：(街舞/ 跑步/ 滑滑板/ 踢足球/ 侧手翻/ 打招呼/ 敬礼/ 打架/ 武术表演/ 摆摊/ 唱歌/ 跳舞/ 玩手机/ 飞行/ 演戏/ 搬东西/ 玩游戏/...等)\n情绪：(兴奋/ 颤抖/ 镇定/ 激动/ 痴情/ 贪婪/ 欲望/ 正义/ 忧郁/ 忧伤/ 愤怒/ 恐惧/ 高兴/ 痛哭/ 惊讶/ 大笑/ 窃喜/...等)\n其他: “快速地”、“缓慢地”、“猛烈地摇摆”、“缓慢地移动”、“打碎了玻璃”、“剧烈抖动地摇屁股、“惊慌失措地奔跑”、“打碎了玻璃”、“打碎了玻璃”\n\n例子:\n[镜头1]它凶猛地向前冲去，金色的装甲爪子拍打着破碎的石头地面，碎片四散奔飞。环境黑暗而不祥，被满月和背景中噼啪作响的闪电照亮。老虎的眼睛闪闪发光，流露出统治和权威。相机通过动态跟踪镜头跟随老虎的快速移动，强调了它步伐的力量和紧迫性。当它靠近时，灰尘和碎石散落一地，为场景增添了戏剧性的层次。\n\n[镜头2]特写，当老虎突然停下来，观察周围环境时，平拍老虎的脸部特写。老虎的表情凶狠而专注，当它吸入自己领地的气味时，鼻孔会张大。随后镜头拉远，俯拍在它身后，古老的废墟和破碎的柱子构成了场景，微弱的闪电火花反射在它身上的金属盔甲上。当老虎的尾巴急剧摆动时，环境感觉充满了能量，这表明它准备保护和控制自己的领土。\n",
+      "prompt": [
+        "71",
+        0
+      ],
+      "temperature": 0.6,
+      "seed": 1810248366,
+      "ref_image": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "RH_LLMAPI_NODE",
+    "_meta": {
+      "title": "Runninghub LLM API Node"
+    }
+  },
+  "77": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "true: gpt-4生成提示词,lalse:自己手写提示词"
+    }
+  },
+  "78": {
+    "inputs": {
+      "text": "美女在跳抖臀舞"
+    },
+    "class_type": "JjkText",
+    "_meta": {
+      "title": "自定义提示词 div prompt"
+    }
+  },
+  "79": {
+    "inputs": {
+      "boolean": [
+        "77",
+        0
+      ],
+      "on_true": [
+        "76",
+        0
+      ],
+      "on_false": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "easy ifElse",
+    "_meta": {
+      "title": "If else"
+    }
+  },
+  "81": {
+    "inputs": {
+      "vae_name": "Wan2.1_VAE.pth"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE加载器"
+    }
+  },
+  "82": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "CLIP加载器"
+    }
+  },
+  "84": {
+    "inputs": {
+      "text": [
+        "79",
+        0
+      ]
+    },
+    "class_type": "ShowText",
+    "_meta": {
+      "title": "ShowText"
+    }
+  },
+  "85": {
+    "inputs": {
+      "width": [
+        "20",
+        3
+      ],
+      "height": [
+        "20",
+        4
+      ],
+      "length": [
+        "100",
+        0
+      ],
+      "batch_size": 1,
+      "motion_amplitude": 1.1000000000000003,
+      "positive": [
+        "30",
+        0
+      ],
+      "negative": [
+        "1",
+        0
+      ],
+      "vae": [
+        "81",
+        0
+      ],
+      "clip_vision_output": [
+        "3",
+        0
+      ],
+      "start_image": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "PainterI2V",
+    "_meta": {
+      "title": "PainterI2V (Wan2.2 Slow-Motion Fix)"
+    }
+  },
+  "86": {
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    },
+    "class_type": "CLIPVisionLoader",
+    "_meta": {
+      "title": "CLIP视觉加载器"
+    }
+  },
+  "99": {
+    "inputs": {
+      "value": 5
+    },
+    "class_type": "Int",
+    "_meta": {
+      "title": "整数"
+    }
+  },
+  "100": {
+    "inputs": {
+      "value": "a*16+1",
+      "a": [
+        "99",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "简易运算"
+    }
+  },
+  "111": {
+    "inputs": {
+      "lora_name": "lightx2v_I2V_14B_480p_cfg_step_distill_rank128_bf16.safetensors",
+      "strength_model": 1.5000000000000002,
+      "model": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器(仅模型)"
+    }
+  },
+  "113": {
+    "inputs": {
+      "shift": 8.000000000000002,
+      "model": [
+        "116",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "模型采样算法SD3"
+    }
+  },
+  "114": {
+    "inputs": {
+      "shift": 8.000000000000002,
+      "model": [
+        "117",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "模型采样算法SD3"
+    }
+  },
+  "115": {
+    "inputs": {
+      "lora_name": "lightx2v_I2V_14B_480p_cfg_step_distill_rank128_bf16.safetensors",
+      "strength_model": 3.0000000000000004,
+      "model": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器(仅模型)"
+    }
+  },
+  "116": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": false,
+      "model": [
+        "115",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "117": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": false,
+      "model": [
+        "111",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "119": {
+    "inputs": {
+      "unet_name": "smoothMixWan2214BI2V_i2vV20High.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  },
+  "120": {
+    "inputs": {
+      "unet_name": "smoothMixWan2214BI2V_i2vV20Low.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  }
+}
