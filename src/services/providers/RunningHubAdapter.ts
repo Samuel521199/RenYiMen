@@ -1198,6 +1198,27 @@ async function queryTaskOutputs(
   return { code: codeOut, msg, files: urlsToOutputFiles(deepOnly), raw };
 }
 
+/**
+ * 从 `/openapi/v2/query` 响应的 `results[]` 数组中提取所有图片 URL。
+ * 每项含 `url` + `outputType`（如 "png" / "jpg"），无需猜测后缀。
+ */
+function extractImageUrlsFromV2QueryResults(raw: unknown): string[] {
+  if (!isRecord(raw)) return [];
+  const results = raw.results;
+  if (!Array.isArray(results)) return [];
+  const IMAGE_TYPES = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+  const urls: string[] = [];
+  for (const r of results) {
+    if (!isRecord(r)) continue;
+    const url = typeof r.url === "string" ? r.url.trim() : null;
+    const outputType = typeof r.outputType === "string" ? r.outputType.toLowerCase().trim() : "";
+    if (url && (IMAGE_TYPES.has(outputType) || /\.(png|jpe?g|webp|gif)(\?|#|$)/i.test(url))) {
+      urls.push(url);
+    }
+  }
+  return urls;
+}
+
 /** 官方 OpenAPI：`POST /openapi/v2/query`，请求体为 `{ taskId }`（`usage.consumeCoins` / `usage.taskCostTime` 等）。 */
 async function queryOpenApiV2TaskDetail(
   taskId: string,
@@ -1414,8 +1435,30 @@ export class RunningHubAdapter implements IProviderAdapter {
     const providerCost = resolveRhProviderCostCoins(raw, outputs.raw, detailRaw);
     const providerAssetSizeBytes = resolveRhProviderAssetSizeBytes(raw, outputs.raw);
     const providerDurationSec = resolveRhProviderTaskDurationSec(raw, outputs.raw, detailRaw);
+
+    // 优先从 /openapi/v2/query 的 results[] 提取图片（含 outputType 字段，最可靠）
+    const v2ImageUrls = extractImageUrlsFromV2QueryResults(detailRaw);
+
     const mapped = mapRhOutputsToPollDataAfterSuccess(outputs);
     if (mapped.status === "succeeded") {
+      // v2 results 有图片时，用它们覆盖 outputs 接口解析的结果
+      if (v2ImageUrls.length > 0) {
+        console.log("[RunningHubAdapter] v2/query results 提取到图片", {
+          taskId,
+          count: v2ImageUrls.length,
+          urls: v2ImageUrls,
+        });
+        return {
+          status: "succeeded",
+          resultUrl: v2ImageUrls[0],
+          resultMediaType: "image" as const,
+          ...(v2ImageUrls.length > 1 ? { resultUrls: v2ImageUrls } : {}),
+          progress: 100,
+          ...(providerCost != null ? { providerCost } : {}),
+          ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
+          ...(providerDurationSec != null ? { providerDurationSec } : {}),
+        };
+      }
       return {
         ...mapped,
         ...(providerCost != null ? { providerCost } : {}),
