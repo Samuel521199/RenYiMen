@@ -1436,35 +1436,74 @@ export class RunningHubAdapter implements IProviderAdapter {
     const providerAssetSizeBytes = resolveRhProviderAssetSizeBytes(raw, outputs.raw);
     const providerDurationSec = resolveRhProviderTaskDurationSec(raw, outputs.raw, detailRaw);
 
+    // ── 详细诊断日志 ──────────────────────────────────────────────
+    try {
+      console.log("[RH DEBUG] detailRaw (v2/query 原始响应):", JSON.stringify(detailRaw));
+    } catch {
+      console.log("[RH DEBUG] detailRaw (v2/query 原始响应，序列化失败):", detailRaw);
+    }
+    try {
+      console.log("[RH DEBUG] outputs.raw (task/openapi/outputs 原始响应):", JSON.stringify(outputs.raw));
+    } catch {
+      console.log("[RH DEBUG] outputs.raw (序列化失败):", outputs.raw);
+    }
+    // ────────────────────────────────────────────────────────────
+
     // 优先从 /openapi/v2/query 的 results[] 提取图片（含 outputType 字段，最可靠）
     const v2ImageUrls = extractImageUrlsFromV2QueryResults(detailRaw);
+    console.log("[RH DEBUG] extractImageUrlsFromV2QueryResults 结果:", {
+      taskId,
+      v2ImageUrlsCount: v2ImageUrls.length,
+      v2ImageUrls,
+    });
 
     const mapped = mapRhOutputsToPollDataAfterSuccess(outputs);
+    console.log("[RH DEBUG] mapRhOutputsToPollDataAfterSuccess 结果:", {
+      taskId,
+      mappedStatus: mapped.status,
+      mappedResultUrl: (mapped as { resultUrl?: string }).resultUrl,
+      mappedResultUrls: (mapped as { resultUrls?: string[] }).resultUrls,
+      mappedResultMediaType: (mapped as { resultMediaType?: string }).resultMediaType,
+    });
+
     if (mapped.status === "succeeded") {
       // v2 results 有图片时，用它们覆盖 outputs 接口解析的结果
       if (v2ImageUrls.length > 0) {
-        console.log("[RunningHubAdapter] v2/query results 提取到图片", {
+        console.log("[RunningHubAdapter] v2/query results 提取到图片，使用 v2 结果", {
           taskId,
           count: v2ImageUrls.length,
           urls: v2ImageUrls,
         });
-        return {
+        const finalResult: TaskStatusPollData = {
           status: "succeeded",
           resultUrl: v2ImageUrls[0],
-          resultMediaType: "image" as const,
+          resultMediaType: "image",
           ...(v2ImageUrls.length > 1 ? { resultUrls: v2ImageUrls } : {}),
           progress: 100,
           ...(providerCost != null ? { providerCost } : {}),
           ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
           ...(providerDurationSec != null ? { providerDurationSec } : {}),
         };
+        console.log("[RH DEBUG] 最终返回给网关的 pollData:", {
+          taskId,
+          resultUrl: finalResult.resultUrl,
+          resultMediaType: finalResult.resultMediaType,
+          resultUrlsCount: finalResult.resultUrls?.length ?? 0,
+        });
+        return finalResult;
       }
-      return {
+      const fallbackResult = {
         ...mapped,
         ...(providerCost != null ? { providerCost } : {}),
         ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
         ...(providerDurationSec != null ? { providerDurationSec } : {}),
       };
+      console.log("[RH DEBUG] v2 无图片，回退 outputs 解析结果:", {
+        taskId,
+        resultUrl: fallbackResult.resultUrl,
+        resultMediaType: (fallbackResult as TaskStatusPollData).resultMediaType,
+      });
+      return fallbackResult;
     }
     return mapped;
   }

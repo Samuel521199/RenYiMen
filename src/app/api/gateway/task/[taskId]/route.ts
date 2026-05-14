@@ -57,7 +57,7 @@ function isTransientPollFailure(e: unknown): boolean {
 
 function mapPollDataToGatewayBody(d: TaskStatusPollData): GatewayTaskPollBody {
   if (d.status === "succeeded") {
-    return {
+    const body: GatewayTaskPollBody = {
       status: "success",
       videoUrl: d.resultUrl ?? undefined,
       progress: d.progress != null ? Math.round(Number(d.progress)) : 100,
@@ -70,6 +70,14 @@ function mapPollDataToGatewayBody(d: TaskStatusPollData): GatewayTaskPollBody {
         ? { sellPrice: d.sellPrice }
         : {}),
     };
+    console.log("[gateway/task] 发往前端的 pollBody:", {
+      status: body.status,
+      videoUrl: body.videoUrl,
+      resultMediaType: body.resultMediaType,
+      resultUrlsCount: body.resultUrls?.length ?? 0,
+      resultUrls: body.resultUrls,
+    });
+    return body;
   }
   if (d.status === "failed") {
     return { status: "failure", error: d.errorMessage ?? "生成失败" };
