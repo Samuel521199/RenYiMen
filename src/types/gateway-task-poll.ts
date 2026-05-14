@@ -11,4 +11,9 @@ export interface GatewayTaskPollBody {
   sellPrice?: number;
   /** 上游实际 RH 币消耗（若适配器解析到） */
   providerCost?: number;
+  /**
+   * 多图输出（如分镜）：所有图片 URL。
+   * `videoUrl` 仍为第一张（向后兼容）。
+   */
+  resultUrls?: string[];
 }

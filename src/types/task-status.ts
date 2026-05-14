@@ -30,6 +30,11 @@ export interface TaskStatusPollData {
    * 上游任务耗时（秒），如 RunningHub `usage.taskCostTime` 解析后的整型；未解析到则不传。
    */
   providerDurationSec?: number | null;
+  /**
+   * 多图输出（如分镜生成）：所有图片 URL 列表。
+   * 存在时前端展示网格；`resultUrl` 仍为第一张（向后兼容）。
+   */
+  resultUrls?: string[] | null;
 }
 
 /**
@@ -51,6 +56,11 @@ export interface TaskStatusViewModel {
   videoUrl?: string;
   /** 成功态下根据 `resultUrl` 推断的展示类型（图片 / 视频） */
   mediaType?: "image" | "video";
+  /**
+   * 多图输出（如分镜）：所有图片 URL；有此字段时前端以网格展示，每张可单独下载。
+   * `videoUrl` 仍为第一张（向后兼容）。
+   */
+  resultUrls?: string[];
   errorMessage?: string;
   /** 传输层连续失败等 */
   transportMessage?: string;

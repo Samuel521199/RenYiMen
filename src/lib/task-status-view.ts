@@ -23,6 +23,7 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
   RH_TXT2IMG_SHORTDRAMA: 30_000,
+  RH_STORYBOARD: 300_000,
 };
 
 const DEFAULT_EXPECTED_DURATION_MS = 150_000;
@@ -64,10 +65,15 @@ export function buildTaskViewerModel(
         : undefined;
     const resultUrl = data.resultUrl?.trim() ? String(data.resultUrl).trim() : undefined;
     const mediaType = resultUrl ? inferMediaTypeFromResultUrl(resultUrl) : undefined;
+    const resultUrls =
+      Array.isArray(data.resultUrls) && data.resultUrls.length > 1
+        ? (data.resultUrls as string[])
+        : undefined;
     return {
       phase: "success",
       videoUrl: resultUrl,
       ...(mediaType !== undefined ? { mediaType } : {}),
+      ...(resultUrls !== undefined ? { resultUrls } : {}),
       hints: DEFAULT_TASK_LOADING_HINTS,
       ...(sellPrice !== undefined ? { sellPrice } : {}),
     };

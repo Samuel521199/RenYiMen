@@ -15,6 +15,8 @@ const SKU_TO_PROVIDER: Record<string, string> = {
   KLING_CINEMA_PRO: "RUNNINGHUB_IMG2VIDEO",
   /** 阿里云百炼 DashScope 图生视频（异步），网关 `providerCode` 为 ALIYUN_BAILIAN */
   BAILIAN_WANX_I2V: "ALIYUN_BAILIAN",
+  /** 分镜生成出图（多图输出） */
+  RH_STORYBOARD: "RUNNINGHUB_STORYBOARD",
 };
 
 /**
@@ -41,6 +43,7 @@ export function getProviderAdapter(providerCode: string): IProviderAdapter {
     case "RUNNINGHUB_SVD":
     case "RUNNINGHUB_TXT2IMG":
     case "RUNNINGHUB_IMG2VIDEO":
+    case "RUNNINGHUB_STORYBOARD":
     case "RUNNINGHUB":
       return new RunningHubAdapter();
     case "KLING_PRO":

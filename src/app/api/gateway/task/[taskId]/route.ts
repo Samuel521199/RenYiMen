@@ -61,6 +61,7 @@ function mapPollDataToGatewayBody(d: TaskStatusPollData): GatewayTaskPollBody {
       status: "success",
       videoUrl: d.resultUrl ?? undefined,
       progress: d.progress != null ? Math.round(Number(d.progress)) : 100,
+      ...(Array.isArray(d.resultUrls) && d.resultUrls.length > 1 ? { resultUrls: d.resultUrls } : {}),
       ...(typeof d.providerCost === "number" && Number.isFinite(d.providerCost)
         ? { providerCost: d.providerCost }
         : {}),
@@ -124,8 +125,13 @@ async function persistGenerationHistoryTerminal(
 
   if (pollData.status !== "succeeded") return null;
 
-  const resultUrl = pollData.resultUrl?.trim() ? String(pollData.resultUrl).trim() : null;
-  const mediaType = resultUrl ? inferMediaTypeFromResultUrl(resultUrl) : "";
+  // 多图输出（如分镜）：将所有 URL 序列化为 JSON 数组存入 resultUrl 字段
+  const rawResultUrl = pollData.resultUrl?.trim() ? String(pollData.resultUrl).trim() : null;
+  const resultUrl =
+    Array.isArray(pollData.resultUrls) && pollData.resultUrls.length > 1
+      ? JSON.stringify(pollData.resultUrls)
+      : rawResultUrl;
+  const mediaType = rawResultUrl ? inferMediaTypeFromResultUrl(rawResultUrl) : "";
   const actualCost =
     typeof pollData.providerCost === "number" && Number.isFinite(pollData.providerCost)
       ? Math.round(pollData.providerCost)

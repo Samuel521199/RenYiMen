@@ -10,6 +10,7 @@ import { downloadResultVideoAsFile } from "@/lib/download-result-video";
 import { computePseudoProgressPercent } from "@/lib/task-status-view";
 import { cn } from "@/lib/utils";
 import type { TaskStatusViewModel } from "@/types/task-status";
+import { StoryboardResultGrid } from "./StoryboardResultGrid";
 
 /** 与成功态画板一致的 20px 正交细线网格（#060a10 底） */
 const ARTBOARD_GRID_STYLE: CSSProperties = {
@@ -259,6 +260,34 @@ function SuccessLayer({
   const mediaUrl = model.videoUrl;
   const mediaType: "image" | "video" | undefined =
     model.mediaType ?? (mediaUrl ? "video" : undefined);
+
+  // 多图模式（分镜等）：整个 SuccessLayer 渲染网格
+  const isMultiImage = Array.isArray(model.resultUrls) && model.resultUrls.length > 1;
+  if (active && isMultiImage) {
+    return (
+      <div className={layerClass(active)} aria-hidden={!active}>
+        <div className="flex h-full min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+          <StoryboardResultGrid imageUrls={model.resultUrls!} />
+          {typeof model.sellPrice === "number" &&
+            Number.isFinite(model.sellPrice) &&
+            model.sellPrice >= 0 && (
+              <div className="shrink-0 rounded-lg border border-emerald-200/80 bg-emerald-50/90 px-3 py-2 text-xs text-emerald-900">
+                ✅ 任务完成，实扣 {model.sellPrice} 积分
+              </div>
+            )}
+          {onRegenerate && (
+            <button
+              type="button"
+              onClick={onRegenerate}
+              className="w-fit shrink-0 rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-900"
+            >
+              重新生成
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
   const showBilling =
     typeof model.sellPrice === "number" && Number.isFinite(model.sellPrice) && model.sellPrice >= 0;
 

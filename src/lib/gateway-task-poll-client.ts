@@ -11,6 +11,9 @@ function mapGatewayBodyToPollData(body: GatewayTaskPollBody): TaskStatusPollData
       status: "succeeded",
       resultUrl: body.videoUrl ?? null,
       progress: 100,
+      ...(Array.isArray(body.resultUrls) && body.resultUrls.length > 1
+        ? { resultUrls: body.resultUrls }
+        : {}),
       ...(typeof body.sellPrice === "number" && Number.isFinite(body.sellPrice)
         ? { sellPrice: body.sellPrice }
         : {}),

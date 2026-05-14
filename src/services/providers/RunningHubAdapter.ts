@@ -320,7 +320,13 @@ function getRunningHubSvdRemoteWorkflowId(): string | null {
   return v || null;
 }
 
+/** 分镜生成出图（多图输出）：工作流 ID。 */
+function getRunningHubStoryboardRemoteWorkflowId(): string | null {
+  return process.env.RUNNINGHUB_STORYBOARD_REMOTE_WORKFLOW_ID?.trim() || null;
+}
+
 const DEFAULT_TXT2IMG_WORKFLOW_RELATIVE = "config/runninghub/lu-shortdrama-txt2img-workflow.json";
+const DEFAULT_STORYBOARD_WORKFLOW_RELATIVE = "config/runninghub/lu-storyboard-workflow.json";
 
 function resolveTxt2ImgWorkflowFileAbsPath(): string | null {
   const fromEnv = process.env.RUNNINGHUB_TXT2IMG_WORKFLOW_FILE?.trim();
@@ -336,6 +342,43 @@ function shouldSendFullTxt2ImgWorkflowBody(): boolean {
   if (process.env.RUNNINGHUB_TXT2IMG_WORKFLOW_JSON?.trim()) return true;
   if (process.env.RUNNINGHUB_TXT2IMG_WORKFLOW_FILE?.trim()) return true;
   return fs.existsSync(path.join(process.cwd(), DEFAULT_TXT2IMG_WORKFLOW_RELATIVE));
+}
+
+function resolveStoryboardWorkflowFileAbsPath(): string | null {
+  const fromEnv = process.env.RUNNINGHUB_STORYBOARD_WORKFLOW_FILE?.trim();
+  if (fromEnv) {
+    return path.isAbsolute(fromEnv) ? fromEnv : path.join(process.cwd(), fromEnv);
+  }
+  const def = path.join(process.cwd(), DEFAULT_STORYBOARD_WORKFLOW_RELATIVE);
+  return fs.existsSync(def) ? def : null;
+}
+
+function loadStoryboardBaseWorkflow(): Record<string, ComfyNodeShell> {
+  const fromEnvJson = process.env.RUNNINGHUB_STORYBOARD_WORKFLOW_JSON?.trim();
+  if (fromEnvJson) {
+    return JSON.parse(fromEnvJson) as Record<string, ComfyNodeShell>;
+  }
+  const filePath = resolveStoryboardWorkflowFileAbsPath();
+  if (filePath) {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<string, ComfyNodeShell>;
+  }
+  throw new ProviderError(
+    "分镜工作流配置缺失：请设置 RUNNINGHUB_STORYBOARD_WORKFLOW_FILE 或 RUNNINGHUB_STORYBOARD_WORKFLOW_JSON。",
+    "RH_MISSING_STORYBOARD_WORKFLOW",
+    500
+  );
+}
+
+const STORYBOARD_TEMPLATE_ID = "lu-storyboard";
+
+function isRunningHubStoryboardPayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_STORYBOARD") return true;
+  if (sku === "RH_STORYBOARD") return true;
+  return payload.templateId.trim().toLowerCase() === STORYBOARD_TEMPLATE_ID;
 }
 
 function isRunningHubTxt2ImgPayload(payload: StandardPayload): boolean {
@@ -357,6 +400,9 @@ function resolveRunWorkflowIdForPayload(payload: StandardPayload): string | null
   }
   if (isRunningHubImg2VideoPayload(payload)) {
     return getRunningHubImg2VideoRemoteWorkflowId();
+  }
+  if (isRunningHubStoryboardPayload(payload)) {
+    return getRunningHubStoryboardRemoteWorkflowId();
   }
   const fromEnv = getRunningHubSvdRemoteWorkflowId();
   if (fromEnv) return fromEnv;
@@ -1012,6 +1058,33 @@ function resolveRhLifecyclePhaseFromStatusPayload(raw: unknown): { phase: RhTask
   return { phase, data };
 }
 
+/** 从 outputs 收集所有图片 URL（顺序遍历 data 各节点），用于多图输出场景。 */
+function pickAllImageUrlsFromOutputs(outputs: RunningHubTaskOutputsParsed): string[] {
+  const imageRe = /\.(png|jpe?g|webp|gif)(\?|#|$)/i;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  const data = getOutputsDataRecord(outputs.raw);
+  for (const nodeId of Object.keys(data)) {
+    const files = collectUrlsUnderNode(data, nodeId);
+    for (const f of files) {
+      if (f.fileUrl && imageRe.test(f.fileUrl) && !seen.has(f.fileUrl)) {
+        seen.add(f.fileUrl);
+        result.push(f.fileUrl);
+      }
+    }
+  }
+  // 深度补充
+  const deep = new Set<string>();
+  deepCollectMediaHttpUrls(outputs.raw, deep);
+  for (const url of deep) {
+    if (imageRe.test(url) && !seen.has(url)) {
+      seen.add(url);
+      result.push(url);
+    }
+  }
+  return result;
+}
+
 /** 状态已为 SUCCESS 后，根据 outputs 接口结果映射为轮询终态或继续 running（804 仍在跑）。 */
 function mapRhOutputsToPollDataAfterSuccess(outputs: RunningHubTaskOutputsParsed): TaskStatusPollData {
   if (outputs.isRunning) {
@@ -1022,7 +1095,9 @@ function mapRhOutputsToPollDataAfterSuccess(outputs: RunningHubTaskOutputsParsed
   }
   const mediaUrl = pickResultMediaUrl(outputs);
   if (mediaUrl) {
-    return { status: "succeeded", resultUrl: mediaUrl, progress: 100 };
+    const allImages = pickAllImageUrlsFromOutputs(outputs);
+    const resultUrls = allImages.length > 1 ? allImages : undefined;
+    return { status: "succeeded", resultUrl: mediaUrl, progress: 100, ...(resultUrls ? { resultUrls } : {}) };
   }
   const oc = normalizeRhOutputCode(outputs.code);
   if (oc !== undefined && oc !== 0 && oc !== 200) {
@@ -1156,7 +1231,17 @@ export class RunningHubAdapter implements IProviderAdapter {
         usePersonalQueue: runningHubUsePersonalQueueString(),
       };
 
-      if (isRunningHubTxt2ImgPayload(payload)) {
+      if (isRunningHubStoryboardPayload(payload)) {
+        const wf = loadStoryboardBaseWorkflow();
+        applyNodeInfoListToComfyWorkflow(wf, nodeInfoFlat, {});
+        // 随机化 KSampler 种子，确保每次结果不同
+        const ksamplerNode = wf["56"];
+        if (ksamplerNode?.inputs) {
+          ksamplerNode.inputs.seed = randomInt(0, 2 ** 31);
+        }
+        runBody.workflow = JSON.stringify(wf);
+        runBody.nodeInfoList = [];
+      } else if (isRunningHubTxt2ImgPayload(payload)) {
         if (shouldSendFullTxt2ImgWorkflowBody()) {
           const wf = loadShortdramaTxt2ImgBaseWorkflow();
           applyNodeInfoListToComfyWorkflow(wf, nodeInfoFlat, { syncTxt2ImgPrompt: true });

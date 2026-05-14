@@ -3,6 +3,7 @@ import { bailianMultiRefWorkflowMock } from "@/mocks/bailian-multi-ref-workflow"
 import { bailianWanxI2vWorkflowMock } from "@/mocks/bailian-wanx-i2v-workflow";
 import { imageToVideoWorkflowMock } from "@/mocks/image-to-video-workflow";
 import { klingCinemaWorkflowMock } from "@/mocks/kling-cinema-workflow";
+import { storyboardWorkflowMock } from "@/mocks/storyboard-workflow";
 import { textToImageWorkflowMock } from "@/mocks/text-to-image-workflow";
 import type { SkuCatalogResponse, SkuDefinition } from "@/types/sku-catalog";
 
@@ -54,6 +55,15 @@ const CATALOG: SkuDefinition[] = [
       "上传开头和结尾两张图片，用文字或选项说明期望的过渡感觉，AI 会自动补足中间的连贯动作，让首尾自然衔接成一段完整视频。",
     sellCredits: 10,
     uiSchema: imageToVideoWorkflowMock,
+  },
+  {
+    skuId: "RH_STORYBOARD",
+    providerCode: "RUNNINGHUB_STORYBOARD",
+    displayName: "分镜生成出图",
+    description:
+      "上传一张角色参考图，描述创作方向，AI 自动生成多张风格一致的电影级分镜图，每张均可单独下载。适合广告预演、短剧分镜与概念设计。",
+    sellCredits: 30,
+    uiSchema: storyboardWorkflowMock,
   },
 ];
 
