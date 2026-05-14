@@ -15,6 +15,7 @@ function mapGatewayBodyToPollData(body: GatewayTaskPollBody): TaskStatusPollData
         ? { resultUrls: body.resultUrls }
         : {}),
       ...(body.resultMediaType ? { resultMediaType: body.resultMediaType } : {}),
+      ...(typeof body.resultText === "string" && body.resultText ? { resultText: body.resultText } : {}),
       ...(typeof body.sellPrice === "number" && Number.isFinite(body.sellPrice)
         ? { sellPrice: body.sellPrice }
         : {}),

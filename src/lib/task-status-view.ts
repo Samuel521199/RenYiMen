@@ -24,6 +24,7 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   RH_SVD_IMG2VID: 180_000,
   RH_TXT2IMG_SHORTDRAMA: 30_000,
   RH_STORYBOARD: 300_000,
+  RH_PROMPT_REVERSE: 30_000,
 };
 
 const DEFAULT_EXPECTED_DURATION_MS = 150_000;
@@ -65,8 +66,8 @@ export function buildTaskViewerModel(
         : undefined;
     const resultUrl = data.resultUrl?.trim() ? String(data.resultUrl).trim() : undefined;
     // resultMediaType 由适配器明确设置时优先使用，避免 CDN 无后缀 URL 被误判为 video
-    const mediaType =
-      data.resultMediaType === "image" || data.resultMediaType === "video"
+    const mediaType: "image" | "video" | "text" | undefined =
+      data.resultMediaType === "image" || data.resultMediaType === "video" || data.resultMediaType === "text"
         ? data.resultMediaType
         : resultUrl
           ? inferMediaTypeFromResultUrl(resultUrl)
@@ -75,11 +76,15 @@ export function buildTaskViewerModel(
       Array.isArray(data.resultUrls) && data.resultUrls.length > 1
         ? (data.resultUrls as string[])
         : undefined;
+    const resultText = typeof data.resultText === "string" && data.resultText.trim()
+      ? data.resultText.trim()
+      : undefined;
     return {
       phase: "success",
       videoUrl: resultUrl,
       ...(mediaType !== undefined ? { mediaType } : {}),
       ...(resultUrls !== undefined ? { resultUrls } : {}),
+      ...(resultText !== undefined ? { resultText } : {}),
       hints: DEFAULT_TASK_LOADING_HINTS,
       ...(sellPrice !== undefined ? { sellPrice } : {}),
     };

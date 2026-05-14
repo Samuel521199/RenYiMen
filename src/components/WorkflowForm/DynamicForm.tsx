@@ -43,8 +43,8 @@ export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, formCla
 
   const inner = (
     <>
-      {schema.title && <h2 className="text-xl font-semibold tracking-tight">{schema.title}</h2>}
-      {schema.description && <p className="text-sm leading-relaxed text-neutral-600">{schema.description}</p>}
+      {schema.title && <h2 className="text-base font-semibold tracking-tight text-slate-100">{schema.title}</h2>}
+      {schema.description && <p className="text-sm leading-relaxed text-slate-400">{schema.description}</p>}
       <div className="space-y-8">
         {schema.fields.map((field) => (
           <FieldBranch key={field.id} field={field} schema={schema} errors={errors} />
@@ -56,13 +56,13 @@ export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, formCla
 
   if (onSubmit) {
     return (
-      <form onSubmit={onSubmit} className={formClassName ?? "space-y-6"}>
+      <form onSubmit={onSubmit} className={formClassName ?? "space-y-5 p-5"}>
         {inner}
       </form>
     );
   }
 
-  return <div className="space-y-6">{inner}</div>;
+  return <div className="space-y-5 p-5">{inner}</div>;
 }
 
 function FieldBranch({
@@ -76,9 +76,9 @@ function FieldBranch({
 }) {
   if (isGroupField(field)) {
     return (
-      <fieldset className="rounded-xl border border-neutral-200 bg-neutral-50/60 p-4 shadow-sm">
-        <legend className="px-1 text-sm font-semibold text-neutral-900">{field.label}</legend>
-        {field.description && <p className="mb-4 text-xs text-neutral-500">{field.description}</p>}
+      <fieldset className="rounded-xl border border-[#1e2d4a] bg-[#1a2840]/50 p-4">
+        <legend className="px-1 text-sm font-semibold text-slate-300">{field.label}</legend>
+        {field.description && <p className="mb-4 text-xs text-slate-500">{field.description}</p>}
         <div className="space-y-6 pt-1">
           {field.children.map((child) => (
             <FieldBranch key={child.id} field={child} schema={schema} errors={errors} />
@@ -94,9 +94,9 @@ function FieldBranch({
   return (
     <div className="space-y-2">
       {useSpanLabel ? (
-        <span className="block text-sm font-medium text-neutral-900">{field.label}</span>
+        <span className="block text-sm font-medium text-slate-300">{field.label}</span>
       ) : (
-        <label htmlFor={field.id} className="block text-sm font-medium text-neutral-900">
+        <label htmlFor={field.id} className="block text-sm font-medium text-slate-300">
           {field.label}
         </label>
       )}

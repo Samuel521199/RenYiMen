@@ -30,21 +30,21 @@ export function NumberSliderControl({ field, error }: NumberSliderControlProps) 
             const n = Number(e.target.value);
             setFieldValue(field.id, field.validation.integer ? Math.round(n) : n);
           }}
-          className="h-2 w-full max-w-md cursor-pointer accent-neutral-900"
+          className="h-1.5 w-full max-w-md cursor-pointer accent-emerald-400"
         />
         <output
-          className="min-w-[3rem] rounded-md bg-neutral-100 px-2 py-1 text-center text-sm font-medium tabular-nums text-neutral-900"
+          className="min-w-[3rem] rounded-lg border border-[#2a3d5e] bg-[#1a2840] px-2.5 py-1 text-center text-sm font-semibold tabular-nums text-emerald-300"
           htmlFor={field.id}
         >
           {value}
         </output>
       </div>
-      <div className="flex justify-between text-xs text-neutral-400">
+      <div className="flex justify-between text-xs text-slate-600">
         <span>{min}</span>
         <span>{max}</span>
       </div>
-      {field.description && <p className="text-xs text-neutral-500">{field.description}</p>}
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+      {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );
 }

@@ -11,6 +11,7 @@ import { computePseudoProgressPercent } from "@/lib/task-status-view";
 import { cn } from "@/lib/utils";
 import type { TaskStatusViewModel } from "@/types/task-status";
 import { StoryboardResultGrid } from "./StoryboardResultGrid";
+import { TextResultDisplay } from "./TextResultDisplay";
 
 /** 与成功态画板一致的 20px 正交细线网格（#060a10 底） */
 const ARTBOARD_GRID_STYLE: CSSProperties = {
@@ -73,7 +74,7 @@ export function TaskStatusViewer({
   return (
     <section
       className={cn(
-        "relative isolate flex min-h-[600px] flex-1 flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm lg:min-h-[calc(100vh-10rem)]",
+        "relative isolate flex min-h-[600px] flex-1 flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-sm lg:min-h-[calc(100vh-10rem)]",
         className
       )}
       aria-live="polite"
@@ -191,48 +192,48 @@ function LoadingLayer({
     <div className={layerClass(active)} aria-hidden={!active}>
       <div className="flex flex-1 flex-col gap-5">
         <header>
-          <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">{title}</p>
-          <h3 className="mt-1 text-lg font-semibold text-neutral-900">{subtitle}</h3>
+          <p className="text-xs font-medium uppercase tracking-widest text-slate-500">{title}</p>
+          <h3 className="mt-1 text-base font-semibold text-slate-300">{subtitle}</h3>
         </header>
 
         {model.transportMessage && (
-          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <p className="rounded-lg border border-amber-500/25 bg-amber-900/20 px-3 py-2 text-xs text-amber-400">
             {model.transportMessage}
           </p>
         )}
 
-        <div className="relative aspect-video w-full max-w-xl overflow-hidden rounded-xl bg-neutral-100">
-          <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-neutral-100 via-neutral-200/80 to-neutral-100" />
+        <div className="relative aspect-video w-full max-w-xl overflow-hidden rounded-xl bg-[#1a2840]">
+          <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-[#1a2840] via-[#1e3050]/80 to-[#1a2840]" />
           <div className="absolute inset-4 flex flex-col justify-end gap-3">
             <div className="space-y-2">
-              <div className="h-3 w-4/5 rounded bg-neutral-300/90" />
-              <div className="h-3 w-3/5 rounded bg-neutral-300/70" />
-              <div className="h-3 w-2/5 rounded bg-neutral-300/50" />
+              <div className="h-3 w-4/5 rounded bg-[#2a3d5e]/90" />
+              <div className="h-3 w-3/5 rounded bg-[#2a3d5e]/70" />
+              <div className="h-3 w-2/5 rounded bg-[#2a3d5e]/50" />
             </div>
           </div>
           <div className="pointer-events-none absolute inset-0 overflow-hidden">
-            <div className="wf-shimmer-bar absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/40 to-transparent" />
+            <div className="wf-shimmer-bar absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/5 to-transparent" />
           </div>
         </div>
 
         <div className="max-w-xl space-y-2">
-          <p className="text-sm tabular-nums tracking-tight text-neutral-600">
+          <p className="text-sm tabular-nums tracking-tight text-slate-400">
             已耗时: {formatClockMmSs(elapsed)} / 预计: {formatClockMmSs(expected)}
           </p>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-200">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#1e2d4a]">
             <div
-              className="h-full rounded-full bg-neutral-900 transition-[width] duration-300 ease-out"
+              className="h-full rounded-full bg-emerald-500 transition-[width] duration-300 ease-out"
               style={{ width: `${barPct}%` }}
             />
           </div>
-          <p className="text-right text-xs tabular-nums text-neutral-500">
+          <p className="text-right text-xs tabular-nums text-slate-500">
             约 {Math.round(barPct)}%（预估，完成后将显示 100%）
           </p>
         </div>
 
         <p
           key={hintIndex}
-          className="max-w-xl text-sm leading-relaxed text-neutral-600 transition-opacity duration-500"
+          className="max-w-xl text-sm leading-relaxed text-slate-500 transition-opacity duration-500"
         >
           {hints[hintIndex]}
         </p>
@@ -254,40 +255,17 @@ function SuccessLayer({
   onRegenerate?: () => void;
   downloadFileName: string;
 }) {
+  // ── 所有 hooks 必须无条件置顶，不可在任何 return 之后 ──
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [imageDownloadBusy, setImageDownloadBusy] = useState(false);
   const [videoDownloadBusy, setVideoDownloadBusy] = useState(false);
+
   const mediaUrl = model.videoUrl;
-  const mediaType: "image" | "video" | undefined =
+  const mediaType: "image" | "video" | "text" | undefined =
     model.mediaType ?? (mediaUrl ? "video" : undefined);
 
-  // 多图模式（分镜等）：整个 SuccessLayer 渲染网格
-  const isMultiImage = Array.isArray(model.resultUrls) && model.resultUrls.length > 1;
-  if (active && isMultiImage) {
-    return (
-      <div className={layerClass(active)} aria-hidden={!active}>
-        <div className="flex h-full min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-          <StoryboardResultGrid imageUrls={model.resultUrls!} />
-          {typeof model.sellPrice === "number" &&
-            Number.isFinite(model.sellPrice) &&
-            model.sellPrice >= 0 && (
-              <div className="shrink-0 rounded-lg border border-emerald-200/80 bg-emerald-50/90 px-3 py-2 text-xs text-emerald-900">
-                ✅ 任务完成，实扣 {model.sellPrice} 积分
-              </div>
-            )}
-          {onRegenerate && (
-            <button
-              type="button"
-              onClick={onRegenerate}
-              className="w-fit shrink-0 rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-900"
-            >
-              重新生成
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
+  const isTextResult = mediaType === "text" || (typeof model.resultText === "string" && model.resultText.trim().length > 0);
+  const isMultiImage = !isTextResult && Array.isArray(model.resultUrls) && model.resultUrls.length > 1;
   const showBilling =
     typeof model.sellPrice === "number" && Number.isFinite(model.sellPrice) && model.sellPrice >= 0;
 
@@ -332,7 +310,9 @@ function SuccessLayer({
   }, [onDownload, mediaUrl, resolvedDownloadName, mediaType]);
 
   const resultHeadline =
-    !mediaUrl ? "预览地址缺失" : mediaType === "image" ? "图片已就绪" : "视频已就绪";
+    mediaType === "text" ? "提示词已生成" :
+    !mediaUrl ? "预览地址缺失" :
+    mediaType === "image" ? "图片已就绪" : "视频已就绪";
 
   const openImageLightbox = useCallback(() => {
     if (mediaType === "image" && mediaUrl) setLightboxOpen(true);
@@ -342,12 +322,62 @@ function SuccessLayer({
     if (!active) setLightboxOpen(false);
   }, [active]);
 
+  // 纯文本输出模式（如提示词反推）：渲染文本区域（必须在所有 hooks 之后）
+  if (isTextResult && model.resultText) {
+    return (
+      <div className={layerClass(active)} aria-hidden={!active}>
+        <div className="flex h-full min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-2">
+          <TextResultDisplay text={model.resultText} />
+          {showBilling && (
+            <div className="shrink-0 rounded-lg border border-emerald-500/25 bg-emerald-900/20 px-3 py-2 text-xs text-emerald-400">
+              ✅ 任务完成，实扣 {model.sellPrice} 积分
+            </div>
+          )}
+          {onRegenerate && (
+            <button
+              type="button"
+              onClick={onRegenerate}
+              className="w-fit shrink-0 rounded-lg border border-[#2a3d5e] bg-[#1a2840] px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-[#3a5070] hover:text-slate-100"
+            >
+              重新生成
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // 多图模式（分镜等）：渲染图片网格（必须在所有 hooks 之后）
+  if (isMultiImage) {
+    return (
+      <div className={layerClass(active)} aria-hidden={!active}>
+        <div className="flex h-full min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+          <StoryboardResultGrid imageUrls={model.resultUrls!} />
+          {showBilling && (
+            <div className="shrink-0 rounded-lg border border-emerald-500/25 bg-emerald-900/20 px-3 py-2 text-xs text-emerald-400">
+              ✅ 任务完成，实扣 {model.sellPrice} 积分
+            </div>
+          )}
+          {onRegenerate && (
+            <button
+              type="button"
+              onClick={onRegenerate}
+              className="w-fit shrink-0 rounded-lg border border-[#2a3d5e] bg-[#1a2840] px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-[#3a5070] hover:text-slate-100"
+            >
+              重新生成
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={layerClass(active)} aria-hidden={!active}>
       <div className="flex h-full min-h-0 flex-1 flex-col gap-4">
         <header className="shrink-0">
-          <p className="text-xs font-medium uppercase tracking-wide text-emerald-600">生成成功</p>
-          <h3 className="mt-1 text-lg font-semibold text-neutral-900">{resultHeadline}</h3>
+          <p className="text-xs font-medium uppercase tracking-widest text-emerald-400">生成成功</p>
+          <h3 className="mt-1 text-base font-semibold text-slate-200">{resultHeadline}</h3>
         </header>
 
         <div
@@ -421,7 +451,7 @@ function SuccessLayer({
               type="button"
               onClick={() => void handleDownload()}
               disabled={imageDownloadBusy || videoDownloadBusy}
-              className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-wait disabled:opacity-70"
+              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:from-emerald-400 hover:to-teal-400 disabled:cursor-wait disabled:opacity-60"
             >
               {imageDownloadBusy || videoDownloadBusy ? "正在准备下载…" : "下载"}
             </button>
@@ -429,7 +459,7 @@ function SuccessLayer({
               <button
                 type="button"
                 onClick={onRegenerate}
-                className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-900"
+                className="rounded-xl border border-[#2a3d5e] bg-[#1a2840] px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-[#3a5070] hover:text-slate-100"
               >
                 重新生成
               </button>
@@ -438,7 +468,7 @@ function SuccessLayer({
           {showBilling && (
             <Badge
               variant="secondary"
-              className="h-auto w-full max-w-full whitespace-normal rounded-lg border border-emerald-200/80 bg-emerald-50/90 px-3 py-2 text-left text-xs font-normal leading-snug text-emerald-900 sm:w-auto sm:self-start"
+              className="h-auto w-full max-w-full whitespace-normal rounded-lg border border-emerald-500/25 bg-emerald-900/20 px-3 py-2 text-left text-xs font-normal leading-snug text-emerald-400 sm:w-auto sm:self-start"
             >
               ✅ 任务完成，实扣 {model.sellPrice} 积分
             </Badge>
@@ -473,16 +503,16 @@ function FailureLayer({
     <div className={layerClass(active)} aria-hidden={!active}>
       <div className="flex h-full min-h-[280px] flex-1 flex-col gap-4">
         <header>
-          <p className="text-xs font-medium uppercase tracking-wide text-red-600">生成失败</p>
-          <h3 className="mt-1 text-lg font-semibold text-neutral-900">未能完成本次任务</h3>
+          <p className="text-xs font-medium uppercase tracking-widest text-red-400">生成失败</p>
+          <h3 className="mt-1 text-base font-semibold text-slate-300">未能完成本次任务</h3>
         </header>
-        <div className="max-w-2xl rounded-xl border border-red-100 bg-red-50/90 px-4 py-3 text-sm text-red-900">
+        <div className="max-w-2xl rounded-xl border border-red-500/25 bg-red-900/20 px-4 py-3 text-sm text-red-400">
           {errorMessage ?? "发生未知错误，请稍后重试。"}
         </div>
         {preservedParamsSlot && (
           <div className="max-w-2xl space-y-2">
-            <p className="text-xs font-medium text-neutral-600">您刚才提交的参数（可对照修改后重试）</p>
-            <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-xs text-neutral-800">
+            <p className="text-xs font-medium text-slate-500">您刚才提交的参数（可对照修改后重试）</p>
+            <div className="rounded-lg border border-[#1e2d4a] bg-[#1a2840] p-3 text-xs text-slate-400">
               {preservedParamsSlot}
             </div>
           </div>
@@ -491,7 +521,7 @@ function FailureLayer({
           <button
             type="button"
             onClick={onRegenerate}
-            className="w-fit rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white"
+            className="w-fit rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:from-emerald-400 hover:to-teal-400"
           >
             使用相同参数重试
           </button>

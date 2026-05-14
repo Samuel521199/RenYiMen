@@ -16,7 +16,7 @@ import type { TaskStatusViewModel } from "@/types/task-status";
 import type { ImageFieldValue, MultiImageFieldValue } from "@/types/workflow";
 import { fetchSkus } from "@/services/sku-api";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
-import type { SkuDefinition } from "@/types/sku-catalog";
+import type { SkuCategory, SkuDefinition } from "@/types/sku-catalog";
 
 /**
  * 工作流工作室：面向运营的功能入口，选择创作能力、填写表单并发起生成。
@@ -30,6 +30,7 @@ export function WorkflowStudio() {
 
   const [skus, setSkus] = useState<SkuDefinition[]>([]);
   const [selectedSkuId, setSelectedSkuId] = useState<string | null>(null);
+  const [activeCategory, setActiveCategory] = useState<SkuCategory>("prompt");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [profileRefreshKey, setProfileRefreshKey] = useState(0);
@@ -81,10 +82,12 @@ export function WorkflowStudio() {
         if (cancelled) return;
         setSkus(res.skus);
         if (res.skus.length > 0) {
-          const first = res.skus[0];
-          setSelectedSkuId(first.skuId);
-          useWorkflowStore.getState().setGatewaySelection(first.skuId, first.providerCode);
-          useWorkflowStore.getState().hydrateSchema(first.uiSchema);
+          // 默认选中第一个 prompt 类 SKU（如无则取第一个）
+          const firstPrompt = res.skus.find((s) => s.category === "prompt") ?? res.skus[0];
+          setActiveCategory(firstPrompt.category ?? "prompt");
+          setSelectedSkuId(firstPrompt.skuId);
+          useWorkflowStore.getState().setGatewaySelection(firstPrompt.skuId, firstPrompt.providerCode);
+          useWorkflowStore.getState().hydrateSchema(firstPrompt.uiSchema);
         }
       } catch (e) {
         if (!cancelled) {
@@ -302,182 +305,282 @@ export function WorkflowStudio() {
     ? "等待图片上传..."
     : isSubmitting
       ? "提交中…"
-      : "🚀 立即生成";
+      : "立即生成";
+
+  const CATEGORY_TABS: { key: SkuCategory; label: string; icon: string }[] = [
+    { key: "prompt", label: "提示词", icon: "✦" },
+    { key: "image",  label: "图片",   icon: "◈" },
+    { key: "video",  label: "视频",   icon: "▶" },
+  ];
+  const visibleSkus = skus.filter((s) => s.category === activeCategory);
 
   return (
-    <div className="mx-auto max-w-[1600px] px-4 py-8 lg:py-10">
-      <StudioAuthBar
-        session={session}
-        sessionStatus={sessionStatus}
-        profileRefreshKey={profileRefreshKey}
-        onSignIn={() => void signIn(undefined, { callbackUrl: "/" })}
-        onSignOut={() => void signOut({ callbackUrl: "/" })}
-      />
-
-      <header className="mb-8 space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">工作流工作室</h1>
-        <p className="text-sm leading-relaxed text-neutral-600">
-          在这里选择您需要的 AI 创作功能，上传素材并填写简单的描述，一键生成高质量的 AI 内容。
-        </p>
-      </header>
-
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-12 lg:items-start lg:gap-8">
-        <aside
-          className="space-y-8 lg:col-span-5 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto lg:pr-1 lg:[scrollbar-width:thin] lg:[scrollbar-color:rgba(163,163,163,0.65)_transparent] lg:[&::-webkit-scrollbar]:w-1.5 lg:[&::-webkit-scrollbar-thumb]:rounded-full lg:[&::-webkit-scrollbar-thumb]:bg-neutral-300/70 lg:[&::-webkit-scrollbar-track]:bg-transparent"
-        >
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold text-neutral-900">选择创作功能</h2>
-            {catalogLoading && <p className="text-sm text-neutral-500">正在加载功能列表…</p>}
-            {catalogError && (
-              <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
-                {catalogError}
-              </div>
-            )}
-            {!catalogLoading && !catalogError && skus.length === 0 && (
-              <p className="text-sm text-amber-800">暂无可用的创作功能，请联系管理员检查配置。</p>
-            )}
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-              {skus.map((sku) => {
-                const active = sku.skuId === selectedSkuId;
-                return (
-                  <button
-                    key={sku.skuId}
-                    type="button"
-                    onClick={() => applySku(sku)}
-                    className={[
-                      "rounded-xl border p-4 text-left transition-shadow",
-                      active
-                        ? "border-emerald-600 bg-emerald-50/80 shadow-sm ring-1 ring-emerald-600"
-                        : "border-neutral-200 bg-white hover:border-neutral-300 hover:shadow-sm",
-                    ].join(" ")}
-                  >
-                    <p className="text-sm font-semibold text-neutral-900">{sku.displayName}</p>
-                    {sku.description && (
-                      <p className="mt-1 line-clamp-6 text-xs leading-relaxed text-neutral-600">{sku.description}</p>
-                    )}
-                    <p className="mt-2 text-xs font-medium text-emerald-800">{sku.sellCredits} 积分</p>
-                  </button>
-                );
-              })}
+    <div className="flex min-h-screen flex-col bg-[#0f1728]">
+      {/* ── 顶部导航栏 ── */}
+      <nav className="sticky top-0 z-50 border-b border-[#1e2d4a] bg-[#0f1728]/90 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-[1600px] items-center justify-between px-5 py-3">
+          {/* 品牌 */}
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 shadow-lg shadow-emerald-500/20">
+              <span className="text-[11px] font-black tracking-tighter text-white">AI</span>
             </div>
-          </section>
+            <div className="hidden sm:block">
+              <span className="text-sm font-semibold text-slate-200 tracking-tight">创作工作室</span>
+              <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-400">Beta</span>
+            </div>
+          </div>
 
-          {schema ? (
-            <DynamicForm
-              schema={schema}
-              errors={errors}
-              onSubmit={onStudioFormSubmit}
-              formFooter={
-                <div className="space-y-6 pt-2">
-                  {showErrors && Object.keys(errors).length > 0 && (
-                    <section className="rounded-lg border border-red-200 bg-red-50/80 p-4 text-sm">
-                      <p className="font-medium text-red-900">请修正以下问题</p>
-                      <ul className="mt-2 list-inside list-disc text-red-800">
-                        {Object.entries(errors).map(([id, msg]) => (
-                          <li key={id}>
-                            <span className="text-xs text-neutral-700">「{id}」</span> {msg}
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  )}
+          {/* 右侧 Auth 区 */}
+          <NavAuthZone
+            session={session}
+            sessionStatus={sessionStatus}
+            profileRefreshKey={profileRefreshKey}
+            onSignIn={() => void signIn(undefined, { callbackUrl: "/" })}
+            onSignOut={() => void signOut({ callbackUrl: "/" })}
+          />
+        </div>
+      </nav>
 
-                  <section className="space-y-4 border-t border-neutral-200 pt-6">
-                    <div>
-                      <h2 className="text-lg font-semibold text-neutral-900">生成</h2>
-                      <p className="mt-1 text-xs leading-relaxed text-neutral-600">
-                        提交后，进度与成片会显示在右侧；底部可查看历史记录并切换预览。
-                      </p>
-                    </div>
+      {/* ── 主内容区 ── */}
+      <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col px-4 py-6 lg:px-6 lg:py-8">
+        {/* 页面标题 */}
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-100 lg:text-3xl">
+            AI 创作工作室
+          </h1>
+          <p className="mt-1.5 text-sm text-slate-400">
+            选择创作功能，上传素材，一键生成高质量 AI 内容
+          </p>
+        </div>
 
-                    {submitError && (
-                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-                        {submitError}
-                      </div>
+        {/* 两栏布局 */}
+        <div className="grid flex-1 grid-cols-1 gap-4 lg:grid-cols-12 lg:items-start lg:gap-5">
+
+          {/* ── 左侧：功能选择 + 参数表单 ── */}
+          <aside className="lg:col-span-5 lg:sticky lg:top-[4.25rem] lg:max-h-[calc(100vh-5.5rem)] lg:overflow-y-auto lg:[scrollbar-width:thin] lg:[scrollbar-color:rgba(100,130,180,0.25)_transparent] lg:[&::-webkit-scrollbar]:w-1 lg:[&::-webkit-scrollbar-thumb]:rounded-full lg:[&::-webkit-scrollbar-thumb]:bg-slate-600/40">
+            {/* 功能选择卡 */}
+            <div className="rounded-2xl border border-[#1e2d4a] bg-[#152035] p-5 shadow-lg shadow-black/20">
+              <div className="mb-4">
+                <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">选择创作功能</h2>
+              </div>
+
+              {catalogLoading && (
+                <div className="flex items-center gap-2 py-4 text-sm text-slate-500">
+                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-600 border-t-emerald-400" />
+                  正在加载…
+                </div>
+              )}
+              {catalogError && (
+                <div className="rounded-xl border border-red-500/20 bg-red-900/20 px-4 py-3 text-sm text-red-400">
+                  {catalogError}
+                </div>
+              )}
+              {!catalogLoading && !catalogError && skus.length === 0 && (
+                <p className="text-sm text-amber-400/70">暂无可用功能，请联系管理员。</p>
+              )}
+
+              {!catalogLoading && !catalogError && skus.length > 0 && (
+                <div className="space-y-3">
+                  {/* Category Tabs */}
+                  <div className="grid grid-cols-3 gap-1 rounded-xl bg-[#0f1728] p-1">
+                    {CATEGORY_TABS.map((tab) => {
+                      const count = skus.filter((s) => s.category === tab.key).length;
+                      const isActive = activeCategory === tab.key;
+                      return (
+                        <button
+                          key={tab.key}
+                          type="button"
+                          onClick={() => setActiveCategory(tab.key)}
+                          className={[
+                            "flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition-all duration-200",
+                            isActive
+                              ? "bg-[#1e2d4a] text-slate-200 shadow-sm"
+                              : "text-slate-500 hover:text-slate-300",
+                          ].join(" ")}
+                        >
+                          <span className="text-[10px]">{tab.icon}</span>
+                          <span>{tab.label}</span>
+                          <span className={[
+                            "rounded-full px-1.5 py-0.5 text-[9px] font-bold leading-none",
+                            isActive ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700/60 text-slate-500",
+                          ].join(" ")}>{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* SKU 卡片列表 */}
+                  <div className="space-y-2">
+                    {visibleSkus.map((sku) => {
+                      const active = sku.skuId === selectedSkuId;
+                      return (
+                        <button
+                          key={sku.skuId}
+                          type="button"
+                          onClick={() => applySku(sku)}
+                          className={[
+                            "group w-full rounded-xl border p-4 text-left transition-all duration-200",
+                            active
+                              ? "border-emerald-500/40 bg-emerald-500/[0.07] ring-1 ring-emerald-500/20 shadow-md shadow-emerald-900/20"
+                              : "border-[#1e2d4a] bg-[#0f1728]/60 hover:border-[#2a3d5e] hover:bg-[#162038]",
+                          ].join(" ")}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <p className={[
+                              "text-sm font-semibold leading-tight",
+                              active ? "text-slate-100" : "text-slate-300 group-hover:text-slate-100",
+                            ].join(" ")}>{sku.displayName}</p>
+                            <span className={[
+                              "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums",
+                              active
+                                ? "bg-emerald-500/20 text-emerald-300"
+                                : "bg-slate-700/50 text-slate-400",
+                            ].join(" ")}>{sku.sellCredits} 积分</span>
+                          </div>
+                          {sku.description && (
+                            <p className={[
+                              "mt-1.5 line-clamp-2 text-[11px] leading-relaxed",
+                              active ? "text-slate-400" : "text-slate-500",
+                            ].join(" ")}>{sku.description}</p>
+                          )}
+                        </button>
+                      );
+                    })}
+                    {visibleSkus.length === 0 && (
+                      <p className="py-6 text-center text-sm text-slate-600">该分类暂无可用功能</p>
                     )}
+                  </div>
+                </div>
+              )}
+            </div>
 
-                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-                      <button
-                        type="submit"
-                        disabled={
-                          isSubmitting ||
-                          hasImageUploadInFlight ||
-                          !selectedSku ||
-                          sessionStatus !== "authenticated"
-                        }
-                        className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {submitPrimaryLabel}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowErrors(false);
-                          setSubmitError(null);
-                          reset();
-                        }}
-                        className="rounded-md border border-transparent px-4 py-2 text-sm text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900"
-                      >
-                        清空内容
-                      </button>
-                      {activeTaskId && (
+            {/* 参数表单卡 */}
+            <div className="mt-4 overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#152035] shadow-lg shadow-black/20">
+              {schema ? (
+                <DynamicForm
+                  schema={schema}
+                  errors={errors}
+                  onSubmit={onStudioFormSubmit}
+                  formFooter={
+                    <div className="space-y-4 border-t border-[#1e2d4a] pt-4">
+                      {showErrors && Object.keys(errors).length > 0 && (
+                        <div className="rounded-xl border border-red-500/25 bg-red-900/20 p-3.5 text-sm">
+                          <p className="font-semibold text-red-400">请修正以下问题</p>
+                          <ul className="mt-2 list-inside list-disc space-y-0.5 text-red-400/80">
+                            {Object.entries(errors).map(([id, msg]) => (
+                              <li key={id} className="text-xs">
+                                <span className="text-slate-500">「{id}」</span> {msg}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {submitError && (
+                        <div className="rounded-xl border border-amber-500/25 bg-amber-900/20 px-4 py-3 text-sm text-amber-400">
+                          {submitError}
+                        </div>
+                      )}
+
+                      {/* 积分预估 */}
+                      {selectedSku && !hasImageUploadInFlight && !isSubmitting && (
+                        <p className="text-[11px] text-[#4a6880]">
+                          {bailianEstimate ? (
+                            <>预计消耗约 <span className="font-semibold text-[#2c4f6a]">{bailianEstimate.credits.toLocaleString("zh-CN")}</span> 积分（{bailianEstimate.sec}s × {BAILIAN_VIDEO_CREDITS_PER_SECOND}，以实际结算为准）</>
+                          ) : (
+                            <>预计消耗约 <span className="font-semibold text-[#2c4f6a]">{selectedSku.sellCredits}</span> 积分（以实际结算为准）</>
+                          )}
+                        </p>
+                      )}
+
+                      {/* 操作按钮组 */}
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <button
+                          type="submit"
+                          disabled={isSubmitting || hasImageUploadInFlight || !selectedSku || sessionStatus !== "authenticated"}
+                          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-emerald-500/20 transition-all hover:from-emerald-400 hover:to-teal-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+                        >
+                          {isSubmitting ? (
+                            <>
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                              提交中…
+                            </>
+                          ) : hasImageUploadInFlight ? (
+                            <>
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                              上传中…
+                            </>
+                          ) : (
+                            <>
+                              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polygon points="5 3 19 12 5 21 5 3" />
+                              </svg>
+                              {submitPrimaryLabel}
+                            </>
+                          )}
+                        </button>
                         <button
                           type="button"
-                          onClick={handleRegenerate}
-                          className="rounded-md border border-neutral-200 bg-white px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+                          onClick={() => { setShowErrors(false); setSubmitError(null); reset(); }}
+                          className="rounded-xl border border-[#3a5070] bg-[#1e3050] px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:border-[#4a6888] hover:bg-[#243860] hover:text-slate-100"
                         >
-                          关闭任务视图
+                          清空
                         </button>
-                      )}
-                    </div>
-                    {selectedSku && !hasImageUploadInFlight && !isSubmitting && (
-                      <p className="text-xs text-neutral-500">
-                        {bailianEstimate ? (
-                          <>
-                            预计消耗约 {bailianEstimate.credits.toLocaleString("zh-CN")} 积分
-                            <span className="text-neutral-400">
-                              （{bailianEstimate.sec} 秒 × {BAILIAN_VIDEO_CREDITS_PER_SECOND}，未含底图存储等杂项，以实际结算为准）
-                            </span>
-                          </>
-                        ) : (
-                          <>预计消耗约 {selectedSku.sellCredits} 积分（以实际结算为准）</>
+                        {activeTaskId && (
+                          <button
+                            type="button"
+                            onClick={handleRegenerate}
+                            className="rounded-xl border border-[#3a5070] bg-[#1e3050] px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:border-[#4a6888] hover:bg-[#243860] hover:text-slate-100"
+                          >
+                            关闭任务
+                          </button>
                         )}
-                      </p>
-                    )}
-                  </section>
+                      </div>
+                    </div>
+                  }
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-3 px-6 py-12">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[#9bbdd8]/40">
+                    <svg className="h-5 w-5 text-[#4a7a9b]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3" />
+                    </svg>
+                  </div>
+                  <p className="text-center text-sm text-[#4a6880]">请先选择一项创作功能以加载参数表单</p>
                 </div>
-              }
-            />
-          ) : (
-            <p className="rounded-lg border border-dashed border-neutral-200 bg-neutral-50 px-4 py-8 text-center text-sm text-neutral-500">
-              请先在左侧选择一项创作功能以加载表单
-            </p>
-          )}
-        </aside>
+              )}
+            </div>
+          </aside>
 
-        <div className="flex min-h-[min(600px,calc(100vh-6rem))] flex-col lg:col-span-7 lg:min-h-[calc(100vh-8rem)]">
-          <TaskStatusViewer
-            model={displayViewerModel}
-            onRegenerate={handleRegenerate}
-            downloadFileName="workflow-studio.mp4"
-            className="h-full w-full flex-1"
-          />
-          {cloudHistory.length > 0 && (
-            <div className="shrink-0 border-t border-neutral-200 bg-neutral-50/80 px-2">
-              <HistoryFilmstrip
-                history={cloudHistory}
-                activeId={viewingHistoryId}
-                onSelect={setViewingHistoryId}
+          {/* ── 右侧：预览画板 + 历史记录 ── */}
+          <div className="flex min-h-[min(640px,calc(100vh-8rem))] flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-xl shadow-black/25 lg:col-span-7 lg:min-h-[calc(100vh-7rem)]">
+            <div className="flex-1">
+              <TaskStatusViewer
+                model={displayViewerModel}
+                onRegenerate={handleRegenerate}
+                downloadFileName="workflow-studio.mp4"
+                className="h-full w-full"
               />
             </div>
-          )}
+            {cloudHistory.length > 0 && (
+              <div className="shrink-0 border-t border-[#1e2d4a] bg-[#0f1728]/80 px-2">
+                <HistoryFilmstrip
+                  history={cloudHistory}
+                  activeId={viewingHistoryId}
+                  onSelect={setViewingHistoryId}
+                />
+              </div>
+            )}
+          </div>
+
         </div>
       </div>
     </div>
   );
 }
 
-function StudioAuthBar({
+/** 顶部导航栏右侧 Auth 区域 */
+function NavAuthZone({
   session,
   sessionStatus,
   profileRefreshKey,
@@ -486,63 +589,54 @@ function StudioAuthBar({
 }: {
   session: Session | null;
   sessionStatus: "loading" | "authenticated" | "unauthenticated";
-  /** 任务结算等场景下递增，触发积分立即刷新 */
   profileRefreshKey?: number;
   onSignIn: () => void;
   onSignOut: () => void;
 }) {
   if (sessionStatus === "loading") {
     return (
-      <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2 text-xs text-neutral-600">
-        正在检查登录状态…
+      <div className="flex items-center gap-2 text-xs text-slate-500">
+        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-600 border-t-slate-400" />
+        加载中…
       </div>
     );
   }
 
   if (sessionStatus === "unauthenticated") {
     return (
-      <div className="flex flex-col gap-3 rounded-xl border border-amber-300/80 bg-amber-50 px-4 py-4 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-1">
-          <p className="font-medium">需要先登录</p>
-          <p className="text-xs leading-relaxed text-amber-900/90">
-            使用「生成」前请先登录。可注册邮箱账号，或使用「登录」进入登录页；若管理员已开启 GitHub
-            登录，也可在登录页选用。
-          </p>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end sm:gap-3">
-          <Link
-            href="/auth/register?callbackUrl=%2F"
-            className="inline-flex shrink-0 items-center justify-center rounded-md border border-amber-800/30 bg-white px-4 py-2 text-center text-sm font-medium text-amber-950 hover:bg-amber-100/60"
-          >
-            注册账号
-          </Link>
-          <button
-            type="button"
-            onClick={onSignIn}
-            className="shrink-0 rounded-md bg-amber-800 px-4 py-2 text-sm font-medium text-white hover:bg-amber-900"
-          >
-            登录
-          </button>
-        </div>
+      <div className="flex items-center gap-2.5">
+        <span className="hidden text-xs text-slate-500 sm:block">请登录后开始创作</span>
+        <Link
+          href="/auth/register?callbackUrl=%2F"
+          className="hidden rounded-lg border border-[#2a3d5e] px-3.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:border-[#3a5070] hover:text-slate-200 sm:inline-flex"
+        >
+          注册
+        </Link>
+        <button
+          type="button"
+          onClick={onSignIn}
+          className="rounded-lg bg-emerald-500 px-4 py-1.5 text-xs font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:bg-emerald-400"
+        >
+          登录
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-emerald-200 bg-emerald-50/90 px-4 py-3 text-sm text-emerald-950 sm:flex-row sm:items-center sm:justify-between">
-      <p>
-        已登录：<span className="font-medium">{session?.user?.email ?? session?.user?.name ?? "用户"}</span>
-      </p>
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <UserCredits refreshKey={profileRefreshKey ?? 0} />
-        <button
-          type="button"
-          onClick={onSignOut}
-          className="shrink-0 rounded-md border border-emerald-700/40 bg-white px-3 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100/80"
-        >
-          退出登录
-        </button>
-      </div>
+    <div className="flex items-center gap-3">
+      <UserCredits refreshKey={profileRefreshKey ?? 0} />
+      <div className="hidden h-4 w-px bg-slate-700 sm:block" />
+      <span className="hidden max-w-[160px] truncate text-xs text-slate-400 sm:block">
+        {session?.user?.email ?? session?.user?.name ?? "用户"}
+      </span>
+      <button
+        type="button"
+        onClick={onSignOut}
+        className="rounded-lg border border-[#2a3d5e] px-3 py-1.5 text-xs font-medium text-slate-400 transition-all hover:border-[#3a5070] hover:text-slate-200"
+      >
+        退出
+      </button>
     </div>
   );
 }

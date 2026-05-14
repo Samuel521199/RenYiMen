@@ -1,0 +1,101 @@
+{
+  "3": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "5": {
+    "inputs": {
+      "preset_prompt": "Prompt Style - Extreme Detailed",
+      "custom_prompt": "用中文详细描述这张图像，并生成提示词。\n要求：只输出标准提示词，内容详尽细致（不要出现无关的文字和符号）",
+      "system_prompt": "你是一个专业的 AI 绘画提示词专家，擅长将图像转化为精准且专业的 AI 绘画提示词描述",
+      "inference_mode": "one by one",
+      "max_frames": 24,
+      "max_size": 1024,
+      "seed": 238643171083306,
+      "force_offload": false,
+      "save_states": false,
+      "llama_model": [
+        "6",
+        0
+      ],
+      "parameters": [
+        "7",
+        0
+      ],
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "llama_cpp_instruct_adv",
+    "_meta": {
+      "title": "Llama-cpp Instruct"
+    }
+  },
+  "6": {
+    "inputs": {
+      "model": "Huihui-Qwen3-VL-8B-Instruct-abliterated.Q8_0.gguf",
+      "mmproj": "Huihui-Qwen3-VL-8B-Instruct-abliterated.mmproj-Q8_0.gguf",
+      "chat_handler": "Qwen3-VL",
+      "n_ctx": 8192,
+      "vram_limit": -1,
+      "image_min_tokens": 0,
+      "image_max_tokens": 0
+    },
+    "class_type": "llama_cpp_model_loader",
+    "_meta": {
+      "title": "Llama-cpp Model Loader"
+    }
+  },
+  "7": {
+    "inputs": {
+      "max_tokens": 1024,
+      "top_k": 30,
+      "top_p": 0.9,
+      "min_p": 0.05,
+      "typical_p": 1,
+      "temperature": 0.8,
+      "repeat_penalty": 1,
+      "frequency_penalty": 0,
+      "presence_penalty": 1,
+      "mirostat_mode": 0,
+      "mirostat_eta": 0.1,
+      "mirostat_tau": 5,
+      "state_uid": -1
+    },
+    "class_type": "llama_cpp_parameters",
+    "_meta": {
+      "title": "Llama-cpp Parameters"
+    }
+  },
+  "8": {
+    "inputs": {
+      "text": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "ShowText|pysssss",
+    "_meta": {
+      "title": "展示文本"
+    }
+  },
+  "100": {
+    "inputs": {
+      "text": [
+        "5",
+        0
+      ],
+      "output_name": "prompt_text"
+    },
+    "class_type": "ShellAgentPluginOutputText",
+    "_meta": {
+      "title": "API 输出提示词"
+    }
+  }
+}

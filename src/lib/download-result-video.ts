@@ -1,11 +1,15 @@
+import { saveFileWithPicker } from "./save-file-with-picker";
+
 /**
- * 将任务结果视频保存为本地文件：经同源 API 拉取字节 → Blob → `<a download>`，
- * 避免跨域直链上 `download` 被忽略、仅在新标签全屏播放的问题。
+ * 将任务结果视频保存为本地文件：
+ * 1. 经同源 API 拉取字节 → Blob
+ * 2. 调用 showSaveFilePicker 让用户自选保存路径（不支持时降级为 <a download>）
  */
 export async function downloadResultVideoAsFile(videoUrl: string, downloadFileName: string): Promise<void> {
-  const base = /\.(mp4|webm|mov)$/i.test(downloadFileName.trim())
+  const ext = /\.(webm|mov|gif)$/i.exec(downloadFileName.trim())?.[1]?.toLowerCase() ?? "mp4";
+  const base = /\.(mp4|webm|mov|gif)$/i.test(downloadFileName.trim())
     ? downloadFileName.trim()
-    : `${downloadFileName.replace(/\.[^./\\]+$/, "")}.mp4`;
+    : `${downloadFileName.replace(/\.[^./\\]+$/, "")}.${ext}`;
 
   const res = await fetch("/api/download-external-image", {
     method: "POST",
@@ -26,13 +30,21 @@ export async function downloadResultVideoAsFile(videoUrl: string, downloadFileNa
   }
 
   const blob = await res.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = objectUrl;
-  a.download = base;
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 2500);
+
+  const mimeMap: Record<string, string> = {
+    mp4: "video/mp4",
+    webm: "video/webm",
+    mov: "video/quicktime",
+    gif: "image/gif",
+  };
+  const mime = mimeMap[ext] ?? "video/mp4";
+
+  const saved = await saveFileWithPicker(blob, base, [
+    { description: `${ext.toUpperCase()} 文件`, accept: { [mime]: [`.${ext}`] } },
+  ]);
+
+  if (!saved) {
+    // 用户主动取消了文件选择对话框，静默处理
+    return;
+  }
 }

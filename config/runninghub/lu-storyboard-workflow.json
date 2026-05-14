@@ -7,6 +7,10 @@
       "sampler_name": "sa_solver",
       "scheduler": "simple",
       "denoise": 1,
+      "model": [
+        "109",
+        0
+      ],
       "positive": [
         "68",
         0
@@ -30,6 +34,10 @@
       "pixels": [
         "91",
         0
+      ],
+      "vae": [
+        "110",
+        0
       ]
     },
     "class_type": "VAEEncode",
@@ -39,6 +47,10 @@
   },
   "61": {
     "inputs": {
+      "clip": [
+        "107",
+        0
+      ],
       "prompt": "",
       "image1": [
         "91",
@@ -52,6 +64,10 @@
   },
   "68": {
     "inputs": {
+      "clip": [
+        "107",
+        0
+      ],
       "prompt": [
         "76",
         0
@@ -70,6 +86,10 @@
     "inputs": {
       "samples": [
         "56",
+        0
+      ],
+      "vae": [
+        "110",
         0
       ]
     },
@@ -268,19 +288,6 @@
       "title": "全局输入3"
     }
   },
-  "132": {
-    "inputs": {
-      "text": [
-        "95",
-        0
-      ],
-      "output_name": "output_text"
-    },
-    "class_type": "ShellAgentPluginOutputText",
-    "_meta": {
-      "title": "Output Text (ShellAgent Plugin)"
-    }
-  },
   "133": {
     "inputs": {
       "lora_name": "next-scene_lora_v1-3000.safetensors",
@@ -293,6 +300,38 @@
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
       "title": "LoRA加载器(仅模型)"
+    }
+  },
+  "134": {
+    "inputs": {
+      "text": [
+        "105",
+        0
+      ],
+      "output_name": "image_urls"
+    },
+    "class_type": "ShellAgentPluginOutputText",
+    "_meta": {
+      "title": "输出图片URLs"
+    }
+  },
+  "200": {
+    "inputs": {
+      "frame_rate": 1,
+      "loop_count": 0,
+      "filename_prefix": "storyboard",
+      "format": "image/gif",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": false,
+      "images": [
+        "69",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "分镜输出GIF"
     }
   }
 }

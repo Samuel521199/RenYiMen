@@ -21,18 +21,18 @@ export function SelectControl({ field, error }: SelectControlProps) {
         id={field.id}
         value={value}
         onChange={(e) => setFieldValue(field.id, e.target.value)}
-        className={`w-full max-w-md rounded-md border bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-neutral-800 ${
-          error ? "border-red-300" : "border-neutral-300"
+        className={`w-full max-w-md rounded-lg border bg-[#1a2840] px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-emerald-500/40 ${
+          error ? "border-red-500/50" : "border-[#2a3d5e]"
         }`}
       >
         {field.options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
+          <option key={opt.value} value={opt.value} className="bg-[#1a2840] text-slate-200">
             {opt.label}
           </option>
         ))}
       </select>
-      {field.description && <p className="text-xs text-neutral-500">{field.description}</p>}
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+      {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );
 }

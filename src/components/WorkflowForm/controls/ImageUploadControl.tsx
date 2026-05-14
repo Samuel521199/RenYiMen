@@ -60,8 +60,8 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
     setLightboxUrl(null);
   }, []);
 
-  const dashedFrameClass = `relative flex h-[180px] w-[250px] shrink-0 items-center justify-center overflow-hidden rounded-lg border-2 border-dashed bg-neutral-50 ${
-    error ? "border-red-300" : "border-neutral-200"
+  const dashedFrameClass = `relative flex h-[180px] w-[250px] shrink-0 items-center justify-center overflow-hidden rounded-lg border-2 border-dashed bg-[#1a2840] ${
+    error ? "border-red-500/50" : "border-[#2a3d5e]"
   }`;
 
   return (
@@ -150,8 +150,8 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
             </button>
           ) : (
             <div className="flex flex-col items-center justify-center gap-2 px-3">
-              <Upload className="h-9 w-9 text-neutral-300" strokeWidth={1.25} aria-hidden />
-              <span className="text-center text-xs text-neutral-400">暂无预览</span>
+              <Upload className="h-9 w-9 text-slate-600" strokeWidth={1.25} aria-hidden />
+              <span className="text-center text-xs text-slate-600">暂无预览</span>
             </div>
           )}
         </div>
@@ -173,7 +173,7 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
               type="button"
               disabled={v.status === "uploading"}
               onClick={triggerFilePick}
-              className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {v.status === "ready" ? "更换图片" : "选择图片"}
             </button>
@@ -182,23 +182,23 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
                 type="button"
                 disabled={v.status === "uploading"}
                 onClick={() => clearImageField(field.id)}
-                className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg border border-[#2a3d5e] px-3 py-1.5 text-sm text-slate-400 transition-colors hover:border-[#3a5070] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 清除
               </button>
             )}
           </div>
-          {v.fileName && <p className="truncate text-xs text-neutral-500">已选：{v.fileName}</p>}
+          {v.fileName && <p className="truncate text-xs text-slate-500">已选：{v.fileName}</p>}
           {v.status === "ready" && v.remoteUrl && (
-            <p className="break-all text-xs text-emerald-700">远端：{v.remoteUrl}</p>
+            <p className="break-all text-xs text-emerald-500/80">远端：{v.remoteUrl}</p>
           )}
           {v.status === "error" && (
             <p className="text-xs text-red-600">{v.errorMessage ?? "上传失败"}</p>
           )}
         </div>
       </div>
-      {field.description && <p className="text-xs text-neutral-500">{field.description}</p>}
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+      {error && <p className="text-xs text-red-400">{error}</p>}
 
       <LightboxModal open={lightboxOpen} imageUrl={lightboxUrl} onClose={closeLightbox} />
     </div>

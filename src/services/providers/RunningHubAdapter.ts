@@ -325,8 +325,13 @@ function getRunningHubStoryboardRemoteWorkflowId(): string | null {
   return process.env.RUNNINGHUB_STORYBOARD_REMOTE_WORKFLOW_ID?.trim() || null;
 }
 
+function getRunningHubPromptReverseRemoteWorkflowId(): string | null {
+  return process.env.RUNNINGHUB_PROMPT_REVERSE_WORKFLOW_ID?.trim() || null;
+}
+
 const DEFAULT_TXT2IMG_WORKFLOW_RELATIVE = "config/runninghub/lu-shortdrama-txt2img-workflow.json";
 const DEFAULT_STORYBOARD_WORKFLOW_RELATIVE = "config/runninghub/lu-storyboard-workflow.json";
+const DEFAULT_PROMPT_REVERSE_WORKFLOW_RELATIVE = "config/runninghub/lu-prompt-reverse-workflow.json";
 
 function resolveTxt2ImgWorkflowFileAbsPath(): string | null {
   const fromEnv = process.env.RUNNINGHUB_TXT2IMG_WORKFLOW_FILE?.trim();
@@ -369,7 +374,39 @@ function loadStoryboardBaseWorkflow(): Record<string, ComfyNodeShell> {
   );
 }
 
+function resolvePromptReverseWorkflowFileAbsPath(): string | null {
+  const fromEnv = process.env.RUNNINGHUB_PROMPT_REVERSE_WORKFLOW_FILE?.trim();
+  if (fromEnv) {
+    return path.isAbsolute(fromEnv) ? fromEnv : path.join(process.cwd(), fromEnv);
+  }
+  const def = path.join(process.cwd(), DEFAULT_PROMPT_REVERSE_WORKFLOW_RELATIVE);
+  return fs.existsSync(def) ? def : null;
+}
+
+function loadPromptReverseBaseWorkflow(): Record<string, ComfyNodeShell> {
+  const filePath = resolvePromptReverseWorkflowFileAbsPath();
+  if (filePath) {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<string, ComfyNodeShell>;
+  }
+  throw new ProviderError(
+    "提示词反推工作流配置缺失：请设置 RUNNINGHUB_PROMPT_REVERSE_WORKFLOW_FILE 或确认文件存在。",
+    "RH_MISSING_PROMPT_REVERSE_WORKFLOW",
+    500
+  );
+}
+
+const PROMPT_REVERSE_TEMPLATE_ID = "lu-prompt-reverse";
 const STORYBOARD_TEMPLATE_ID = "lu-storyboard";
+
+function isRunningHubPromptReversePayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_PROMPT_REVERSE") return true;
+  if (sku === "RH_PROMPT_REVERSE") return true;
+  return payload.templateId.trim().toLowerCase() === PROMPT_REVERSE_TEMPLATE_ID;
+}
 
 function isRunningHubStoryboardPayload(payload: StandardPayload): boolean {
   const f = payload.flags;
@@ -403,6 +440,9 @@ function resolveRunWorkflowIdForPayload(payload: StandardPayload): string | null
   }
   if (isRunningHubStoryboardPayload(payload)) {
     return getRunningHubStoryboardRemoteWorkflowId();
+  }
+  if (isRunningHubPromptReversePayload(payload)) {
+    return getRunningHubPromptReverseRemoteWorkflowId();
   }
   const fromEnv = getRunningHubSvdRemoteWorkflowId();
   if (fromEnv) return fromEnv;
@@ -1199,24 +1239,130 @@ async function queryTaskOutputs(
 }
 
 /**
+ * 从文本内容（SaveImage image_urls 输出 / txt 文件）中提取图片 URL。
+ * 支持换行分隔、JSON 数组、逗号分隔等格式。
+ */
+function parseImageUrlsFromText(text: string): string[] {
+  const imageRe = /https?:\/\/[^\s"',\]]+\.(png|jpe?g|webp|gif)(\?[^\s"',\]]*)?/gi;
+  const matches = text.match(imageRe);
+  if (matches) return [...new Set(matches)];
+  // 尝试 JSON 数组格式
+  try {
+    const parsed = JSON.parse(text.trim());
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((v): v is string => typeof v === "string" && /^https?:\/\//.test(v))
+        .filter((v) => /\.(png|jpe?g|webp|gif)(\?|#|$)/i.test(v));
+    }
+  } catch {
+    // 非 JSON，忽略
+  }
+  return [];
+}
+
+/**
  * 从 `/openapi/v2/query` 响应的 `results[]` 数组中提取所有图片 URL。
- * 每项含 `url` + `outputType`（如 "png" / "jpg"），无需猜测后缀。
+ * 优先识别直接 image outputType（png/jpg/gif 等），
+ * 其次解析 txt 结果里内联的 text 字段（SaveImage image_urls 输出会把 URL 写在 text 里）。
  */
 function extractImageUrlsFromV2QueryResults(raw: unknown): string[] {
   if (!isRecord(raw)) return [];
   const results = raw.results;
   if (!Array.isArray(results)) return [];
   const IMAGE_TYPES = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+  const seen = new Set<string>();
   const urls: string[] = [];
+
+  const addUrl = (u: string) => {
+    const trimmed = u.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      urls.push(trimmed);
+    }
+  };
+
   for (const r of results) {
     if (!isRecord(r)) continue;
     const url = typeof r.url === "string" ? r.url.trim() : null;
     const outputType = typeof r.outputType === "string" ? r.outputType.toLowerCase().trim() : "";
+
+    // 直接图片类型结果（png/jpg/gif 等）
     if (url && (IMAGE_TYPES.has(outputType) || /\.(png|jpe?g|webp|gif)(\?|#|$)/i.test(url))) {
-      urls.push(url);
+      addUrl(url);
+      continue;
+    }
+
+    // 任意类型 result 中若 text 字段含有图片 URL，也提取（SaveImage image_urls 等输出机制）
+    if (typeof r.text === "string" && r.text.trim()) {
+      parseImageUrlsFromText(r.text).forEach(addUrl);
     }
   }
   return urls;
+}
+
+/**
+ * 从 `/openapi/v2/query` 响应的 `results[]` 中提取纯文本内容。
+ * 用于提示词反推等仅输出文字的工作流（`ShowText|pysssss`、`ShellAgentPluginOutputText` 等）。
+ * 不限制 outputType，只要 `r.text` 非空且不含图片 URL 即视为纯文本。
+ * 仅在没有图片 URL 的情况下才会使用此结果。
+ */
+function extractPlainTextFromV2QueryInlineResults(raw: unknown): string | null {
+  if (!isRecord(raw)) return null;
+  const results = raw.results;
+  if (!Array.isArray(results)) return null;
+
+  for (const r of results) {
+    if (!isRecord(r)) continue;
+    const inlineText = typeof r.text === "string" ? r.text.trim() : null;
+    if (!inlineText) continue;
+    // 如果行内文本不含图片 URL，则视为纯文本输出（提示词反推生成的描述文字）
+    const imageUrls = parseImageUrlsFromText(inlineText);
+    if (imageUrls.length === 0) {
+      console.log(
+        "[RH] extractPlainTextFromV2QueryInlineResults 发现纯文本:",
+        "outputType=",
+        r.outputType,
+        "preview=",
+        inlineText.slice(0, 100)
+      );
+      return inlineText;
+    }
+  }
+  return null;
+}
+
+const MIN_JSON_SCAN_TEXT_LEN = 48;
+
+/**
+ * 在任意 JSON 子树中收集 `text` 键下的字符串，取最长一条（且不含可解析的图片 URL）。
+ * 用于 v2/query 标记 SUCCESS 但 `results` 异常为空等兜底场景。
+ */
+function extractLongestPlainTextFromJsonTextKeys(root: unknown, depth = 0): string | null {
+  if (depth > 14 || root === null || root === undefined) return null;
+  let best: string | null = null;
+  const consider = (s: unknown) => {
+    if (typeof s !== "string") return;
+    const t = s.trim();
+    if (t.length < MIN_JSON_SCAN_TEXT_LEN) return;
+    if (parseImageUrlsFromText(t).length > 0) return;
+    if (!best || t.length > best.length) best = t;
+  };
+  if (Array.isArray(root)) {
+    for (const item of root) {
+      const sub = extractLongestPlainTextFromJsonTextKeys(item, depth + 1);
+      if (sub && (!best || sub.length > best.length)) best = sub;
+    }
+    return best;
+  }
+  if (!isRecord(root)) return best;
+  for (const [k, v] of Object.entries(root)) {
+    if (k === "text") consider(v);
+    if (typeof v === "object" && v !== null) {
+      const sub = extractLongestPlainTextFromJsonTextKeys(v, depth + 1);
+      if (sub && (!best || sub.length > best.length)) best = sub;
+    }
+  }
+  return best;
 }
 
 /** 官方 OpenAPI：`POST /openapi/v2/query`，请求体为 `{ taskId }`（`usage.consumeCoins` / `usage.taskCostTime` 等）。 */
@@ -1238,11 +1384,13 @@ export class RunningHubAdapter implements IProviderAdapter {
     try {
       const { apiKey, baseUrl, signal } = extractCredentials(credentials);
       const nodeInfoFlatRaw = flattenNodeInputsToRunningHubOverrides(payload.nodeInputs);
+      console.log("[RH generate] nodeInfoFlatRaw (上传前):", JSON.stringify(nodeInfoFlatRaw));
       const nodeInfoFlat = await rewriteHttpUrlsInNodeInfoListForRunningHubImages(nodeInfoFlatRaw, {
         baseUrl,
         apiKey,
         signal,
       });
+      console.log("[RH generate] nodeInfoFlat (图片上传后):", JSON.stringify(nodeInfoFlat));
 
       const runWorkflowId = resolveRunWorkflowIdForPayload(payload);
       if (!runWorkflowId) {
@@ -1265,7 +1413,19 @@ export class RunningHubAdapter implements IProviderAdapter {
         usePersonalQueue: runningHubUsePersonalQueueString(),
       };
 
-      if (isRunningHubStoryboardPayload(payload)) {
+      if (isRunningHubPromptReversePayload(payload)) {
+        const wf = loadPromptReverseBaseWorkflow();
+        applyNodeInfoListToComfyWorkflow(wf, nodeInfoFlat, {});
+        // 随机化 llama_cpp_instruct_adv seed，确保每次推理独立（节点 5）
+        const inferNode = wf["5"];
+        if (inferNode?.inputs) {
+          inferNode.inputs.seed = randomInt(0, 281474976710655);
+        }
+        const wfJson = JSON.stringify(wf);
+        console.log("[RH generate] PromptReverse workflow JSON 预览（前 600 chars）:", wfJson.slice(0, 600));
+        runBody.workflow = wfJson;
+        runBody.nodeInfoList = [];
+      } else if (isRunningHubStoryboardPayload(payload)) {
         const wf = loadStoryboardBaseWorkflow();
         applyNodeInfoListToComfyWorkflow(wf, nodeInfoFlat, {});
         // 随机化 KSampler 种子，确保每次结果不同
@@ -1386,10 +1546,18 @@ export class RunningHubAdapter implements IProviderAdapter {
     if (phase === "FAILED") {
       const topHints = extractRhTopLevelErrorHints(raw);
       let detailFromOutputs: string | null = null;
+      let detailFromV2: string | null = null;
+
+      // 拉取 /task/openapi/outputs 以获取 failedReason
       try {
         const outputs = await runRhPollFetch(parent, (sig) =>
           queryTaskOutputs(taskId, apiKey, baseUrl, sig)
         );
+        try {
+          console.log("[RH FAILED] task/openapi/outputs 原始响应:", JSON.stringify(outputs.raw));
+        } catch {
+          console.log("[RH FAILED] task/openapi/outputs 原始响应（序列化失败）:", outputs.raw);
+        }
         if (hasSubstantiveFailedReason(outputs.failedReason)) {
           detailFromOutputs = summarizeFailedReason(outputs.failedReason);
         } else {
@@ -1401,15 +1569,41 @@ export class RunningHubAdapter implements IProviderAdapter {
             if (deep !== "RunningHub 平台返回任务失败") detailFromOutputs = deep;
           }
         }
-      } catch {
-        /* 仍以状态接口与 extractRhFailureMessage 为准 */
+      } catch (e) {
+        console.warn("[RH FAILED] 拉取 task/openapi/outputs 失败", e instanceof Error ? e.message : e);
+      }
+
+      // 额外拉取 v2/query，获取更详细的错误信息（nodeOutputs / errorMessages 等）
+      try {
+        const v2Detail = await runRhPollFetch(parent, (sig) =>
+          queryOpenApiV2TaskDetail(taskId, apiKey, baseUrl, sig)
+        );
+        try {
+          console.log("[RH FAILED] openapi/v2/query 原始响应:", JSON.stringify(v2Detail));
+        } catch {
+          console.log("[RH FAILED] openapi/v2/query 原始响应（序列化失败）:", v2Detail);
+        }
+        if (isRecord(v2Detail)) {
+          const errMsgs = (v2Detail as Record<string, unknown>).errorMessages;
+          if (typeof errMsgs === "string" && errMsgs.trim()) {
+            detailFromV2 = errMsgs.trim();
+          } else if (Array.isArray(errMsgs) && errMsgs.length > 0) {
+            detailFromV2 = errMsgs.join("；");
+          }
+        }
+      } catch (e) {
+        console.warn("[RH FAILED] 拉取 openapi/v2/query 失败", e instanceof Error ? e.message : e);
       }
 
       const fromStatus = extractRhFailureMessage(raw, data);
-      const candidates = [detailFromOutputs, topHints, fromStatus !== "RunningHub 平台返回任务失败" ? fromStatus : null].filter(
-        (x): x is string => typeof x === "string" && Boolean(x.trim())
-      );
+      const candidates = [
+        detailFromV2,
+        detailFromOutputs,
+        topHints,
+        fromStatus !== "RunningHub 平台返回任务失败" ? fromStatus : null,
+      ].filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
       const unique = [...new Set(candidates.map((s) => s.trim()))];
+      console.log("[RH FAILED] 最终错误信息候选:", unique);
       if (unique.length > 0) {
         return { status: "failed", errorMessage: unique.join("；") };
       }
@@ -1450,12 +1644,114 @@ export class RunningHubAdapter implements IProviderAdapter {
     // ────────────────────────────────────────────────────────────
 
     // 优先从 /openapi/v2/query 的 results[] 提取图片（含 outputType 字段，最可靠）
-    const v2ImageUrls = extractImageUrlsFromV2QueryResults(detailRaw);
+    let v2ImageUrls = extractImageUrlsFromV2QueryResults(detailRaw);
     console.log("[RH DEBUG] extractImageUrlsFromV2QueryResults 结果:", {
       taskId,
       v2ImageUrlsCount: v2ImageUrls.length,
       v2ImageUrls,
     });
+
+    // 尝试从 v2/query 行内 text 字段中提取纯文本（如提示词反推 ShellAgentPluginOutputText 直接返回 text）
+    const v2InlinePlainText = v2ImageUrls.length === 0
+      ? extractPlainTextFromV2QueryInlineResults(detailRaw)
+      : null;
+
+    // 如果行内未找到图片，尝试从 txt 结果文件中解析图片 URL 或纯文本内容
+    // - 图片 URL 场景：SaveImage image_urls 输出通过 ShellAgentPluginOutputText 返回为 txt 文件
+    // - 纯文本场景：提示词反推等 VQA 工作流直接输出文本内容
+    // 使用数组 ref 规避 TypeScript 对 async 回调内修改的外部变量的 narrowing 误判
+    const capturedPlainTexts: string[] = [];
+    if (v2ImageUrls.length === 0 && isRecord(detailRaw) && Array.isArray(detailRaw.results)) {
+      const txtResults = (detailRaw.results as unknown[]).filter(
+        (r): r is Record<string, unknown> =>
+          isRecord(r) &&
+          typeof r.url === "string" &&
+          r.url.trim().length > 0 &&
+          (() => {
+            const ot = typeof r.outputType === "string" ? r.outputType.toLowerCase().trim() : "";
+            if (ot === "txt") return true;
+            if (/\.txt(\?|#|$)/i.test(r.url.trim())) return true;
+            return false;
+          })()
+      );
+      if (txtResults.length > 0) {
+        const fetchedUrls: string[] = [];
+        await Promise.allSettled(
+          txtResults.map(async (r) => {
+            try {
+              const txtUrl = (r.url as string).trim();
+              const resp = await fetch(txtUrl, { signal: parent ?? undefined });
+              if (resp.ok) {
+                const text = await resp.text();
+                console.log("[RH DEBUG] 拉取 txt 文件内容:", {
+                  taskId,
+                  txtUrl,
+                  contentPreview: text.slice(0, 200),
+                });
+                const parsed = parseImageUrlsFromText(text);
+                if (parsed.length > 0) {
+                  fetchedUrls.push(...parsed);
+                } else if (text.trim() && capturedPlainTexts.length === 0) {
+                  // 无图片 URL，作为纯文本输出保留（如提示词反推）
+                  capturedPlainTexts.push(text.trim());
+                }
+              }
+            } catch (e) {
+              console.warn("[RH DEBUG] 拉取 txt 文件失败:", e);
+            }
+          })
+        );
+        if (fetchedUrls.length > 0) {
+          console.log("[RH DEBUG] 从 txt 文件解析到图片 URL:", { taskId, count: fetchedUrls.length, fetchedUrls });
+          v2ImageUrls = [...new Set(fetchedUrls)];
+        }
+      }
+    }
+
+    // 纯文本输出（如提示词反推）：
+    // 优先级：v2/query 行内 text > 从 txt 文件 URL 拉取的内容
+    const capturedPlainText = capturedPlainTexts[0];
+    const finalPlainText = v2InlinePlainText ?? capturedPlainText ?? null;
+    if (v2ImageUrls.length === 0 && finalPlainText) {
+      console.log("[RunningHubAdapter] 检测到纯文本输出，作为 resultText 返回", {
+        taskId,
+        source: v2InlinePlainText ? "v2/query inline text" : "fetched txt file",
+        textPreview: finalPlainText.slice(0, 100),
+      });
+      return {
+        status: "succeeded",
+        resultText: finalPlainText,
+        resultMediaType: "text",
+        progress: 100,
+        ...(providerCost != null ? { providerCost } : {}),
+        ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
+        ...(providerDurationSec != null ? { providerDurationSec } : {}),
+      };
+    }
+
+    // v2 标记 SUCCESS 但 results 无可用条目时，扫描整棵 JSON 中带 `text` 键的长字符串（RH 字段变化兜底）
+    const v2MarkedSuccess =
+      isRecord(detailRaw) && String(detailRaw.status ?? "").toUpperCase() === "SUCCESS";
+    if (v2ImageUrls.length === 0 && !finalPlainText && v2MarkedSuccess) {
+      const scanned =
+        extractLongestPlainTextFromJsonTextKeys(detailRaw) ??
+        extractLongestPlainTextFromJsonTextKeys(outputs.raw);
+      if (scanned) {
+        console.log("[RunningHubAdapter] 通过 JSON text 键扫描得到纯文本（SUCCESS 兜底）", {
+          taskId,
+          textPreview: scanned.slice(0, 100),
+        });
+        return {
+          status: "succeeded",
+          resultText: scanned,
+          resultMediaType: "text",
+          progress: 100,
+          ...(providerCost != null ? { providerCost } : {}),
+          ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
+          ...(providerDurationSec != null ? { providerDurationSec } : {}),
+        };
+      }
+    }
 
     const mapped = mapRhOutputsToPollDataAfterSuccess(outputs);
     console.log("[RH DEBUG] mapRhOutputsToPollDataAfterSuccess 结果:", {
@@ -1466,32 +1762,34 @@ export class RunningHubAdapter implements IProviderAdapter {
       mappedResultMediaType: (mapped as { resultMediaType?: string }).resultMediaType,
     });
 
+    // v2 results 有图片时，无论 outputs 接口解析结果如何都优先使用
+    // （VHS_VideoCombine GIF / PNG 等 outputs 可能比 task/openapi/outputs 返回更早或更完整）
+    if (v2ImageUrls.length > 0) {
+      console.log("[RunningHubAdapter] v2/query results 提取到图片，使用 v2 结果", {
+        taskId,
+        count: v2ImageUrls.length,
+        urls: v2ImageUrls,
+      });
+      const finalResult: TaskStatusPollData = {
+        status: "succeeded",
+        resultUrl: v2ImageUrls[0],
+        resultMediaType: "image",
+        ...(v2ImageUrls.length > 1 ? { resultUrls: v2ImageUrls } : {}),
+        progress: 100,
+        ...(providerCost != null ? { providerCost } : {}),
+        ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
+        ...(providerDurationSec != null ? { providerDurationSec } : {}),
+      };
+      console.log("[RH DEBUG] 最终返回给网关的 pollData:", {
+        taskId,
+        resultUrl: finalResult.resultUrl,
+        resultMediaType: finalResult.resultMediaType,
+        resultUrlsCount: finalResult.resultUrls?.length ?? 0,
+      });
+      return finalResult;
+    }
+
     if (mapped.status === "succeeded") {
-      // v2 results 有图片时，用它们覆盖 outputs 接口解析的结果
-      if (v2ImageUrls.length > 0) {
-        console.log("[RunningHubAdapter] v2/query results 提取到图片，使用 v2 结果", {
-          taskId,
-          count: v2ImageUrls.length,
-          urls: v2ImageUrls,
-        });
-        const finalResult: TaskStatusPollData = {
-          status: "succeeded",
-          resultUrl: v2ImageUrls[0],
-          resultMediaType: "image",
-          ...(v2ImageUrls.length > 1 ? { resultUrls: v2ImageUrls } : {}),
-          progress: 100,
-          ...(providerCost != null ? { providerCost } : {}),
-          ...(providerAssetSizeBytes != null ? { providerAssetSizeBytes } : {}),
-          ...(providerDurationSec != null ? { providerDurationSec } : {}),
-        };
-        console.log("[RH DEBUG] 最终返回给网关的 pollData:", {
-          taskId,
-          resultUrl: finalResult.resultUrl,
-          resultMediaType: finalResult.resultMediaType,
-          resultUrlsCount: finalResult.resultUrls?.length ?? 0,
-        });
-        return finalResult;
-      }
       const fallbackResult = {
         ...mapped,
         ...(providerCost != null ? { providerCost } : {}),

@@ -63,6 +63,7 @@ function mapPollDataToGatewayBody(d: TaskStatusPollData): GatewayTaskPollBody {
       progress: d.progress != null ? Math.round(Number(d.progress)) : 100,
       ...(Array.isArray(d.resultUrls) && d.resultUrls.length > 1 ? { resultUrls: d.resultUrls } : {}),
       ...(d.resultMediaType ? { resultMediaType: d.resultMediaType } : {}),
+      ...(typeof d.resultText === "string" && d.resultText ? { resultText: d.resultText } : {}),
       ...(typeof d.providerCost === "number" && Number.isFinite(d.providerCost)
         ? { providerCost: d.providerCost }
         : {}),
@@ -76,6 +77,7 @@ function mapPollDataToGatewayBody(d: TaskStatusPollData): GatewayTaskPollBody {
       resultMediaType: body.resultMediaType,
       resultUrlsCount: body.resultUrls?.length ?? 0,
       resultUrls: body.resultUrls,
+      resultText: body.resultText ? body.resultText.slice(0, 80) + "..." : undefined,
     });
     return body;
   }

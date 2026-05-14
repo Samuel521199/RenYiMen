@@ -15,8 +15,8 @@ export function TextInputControl({ field, error }: TextInputControlProps) {
   const setFieldValue = useWorkflowStore((s) => s.setFieldValue);
   const value = typeof raw === "string" ? raw : "";
 
-  const className = `w-full rounded-md border bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-neutral-800 ${
-    error ? "border-red-300" : "border-neutral-300"
+  const className = `w-full rounded-lg border bg-[#1a2840] px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-emerald-500/40 ${
+    error ? "border-red-500/50" : "border-[#2a3d5e]"
   }`;
 
   return (
@@ -40,8 +40,8 @@ export function TextInputControl({ field, error }: TextInputControlProps) {
           className={className}
         />
       )}
-      {field.description && <p className="text-xs text-neutral-500">{field.description}</p>}
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+      {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );
 }

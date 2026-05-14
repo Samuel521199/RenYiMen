@@ -38,8 +38,14 @@ export interface TaskStatusPollData {
   /**
    * 适配器明确知晓的媒体类型（优先于 URL 后缀推断）。
    * 用于 CDN URL 无标准后缀时避免被错误判为 video。
+   * "text" 表示纯文本输出（如提示词反推），此时 resultText 有值。
    */
-  resultMediaType?: "image" | "video" | null;
+  resultMediaType?: "image" | "video" | "text" | null;
+  /**
+   * 纯文本输出（如提示词反推）：直接包含生成的文本内容。
+   * 存在时前端展示文本区域，支持复制与下载。
+   */
+  resultText?: string | null;
 }
 
 /**
@@ -59,13 +65,17 @@ export interface TaskStatusViewModel {
   /** 轮播占位提示 */
   hints?: string[];
   videoUrl?: string;
-  /** 成功态下根据 `resultUrl` 推断的展示类型（图片 / 视频） */
-  mediaType?: "image" | "video";
+  /** 成功态下根据 `resultUrl` 推断的展示类型（图片 / 视频 / 纯文本） */
+  mediaType?: "image" | "video" | "text";
   /**
    * 多图输出（如分镜）：所有图片 URL；有此字段时前端以网格展示，每张可单独下载。
    * `videoUrl` 仍为第一张（向后兼容）。
    */
   resultUrls?: string[];
+  /**
+   * 纯文本输出（如提示词反推）：生成的文本内容，前端展示文本区域。
+   */
+  resultText?: string;
   errorMessage?: string;
   /** 传输层连续失败等 */
   transportMessage?: string;

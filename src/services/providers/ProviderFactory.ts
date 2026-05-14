@@ -17,6 +17,8 @@ const SKU_TO_PROVIDER: Record<string, string> = {
   BAILIAN_WANX_I2V: "ALIYUN_BAILIAN",
   /** 分镜生成出图（多图输出） */
   RH_STORYBOARD: "RUNNINGHUB_STORYBOARD",
+  /** 提示词反推（图生文，Qwen3 VQA） */
+  RH_PROMPT_REVERSE: "RUNNINGHUB_PROMPT_REVERSE",
 };
 
 /**
@@ -44,6 +46,7 @@ export function getProviderAdapter(providerCode: string): IProviderAdapter {
     case "RUNNINGHUB_TXT2IMG":
     case "RUNNINGHUB_IMG2VIDEO":
     case "RUNNINGHUB_STORYBOARD":
+    case "RUNNINGHUB_PROMPT_REVERSE":
     case "RUNNINGHUB":
       return new RunningHubAdapter();
     case "KLING_PRO":
