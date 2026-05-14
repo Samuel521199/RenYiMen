@@ -64,7 +64,13 @@ export function buildTaskViewerModel(
         ? data.sellPrice
         : undefined;
     const resultUrl = data.resultUrl?.trim() ? String(data.resultUrl).trim() : undefined;
-    const mediaType = resultUrl ? inferMediaTypeFromResultUrl(resultUrl) : undefined;
+    // resultMediaType 由适配器明确设置时优先使用，避免 CDN 无后缀 URL 被误判为 video
+    const mediaType =
+      data.resultMediaType === "image" || data.resultMediaType === "video"
+        ? data.resultMediaType
+        : resultUrl
+          ? inferMediaTypeFromResultUrl(resultUrl)
+          : undefined;
     const resultUrls =
       Array.isArray(data.resultUrls) && data.resultUrls.length > 1
         ? (data.resultUrls as string[])

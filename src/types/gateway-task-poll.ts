@@ -16,4 +16,6 @@ export interface GatewayTaskPollBody {
    * `videoUrl` 仍为第一张（向后兼容）。
    */
   resultUrls?: string[];
+  /** 适配器明确标注的媒体类型，优先于客户端从 URL 后缀推断。 */
+  resultMediaType?: "image" | "video";
 }

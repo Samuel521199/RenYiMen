@@ -35,6 +35,11 @@ export interface TaskStatusPollData {
    * 存在时前端展示网格；`resultUrl` 仍为第一张（向后兼容）。
    */
   resultUrls?: string[] | null;
+  /**
+   * 适配器明确知晓的媒体类型（优先于 URL 后缀推断）。
+   * 用于 CDN URL 无标准后缀时避免被错误判为 video。
+   */
+  resultMediaType?: "image" | "video" | null;
 }
 
 /**

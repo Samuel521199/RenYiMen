@@ -1058,30 +1058,35 @@ function resolveRhLifecyclePhaseFromStatusPayload(raw: unknown): { phase: RhTask
   return { phase, data };
 }
 
-/** 从 outputs 收集所有图片 URL（顺序遍历 data 各节点），用于多图输出场景。 */
+/** 从 outputs 收集所有图片 URL（支持扩展名 + fileType 双重判断，兼容无后缀 CDN URL）。 */
 function pickAllImageUrlsFromOutputs(outputs: RunningHubTaskOutputsParsed): string[] {
   const imageRe = /\.(png|jpe?g|webp|gif)(\?|#|$)/i;
   const seen = new Set<string>();
   const result: string[] = [];
+
+  const isImageFile = (f: RunningHubOutputFile) =>
+    imageRe.test(f.fileUrl ?? "") ||
+    (f.fileType ?? "").toLowerCase().includes("image");
+
+  // outputs.files 已聚合 data 节点 + 深度扫描的所有文件（含 fileType 字段）
+  for (const f of outputs.files) {
+    if (f.fileUrl && isImageFile(f) && !seen.has(f.fileUrl)) {
+      seen.add(f.fileUrl);
+      result.push(f.fileUrl);
+    }
+  }
+
+  // 补充：逐节点扫描（含 fileType 判断），避免 outputs.files 聚合时遗漏
   const data = getOutputsDataRecord(outputs.raw);
   for (const nodeId of Object.keys(data)) {
-    const files = collectUrlsUnderNode(data, nodeId);
-    for (const f of files) {
-      if (f.fileUrl && imageRe.test(f.fileUrl) && !seen.has(f.fileUrl)) {
+    for (const f of collectUrlsUnderNode(data, nodeId)) {
+      if (f.fileUrl && isImageFile(f) && !seen.has(f.fileUrl)) {
         seen.add(f.fileUrl);
         result.push(f.fileUrl);
       }
     }
   }
-  // 深度补充
-  const deep = new Set<string>();
-  deepCollectMediaHttpUrls(outputs.raw, deep);
-  for (const url of deep) {
-    if (imageRe.test(url) && !seen.has(url)) {
-      seen.add(url);
-      result.push(url);
-    }
-  }
+
   return result;
 }
 
@@ -1097,7 +1102,15 @@ function mapRhOutputsToPollDataAfterSuccess(outputs: RunningHubTaskOutputsParsed
   if (mediaUrl) {
     const allImages = pickAllImageUrlsFromOutputs(outputs);
     const resultUrls = allImages.length > 1 ? allImages : undefined;
-    return { status: "succeeded", resultUrl: mediaUrl, progress: 100, ...(resultUrls ? { resultUrls } : {}) };
+    // 当能收集到图片时，明确标注媒体类型，避免 CDN 无后缀 URL 被误判为 video
+    const resultMediaType = allImages.length >= 1 ? ("image" as const) : undefined;
+    return {
+      status: "succeeded",
+      resultUrl: mediaUrl,
+      progress: 100,
+      ...(resultUrls ? { resultUrls } : {}),
+      ...(resultMediaType ? { resultMediaType } : {}),
+    };
   }
   const oc = normalizeRhOutputCode(outputs.code);
   if (oc !== undefined && oc !== 0 && oc !== 200) {
