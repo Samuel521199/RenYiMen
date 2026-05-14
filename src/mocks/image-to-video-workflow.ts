@@ -65,12 +65,12 @@ export const imageToVideoWorkflowMock: WorkflowFormSchema = {
         },
         {
           kind: "numberSlider",
-          id: "motionStrength",
-          label: "片段长度系数",
-          description: "对应节点 50 的整数值，参与 SimpleMath+ 51 与 Wan 节点 length 链路；越大通常帧序列越长。",
+          id: "videoDurationSeconds",
+          label: "视频时长（秒）",
+          description: "生成视频的时长，对应工作流节点 50；实际帧数 = 秒数 × 16 + 1。时长越长显存消耗越高，建议不超过 8 秒。",
           mapping: { nodeId: "50", inputPath: ["value"] },
           defaultValue: 5,
-          validation: { min: 1, max: 24, step: 1, integer: true },
+          validation: { min: 3, max: 10, step: 1, integer: true },
         },
         {
           kind: "select",
