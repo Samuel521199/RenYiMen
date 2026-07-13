@@ -33,6 +33,7 @@ function isBlockedHostname(hostname: string): boolean {
 /**
  * 登录用户代理拉取公网媒体字节：默认按「图片」校验大小与 Accept；
  * `body.mediaKind === "video"` 时用于 MP4/WebM 等结果下载（同源 Blob + `a.download`）。
+ * 支持 `data:` URI（Base64 图片，如 GPT-image-2 返回的 b64_json 结果）直接解码返回。
  */
 export async function POST(req: Request) {
   const session = await auth();
@@ -56,6 +57,36 @@ export async function POST(req: Request) {
   const mediaKindRaw = typeof rec?.mediaKind === "string" ? rec.mediaKind.trim().toLowerCase() : "image";
   const isVideo = mediaKindRaw === "video";
   const maxBytes = isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
+
+  // ── data: URI（如 gpt-image-2 的 b64_json 结果）直接解码返回 ────────────
+  if (url.startsWith("data:")) {
+    const comma = url.indexOf(",");
+    if (comma === -1) {
+      return NextResponse.json({ error: "INVALID_DATA_URI" }, { status: 400 });
+    }
+    const meta = url.slice(5, comma); // e.g. "image/png;base64"
+    const dataPart = url.slice(comma + 1);
+    const isBase64 = meta.endsWith(";base64");
+    const contentType = isBase64 ? meta.slice(0, -7) : meta;
+    let buf: Buffer;
+    try {
+      buf = isBase64
+        ? Buffer.from(dataPart, "base64")
+        : Buffer.from(decodeURIComponent(dataPart));
+    } catch {
+      return NextResponse.json({ error: "DATA_URI_DECODE_FAILED" }, { status: 400 });
+    }
+    if (buf.byteLength > maxBytes) {
+      return NextResponse.json({ error: "TOO_LARGE" }, { status: 413 });
+    }
+    return new NextResponse(new Uint8Array(buf), {
+      status: 200,
+      headers: {
+        "Content-Type": contentType || "image/png",
+        "Cache-Control": "no-store",
+      },
+    });
+  }
 
   let parsed: URL;
   try {

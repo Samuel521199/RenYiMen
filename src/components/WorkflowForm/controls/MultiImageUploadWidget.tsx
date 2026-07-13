@@ -6,8 +6,35 @@ import type { MultiImageFieldValue, MultiImageItemValue, MultiImageUploadField }
 import { getAtPath } from "@/lib/workflow-utils";
 import { isPresignPayload } from "@/services/oss-upload";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
+import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
+import { useT } from "@/i18n";
+import { loc } from "@/components/WorkflowForm/DynamicForm";
 
 const HARD_MAX_IMAGES = 9;
+
+/** 在浏览器端校验图片尺寸，解析失败时放行（让上游报错）。 */
+function checkImageDimension(
+  file: File,
+  minDimension: number
+): Promise<{ ok: boolean; width: number; height: number }> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve({
+        ok: img.naturalWidth >= minDimension && img.naturalHeight >= minDimension,
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+      });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve({ ok: true, width: 0, height: 0 });
+    };
+    img.src = url;
+  });
+}
 
 function newSlotId(): string {
   return typeof globalThis.crypto !== "undefined" && "randomUUID" in globalThis.crypto
@@ -22,6 +49,7 @@ export interface MultiImageUploadWidgetProps {
   value?: string[];
   /** 可选：在 Zustand 更新后额外通知父级（如独立 RJSF 集成） */
   onChange?: (urls: string[]) => void;
+  locale?: "zh" | "en";
 }
 
 function thumbUrl(item: MultiImageItemValue): string | null {
@@ -39,14 +67,17 @@ const addTileBase =
  * 多图参考上传：原生嵌套 `<label>` + `hidden` 的 `type=file"`；
  * 上传与 `uploadImageToOSS` 同源：`POST /api/upload/presign` + `PUT` 直传（本组件内联以便显式 `return publicUrl`）。
  */
-export function MultiImageUploadWidget({ field, error, value, onChange }: MultiImageUploadWidgetProps) {
+export function MultiImageUploadWidget({ field, error, value, onChange, locale = "zh" }: MultiImageUploadWidgetProps) {
   const [localUploading, setLocalUploading] = useState(false);
+  const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const t = useT();
 
   const multiBlock = useWorkflowStore((s) => {
     const p = s.fieldPaths[field.id];
     return p ? (getAtPath(s.parameters, p) as MultiImageFieldValue | undefined) : undefined;
   });
   const removeMultiImageSlot = useWorkflowStore((s) => s.removeMultiImageSlot);
+  const appendMultiImageFromAsset = useWorkflowStore((s) => s.appendMultiImageFromAsset);
 
   const maxItems = Math.min(HARD_MAX_IMAGES, Math.max(1, field.maxItems ?? HARD_MAX_IMAGES));
   const items = Array.isArray(multiBlock?.items) ? multiBlock.items : [];
@@ -77,10 +108,21 @@ export function MultiImageUploadWidget({ field, error, value, onChange }: MultiI
       }
 
       const maxMb = field.validation?.maxSizeMB;
+      const minDim = field.validation?.minDimension;
       for (const file of list) {
         if (maxMb != null && file.size > maxMb * 1024 * 1024) {
           alert(`「${file.name}」超过 ${maxMb}MB，已中止本次上传。`);
           return;
+        }
+        if (minDim != null) {
+          const dim = await checkImageDimension(file, minDim);
+          if (!dim.ok) {
+            alert(
+              `「${file.name}」尺寸过小（${dim.width}×${dim.height} px），\n` +
+              `要求宽和高均不小于 ${minDim} px，请替换为更高分辨率的图片后重试。`
+            );
+            return;
+          }
         }
       }
 
@@ -184,6 +226,13 @@ export function MultiImageUploadWidget({ field, error, value, onChange }: MultiI
     [field.id, field.validation?.maxSizeMB, maxItems, onChange, value]
   );
 
+  const handleAssetSelect = useCallback(
+    (asset: PickedAsset) => {
+      void appendMultiImageFromAsset(field.id, asset.url, asset.fileName);
+    },
+    [appendMultiImageFromAsset, field.id],
+  );
+
   return (
     <div className="space-y-2">
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
@@ -241,33 +290,51 @@ export function MultiImageUploadWidget({ field, error, value, onChange }: MultiI
             );
           })}
 
-          {canAddMore && !isBusy && (
-            <label className={`${addTileBase} cursor-pointer`}>
-              <input type="file" multiple accept={accept} className="hidden" onChange={handleFileChange} />
-              <div className="flex flex-col items-center justify-center gap-1 px-1">
-                <Upload className="h-6 w-6 shrink-0" strokeWidth={1.5} aria-hidden />
-                <span className="text-center text-[10px] font-medium">添加图片</span>
-                <span className="text-[9px] text-neutral-400">
-                  {items.length}/{maxItems}
-                </span>
-              </div>
-            </label>
-          )}
-
-          {canAddMore && isBusy && (
-            <div
-              className={`${addTileBase} cursor-wait opacity-70 pointer-events-none`}
-              aria-busy="true"
+          {canAddMore && (
+            <label
+              className={[
+                addTileBase,
+                isBusy ? "cursor-wait opacity-70 pointer-events-none" : "cursor-pointer",
+              ].join(" ")}
+              aria-busy={isBusy}
             >
-              <div className="flex flex-col items-center justify-center gap-1 px-1">
-                <Loader2 className="h-6 w-6 shrink-0 animate-spin text-neutral-700" strokeWidth={2} aria-hidden />
-                <span className="text-center text-[10px] font-medium text-neutral-800">上传中…</span>
-              </div>
-            </div>
+              {/* 始终保留 input，避免元素类型切换引发 React insertBefore 错误 */}
+              <input
+                type="file"
+                multiple
+                accept={accept}
+                className="hidden"
+                onChange={handleFileChange}
+                disabled={isBusy}
+              />
+              {isBusy ? (
+                <div className="flex flex-col items-center justify-center gap-1 px-1">
+                  <Loader2 className="h-6 w-6 shrink-0 animate-spin text-neutral-700" strokeWidth={2} aria-hidden />
+                  <span className="text-center text-[10px] font-medium text-neutral-800">上传中…</span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-1 px-1">
+                  <Upload className="h-6 w-6 shrink-0" strokeWidth={1.5} aria-hidden />
+                  <span className="text-center text-[10px] font-medium">添加图片</span>
+                  <span className="text-[9px] text-neutral-400">
+                    {items.length}/{maxItems}
+                  </span>
+                </div>
+              )}
+            </label>
           )}
         </div>
 
         <div className="min-w-0 flex-1 space-y-2 sm:min-w-[120px]">
+          {canAddMore && !isBusy && (
+            <button
+              type="button"
+              onClick={() => setAssetPickerOpen(true)}
+              className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-700 transition hover:border-neutral-400 hover:bg-neutral-50"
+            >
+              {t.uploadFromAssetLibraryBtn}
+            </button>
+          )}
           {!canAddMore && (
             <p className="text-xs text-neutral-500">已达上限（{maxItems} 张），请删除后再添加。</p>
           )}
@@ -277,8 +344,15 @@ export function MultiImageUploadWidget({ field, error, value, onChange }: MultiI
         </div>
       </div>
 
-      {field.description && <p className="text-xs text-neutral-500">{field.description}</p>}
+      {field.description && (
+        <p className="text-xs text-neutral-500">{loc(field.description, field.descriptionEn, locale)}</p>
+      )}
       {error && <p className="text-xs text-red-600">{error}</p>}
+      <AssetLibraryPicker
+        open={assetPickerOpen}
+        onClose={() => setAssetPickerOpen(false)}
+        onSelect={handleAssetSelect}
+      />
     </div>
   );
 }

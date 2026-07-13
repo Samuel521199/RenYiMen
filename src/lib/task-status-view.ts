@@ -25,6 +25,17 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   RH_TXT2IMG_SHORTDRAMA: 30_000,
   RH_STORYBOARD: 300_000,
   RH_PROMPT_REVERSE: 30_000,
+  RH_FACE_SWAP: 120_000,
+  RH_HD_UPSCALE: 60_000,
+  RH_MATTING: 30_000,
+  RH_BG_REPLACE: 60_000,
+  RH_VIDEO_ENHANCE: 180_000,
+  /** GPT-image-2 同步生成，预计 15–45s（含网络往返） */
+  GPT_IMAGE2_REF: 30_000,
+  /** Kling 标准版（302.ai），预计 2–4 分钟 */
+  KLING_STD_I2V: 180_000,
+  /** Kling 高级版（302.ai），预计 3–5 分钟 */
+  KLING_PRO_I2V: 240_000,
 };
 
 const DEFAULT_EXPECTED_DURATION_MS = 150_000;

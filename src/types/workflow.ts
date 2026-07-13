@@ -35,6 +35,8 @@ export interface ImageValidation {
   maxSizeMB?: number;
   /** MIME 或扩展名提示，如 image/png */
   accept?: string[];
+  /** 图片最小边长（宽和高均须 ≥ 此值，单位 px）；上传前在浏览器端校验 */
+  minDimension?: number;
 }
 
 export interface TextValidation {
@@ -57,18 +59,35 @@ export interface SelectValidation {
 export interface SelectOption {
   value: string;
   label: string;
+  /** English label — shown when locale is "en" */
+  labelEn?: string;
 }
 
 interface WorkflowFieldBase {
   id: string;
   label: string;
+  /** English label — shown when locale is "en" */
+  labelEn?: string;
   description?: string;
+  /** English description — shown when locale is "en" */
+  descriptionEn?: string;
   mapping: NodeInputMapping;
 }
 
 /** 双图首尾帧等场景 */
 export interface ImageUploadField extends WorkflowFieldBase {
   kind: "imageUpload";
+  defaultValue?: Partial<ImageFieldValue>;
+  validation?: ImageValidation;
+}
+
+/**
+ * 视频上传字段。
+ * 运行时状态复用 `ImageFieldValue`（empty → uploading → ready/error），
+ * UI 控件使用 `<video>` 预览，接受 `video/*` MIME 类型。
+ */
+export interface VideoUploadField extends WorkflowFieldBase {
+  kind: "videoUpload";
   defaultValue?: Partial<ImageFieldValue>;
   validation?: ImageValidation;
 }
@@ -101,6 +120,8 @@ export interface TextInputField extends WorkflowFieldBase {
   /** true 时使用多行文本框 */
   multiline?: boolean;
   placeholder?: string;
+  /** English placeholder — shown when locale is "en" */
+  placeholderEn?: string;
   validation?: TextValidation;
 }
 
@@ -125,12 +146,17 @@ export interface GroupField {
   kind: "group";
   id: string;
   label: string;
+  /** English label — shown when locale is "en" */
+  labelEn?: string;
   description?: string;
+  /** English description — shown when locale is "en" */
+  descriptionEn?: string;
   children: WorkflowField[];
 }
 
 export type WorkflowField =
   | ImageUploadField
+  | VideoUploadField
   | MultiImageUploadField
   | TextInputField
   | NumberSliderField
@@ -145,7 +171,11 @@ export interface WorkflowFormSchema {
   workflowId: string;
   version: string;
   title?: string;
+  /** English title — shown when locale is "en" */
+  titleEn?: string;
   description?: string;
+  /** English description — shown when locale is "en" */
+  descriptionEn?: string;
   fields: WorkflowField[];
   /**
    * 可选：JSON Schema 草案（如 `properties.modelName`），与 `fields` 对齐供文档/导出；

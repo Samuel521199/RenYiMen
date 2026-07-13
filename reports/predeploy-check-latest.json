@@ -1,0 +1,40 @@
+{
+  "generated_at": "2026-07-06T08:05:43.718Z",
+  "options": {
+    "strict": true,
+    "since_hours": 168,
+    "thresholds": {
+      "max_platform_missing": 0,
+      "max_potential_conflicts": 0,
+      "max_unbound_workbench": 0,
+      "max_role_drift": 0,
+      "max_email_drift": 0,
+      "max_recent_conflict_audit_logs": 0,
+      "max_open_conflict_tickets": 0
+    }
+  },
+  "summary": {
+    "platform_users": 10,
+    "workbench_users": 10,
+    "linked_platform_users": 10,
+    "mapping_completeness_rate": 1,
+    "platform_missing_count": 0,
+    "potential_conflicts_count": 0,
+    "unbound_workbench_count": 0,
+    "role_drift_count": 0,
+    "email_drift_count": 0,
+    "recent_conflict_audit_log_count": 0,
+    "open_conflict_ticket_count": 0
+  },
+  "status": {
+    "pass": true,
+    "violations": []
+  },
+  "platform_missing_users": [],
+  "potential_conflicts": [],
+  "unbound_workbench_users": [],
+  "role_drift": [],
+  "email_drift": [],
+  "recent_conflict_audit_logs": [],
+  "open_conflict_tickets": []
+}

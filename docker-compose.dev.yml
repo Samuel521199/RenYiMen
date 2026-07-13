@@ -1,0 +1,23 @@
+# 本地开发覆盖文件：为 workbench-backend 挂载源码 + 开启热重载
+# 用法：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d workbench-backend
+#
+# 好处：修改 ai-workflow-code/backend/app/ 下的任何 .py 文件后，
+# uvicorn --reload 自动检测并重启，无需 docker compose build。
+
+services:
+  workbench-backend:
+    ports:
+      - "127.0.0.1:8000:8000"   # 只本地开发时暴露，供 npm run dev 连接
+    volumes:
+      - ./ai-workflow-data/storage:/storage
+      - ./ai-workflow-code/backend/app:/app/app   # 源码热挂载
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload                                   # 文件变动自动重启
+      - --reload-dir
+      - /app/app

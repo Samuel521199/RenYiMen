@@ -79,7 +79,11 @@ export async function POST(req: Request): Promise<NextResponse> {
     });
   } catch (e) {
     console.error("[register] 写入失败", e);
-    return NextResponse.json({ ok: false, error: "注册失败，请稍后重试" }, { status: 500 });
+    const message =
+      e && typeof e === "object" && "code" in e && (e as { code?: string }).code === "P2021"
+        ? "用户表未初始化，请在服务器执行数据库迁移：docker compose --profile migrate run migrate"
+        : "注册失败，请稍后重试";
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });

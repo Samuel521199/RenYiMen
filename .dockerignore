@@ -1,6 +1,43 @@
+# Dependencies & build output (rebuilt inside Docker)
 node_modules
-npm-debug.log
 .next
+out
+dist
+coverage
+
+# Git / IDE
 .git
-.env*.local
-README.md
+.gitignore
+.cursor
+.vscode
+*.md
+!README.md
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime data — 绝不能打进 web 镜像（素材/数据库体积可达数 GB）
+ai-workflow-data
+postgres-data
+workbench-postgres-data
+*.tar
+*.tar.gz
+*.zip
+
+# Workbench 源码由 workbench-backend 镜像单独构建，web 不需要
+ai-workflow-code
+
+# Docker / deploy artifacts
+docker-compose*.yml
+deploy
+Dockerfile*
+.dockerignore
+
+# Logs & temp
+npm-debug.log
+*.log
+tmp
+temp
+.turbo

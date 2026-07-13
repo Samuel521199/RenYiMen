@@ -1,0 +1,328 @@
+{
+  "55": {
+    "inputs": {
+      "inputcount": 2,
+      "direction": "down",
+      "match_image_size": true,
+      "Update inputs": null,
+      "image_1": [
+        "60",
+        0
+      ],
+      "image_2": [
+        "70",
+        0
+      ]
+    },
+    "class_type": "ImageConcatMulti",
+    "_meta": {
+      "title": "图像联结（多个）"
+    }
+  },
+  "56": {
+    "inputs": {
+      "unet_name": "Qwen-Image-Edit-2511-FP8-e5m2fn.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  },
+  "57": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE加载器"
+    }
+  },
+  "58": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "CLIP加载器"
+    }
+  },
+  "59": {
+    "inputs": {
+      "seed": 31443,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "64",
+        0
+      ],
+      "positive": [
+        "65",
+        0
+      ],
+      "negative": [
+        "66",
+        0
+      ],
+      "latent_image": [
+        "72",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "60": {
+    "inputs": {
+      "samples": [
+        "59",
+        0
+      ],
+      "vae": [
+        "57",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "61": {
+    "inputs": {
+      "lora_name": "bfs_head_v4_qwen_image_edit_2509.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "56",
+        0
+      ],
+      "clip": [
+        "58",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA加载器"
+    }
+  },
+  "62": {
+    "inputs": {
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-8steps_V1.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "61",
+        0
+      ],
+      "clip": [
+        "61",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA加载器"
+    }
+  },
+  "63": {
+    "inputs": {
+      "shift": 1.8000000000000003,
+      "model": [
+        "62",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "模型采样算法AuraFlow"
+    }
+  },
+  "64": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "63",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFGNorm"
+    }
+  },
+  "65": {
+    "inputs": {
+      "prompt": [
+        "67",
+        0
+      ],
+      "clip": [
+        "62",
+        1
+      ],
+      "image1": [
+        "71",
+        0
+      ],
+      "image2": [
+        "85",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "66": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        "62",
+        1
+      ],
+      "image1": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "67": {
+    "inputs": {
+      "prompt": "Head_swap: Start with Picture 1 as the base image, keeping its lighting, environment, and background. Completely remove the head from Picture 1 and replace it with the head from Picture 2. Ensure the head and body have correct anatomical proportions, and blend the skin tones, shadows, and lighting naturally so the final result appears as one coherent, realistic person."
+    },
+    "class_type": "CR Prompt Text",
+    "_meta": {
+      "title": "提示词文本"
+    }
+  },
+  "68": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "60",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "69": {
+    "inputs": {
+      "images": [
+        "55",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "70": {
+    "inputs": {
+      "inputcount": 2,
+      "direction": "right",
+      "match_image_size": true,
+      "Update inputs": null,
+      "image_1": [
+        "71",
+        0
+      ],
+      "image_2": [
+        "85",
+        0
+      ]
+    },
+    "class_type": "ImageConcatMulti",
+    "_meta": {
+      "title": "图像联结（多个）"
+    }
+  },
+  "71": {
+    "inputs": {
+      "image": "e50edc94280e6af95585f39058a32fcc865fcd12340cdf7883b62d57365e16a1.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "72": {
+    "inputs": {
+      "width": [
+        "75",
+        3
+      ],
+      "height": [
+        "75",
+        4
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "空Latent_SD3"
+    }
+  },
+  "74": {
+    "inputs": {
+      "VAE": [
+        "57",
+        0
+      ],
+      "CLIP": [
+        "58",
+        0
+      ]
+    },
+    "class_type": "Anything Everywhere3",
+    "_meta": {
+      "title": "全局输入3"
+    }
+  },
+  "75": {
+    "inputs": {
+      "aspect_ratio": "original",
+      "proportional_width": 1,
+      "proportional_height": 1,
+      "fit": "fill",
+      "method": "nearest",
+      "round_to_multiple": "None",
+      "scale_to_longest_side": true,
+      "longest_side": 1536,
+      "image": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: ImageScaleByAspectRatio",
+    "_meta": {
+      "title": "按宽高比缩放"
+    }
+  },
+  "85": {
+    "inputs": {
+      "image": "a4aa30735c1578e9140146955de975b5ee9e1056829afb1dd6ff18b277370e50.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  }
+}

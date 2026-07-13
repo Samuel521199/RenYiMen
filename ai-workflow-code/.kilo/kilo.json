@@ -1,0 +1,10 @@
+{
+  "permission": {
+    "read": {
+      "/Volumes/AIWork/projects/ai-image-workbench/.kilo/get-shit-done/*": "allow"
+    },
+    "external_directory": {
+      "/Volumes/AIWork/projects/ai-image-workbench/.kilo/get-shit-done/*": "allow"
+    }
+  }
+}

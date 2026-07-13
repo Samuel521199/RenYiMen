@@ -148,6 +148,8 @@ model GenerationHistory {
   sourceAssetBytes Int?                  @map("source_asset_bytes")
   /// 上游任务实际执行耗时（秒），如 RunningHub `usage.taskCostTime`
   durationInt      Int                    @default(0) @map("duration_int")
+  /// 终态为 FAILED 时的错误原因（来自上游或网关）；PENDING/SUCCESS 为空
+  errorMessage     String?                @map("error_message") @db.Text
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

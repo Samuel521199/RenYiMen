@@ -1,36 +1,6 @@
 import { GenerationHistoryStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-
-/** 百炼任务若长时间仍 PENDING，视为已放弃轮询，避免看板长期「进行中」幽灵行 */
-const STALE_BAILIAN_PENDING_MS = 30 * 60 * 1000;
-/** 其他线路（如 RunningHub）允许更长排队 */
-const STALE_OTHER_PENDING_MS = 72 * 60 * 60 * 1000;
-
-/**
- * 将过久仍 PENDING 的生成记录标记为失败（未写终态实扣与成片；仅数据卫生，非业务退款）。
- */
-async function expireStalePendingGenerationHistory(): Promise<void> {
-  const now = Date.now();
-  const bailianCutoff = new Date(now - STALE_BAILIAN_PENDING_MS);
-  const otherCutoff = new Date(now - STALE_OTHER_PENDING_MS);
-  const res = await prisma.generationHistory.updateMany({
-    where: {
-      status: GenerationHistoryStatus.PENDING,
-      OR: [
-        {
-          AND: [{ providerCode: "ALIYUN_BAILIAN" }, { createdAt: { lt: bailianCutoff } }],
-        },
-        {
-          AND: [{ providerCode: { not: "ALIYUN_BAILIAN" } }, { createdAt: { lt: otherCutoff } }],
-        },
-      ],
-    },
-    data: { status: GenerationHistoryStatus.FAILED },
-  });
-  if (res.count > 0) {
-    console.info("[adminWorkflowDashboard] 已清理过期 PENDING 生成记录", { count: res.count });
-  }
-}
+import { expireAllStalePending } from "@/lib/stale-pending-cleanup";
 
 export type WorkflowSkuAggregate = {  skuId: string;
   callCount: number;
@@ -48,6 +18,7 @@ export type WorkflowLedgerRow = {
   durationInt: number;
   cost: number;
   status: GenerationHistoryStatus;
+  errorMessage: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -60,7 +31,7 @@ export async function fetchAdminWorkflowDashboard(): Promise<{
   aggregates: WorkflowSkuAggregate[];
   ledger: WorkflowLedgerRow[];
 }> {
-  await expireStalePendingGenerationHistory();
+  await expireAllStalePending();
 
   const [bySku, rows] = await Promise.all([
     prisma.generationHistory.groupBy({
@@ -81,6 +52,7 @@ export async function fetchAdminWorkflowDashboard(): Promise<{
         durationInt: true,
         cost: true,
         status: true,
+        errorMessage: true,
         createdAt: true,
         updatedAt: true,
         user: { select: { email: true, name: true } },
@@ -107,6 +79,7 @@ export async function fetchAdminWorkflowDashboard(): Promise<{
     durationInt: r.durationInt,
     cost: r.cost,
     status: r.status,
+    errorMessage: r.errorMessage ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));

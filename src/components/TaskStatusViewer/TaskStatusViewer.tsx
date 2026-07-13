@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import type { TaskStatusViewModel } from "@/types/task-status";
 import { StoryboardResultGrid } from "./StoryboardResultGrid";
 import { TextResultDisplay } from "./TextResultDisplay";
+import { useT } from "@/i18n";
 
 /** 与成功态画板一致的 20px 正交细线网格（#060a10 底） */
 const ARTBOARD_GRID_STYLE: CSSProperties = {
@@ -60,7 +61,7 @@ export function TaskStatusViewer({
           className
         )}
         aria-live="polite"
-        aria-label="任务画板"
+        aria-label="artboard"
       >
         <IdleArtboard />
       </section>
@@ -108,6 +109,7 @@ export function TaskStatusViewer({
 }
 
 function IdleArtboard() {
+  const t = useT();
   return (
     <div className="relative flex min-h-[600px] flex-1 flex-col lg:min-h-[calc(100vh-10rem)]">
       <div className="pointer-events-none absolute inset-0 bg-[#060a10]" aria-hidden />
@@ -127,10 +129,10 @@ function IdleArtboard() {
           aria-hidden
         />
         <p className="max-w-sm text-sm font-medium tracking-wide text-slate-400/90">
-          等待生成任务…
+          {t.idleWaiting}
         </p>
         <p className="max-w-xs text-xs leading-relaxed text-slate-600">
-          在左侧配置参数并点击「生成」，任务进度与结果将显示于此画板。
+          {t.idleHint}
         </p>
       </div>
     </div>
@@ -167,7 +169,9 @@ function LoadingLayer({
   model: TaskStatusViewModel;
   expectedDurationMs?: number;
 }) {
-  const hints = model.hints?.length ? model.hints : ["正在处理…"];
+  const tt = useT();
+  const defaultHint = tt.progressRendering;
+  const hints = model.hints?.length ? model.hints : [defaultHint];
   const [hintIndex, setHintIndex] = useState(0);
 
   useEffect(() => {
@@ -178,11 +182,11 @@ function LoadingLayer({
     return () => clearInterval(t);
   }, [active, hints.length]);
 
-  const title = model.subPhase === "queued" ? "排队中" : "生成中";
+  const title = model.subPhase === "queued" ? tt.statusQueued : tt.statusGenerating;
   const subtitle =
     model.subPhase === "queued"
-      ? "任务已进入队列，即将分配算力…"
-      : "上游未提供细粒度进度，下方进度为根据预计耗时的平滑估算。";
+      ? tt.subtitleQueued
+      : tt.subtitleGenerating;
 
   const elapsed = model.elapsedMs ?? 0;
   const expected = expectedProp ?? model.expectedDurationMs ?? 150_000;
@@ -218,7 +222,7 @@ function LoadingLayer({
 
         <div className="max-w-xl space-y-2">
           <p className="text-sm tabular-nums tracking-tight text-slate-400">
-            已耗时: {formatClockMmSs(elapsed)} / 预计: {formatClockMmSs(expected)}
+            {tt.progressElapsed}: {formatClockMmSs(elapsed)} / {tt.progressEstimated}: {formatClockMmSs(expected)}
           </p>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#1e2d4a]">
             <div
@@ -227,7 +231,7 @@ function LoadingLayer({
             />
           </div>
           <p className="text-right text-xs tabular-nums text-slate-500">
-            约 {Math.round(barPct)}%（预估，完成后将显示 100%）
+            {tt.progressPct(barPct)}
           </p>
         </div>
 
@@ -256,6 +260,7 @@ function SuccessLayer({
   downloadFileName: string;
 }) {
   // ── 所有 hooks 必须无条件置顶，不可在任何 return 之后 ──
+  const tt = useT();
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [imageDownloadBusy, setImageDownloadBusy] = useState(false);
   const [videoDownloadBusy, setVideoDownloadBusy] = useState(false);
@@ -287,9 +292,7 @@ function SuccessLayer({
         await downloadResultImageAsPng(mediaUrl, resolvedDownloadName);
       } catch (e) {
         console.error("[TaskStatusViewer] 图片下载失败", e);
-        window.alert(
-          e instanceof Error ? e.message : "图片下载失败，请稍后重试或在预览图上右键另存为。"
-        );
+        window.alert(e instanceof Error ? e.message : tt.downloadBtn);
       } finally {
         setImageDownloadBusy(false);
       }
@@ -301,18 +304,17 @@ function SuccessLayer({
       await downloadResultVideoAsFile(mediaUrl, resolvedDownloadName);
     } catch (e) {
       console.error("[TaskStatusViewer] 视频下载失败", e);
-      window.alert(
-        e instanceof Error ? e.message : "视频下载失败，请稍后重试或复制链接用下载工具获取。"
-      );
+      window.alert(e instanceof Error ? e.message : tt.downloadBtn);
     } finally {
       setVideoDownloadBusy(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onDownload, mediaUrl, resolvedDownloadName, mediaType]);
 
   const resultHeadline =
-    mediaType === "text" ? "提示词已生成" :
-    !mediaUrl ? "预览地址缺失" :
-    mediaType === "image" ? "图片已就绪" : "视频已就绪";
+    mediaType === "text" ? tt.successPrompt :
+    !mediaUrl ? tt.successNoPreview :
+    mediaType === "image" ? tt.successImage : tt.successVideo;
 
   const openImageLightbox = useCallback(() => {
     if (mediaType === "image" && mediaUrl) setLightboxOpen(true);
@@ -330,7 +332,7 @@ function SuccessLayer({
           <TextResultDisplay text={model.resultText} />
           {showBilling && (
             <div className="shrink-0 rounded-lg border border-emerald-500/25 bg-emerald-900/20 px-3 py-2 text-xs text-emerald-400">
-              ✅ 任务完成，实扣 {model.sellPrice} 积分
+              {tt.billingDone(model.sellPrice!)}
             </div>
           )}
           {onRegenerate && (
@@ -339,7 +341,7 @@ function SuccessLayer({
               onClick={onRegenerate}
               className="w-fit shrink-0 rounded-lg border border-[#2a3d5e] bg-[#1a2840] px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-[#3a5070] hover:text-slate-100"
             >
-              重新生成
+              {tt.regenerateBtn}
             </button>
           )}
         </div>
@@ -355,7 +357,7 @@ function SuccessLayer({
           <StoryboardResultGrid imageUrls={model.resultUrls!} />
           {showBilling && (
             <div className="shrink-0 rounded-lg border border-emerald-500/25 bg-emerald-900/20 px-3 py-2 text-xs text-emerald-400">
-              ✅ 任务完成，实扣 {model.sellPrice} 积分
+              {tt.billingDone(model.sellPrice!)}
             </div>
           )}
           {onRegenerate && (
@@ -364,7 +366,7 @@ function SuccessLayer({
               onClick={onRegenerate}
               className="w-fit shrink-0 rounded-lg border border-[#2a3d5e] bg-[#1a2840] px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-[#3a5070] hover:text-slate-100"
             >
-              重新生成
+              {tt.regenerateBtn}
             </button>
           )}
         </div>
@@ -376,7 +378,7 @@ function SuccessLayer({
     <div className={layerClass(active)} aria-hidden={!active}>
       <div className="flex h-full min-h-0 flex-1 flex-col gap-4">
         <header className="shrink-0">
-          <p className="text-xs font-medium uppercase tracking-widest text-emerald-400">生成成功</p>
+          <p className="text-xs font-medium uppercase tracking-widest text-emerald-400">{tt.successLabel}</p>
           <h3 className="mt-1 text-base font-semibold text-slate-200">{resultHeadline}</h3>
         </header>
 
@@ -411,7 +413,7 @@ function SuccessLayer({
                 // eslint-disable-next-line @next/next/no-img-element -- 任务结果外链，运行时 URL
                 <img
                   src={mediaUrl}
-                  alt="生成结果"
+                  alt={tt.successLabel}
                   role="button"
                   tabIndex={0}
                   onClick={openImageLightbox}
@@ -433,13 +435,11 @@ function SuccessLayer({
                   muted
                   loop
                   preload="metadata"
-                >
-                  您的浏览器不支持视频播放。
-                </video>
+                />
               )
             ) : (
               <div className="flex aspect-video items-center justify-center rounded-lg bg-black/20 text-sm text-slate-400">
-                未提供预览地址
+                {tt.noPreviewUrl}
               </div>
             )}
           </div>
@@ -453,7 +453,7 @@ function SuccessLayer({
               disabled={imageDownloadBusy || videoDownloadBusy}
               className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:from-emerald-400 hover:to-teal-400 disabled:cursor-wait disabled:opacity-60"
             >
-              {imageDownloadBusy || videoDownloadBusy ? "正在准备下载…" : "下载"}
+              {imageDownloadBusy || videoDownloadBusy ? tt.downloadingBtn : tt.downloadBtn}
             </button>
             {onRegenerate && (
               <button
@@ -461,7 +461,7 @@ function SuccessLayer({
                 onClick={onRegenerate}
                 className="rounded-xl border border-[#2a3d5e] bg-[#1a2840] px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-[#3a5070] hover:text-slate-100"
               >
-                重新生成
+                {tt.regenerateBtn}
               </button>
             )}
           </div>
@@ -470,7 +470,7 @@ function SuccessLayer({
               variant="secondary"
               className="h-auto w-full max-w-full whitespace-normal rounded-lg border border-emerald-500/25 bg-emerald-900/20 px-3 py-2 text-left text-xs font-normal leading-snug text-emerald-400 sm:w-auto sm:self-start"
             >
-              ✅ 任务完成，实扣 {model.sellPrice} 积分
+              {tt.billingDone(model.sellPrice!)}
             </Badge>
           )}
         </div>
@@ -499,19 +499,20 @@ function FailureLayer({
   preservedParamsSlot?: ReactNode;
   onRegenerate?: () => void;
 }) {
+  const tt = useT();
   return (
     <div className={layerClass(active)} aria-hidden={!active}>
       <div className="flex h-full min-h-[280px] flex-1 flex-col gap-4">
         <header>
-          <p className="text-xs font-medium uppercase tracking-widest text-red-400">生成失败</p>
-          <h3 className="mt-1 text-base font-semibold text-slate-300">未能完成本次任务</h3>
+          <p className="text-xs font-medium uppercase tracking-widest text-red-400">{tt.failureLabel}</p>
+          <h3 className="mt-1 text-base font-semibold text-slate-300">{tt.failureTitle}</h3>
         </header>
         <div className="max-w-2xl rounded-xl border border-red-500/25 bg-red-900/20 px-4 py-3 text-sm text-red-400">
-          {errorMessage ?? "发生未知错误，请稍后重试。"}
+          {errorMessage ?? tt.failureDefault}
         </div>
         {preservedParamsSlot && (
           <div className="max-w-2xl space-y-2">
-            <p className="text-xs font-medium text-slate-500">您刚才提交的参数（可对照修改后重试）</p>
+            <p className="text-xs font-medium text-slate-500">{tt.failureParamsTitle}</p>
             <div className="rounded-lg border border-[#1e2d4a] bg-[#1a2840] p-3 text-xs text-slate-400">
               {preservedParamsSlot}
             </div>
@@ -523,7 +524,7 @@ function FailureLayer({
             onClick={onRegenerate}
             className="w-fit rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:from-emerald-400 hover:to-teal-400"
           >
-            使用相同参数重试
+            {tt.retryBtn}
           </button>
         )}
       </div>

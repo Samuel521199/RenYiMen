@@ -14,10 +14,10 @@ const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synth
 export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
 
 /**
- * 百炼视频实扣：积分 / 秒（零利润口径：与 1 元=250 积分对齐；指挥官可改此常数）。
+ * HappyHorse 1.1 六折期实扣：积分 / 秒（原百炼视频口径为 250 积分/秒）。
  * 对外导出同名语义，供 SKU 预估与文档引用。
  */
-const POINTS_PER_SECOND = 250;
+const POINTS_PER_SECOND = 150;
 export const BAILIAN_VIDEO_CREDITS_PER_SECOND = POINTS_PER_SECOND;
 
 const BAILIAN_DEFAULT_USAGE_DURATION_SEC = 5;
@@ -214,6 +214,31 @@ function resolveDashScopeModel(payload: StandardPayload): string {
   return "wan2.7-i2v-2026-04-25";
 }
 
+function forceHappyHorseModel(requestedModel: string, payload: StandardPayload): string {
+  const input = payload.nodeInputs["input"];
+  const inputNode = isRecord(input) ? input : undefined;
+  const requestedLc = requestedModel.trim().toLowerCase();
+  const templateLc = payload.templateId.trim().toLowerCase();
+  const hasReferenceImages =
+    normalizeHttpImageUrlArray(payload.inputs?.image_urls).length > 0 ||
+    normalizeHttpImageUrlArray(inputNode?.image_urls).length > 0;
+  const isR2v =
+    requestedLc.includes("r2v") ||
+    templateLc.includes("multi-ref") ||
+    templateLc.includes("r2v") ||
+    hasReferenceImages;
+
+  return isR2v ? "happyhorse-1.1-r2v" : "happyhorse-1.1-i2v";
+}
+
+function shouldForceHappyHorseModel(): boolean {
+  const raw =
+    process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL ??
+    process.env.DASHSCOPE_FORCE_HAPPYHORSE_MODEL;
+  if (raw == null || raw.trim() === "") return true;
+  return !["0", "false", "off", "no"].includes(raw.trim().toLowerCase());
+}
+
 /** 表单 / flags / 顶层 inputs 请求的成片时长（秒），钳制在 DashScope 常见区间 3–15 */
 function resolveRequestedVideoDurationSec(payload: StandardPayload): number {
   const fromInputs =
@@ -255,12 +280,21 @@ function resolveRatio(payload: StandardPayload, inputNode: Record<string, unknow
   return "16:9";
 }
 
-/** Reference-to-Video（r2v）：每张参考图为 `reference_image` */
+const R2V_MAX_IMAGES = 5;
+
+/** Reference-to-Video（r2v）：每张参考图为 `reference_image`，上游限制最多 5 张 */
 function buildR2vReferenceMediaList(
   singleImageUrl: string | undefined,
   imageUrls: string[]
 ): Array<{ type: "reference_image"; url: string }> {
   if (imageUrls.length > 0) {
+    if (imageUrls.length > R2V_MAX_IMAGES) {
+      throw new ProviderError(
+        `参考图最多 ${R2V_MAX_IMAGES} 张，当前上传了 ${imageUrls.length} 张，请删除多余图片后重试。`,
+        "BAILIAN_TOO_MANY_IMAGES",
+        400
+      );
+    }
     return imageUrls.map((url) => ({ type: "reference_image", url }));
   }
   const trimmed =
@@ -359,7 +393,10 @@ export class BailianAdapter implements IProviderAdapter {
       readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
       extractPromptFromNodeInputs(payload.nodeInputs);
     const prompt = promptRaw?.trim() ?? "";
-    const targetModel = resolveDashScopeModel(payload);
+    const requestedModel = resolveDashScopeModel(payload);
+    const targetModel = shouldForceHappyHorseModel()
+      ? forceHappyHorseModel(requestedModel, payload)
+      : requestedModel;
     const modelLc = targetModel.toLowerCase();
     const usesMediaInput = modelLc.includes("wan2") || modelLc.includes("happyhorse");
     const extraParams = flags?.bailianParameters ?? flags?.dashscopeParameters;

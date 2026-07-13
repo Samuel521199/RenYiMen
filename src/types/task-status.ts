@@ -24,6 +24,11 @@ export interface TaskStatusPollData {
   sellPrice?: number;
   /** 上游用量或计费标量：如 RunningHub RH 币、DashScope `usage` 内 token/price 等，供网关实扣参考 */
   providerCost?: number | null;
+  /**
+   * 固定费用积分（适配器明确知晓的固定收费，如 Kling）。
+   * 存在时结算层直接以此值扣费，跳过 rhPart + ossCredits 公式。
+   */
+  flatFeeCredits?: number | null;
   /** 上游报文中解析到的素材体积（字节），用于 OSS 类积分换算；可与提单时落库的底图大小合并使用 */
   providerAssetSizeBytes?: number | null;
   /**

@@ -2,12 +2,14 @@
 
 import { useState, useCallback } from "react";
 import { saveFileWithPicker } from "@/lib/save-file-with-picker";
+import { useT } from "@/i18n";
 
 interface TextResultDisplayProps {
   text: string;
 }
 
 export function TextResultDisplay({ text }: TextResultDisplayProps) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
@@ -46,9 +48,9 @@ export function TextResultDisplay({ text }: TextResultDisplayProps) {
       {/* Header */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
-          <span className="text-base font-semibold text-foreground">提示词已生成</span>
+          <span className="text-base font-semibold text-foreground">{t.textResultTitle}</span>
           <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/30">
-            ✓ 完成
+            ✓
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -63,7 +65,7 @@ export function TextResultDisplay({ text }: TextResultDisplayProps) {
                 <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
-                <span className="text-green-400">已复制</span>
+                <span className="text-green-400">{t.textCopied}</span>
               </>
             ) : (
               <>
@@ -71,7 +73,7 @@ export function TextResultDisplay({ text }: TextResultDisplayProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
-                <span>复制</span>
+                <span>{t.textCopyBtn}</span>
               </>
             )}
           </button>
@@ -89,7 +91,7 @@ export function TextResultDisplay({ text }: TextResultDisplayProps) {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
                 </svg>
-                <span>保存中…</span>
+                <span>{t.downloadingBtn}</span>
               </>
             ) : (
               <>
@@ -97,7 +99,7 @@ export function TextResultDisplay({ text }: TextResultDisplayProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
-                <span>下载 .txt</span>
+                <span>{t.textDownloadBtn}</span>
               </>
             )}
           </button>
@@ -113,7 +115,7 @@ export function TextResultDisplay({ text }: TextResultDisplayProps) {
       </div>
 
       <p className="text-xs text-muted-foreground text-center">
-        可将上方提示词粘贴到 AI 绘画工具（如 Stable Diffusion、Midjourney 等）的正向提示词栏中使用
+        {t.textResultTitle}
       </p>
     </div>
   );

@@ -114,3 +114,192 @@
     @apply font-sans;
   }
 }
+
+/* Workbench：将遗留浅色 Tailwind 类统一映射为深色，避免页面一黑一白 */
+.workbench-content {
+  color: rgb(226 232 240);
+}
+
+.workbench-content :is(.bg-white) {
+  background-color: rgb(15 23 40) !important;
+}
+
+.workbench-content :is(.bg-white\/95, .bg-white\/90, .bg-white\/80) {
+  background-color: rgb(15 23 40 / 0.95) !important;
+}
+
+.workbench-content :is(.bg-gray-50, .bg-gray-100) {
+  background-color: rgb(17 24 39) !important;
+}
+
+.workbench-content :is(.bg-slate-50) {
+  background-color: rgb(15 23 40) !important;
+}
+
+.workbench-content :is(.text-gray-900, .text-gray-800) {
+  color: rgb(241 245 249) !important;
+}
+
+.workbench-content :is(.text-gray-700, .text-gray-600) {
+  color: rgb(203 213 225) !important;
+}
+
+.workbench-content :is(.text-gray-500, .text-gray-400) {
+  color: rgb(148 163 184) !important;
+}
+
+.workbench-content :is(.border-gray-200, .border-gray-100) {
+  border-color: rgb(255 255 255 / 0.1) !important;
+}
+
+.workbench-content :is(.border-gray-300) {
+  border-color: rgb(255 255 255 / 0.15) !important;
+}
+
+.workbench-content :is(.divide-gray-200, .divide-gray-100) {
+  border-color: rgb(255 255 255 / 0.08) !important;
+}
+
+.workbench-content :is(.ring-gray-200) {
+  --tw-ring-color: rgb(255 255 255 / 0.1) !important;
+}
+
+.workbench-content :is(.hover\:bg-gray-50):hover,
+.workbench-content :is(.hover\:bg-gray-100):hover {
+  background-color: rgb(255 255 255 / 0.05) !important;
+}
+
+.workbench-content :is(.hover\:text-gray-900):hover,
+.workbench-content :is(.hover\:text-gray-600):hover {
+  color: rgb(226 232 240) !important;
+}
+
+.workbench-content :is(.bg-emerald-50) {
+  background-color: rgb(6 78 59 / 0.35) !important;
+}
+
+.workbench-content :is(.text-emerald-700) {
+  color: rgb(110 231 183) !important;
+}
+
+.workbench-content :is(.border-emerald-200) {
+  border-color: rgb(16 185 129 / 0.35) !important;
+}
+
+.workbench-content :is(.bg-red-50) {
+  background-color: rgb(127 29 29 / 0.35) !important;
+}
+
+.workbench-content :is(.border-red-200) {
+  border-color: rgb(239 68 68 / 0.35) !important;
+}
+
+.workbench-content :is(.text-red-700) {
+  color: rgb(252 165 165) !important;
+}
+
+.workbench-content :is(.bg-amber-50) {
+  background-color: rgb(120 53 15 / 0.35) !important;
+}
+
+.workbench-content :is(.text-amber-700, .text-amber-800) {
+  color: rgb(253 230 138) !important;
+}
+
+.workbench-content :is(.border-amber-200) {
+  border-color: rgb(245 158 11 / 0.35) !important;
+}
+
+.workbench-content :is(.bg-blue-50) {
+  background-color: rgb(30 58 138 / 0.35) !important;
+}
+
+.workbench-content :is(.text-blue-700) {
+  color: rgb(147 197 253) !important;
+}
+
+.workbench-content :is(.bg-yellow-50) {
+  background-color: rgb(113 63 18 / 0.35) !important;
+}
+
+.workbench-content :is(.bg-purple-50) {
+  background-color: rgb(88 28 135 / 0.35) !important;
+}
+
+.workbench-content :is(.bg-orange-50) {
+  background-color: rgb(124 45 18 / 0.35) !important;
+}
+
+.workbench-content :is(.bg-green-50) {
+  background-color: rgb(6 78 59 / 0.35) !important;
+}
+
+.workbench-content :is(.bg-violet-50) {
+  background-color: rgb(76 29 149 / 0.35) !important;
+}
+
+.workbench-content :is(.text-violet-700) {
+  color: rgb(196 181 253) !important;
+}
+
+.workbench-content :is(.border-violet-200) {
+  border-color: rgb(139 92 246 / 0.35) !important;
+}
+
+.workbench-content :is(.hover\:bg-violet-50):hover {
+  background-color: rgb(76 29 149 / 0.25) !important;
+}
+
+.workbench-content :is(.disabled\:bg-gray-300:disabled) {
+  background-color: rgb(51 65 85) !important;
+}
+
+.workbench-content :is(.disabled\:text-gray-400:disabled) {
+  color: rgb(100 116 139) !important;
+}
+
+.workbench-content :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select) {
+  background-color: rgb(10 15 30) !important;
+  border-color: rgb(255 255 255 / 0.15) !important;
+  color: rgb(226 232 240) !important;
+}
+
+.workbench-content :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select)::placeholder {
+  color: rgb(100 116 139) !important;
+}
+
+.workbench-content input[type="date"],
+.workbench-content input[type="datetime-local"],
+.workbench-content input[type="time"],
+.workbench-content input[type="month"],
+.workbench-content input[type="week"] {
+  color-scheme: dark;
+}
+
+/* 原生日历按钮：扩大透明点击区，可见图标由 DateTimeInput 组件绘制 */
+.workbench-content .wb-datetime-input::-webkit-calendar-picker-indicator,
+.workbench-content input[type="date"]:not(.wb-datetime-input)::-webkit-calendar-picker-indicator {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 2.75rem;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.workbench-content .recharts-default-tooltip {
+  background-color: rgb(15 23 40) !important;
+  border-color: rgb(255 255 255 / 0.1) !important;
+  color: rgb(226 232 240) !important;
+}
+
+.workbench-content .recharts-legend-item-text {
+  color: rgb(148 163 184) !important;
+}
+
+.workbench-content .recharts-cartesian-axis-tick-value {
+  fill: rgb(148 163 184) !important;
+}

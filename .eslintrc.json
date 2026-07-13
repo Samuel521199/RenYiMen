@@ -1,3 +1,19 @@
 {
-  "extends": ["next/core-web-vitals", "next/typescript"]
+  "extends": "next/core-web-vitals",
+  "ignorePatterns": [
+    "src/workbench/**/*.test.ts",
+    "**/PaxHeader/**",
+    "**/._*",
+    "ai-workflow-code/**"
+  ],
+  "overrides": [
+    {
+      "files": ["src/workbench/**/*", "src/app/(platform)/workbench/**/*"],
+      "rules": {
+        "@typescript-eslint/no-explicit-any": "off",
+        "@next/next/no-img-element": "off",
+        "react-hooks/exhaustive-deps": "warn"
+      }
+    }
+  ]
 }

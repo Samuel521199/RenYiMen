@@ -127,9 +127,10 @@ async function persistGenerationHistoryTerminal(
     return typeof row?.cost === "number" && Number.isFinite(row.cost) ? row.cost : null;
   }
   if (pollData.status === "failed") {
+    const errMsg = (pollData.errorMessage ?? "上游任务失败").slice(0, 500);
     await prisma.generationHistory.updateMany({
       where: { taskId, userId, status: GenerationHistoryStatus.PENDING },
-      data: { status: GenerationHistoryStatus.FAILED },
+      data: { status: GenerationHistoryStatus.FAILED, errorMessage: errMsg },
     });
     return null;
   }
@@ -198,7 +199,11 @@ async function persistGenerationHistoryTerminal(
           typeof pollData.providerCost === "number" && Number.isFinite(pollData.providerCost)
             ? pollData.providerCost
             : 0;
-        const totalCredits = Math.ceil(rhPart + ossCredits);
+        // 固定费用（如 Kling）：适配器直接给出积分，跳过 rhPart+ossCredits 公式
+        const totalCredits =
+          typeof pollData.flatFeeCredits === "number" && Number.isFinite(pollData.flatFeeCredits) && pollData.flatFeeCredits > 0
+            ? Math.ceil(pollData.flatFeeCredits)
+            : Math.ceil(rhPart + ossCredits);
 
         if (totalCredits > 0) {
           await consumeUserBalanceInTransaction(

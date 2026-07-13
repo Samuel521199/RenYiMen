@@ -20,6 +20,7 @@ import {
   type ValuePath,
 } from "@/lib/workflow-utils";
 import { uploadImageToOSS } from "@/services/oss-upload";
+import { fetchWorkbenchAssetAsFile } from "@/lib/workbench-asset-import";
 
 export interface WorkflowStoreState {
   schema: WorkflowFormSchema | null;
@@ -47,8 +48,12 @@ export interface WorkflowStoreState {
   setFieldValue: (fieldId: string, value: unknown) => void;
   /** 图片：选择文件后走本地预览 + OSS 直传 */
   applyImageFile: (fieldId: string, file: File) => Promise<void>;
+  /** 图片：从 Workbench 素材库导入并上传 OSS */
+  applyImageFromAsset: (fieldId: string, assetUrl: string, fileName: string) => Promise<void>;
   /** 多图：追加若干文件（受 `maxItems` 与剩余槽位限制），各槽位独立上传 */
   appendMultiImageFiles: (fieldId: string, files: File[]) => Promise<void>;
+  /** 多图：从 Workbench 素材库追加一张 */
+  appendMultiImageFromAsset: (fieldId: string, assetUrl: string, fileName: string) => Promise<void>;
   /** 多图：按槽位移除并 revoke 本地预览 */
   removeMultiImageSlot: (fieldId: string, slotId: string) => void;
   /** 清空图片并 revoke 预览 */
@@ -102,7 +107,8 @@ function deepAssignInput(
 function mapLeafToApiValue(field: WorkflowField, raw: unknown): unknown {
   if (isGroupField(field)) return undefined;
   switch (field.kind) {
-    case "imageUpload": {
+    case "imageUpload":
+    case "videoUpload": {
       const v = raw as ImageFieldValue;
       if (v?.status === "ready" && v.remoteUrl) return v.remoteUrl;
       return undefined;
@@ -221,6 +227,25 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       }
     },
 
+    applyImageFromAsset: async (fieldId, assetUrl, fileName) => {
+      try {
+        const file = await fetchWorkbenchAssetAsFile(assetUrl, fileName);
+        await get().applyImageFile(fieldId, file);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "素材导入失败";
+        const state = get();
+        const path = state.fieldPaths[fieldId];
+        if (!path) return;
+        set((draft) => {
+          setAtPathDraft(draft.parameters, path, {
+            status: "error",
+            fileName,
+            errorMessage: msg,
+          } satisfies ImageFieldValue);
+        });
+      }
+    },
+
     appendMultiImageFiles: async (fieldId, files) => {
       const state = get();
       const schema = state.schema;
@@ -328,6 +353,15 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       );
     },
 
+    appendMultiImageFromAsset: async (fieldId, assetUrl, fileName) => {
+      try {
+        const file = await fetchWorkbenchAssetAsFile(assetUrl, fileName);
+        await get().appendMultiImageFiles(fieldId, [file]);
+      } catch (e) {
+        console.error("[appendMultiImageFromAsset]", e);
+      }
+    },
+
     removeMultiImageSlot: (fieldId, slotId) =>
       set((draft) => {
         const path = draft.fieldPaths[fieldId];
@@ -371,16 +405,18 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         const raw = path ? getAtPath(parameters, path) : undefined;
 
         switch (field.kind) {
-          case "imageUpload": {
+          case "imageUpload":
+          case "videoUpload": {
             const v = raw as ImageFieldValue | undefined;
+            const isVideo = field.kind === "videoUpload";
             if (field.validation?.required && (!v || v.status !== "ready" || !v.remoteUrl)) {
-              errors[field.id] = "请完成图片上传";
+              errors[field.id] = isVideo ? "请完成视频上传" : "请完成图片上传";
             }
             if (v?.status === "error") {
-              errors[field.id] = v.errorMessage ?? "图片处理失败";
+              errors[field.id] = v.errorMessage ?? (isVideo ? "视频处理失败" : "图片处理失败");
             }
             if (v?.status === "uploading") {
-              errors[field.id] = "图片仍在上传中";
+              errors[field.id] = isVideo ? "视频仍在上传中" : "图片仍在上传中";
             }
             break;
           }
@@ -441,7 +477,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         for (const field of iterateLeafFields(schema.fields)) {
           const p = fieldPaths[field.id];
           const raw = p ? getAtPath(parameters, p) : undefined;
-          if (field.kind === "imageUpload") {
+          if (field.kind === "imageUpload" || field.kind === "videoUpload") {
             if ((raw as ImageFieldValue | undefined)?.status === "uploading") return null;
           } else if (field.kind === "multiImageUpload") {
             const items = (raw as MultiImageFieldValue | undefined)?.items ?? [];
@@ -460,7 +496,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         const path = fieldPaths[field.id];
         const raw = path ? getAtPath(parameters, path) : undefined;
         const mapped = mapLeafToApiValue(field, raw);
-        if (mapped === undefined && (field.kind === "imageUpload" || field.kind === "multiImageUpload")) continue;
+        if (mapped === undefined && (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "multiImageUpload")) continue;
 
         const { nodeId, inputPath } = field.mapping;
         if (!nodeInputs[nodeId]) nodeInputs[nodeId] = {};
@@ -566,6 +602,8 @@ function parseGenerationHistoryArray(json: unknown): GenerationHistory[] {
         : null;
     const durationInt =
       typeof o.durationInt === "number" && Number.isFinite(o.durationInt) ? Math.round(o.durationInt) : 0;
+    const errorMessage =
+      typeof o.errorMessage === "string" && o.errorMessage.trim() ? o.errorMessage.trim() : null;
     out.push({
       id: o.id.trim(),
       userId: o.userId.trim(),
@@ -579,6 +617,7 @@ function parseGenerationHistoryArray(json: unknown): GenerationHistory[] {
       actualCost,
       sourceAssetBytes,
       durationInt,
+      errorMessage,
       createdAt: new Date(o.createdAt as string | number | Date),
       updatedAt: new Date(o.updatedAt as string | number | Date),
     });

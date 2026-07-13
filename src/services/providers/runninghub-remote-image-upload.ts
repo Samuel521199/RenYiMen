@@ -6,27 +6,32 @@
 import { ProviderError } from "./types";
 
 const UPLOAD_PATH = "/task/openapi/upload";
-const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD_BYTES = 30 * 1024 * 1024;
+const MAX_VIDEO_UPLOAD_BYTES = 200 * 1024 * 1024;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object";
 }
 
-function isHttpImageUrl(v: string): boolean {
+function isHttpUrl(v: string): boolean {
   const t = v.trim();
   return /^https?:\/\//i.test(t);
 }
 
-function guessFilenameFromUrl(urlStr: string): string {
+/** @deprecated Use isHttpUrl */
+const isHttpImageUrl = isHttpUrl;
+
+function guessFilenameFromUrl(urlStr: string, isVideo = false): string {
   try {
     const u = new URL(urlStr);
     const seg = u.pathname.split("/").filter(Boolean);
     const last = seg[seg.length - 1];
-    if (last && /\.(png|jpe?g|webp|gif)$/i.test(last)) return last.slice(0, 200);
+    if (isVideo && last && /\.(mp4|webm|mov|avi|mkv)$/i.test(last)) return last.slice(0, 200);
+    if (!isVideo && last && /\.(png|jpe?g|webp|gif)$/i.test(last)) return last.slice(0, 200);
   } catch {
     /* ignore */
   }
-  return "image.png";
+  return isVideo ? "video.mp4" : "image.png";
 }
 
 function guessMimeFromFilename(name: string): string {
@@ -34,19 +39,23 @@ function guessMimeFromFilename(name: string): string {
   if (lower.endsWith(".webp")) return "image/webp";
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".mp4")) return "video/mp4";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".mov")) return "video/quicktime";
   return "image/png";
 }
 
 /**
- * 从公网 URL 下载图片并上传到 RunningHub，返回 `data.fileName`。
+ * 从公网 URL 下载媒体文件（图片或视频）并上传到 RunningHub，返回 `data.fileName`。
  */
 export async function uploadRemoteImageUrlToRunningHub(options: {
   baseUrl: string;
   apiKey: string;
   imageUrl: string;
+  isVideo?: boolean;
   signal?: AbortSignal;
 }): Promise<string> {
-  const { baseUrl, apiKey, imageUrl, signal } = options;
+  const { baseUrl, apiKey, imageUrl, isVideo = false, signal } = options;
   const trimmed = imageUrl.trim();
 
   let imgRes: Response;
@@ -75,15 +84,16 @@ export async function uploadRemoteImageUrlToRunningHub(options: {
     );
   }
   const buf = new Uint8Array(await imgRes.arrayBuffer());
-  if (buf.byteLength > MAX_UPLOAD_BYTES) {
+  const maxBytes = isVideo ? MAX_VIDEO_UPLOAD_BYTES : MAX_IMAGE_UPLOAD_BYTES;
+  if (buf.byteLength > maxBytes) {
     throw new ProviderError(
-      `图片超过 RunningHub 单文件上限 ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB，请先压缩或改用较小文件`,
+      `${isVideo ? "视频" : "图片"}超过 RunningHub 单文件上限 ${maxBytes / (1024 * 1024)}MB，请先压缩或改用较小文件`,
       "RH_IMAGE_TOO_LARGE",
       400
     );
   }
 
-  const filename = guessFilenameFromUrl(trimmed);
+  const filename = guessFilenameFromUrl(trimmed, isVideo);
   const mime = imgRes.headers.get("content-type")?.split(";")[0]?.trim() || guessMimeFromFilename(filename);
 
   const form = new FormData();
@@ -148,8 +158,13 @@ function isComfyImageInputFieldName(fieldName: string): boolean {
   return fieldName === "image" || fieldName.endsWith(".image");
 }
 
+/** 视频上传字段名。 */
+function isComfyVideoInputFieldName(fieldName: string): boolean {
+  return fieldName === "video" || fieldName.endsWith(".video");
+}
+
 /**
- * 将 `nodeInfoList` 扁平项里指向公网的图片 URL 替换为 RunningHub `api/...` 路径（同 URL 只上传一次）。
+ * 将 `nodeInfoList` 扁平项里指向公网的图片 / 视频 URL 替换为 RunningHub `api/...` 路径（同 URL 只上传一次）。
  */
 export async function rewriteHttpUrlsInNodeInfoListForRunningHubImages(
   list: { nodeId: string; fieldName: string; fieldValue: string }[],
@@ -160,7 +175,9 @@ export async function rewriteHttpUrlsInNodeInfoListForRunningHubImages(
 
   for (const item of list) {
     const v = item.fieldValue.trim();
-    if (!isComfyImageInputFieldName(item.fieldName) || !isHttpImageUrl(v)) {
+    const isImg = isComfyImageInputFieldName(item.fieldName);
+    const isVid = isComfyVideoInputFieldName(item.fieldName);
+    if ((!isImg && !isVid) || !isHttpUrl(v)) {
       out.push(item);
       continue;
     }
@@ -170,6 +187,7 @@ export async function rewriteHttpUrlsInNodeInfoListForRunningHubImages(
         baseUrl: opts.baseUrl,
         apiKey: opts.apiKey,
         imageUrl: v,
+        isVideo: isVid,
         signal: opts.signal,
       });
       cache.set(v, fileName);

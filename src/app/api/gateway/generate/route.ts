@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { GenerationHistoryStatus } from "@prisma/client";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { consumeUserBalanceInTransaction } from "@/lib/billing";
 import { parseStandardPayloadFromGatewayBody } from "@/lib/standard-payload-from-request";
 import {
   getProviderAdapter,
@@ -10,6 +11,7 @@ import {
 import { BailianAdapter } from "@/services/providers/BailianAdapter";
 import type { IProviderAdapter, StandardPayload } from "@/services/providers/types";
 import { ProviderError } from "@/services/providers/types";
+import { expireStaleUserPending } from "@/lib/stale-pending-cleanup";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,10 +102,18 @@ export async function POST(req: Request) {
     const payloadForCost = enrichPayloadForPricing(standardPayload, rawBody);
     const { cost, sellPrice } = adapter.calculateCost(payloadForCost);
 
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { balance: true },
-    });
+    // 提交前先清理该用户的幽灵 PENDING，防止历史中断轮询的记录误触发并发限额
+    await expireStaleUserPending(session.user.id);
+
+    const [user, pendingCount] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { balance: true },
+      }),
+      prisma.generationHistory.count({
+        where: { userId: session.user.id, status: GenerationHistoryStatus.PENDING },
+      }),
+    ]);
     if (!user) {
       return NextResponse.json(
         { ok: false, error: "用户不存在", code: "USER_NOT_FOUND" },
@@ -122,7 +132,24 @@ export async function POST(req: Request) {
         { status: 402 }
       );
     }
+    /** 每用户并发上限：最多 3 个 PENDING，防止单用户占满上游队列 */
+    const MAX_PENDING_PER_USER = 3;
+    if (pendingCount >= MAX_PENDING_PER_USER) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `当前有 ${pendingCount} 个任务正在处理中，请等待完成后再提交新任务`,
+          code: "CONCURRENT_LIMIT_EXCEEDED",
+          pendingCount,
+        },
+        { status: 429 }
+      );
+    }
 
+    console.log(
+      "[gateway/generate] 开始调用上游适配器 providerCode=%s skuId=%s userId=%s",
+      providerCode, skuId, session.user.id
+    );
     const started = performance.now();
     let upstream: Awaited<ReturnType<typeof adapter.generate>>;
     try {
@@ -180,25 +207,145 @@ export async function POST(req: Request) {
       String(user.balance)
     );
 
-    try {
-      await prisma.generationHistory.create({
-        data: {
-          userId: session.user.id,
-          skuId,
-          taskId: upstream.taskId,
-          status: GenerationHistoryStatus.PENDING,
-          providerCode,
-          cost: Number.isFinite(cost) ? Math.round(Number(cost)) : 0,
-          mediaType: "",
-          ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
-        },
-      });
-    } catch (dbErr) {
-      console.error("[gateway/generate] generationHistory 落盘失败（上游任务已创建）", {
-        userId: session.user.id,
+    // ── 同步适配器：直接结果（directResult）处理 ──────────────────────────────
+    // 适配器（如 GptImage2Adapter）在 generate() 内同步完成上游调用，将结果编码进
+    // raw.directResult，此处直接写 SUCCESS 并扣费，无需经过 PENDING → 轮询 → SUCCESS 流程。
+    const rawDirect =
+      isRecord(upstream.raw) && isRecord((upstream.raw as Record<string, unknown>).directResult)
+        ? ((upstream.raw as Record<string, unknown>).directResult as Record<string, unknown>)
+        : null;
+
+    if (rawDirect?.status === "succeeded") {
+      const resultUrlsRaw = Array.isArray(rawDirect.resultUrls)
+        ? (rawDirect.resultUrls as unknown[])
+            .filter((u): u is string => typeof u === "string" && u.length > 0)
+        : [];
+      const resultUrl =
+        resultUrlsRaw.length > 1
+          ? JSON.stringify(resultUrlsRaw)
+          : (resultUrlsRaw[0] ?? null);
+
+      const directCost =
+        typeof rawDirect.providerCost === "number" && Number.isFinite(rawDirect.providerCost)
+          ? Math.round(rawDirect.providerCost)
+          : Number.isFinite(cost)
+            ? Math.round(Number(cost))
+            : 0;
+
+      const durationIntSec = Math.max(1, Math.ceil(durationMs / 1000));
+
+      let directDbOk = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await prisma.$transaction(
+            async (tx) => {
+              await tx.generationHistory.create({
+                data: {
+                  userId: session.user.id,
+                  skuId,
+                  taskId: upstream.taskId,
+                  status: GenerationHistoryStatus.SUCCESS,
+                  providerCode,
+                  cost: directCost,
+                  resultUrl,
+                  mediaType: "image",
+                  durationInt: durationIntSec,
+                  ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
+                },
+              });
+              if (directCost > 0) {
+                await consumeUserBalanceInTransaction(
+                  tx,
+                  session.user.id,
+                  directCost,
+                  "GPT图片生成",
+                  upstream.taskId
+                );
+              }
+            },
+            { maxWait: 5000, timeout: 10000 }
+          );
+          directDbOk = true;
+          break;
+        } catch (dbErr) {
+          console.error(
+            `[gateway/generate] directResult 落盘失败 attempt=${attempt}`,
+            { userId: session.user.id, taskId: upstream.taskId, err: dbErr }
+          );
+          if (attempt === 1) await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+
+      if (!directDbOk) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "图片已生成但记录保存失败，请联系管理员并提供任务ID",
+            code: "DB_WRITE_FAILED",
+            taskId: upstream.taskId,
+          },
+          { status: 500 }
+        );
+      }
+
+      console.log(
+        "[gateway/generate] directResult 已落库 SUCCESS, taskId=%s cost=%d resultCount=%d",
+        upstream.taskId,
+        directCost,
+        resultUrlsRaw.length
+      );
+
+      return NextResponse.json({
+        ok: true,
+        success: true,
         taskId: upstream.taskId,
-        err: dbErr,
+        durationMs,
+        providerCode,
+        skuId,
+        billing: { cost: directCost, sellPrice: directCost },
+        upstream: { raw: upstream.raw },
       });
+    }
+
+    // ── 异步适配器：落 PENDING，由客户端轮询 ────────────────────────────────
+    const historyData = {
+      userId: session.user.id,
+      skuId,
+      taskId: upstream.taskId,
+      status: GenerationHistoryStatus.PENDING,
+      providerCode,
+      cost: Number.isFinite(cost) ? Math.round(Number(cost)) : 0,
+      mediaType: "",
+      ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
+    };
+
+    // 落盘失败时重试一次；仍失败则返回 500（上游任务已运行，taskId 记入日志供人工核查）
+    let dbWriteOk = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await prisma.generationHistory.create({ data: historyData });
+        dbWriteOk = true;
+        break;
+      } catch (dbErr) {
+        console.error(`[gateway/generate] generationHistory 落盘失败 attempt=${attempt}`, {
+          userId: session.user.id,
+          taskId: upstream.taskId,
+          err: dbErr,
+        });
+        if (attempt === 1) await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+
+    if (!dbWriteOk) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "任务已提交但记录保存失败，请联系管理员并提供任务ID",
+          code: "DB_WRITE_FAILED",
+          taskId: upstream.taskId,
+        },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({

@@ -1,0 +1,314 @@
+{
+  "generated_at": "2026-07-06T07:50:59.239Z",
+  "mode": "dry-run",
+  "options": {
+    "create_missing": true,
+    "platform_container": "workflow-db",
+    "workbench_container": "workflow-workbench-db"
+  },
+  "summary": {
+    "platform_users": 10,
+    "workbench_users": 12,
+    "matched": 10,
+    "unchanged": 0,
+    "updates_planned": 10,
+    "creates_planned": 0,
+    "conflicts": 0,
+    "unmatched_platform_users": 0,
+    "orphan_workbench_users": 12,
+    "updates_applied": 0,
+    "creates_applied": 0
+  },
+  "conflicts": [],
+  "unmatched_platform_users": [],
+  "orphan_workbench_users": [
+    {
+      "id": 1,
+      "username": "admin",
+      "email": null,
+      "platform_user_id": null,
+      "role": "admin"
+    },
+    {
+      "id": 4,
+      "username": "opreator1",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 5,
+      "username": "virgo",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 6,
+      "username": "leo",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 7,
+      "username": "abc",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 9,
+      "username": "test1",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 10,
+      "username": "test2",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 11,
+      "username": "test3",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 12,
+      "username": "test4",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 13,
+      "username": "test5",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 14,
+      "username": "test6",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    },
+    {
+      "id": 15,
+      "username": "test7",
+      "email": null,
+      "platform_user_id": null,
+      "role": "operator"
+    }
+  ],
+  "planned_updates": [
+    {
+      "platform_user": {
+        "id": "cmp0wde5t0000tkmomxxr9nlv",
+        "email": "virgo@gmail.com",
+        "role": "ADMIN"
+      },
+      "workbench_user_before": {
+        "id": 5,
+        "username": "virgo",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmp0wde5t0000tkmomxxr9nlv",
+        "email": "virgo@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.238Z",
+        "role": "admin"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpfa76hj0000tkug6ge0b9b8",
+        "email": "leo@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 6,
+        "username": "leo",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpfa76hj0000tkug6ge0b9b8",
+        "email": "leo@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.238Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpg9toub0001tkp8vty9yrgk",
+        "email": "abc@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 7,
+        "username": "abc",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpg9toub0001tkp8vty9yrgk",
+        "email": "abc@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.238Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpvzg78n0000tkzshwhmp6s3",
+        "email": "test2@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 10,
+        "username": "test2",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpvzg78n0000tkzshwhmp6s3",
+        "email": "test2@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.238Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpvzjzks0001tkzsu3xix2tz",
+        "email": "test3@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 11,
+        "username": "test3",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpvzjzks0001tkzsu3xix2tz",
+        "email": "test3@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.238Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpvzoo4r0000tkvwpqstv0nh",
+        "email": "test4@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 12,
+        "username": "test4",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpvzoo4r0000tkvwpqstv0nh",
+        "email": "test4@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.238Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpw0c3410000tkek52zxc753",
+        "email": "test5@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 13,
+        "username": "test5",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpw0c3410000tkek52zxc753",
+        "email": "test5@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.239Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpw0dpmf0000tkc8ebk7ioji",
+        "email": "test6@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 14,
+        "username": "test6",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpw0dpmf0000tkc8ebk7ioji",
+        "email": "test6@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.239Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpw0lssq0000tkgc0hy26xfe",
+        "email": "test7@gmail.com",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 15,
+        "username": "test7",
+        "email": null,
+        "platform_user_id": null,
+        "role": "operator"
+      },
+      "patch": {
+        "platform_user_id": "cmpw0lssq0000tkgc0hy26xfe",
+        "email": "test7@gmail.com",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.239Z"
+      }
+    },
+    {
+      "platform_user": {
+        "id": "cmpg9ll6w0000tkp8kk85ivo8",
+        "email": "admin@local.dev",
+        "role": "USER"
+      },
+      "workbench_user_before": {
+        "id": 1,
+        "username": "admin",
+        "email": null,
+        "platform_user_id": null,
+        "role": "admin"
+      },
+      "patch": {
+        "platform_user_id": "cmpg9ll6w0000tkp8kk85ivo8",
+        "email": "admin@local.dev",
+        "auth_source": "platform_sso",
+        "last_sso_at": "2026-07-06T07:50:59.239Z"
+      }
+    }
+  ],
+  "planned_creates": []
+}

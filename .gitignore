@@ -23,6 +23,7 @@ yarn-error.log*
 *.pem
 .idea
 .vscode
+.cursor
 
 # TypeScript
 *.tsbuildinfo
@@ -34,6 +35,9 @@ yarn-error.log*
 coverage
 
 postgres-data/
+workbench-postgres-data/
+ai-workflow-data/
+workbench_backup.sql
 
 # Archives
 *.tar

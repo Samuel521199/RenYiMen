@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-07-06T07:57:36.603Z",
+  "options": {
+    "strict": true,
+    "since_hours": 168,
+    "thresholds": {
+      "max_platform_missing": 0,
+      "max_potential_conflicts": 0,
+      "max_unbound_workbench": 0,
+      "max_role_drift": 1,
+      "max_email_drift": 0,
+      "max_recent_conflict_audit_logs": 0
+    }
+  },
+  "summary": {
+    "platform_users": 10,
+    "workbench_users": 10,
+    "linked_platform_users": 10,
+    "mapping_completeness_rate": 1,
+    "platform_missing_count": 0,
+    "potential_conflicts_count": 0,
+    "unbound_workbench_count": 0,
+    "role_drift_count": 1,
+    "email_drift_count": 0,
+    "recent_conflict_audit_log_count": 0
+  },
+  "status": {
+    "pass": true,
+    "violations": []
+  },
+  "platform_missing_users": [],
+  "potential_conflicts": [],
+  "unbound_workbench_users": [],
+  "role_drift": [
+    {
+      "platform_user_id": "cmpg9ll6w0000tkp8kk85ivo8",
+      "email": "admin@local.dev",
+      "expected_role": "operator",
+      "actual_role": "admin",
+      "workbench_user_id": 1,
+      "workbench_username": "admin"
+    }
+  ],
+  "email_drift": [],
+  "recent_conflict_audit_logs": []
+}

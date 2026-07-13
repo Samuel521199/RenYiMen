@@ -3,13 +3,15 @@
 import type { NumberSliderField } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
+import { loc } from "@/components/WorkflowForm/DynamicForm";
 
 export interface NumberSliderControlProps {
   field: NumberSliderField;
   error?: string;
+  locale?: "zh" | "en";
 }
 
-export function NumberSliderControl({ field, error }: NumberSliderControlProps) {
+export function NumberSliderControl({ field, error, locale = "zh" }: NumberSliderControlProps) {
   const path = useWorkflowStore((s) => s.fieldPaths[field.id]);
   const raw = useWorkflowStore((s) => (path ? getAtPath(s.parameters, path) : undefined));
   const setFieldValue = useWorkflowStore((s) => s.setFieldValue);
@@ -43,7 +45,9 @@ export function NumberSliderControl({ field, error }: NumberSliderControlProps) 
         <span>{min}</span>
         <span>{max}</span>
       </div>
-      {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+      {field.description && (
+        <p className="text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
+      )}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );

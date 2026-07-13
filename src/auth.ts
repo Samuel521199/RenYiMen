@@ -7,8 +7,26 @@ import Credentials from "next-auth/providers/credentials";
 import GitHub from "next-auth/providers/github";
 import { prisma } from "@/lib/prisma";
 
+const authUrl = process.env.AUTH_URL?.trim() ?? "";
+const isHttps = authUrl.startsWith("https://");
+
+/**
+ * HTTP 部署时必须把所有认证 cookie 的 secure 设为 false，
+ * 否则浏览器不会存 CSRF token，导致登录 403 MissingCSRF。
+ */
+const cookieOptions = { secure: isHttps, sameSite: "lax" as const, path: "/" };
+
 export const authConfig = {
   trustHost: true,
+  useSecureCookies: isHttps,
+  cookies: {
+    sessionToken:      { options: { ...cookieOptions, httpOnly: true } },
+    callbackUrl:       { options: { ...cookieOptions, httpOnly: false } },
+    csrfToken:         { options: { ...cookieOptions, httpOnly: false } },
+    pkceCodeVerifier:  { options: { ...cookieOptions, httpOnly: true } },
+    state:             { options: { ...cookieOptions, httpOnly: true } },
+    nonce:             { options: { ...cookieOptions, httpOnly: true } },
+  },
   adapter: PrismaAdapter(prisma),
   session: { strategy: "jwt" },
   pages: {

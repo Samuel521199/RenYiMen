@@ -23,7 +23,6 @@ import {
 } from "./runninghub-video-workflow";
 
 const DEFAULT_API_BASE = "https://www.runninghub.cn";
-const DEFAULT_API_KEY = "dafe6f7aa9b04b239d74cf184d4f5c56";
 
 /** 单次对 RunningHub 的 HTTP 调用（status / outputs）最长等待，防止中转被上游拖死。 */
 export const RUNNINGHUB_PER_FETCH_TIMEOUT_MS = 15_000;
@@ -36,6 +35,8 @@ export const RUNNINGHUB_DEFAULT_QUERY_TIMEOUT_MS = RUNNINGHUB_GATEWAY_POLL_DEADL
 
 /** OpenAPI v2：运行工作流（workflowId 在 URL 路径中） */
 const V2_RUN_WORKFLOW_PREFIX = "/openapi/v2/run/workflow";
+/** OpenAPI v2：运行 AI 应用（appId 在 URL 路径中，请求体为 inputData[]） */
+const V2_RUN_AI_APP_PREFIX = "/openapi/v2/run/ai-app";
 
 const TASK_STATUS_PATH = "/task/openapi/status";
 const TASK_OUTPUTS_PATH = "/task/openapi/outputs";
@@ -46,7 +47,7 @@ const BASE_COST_CREDITS = 5;
 const HD_SURGE_CREDITS = 3;
 
 function getDefaultApiKey(): string {
-  return process.env.RUNNINGHUB_API_KEY?.trim() || DEFAULT_API_KEY;
+  return process.env.RUNNINGHUB_API_KEY?.trim() || "";
 }
 
 function getDefaultBaseUrl(): string {
@@ -68,6 +69,23 @@ function extractTaskId(raw: unknown): string | null {
   }
   if (typeof o.taskId === "string") return o.taskId;
   if (typeof o.task_id === "string") return o.task_id;
+  return null;
+}
+
+/**
+ * 针对 RunningHub AI App 响应的额外 taskId 提取路径。
+ * AI App 响应结构可能为 { data: { id / task_id / taskId } } 或直接顶层字段。
+ */
+function extractAiAppTaskId(o: Record<string, unknown>): string | null {
+  // 尝试 data.id（部分 AI App 响应使用此字段）
+  const data = o.data;
+  if (isRecord(data)) {
+    if (typeof data.id === "string" && data.id.trim()) return data.id.trim();
+    if (typeof data.id === "number") return String(data.id);
+  }
+  // 顶层 id 字段
+  if (typeof o.id === "string" && o.id.trim()) return o.id.trim();
+  if (typeof o.id === "number") return String(o.id);
   return null;
 }
 
@@ -329,9 +347,30 @@ function getRunningHubPromptReverseRemoteWorkflowId(): string | null {
   return process.env.RUNNINGHUB_PROMPT_REVERSE_WORKFLOW_ID?.trim() || null;
 }
 
+function getRunningHubFaceSwapRemoteWorkflowId(): string | null {
+  return process.env.RUNNINGHUB_FACE_SWAP_WORKFLOW_ID?.trim() || null;
+}
+
+function getRunningHubHdUpscaleAppId(): string | null {
+  return process.env.RUNNINGHUB_HD_UPSCALE_APP_ID?.trim() || null;
+}
+
+function getRunningHubMattingAppId(): string | null {
+  return process.env.RUNNINGHUB_MATTING_APP_ID?.trim() || null;
+}
+
+function getRunningHubBgReplaceAppId(): string | null {
+  return process.env.RUNNINGHUB_BG_REPLACE_APP_ID?.trim() || null;
+}
+
+function getRunningHubVideoEnhanceAppId(): string | null {
+  return process.env.RUNNINGHUB_VIDEO_ENHANCE_APP_ID?.trim() || null;
+}
+
 const DEFAULT_TXT2IMG_WORKFLOW_RELATIVE = "config/runninghub/lu-shortdrama-txt2img-workflow.json";
 const DEFAULT_STORYBOARD_WORKFLOW_RELATIVE = "config/runninghub/lu-storyboard-workflow.json";
 const DEFAULT_PROMPT_REVERSE_WORKFLOW_RELATIVE = "config/runninghub/lu-prompt-reverse-workflow.json";
+const DEFAULT_FACE_SWAP_WORKFLOW_RELATIVE = "config/runninghub/lu-face-swap-workflow.json";
 
 function resolveTxt2ImgWorkflowFileAbsPath(): string | null {
   const fromEnv = process.env.RUNNINGHUB_TXT2IMG_WORKFLOW_FILE?.trim();
@@ -395,8 +434,30 @@ function loadPromptReverseBaseWorkflow(): Record<string, ComfyNodeShell> {
   );
 }
 
+function resolveFaceSwapWorkflowFileAbsPath(): string | null {
+  const fromEnv = process.env.RUNNINGHUB_FACE_SWAP_WORKFLOW_FILE?.trim();
+  if (fromEnv) {
+    return path.isAbsolute(fromEnv) ? fromEnv : path.join(process.cwd(), fromEnv);
+  }
+  const def = path.join(process.cwd(), DEFAULT_FACE_SWAP_WORKFLOW_RELATIVE);
+  return fs.existsSync(def) ? def : null;
+}
+
+function loadFaceSwapBaseWorkflow(): Record<string, ComfyNodeShell> {
+  const filePath = resolveFaceSwapWorkflowFileAbsPath();
+  if (filePath) {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<string, ComfyNodeShell>;
+  }
+  throw new ProviderError(
+    "换头换脸工作流配置缺失：请设置 RUNNINGHUB_FACE_SWAP_WORKFLOW_FILE 或确认 config/runninghub/lu-face-swap-workflow.json 存在。",
+    "RH_MISSING_FACE_SWAP_WORKFLOW",
+    500
+  );
+}
+
 const PROMPT_REVERSE_TEMPLATE_ID = "lu-prompt-reverse";
 const STORYBOARD_TEMPLATE_ID = "lu-storyboard";
+const FACE_SWAP_TEMPLATE_ID = "lu-face-swap";
 
 function isRunningHubPromptReversePayload(payload: StandardPayload): boolean {
   const f = payload.flags;
@@ -416,6 +477,61 @@ function isRunningHubStoryboardPayload(payload: StandardPayload): boolean {
   if (prov === "RUNNINGHUB_STORYBOARD") return true;
   if (sku === "RH_STORYBOARD") return true;
   return payload.templateId.trim().toLowerCase() === STORYBOARD_TEMPLATE_ID;
+}
+
+function isRunningHubFaceSwapPayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_FACE_SWAP") return true;
+  if (sku === "RH_FACE_SWAP") return true;
+  return payload.templateId.trim().toLowerCase() === FACE_SWAP_TEMPLATE_ID;
+}
+
+const HD_UPSCALE_TEMPLATE_ID = "lu-hd-upscale";
+const MATTING_TEMPLATE_ID = "lu-matting";
+const BG_REPLACE_TEMPLATE_ID = "lu-bg-replace";
+const VIDEO_ENHANCE_TEMPLATE_ID = "lu-video-enhance";
+
+function isRunningHubHdUpscalePayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_HD_UPSCALE") return true;
+  if (sku === "RH_HD_UPSCALE") return true;
+  return payload.templateId.trim().toLowerCase() === HD_UPSCALE_TEMPLATE_ID;
+}
+
+function isRunningHubMattingPayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_MATTING") return true;
+  if (sku === "RH_MATTING") return true;
+  return payload.templateId.trim().toLowerCase() === MATTING_TEMPLATE_ID;
+}
+
+function isRunningHubBgReplacePayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_BG_REPLACE") return true;
+  if (sku === "RH_BG_REPLACE") return true;
+  return payload.templateId.trim().toLowerCase() === BG_REPLACE_TEMPLATE_ID;
+}
+
+function isRunningHubVideoEnhancePayload(payload: StandardPayload): boolean {
+  const f = payload.flags;
+  const prov =
+    isRecord(f) && typeof f.providerCode === "string" ? f.providerCode.trim().toUpperCase() : "";
+  const sku = isRecord(f) && typeof f.skuId === "string" ? f.skuId.trim().toUpperCase() : "";
+  if (prov === "RUNNINGHUB_VIDEO_ENHANCE") return true;
+  if (sku === "RH_VIDEO_ENHANCE") return true;
+  return payload.templateId.trim().toLowerCase() === VIDEO_ENHANCE_TEMPLATE_ID;
 }
 
 function isRunningHubTxt2ImgPayload(payload: StandardPayload): boolean {
@@ -443,6 +559,9 @@ function resolveRunWorkflowIdForPayload(payload: StandardPayload): string | null
   }
   if (isRunningHubPromptReversePayload(payload)) {
     return getRunningHubPromptReverseRemoteWorkflowId();
+  }
+  if (isRunningHubFaceSwapPayload(payload)) {
+    return getRunningHubFaceSwapRemoteWorkflowId();
   }
   const fromEnv = getRunningHubSvdRemoteWorkflowId();
   if (fromEnv) return fromEnv;
@@ -1392,6 +1511,238 @@ export class RunningHubAdapter implements IProviderAdapter {
       });
       console.log("[RH generate] nodeInfoFlat (图片上传后):", JSON.stringify(nodeInfoFlat));
 
+      // ── AI App 分支（高清放大等）：与 workflow 接口完全不同，提前处理并 return ──
+      if (isRunningHubHdUpscalePayload(payload)) {
+        const appId = getRunningHubHdUpscaleAppId();
+        if (!appId) {
+          throw new ProviderError(
+            "高清放大 App 配置缺失：请在 .env 中设置 RUNNINGHUB_HD_UPSCALE_APP_ID。",
+            "RH_MISSING_HD_UPSCALE_APP_ID",
+            400
+          );
+        }
+        // AI App 与 workflow 请求格式相同：nodeInfoList（不需要完整 workflow JSON）
+        console.log("[RH generate] HdUpscale AI App nodeInfoList:", JSON.stringify(nodeInfoFlat));
+        const aiAppBody: Record<string, unknown> = {
+          nodeInfoList: nodeInfoFlat,
+          instanceType: runningHubInstanceType(),
+          usePersonalQueue: runningHubUsePersonalQueueString(),
+        };
+        const appPath = `${V2_RUN_AI_APP_PREFIX}/${encodeURIComponent(appId)}`;
+        const raw = await fetchRunningHubPost(baseUrl, appPath, aiAppBody, apiKey, signal);
+        console.log("[RH AI App] 原始响应:", JSON.stringify(raw));
+        if (!raw || typeof raw !== "object") {
+          throw new ProviderError("上游响应格式异常", "RH_BAD_RESPONSE", undefined, raw);
+        }
+        const o = raw as Record<string, unknown>;
+
+        // AI App 响应结构：{ taskId, status, errorCode, errorMessage, ... }
+        // errorCode 为字符串类型（与 workflow 接口的数字 code 不同）
+        const aiAppErrorCode = o.errorCode;
+        const aiAppErrMsg = typeof o.errorMessage === "string" ? o.errorMessage : "";
+        if (
+          typeof aiAppErrorCode === "string" &&
+          aiAppErrorCode.trim() !== "" &&
+          aiAppErrorCode.trim() !== "0"
+        ) {
+          console.error("[RH AI App] 业务错误:", aiAppErrorCode, aiAppErrMsg, raw);
+          throw new ProviderError(
+            aiAppErrMsg || `AI App 错误码 ${aiAppErrorCode}`,
+            "RH_BUSINESS",
+            undefined,
+            raw
+          );
+        }
+        // 兼容 workflow 接口的数字 code
+        const numCode = o.code;
+        if (typeof numCode === "number" && numCode !== 0 && numCode !== 200) {
+          const msg = typeof o.msg === "string" ? o.msg : "上游业务错误";
+          throw new ProviderError(msg, "RH_BUSINESS", undefined, raw);
+        }
+
+        // AI App 响应中 taskId 可能直接在顶层（字符串非空时有效）
+        const taskId =
+          (typeof o.taskId === "string" && o.taskId.trim() ? o.taskId.trim() : null) ??
+          extractTaskId(raw) ??
+          extractAiAppTaskId(o);
+        if (!taskId) {
+          console.error("[RH AI App] 无法提取 taskId，完整响应:", JSON.stringify(raw));
+          throw new ProviderError(
+            `AI App 响应缺少 taskId，请检查日志中的原始响应结构。响应片段：${JSON.stringify(raw).slice(0, 300)}`,
+            "RH_BAD_RESPONSE",
+            undefined,
+            raw
+          );
+        }
+        return {
+          taskId,
+          raw: raw,
+        };
+      }
+
+      // ── 人像抠图 AI App ──────────────────────────────────────────────
+      if (isRunningHubMattingPayload(payload)) {
+        const appId = getRunningHubMattingAppId();
+        if (!appId) {
+          throw new ProviderError(
+            "人像抠图 App 配置缺失：请在 .env 中设置 RUNNINGHUB_MATTING_APP_ID。",
+            "RH_MISSING_MATTING_APP_ID",
+            400
+          );
+        }
+        console.log("[RH generate] Matting AI App nodeInfoList:", JSON.stringify(nodeInfoFlat));
+        const mattingBody: Record<string, unknown> = {
+          nodeInfoList: nodeInfoFlat,
+          instanceType: runningHubInstanceType(),
+          usePersonalQueue: runningHubUsePersonalQueueString(),
+        };
+        const appPath = `${V2_RUN_AI_APP_PREFIX}/${encodeURIComponent(appId)}`;
+        const raw = await fetchRunningHubPost(baseUrl, appPath, mattingBody, apiKey, signal);
+        console.log("[RH AI App Matting] 原始响应:", JSON.stringify(raw));
+        if (!raw || typeof raw !== "object") {
+          throw new ProviderError("上游响应格式异常", "RH_BAD_RESPONSE", undefined, raw);
+        }
+        const mo = raw as Record<string, unknown>;
+        const mattingErrCode = mo.errorCode;
+        const mattingErrMsg = typeof mo.errorMessage === "string" ? mo.errorMessage : "";
+        if (
+          typeof mattingErrCode === "string" &&
+          mattingErrCode.trim() !== "" &&
+          mattingErrCode.trim() !== "0"
+        ) {
+          console.error("[RH AI App Matting] 业务错误:", mattingErrCode, mattingErrMsg, raw);
+          throw new ProviderError(
+            mattingErrMsg || `AI App 错误码 ${mattingErrCode}`,
+            "RH_BUSINESS",
+            undefined,
+            raw
+          );
+        }
+        const mattingTaskId =
+          (typeof mo.taskId === "string" && mo.taskId.trim() ? mo.taskId.trim() : null) ??
+          extractTaskId(raw) ??
+          extractAiAppTaskId(mo);
+        if (!mattingTaskId) {
+          console.error("[RH AI App Matting] 无法提取 taskId，完整响应:", JSON.stringify(raw));
+          throw new ProviderError(
+            `Matting App 响应缺少 taskId。响应片段：${JSON.stringify(raw).slice(0, 300)}`,
+            "RH_BAD_RESPONSE",
+            undefined,
+            raw
+          );
+        }
+        return {
+          taskId: mattingTaskId,
+          raw: raw,
+        };
+      }
+
+      // ── 背景替换 AI App ───────────────────────────────────────────────
+      if (isRunningHubBgReplacePayload(payload)) {
+        const appId = getRunningHubBgReplaceAppId();
+        if (!appId) {
+          throw new ProviderError(
+            "背景替换 App 配置缺失：请在 .env 中设置 RUNNINGHUB_BG_REPLACE_APP_ID。",
+            "RH_MISSING_BG_REPLACE_APP_ID",
+            400
+          );
+        }
+        console.log("[RH generate] BgReplace AI App nodeInfoList:", JSON.stringify(nodeInfoFlat));
+        const bgReplaceBody: Record<string, unknown> = {
+          nodeInfoList: nodeInfoFlat,
+          instanceType: runningHubInstanceType(),
+          usePersonalQueue: runningHubUsePersonalQueueString(),
+        };
+        const appPath = `${V2_RUN_AI_APP_PREFIX}/${encodeURIComponent(appId)}`;
+        const raw = await fetchRunningHubPost(baseUrl, appPath, bgReplaceBody, apiKey, signal);
+        console.log("[RH AI App BgReplace] 原始响应:", JSON.stringify(raw));
+        if (!raw || typeof raw !== "object") {
+          throw new ProviderError("上游响应格式异常", "RH_BAD_RESPONSE", undefined, raw);
+        }
+        const bo = raw as Record<string, unknown>;
+        const bgErrCode = bo.errorCode;
+        const bgErrMsg = typeof bo.errorMessage === "string" ? bo.errorMessage : "";
+        if (typeof bgErrCode === "string" && bgErrCode.trim() !== "" && bgErrCode.trim() !== "0") {
+          console.error("[RH AI App BgReplace] 业务错误:", bgErrCode, bgErrMsg, raw);
+          throw new ProviderError(
+            bgErrMsg || `AI App 错误码 ${bgErrCode}`,
+            "RH_BUSINESS",
+            undefined,
+            raw
+          );
+        }
+        const bgTaskId =
+          (typeof bo.taskId === "string" && bo.taskId.trim() ? bo.taskId.trim() : null) ??
+          extractTaskId(raw) ??
+          extractAiAppTaskId(bo);
+        if (!bgTaskId) {
+          console.error("[RH AI App BgReplace] 无法提取 taskId，完整响应:", JSON.stringify(raw));
+          throw new ProviderError(
+            `BgReplace App 响应缺少 taskId。响应片段：${JSON.stringify(raw).slice(0, 300)}`,
+            "RH_BAD_RESPONSE",
+            undefined,
+            raw
+          );
+        }
+        return {
+          taskId: bgTaskId,
+          raw: raw,
+        };
+      }
+
+      // ── 视频模糊修复 AI App ──────────────────────────────────────────────
+      if (isRunningHubVideoEnhancePayload(payload)) {
+        const appId = getRunningHubVideoEnhanceAppId();
+        if (!appId) {
+          throw new ProviderError(
+            "视频修复 App 配置缺失：请在 .env 中设置 RUNNINGHUB_VIDEO_ENHANCE_APP_ID。",
+            "RH_MISSING_VIDEO_ENHANCE_APP_ID",
+            400
+          );
+        }
+        console.log("[RH generate] VideoEnhance AI App nodeInfoList:", JSON.stringify(nodeInfoFlat));
+        const veBody: Record<string, unknown> = {
+          nodeInfoList: nodeInfoFlat,
+          instanceType: runningHubInstanceType(),
+          usePersonalQueue: runningHubUsePersonalQueueString(),
+        };
+        const appPath = `${V2_RUN_AI_APP_PREFIX}/${encodeURIComponent(appId)}`;
+        const raw = await fetchRunningHubPost(baseUrl, appPath, veBody, apiKey, signal);
+        console.log("[RH AI App VideoEnhance] 原始响应:", JSON.stringify(raw));
+        if (!raw || typeof raw !== "object") {
+          throw new ProviderError("上游响应格式异常", "RH_BAD_RESPONSE", undefined, raw);
+        }
+        const bo = raw as Record<string, unknown>;
+        const veErrCode = bo.errorCode;
+        const veErrMsg = typeof bo.errorMessage === "string" ? bo.errorMessage : "";
+        if (typeof veErrCode === "string" && veErrCode.trim() !== "" && veErrCode.trim() !== "0") {
+          console.error("[RH AI App VideoEnhance] 业务错误:", veErrCode, veErrMsg, raw);
+          throw new ProviderError(
+            veErrMsg || `AI App 错误码 ${veErrCode}`,
+            "RH_BUSINESS",
+            undefined,
+            raw
+          );
+        }
+        const veTaskId =
+          (typeof bo.taskId === "string" && bo.taskId.trim() ? bo.taskId.trim() : null) ??
+          extractTaskId(raw) ??
+          extractAiAppTaskId(bo);
+        if (!veTaskId) {
+          console.error("[RH AI App VideoEnhance] 无法提取 taskId，完整响应:", JSON.stringify(raw));
+          throw new ProviderError(
+            `VideoEnhance App 响应缺少 taskId。响应片段：${JSON.stringify(raw).slice(0, 300)}`,
+            "RH_BAD_RESPONSE",
+            undefined,
+            raw
+          );
+        }
+        return {
+          taskId: veTaskId,
+          raw: raw,
+        };
+      }
+
       const runWorkflowId = resolveRunWorkflowIdForPayload(payload);
       if (!runWorkflowId) {
         const msg = isRunningHubTxt2ImgPayload(payload)
@@ -1423,6 +1774,18 @@ export class RunningHubAdapter implements IProviderAdapter {
         }
         const wfJson = JSON.stringify(wf);
         console.log("[RH generate] PromptReverse workflow JSON 预览（前 600 chars）:", wfJson.slice(0, 600));
+        runBody.workflow = wfJson;
+        runBody.nodeInfoList = [];
+      } else if (isRunningHubFaceSwapPayload(payload)) {
+        const wf = loadFaceSwapBaseWorkflow();
+        applyNodeInfoListToComfyWorkflow(wf, nodeInfoFlat, {});
+        // 随机化 KSampler seed（节点 59），确保每次合成结果存在差异
+        const ksamplerNode = wf["59"];
+        if (ksamplerNode?.inputs) {
+          ksamplerNode.inputs.seed = randomInt(0, 281474976710655);
+        }
+        const wfJson = JSON.stringify(wf);
+        console.log("[RH generate] FaceSwap workflow JSON 预览（前 600 chars）:", wfJson.slice(0, 600));
         runBody.workflow = wfJson;
         runBody.nodeInfoList = [];
       } else if (isRunningHubStoryboardPayload(payload)) {
@@ -1497,6 +1860,28 @@ export class RunningHubAdapter implements IProviderAdapter {
           message = `${msgRaw}：请核对 URL 中的 workflowId（${runWorkflowId}）是否在 RunningHub 控制台存在，并与当前 API Key 权限匹配。`;
         }
         throw new ProviderError(message, "RH_BUSINESS", code === 404 ? 502 : undefined, raw);
+      }
+
+      // data 层的字符串 errorCode（如 "421" 队列满）——外层 code 为 0 但 data 内可含业务错误
+      const dataObj = o.data && typeof o.data === "object" ? (o.data as Record<string, unknown>) : null;
+      const rhErrorCode = dataObj ? (dataObj.errorCode ?? o.errorCode) : o.errorCode;
+      const rhErrorMsg =
+        dataObj
+          ? typeof dataObj.errorMessage === "string"
+            ? dataObj.errorMessage
+            : typeof o.errorMessage === "string"
+              ? o.errorMessage
+              : ""
+          : typeof o.errorMessage === "string"
+            ? o.errorMessage
+            : "";
+      if (typeof rhErrorCode === "string" && rhErrorCode.trim() !== "" && rhErrorCode.trim() !== "0") {
+        console.error("[RunningHubAdapter] run/workflow data 层业务错误", rhErrorCode, rhErrorMsg, raw);
+        let errMsg = rhErrorMsg || `RunningHub 错误码 ${rhErrorCode}`;
+        if (rhErrorCode === "421") {
+          errMsg = "RunningHub 队列繁忙，请稍后重试（API 并发数已达上限）";
+        }
+        throw new ProviderError(errMsg, "RH_BUSINESS", 429, raw);
       }
 
       const taskId = extractTaskId(raw);

@@ -3,17 +3,21 @@
 import type { TextInputField } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
+import { loc } from "@/components/WorkflowForm/DynamicForm";
 
 export interface TextInputControlProps {
   field: TextInputField;
   error?: string;
+  locale?: "zh" | "en";
 }
 
-export function TextInputControl({ field, error }: TextInputControlProps) {
+export function TextInputControl({ field, error, locale = "zh" }: TextInputControlProps) {
   const path = useWorkflowStore((s) => s.fieldPaths[field.id]);
   const raw = useWorkflowStore((s) => (path ? getAtPath(s.parameters, path) : undefined));
   const setFieldValue = useWorkflowStore((s) => s.setFieldValue);
   const value = typeof raw === "string" ? raw : "";
+  const placeholder = loc(field.placeholder ?? "", field.placeholderEn, locale) || undefined;
+  const description = field.description ? loc(field.description, field.descriptionEn, locale) : undefined;
 
   const className = `w-full rounded-lg border bg-[#1a2840] px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-emerald-500/40 ${
     error ? "border-red-500/50" : "border-[#2a3d5e]"
@@ -25,7 +29,7 @@ export function TextInputControl({ field, error }: TextInputControlProps) {
         <textarea
           id={field.id}
           rows={5}
-          placeholder={field.placeholder}
+          placeholder={placeholder}
           value={value}
           onChange={(e) => setFieldValue(field.id, e.target.value)}
           className={className}
@@ -34,13 +38,13 @@ export function TextInputControl({ field, error }: TextInputControlProps) {
         <input
           id={field.id}
           type="text"
-          placeholder={field.placeholder}
+          placeholder={placeholder}
           value={value}
           onChange={(e) => setFieldValue(field.id, e.target.value)}
           className={className}
         />
       )}
-      {field.description && <p className="text-xs text-slate-500">{field.description}</p>}
+      {description && <p className="text-xs text-slate-500">{description}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );

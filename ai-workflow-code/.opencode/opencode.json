@@ -1,0 +1,10 @@
+{
+  "permission": {
+    "read": {
+      "/Volumes/AIWork/projects/ai-image-workbench/.opencode/get-shit-done/*": "allow"
+    },
+    "external_directory": {
+      "/Volumes/AIWork/projects/ai-image-workbench/.opencode/get-shit-done/*": "allow"
+    }
+  }
+}
