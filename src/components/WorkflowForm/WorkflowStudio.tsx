@@ -167,6 +167,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
 
   const enterStudio = useCallback(
     (sku: SkuDefinition) => {
+      if (sku.href) {
+        window.location.assign(sku.href);
+        return;
+      }
       applySku(sku);
       setActiveCategory(sku.category);
       setView("studio");

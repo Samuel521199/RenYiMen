@@ -20,6 +20,7 @@ const SKU_TO_PROVIDER: Record<string, string> = {
   KLING_PRO_I2V: "KLING_PRO",
   /** 阿里云百炼 DashScope 图生视频（异步），网关 `providerCode` 为 ALIYUN_BAILIAN */
   BAILIAN_WANX_I2V: "ALIYUN_BAILIAN",
+  BAILIAN_MULTI_REF_I2V: "ALIYUN_BAILIAN",
   /** 分镜生成出图（多图输出） */
   RH_STORYBOARD: "RUNNINGHUB_STORYBOARD",
   /** 提示词反推（图生文，Qwen3 VQA） */

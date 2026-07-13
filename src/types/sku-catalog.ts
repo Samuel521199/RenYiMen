@@ -1,9 +1,9 @@
 import type { WorkflowFormSchema } from "@/types/workflow";
 
-/** SKU 所属的创作功能大类 */
+/** SKU 鎵€灞炵殑鍒涗綔鍔熻兘澶х被 */
 export type SkuCategory = "prompt" | "image" | "video";
 
-/** 大厅可售 SKU（含动态表单 Schema） */
+/** 澶у巺鍙敭 SKU锛堝惈鍔ㄦ€佽〃鍗?Schema锛?*/
 export interface SkuDefinition {
   skuId: string;
   providerCode: string;
@@ -13,17 +13,19 @@ export interface SkuDefinition {
   displayNameEn?: string;
   /** English description */
   descriptionEn?: string;
-  /** 所属分类：prompt 提示词 / image 图片 / video 视频 */
+  /** 鎵€灞炲垎绫伙細prompt 鎻愮ず璇?/ image 鍥剧墖 / video 瑙嗛 */
   category: SkuCategory;
   /**
-   * 封面图路径（相对于 /public，如 /covers/sample-a.png）。
-   * 在画廊视图中展示为卡片封面，留空时显示类目渐变占位符。
-   * 替换封面时只需覆盖 public/covers/ 中对应文件即可，无需修改代码。
+   * 灏侀潰鍥捐矾寰勶紙鐩稿浜?/public锛屽 /covers/sample-a.png锛夈€?
+   * 鍦ㄧ敾寤婅鍥句腑灞曠ず涓哄崱鐗囧皝闈紝鐣欑┖鏃舵樉绀虹被鐩笎鍙樺崰浣嶇銆?
+   * 鏇挎崲灏侀潰鏃跺彧闇€瑕嗙洊 public/covers/ 涓搴旀枃浠跺嵆鍙紝鏃犻渶淇敼浠ｇ爜銆?
    */
   cover?: string;
-  /** 售价（积分），用于按钮与展示 */
+  /** 鍞环锛堢Н鍒嗭級锛岀敤浜庢寜閽笌灞曠ず */
   sellCredits: number;
-  /** 挂载到 DynamicForm 的 UI Schema */
+  /** Optional direct app entry. When present, the gallery card navigates to this route instead of opening DynamicForm. */
+  href?: string;
+  /** 鎸傝浇鍒?DynamicForm 鐨?UI Schema */
   uiSchema: WorkflowFormSchema;
 }
 

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 // frontend/components/layout/Sidebar.tsx
 import Link from "next/link";
@@ -136,7 +136,7 @@ export default function Sidebar() {
             }
             const hasChildren = children.length > 0;
             const childActive = children.some((child) => isSidebarItemActive(pathname, child.href));
-            const isActive = item.href ? pathname === item.href || childActive : childActive;
+            const isActive = item.href ? isSidebarItemActive(pathname, item.href) || childActive : childActive;
             const isOpen = Boolean(openGroups[item.label] || childActive);
 
             if (hasChildren) {
@@ -209,3 +209,4 @@ export default function Sidebar() {
     </aside>
   );
 }
+

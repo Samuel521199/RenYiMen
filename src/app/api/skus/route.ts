@@ -135,6 +135,20 @@ const CATALOG: SkuDefinition[] = [
   },
   // ── 视频 / Video ─────────────────────────────────────────────────
   {
+    skuId: "ONE_PROMPT_30S_VIDEO",
+    providerCode: "VIDEO_ORCHESTRATOR",
+    category: "video",
+    cover: "/covers/animated-cover.webp",
+    displayName: "一句话成片",
+    displayNameEn: "One Prompt 30s Video",
+    description:
+      "输入一句话，自动拆分 30s 分镜脚本，生成可审核关键帧，并预留逐镜头视频与最终合成流程。",
+    descriptionEn:
+      "Enter one prompt to generate an editable 30-second storyboard plan, review keyframes, then continue toward shot clips and final composition.",
+    sellCredits: 0,
+    href: "/workbench/tools/one-prompt-video",
+    uiSchema: textToImageWorkflowMock,
+  },  {
     skuId: "RH_VIDEO_ENHANCE",
     providerCode: "RUNNINGHUB_VIDEO_ENHANCE",
     category: "video",
