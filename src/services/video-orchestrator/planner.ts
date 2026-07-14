@@ -2,6 +2,8 @@ import type {
   OnePromptVideoPlan,
   PlanVideoProjectInput,
   VideoAspectRatio,
+  VideoPlanKeyframe,
+  VideoPlanSegment,
   VideoPlanShot,
   VideoStyleBible,
 } from "./types";
@@ -32,55 +34,23 @@ const STYLE_PRESETS: Record<string, Pick<VideoStyleBible, "visualStyle" | "color
   },
 };
 
-const SHOT_TEMPLATES = [
-  {
-    purpose: "建立主题和视觉氛围",
-    camera: "wide establishing shot, slow push-in",
-    action: "主角或产品进入画面，环境信息清晰出现",
-    subtitle: "故事从这一刻开始",
-  },
-  {
-    purpose: "展示核心对象和情绪",
-    camera: "medium shot, gentle lateral move",
-    action: "主角与产品发生第一次互动，情绪自然建立",
-    subtitle: "看见真正重要的细节",
-  },
-  {
-    purpose: "强调产品或事件的关键卖点",
-    camera: "close-up, controlled rack focus",
-    action: "镜头聚焦关键动作、质感或效果变化",
-    subtitle: "细节决定质感",
-  },
-  {
-    purpose: "制造转折和记忆点",
-    camera: "dynamic orbit shot, smooth handheld energy",
-    action: "场景节奏增强，角色动作更明确",
-    subtitle: "让画面有了情绪",
-  },
-  {
-    purpose: "呈现结果和高级感",
-    camera: "hero shot, slow tilt up",
-    action: "主角或产品以最完整、最有吸引力的状态出现",
-    subtitle: "好的状态自然被看见",
-  },
-  {
-    purpose: "完成收束和行动号召",
-    camera: "final lock-off shot, subtle zoom",
-    action: "画面回到品牌、产品或主题，形成清晰结尾",
-    subtitle: "现在就开始你的高光时刻",
-  },
-  {
-    purpose: "补充场景层次",
-    camera: "insert shot, slow pan",
-    action: "展示环境、道具、质感或辅助信息",
-    subtitle: "氛围让内容更可信",
-  },
-  {
-    purpose: "强化最终印象",
-    camera: "clean final close-up, soft push",
-    action: "用简洁画面留下最后记忆点",
-    subtitle: "把好印象留到最后",
-  },
+const KEYFRAME_PURPOSES = [
+  "建立场景与整体氛围",
+  "主角或核心产品正式出现",
+  "建立人与产品的第一次互动",
+  "突出关键卖点或情绪转折",
+  "呈现效果、质感或事件推进",
+  "强化品牌记忆点和完成感",
+  "收束主题并形成最终印象",
+];
+
+const SEGMENT_PURPOSES = [
+  "从环境建立过渡到主体出现",
+  "从主体出现过渡到互动发生",
+  "从互动动作过渡到关键卖点",
+  "从卖点展示过渡到效果呈现",
+  "从效果呈现过渡到品牌记忆点",
+  "从品牌记忆点过渡到最终收束画面",
 ];
 
 function clampInt(value: number, min: number, max: number): number {
@@ -110,10 +80,17 @@ function styleFromPreset(stylePreset?: string): VideoStyleBible {
   const preset = stylePreset && STYLE_PRESETS[stylePreset] ? STYLE_PRESETS[stylePreset] : STYLE_PRESETS.cinematic;
   return {
     visualStyle: preset.visualStyle,
-    characterLock: "keep the same main character, product identity, outfit, material, color, and lighting continuity across all shots",
+    characterLock: "keep the same main character identity, face, outfit, hairstyle, product identity, location, lighting, and visual style across all keyframes",
+    productLock: "keep the same product shape, material, label area, color, and premium finish",
     colorPalette: preset.colorPalette,
     negativePrompt: DEFAULT_NEGATIVE_PROMPT,
   };
+}
+
+function aspectHint(aspectRatio: VideoAspectRatio): string {
+  if (aspectRatio === "16:9") return "horizontal 16:9 frame";
+  if (aspectRatio === "1:1") return "square 1:1 frame";
+  return "vertical 9:16 frame";
 }
 
 function deriveTitle(prompt: string, stylePreset?: string): string {
@@ -123,74 +100,127 @@ function deriveTitle(prompt: string, stylePreset?: string): string {
   return `${prefix} ${suffix}`;
 }
 
-function buildShot(
-  input: PlanVideoProjectInput,
-  styleBible: VideoStyleBible,
-  shotNo: number,
-  durationSeconds: number,
-): VideoPlanShot {
-  const template = SHOT_TEMPLATES[(shotNo - 1) % SHOT_TEMPLATES.length];
-  const prompt = normalizeText(input.userPrompt, "制作一条高级感 30 秒短视频");
-  const aspectHint =
-    input.aspectRatio === "16:9"
-      ? "horizontal 16:9 frame"
-      : input.aspectRatio === "1:1"
-        ? "square 1:1 frame"
-        : "vertical 9:16 frame";
-  const continuity = `Shot ${shotNo} of a coherent ${input.durationSeconds}s video.`;
-  const base = `${continuity} ${aspectHint}. ${styleBible.visualStyle}. Theme: ${prompt}. Shot purpose: ${template.purpose}. Action: ${template.action}. Camera: ${template.camera}. Color palette: ${styleBible.colorPalette}.`;
-
-  return {
-    shotNo,
-    durationSeconds,
-    purpose: template.purpose,
-    camera: template.camera,
-    action: template.action,
-    imagePrompt: `静态关键帧：${template.purpose}。画面主体围绕“${prompt}”，${template.action}。构图参考 ${template.camera}，保持${styleBible.colorPalette}，不要出现文字、水印或标识。`,
-    imagePromptZh: `静态关键帧：${template.purpose}。画面主体围绕“${prompt}”，${template.action}。构图参考 ${template.camera}，保持${styleBible.colorPalette}，不要出现文字、水印或标识。`,
-    imagePromptEn: `${base} Generate a polished static keyframe with no visible text, no logo, no watermark.`,
-    videoPrompt: `视频运动：${template.action}。镜头采用 ${template.camera}，动作自然稳定，主体身份一致，节奏适合 ${durationSeconds} 秒片段。`,
-    videoPromptZh: `视频运动：${template.action}。镜头采用 ${template.camera}，动作自然稳定，主体身份一致，节奏适合 ${durationSeconds} 秒片段。`,
-    videoPromptEn: `${template.camera}. ${template.action}. Natural motion, stable subject identity, premium pacing, ${durationSeconds} seconds.`,
-    subtitle: template.subtitle,
-    negativePrompt: styleBible.negativePrompt,
-  };
+function keyframeTimes(total: number, segmentCount: number): number[] {
+  return Array.from({ length: segmentCount + 1 }, (_, index) => Math.round((total / segmentCount) * index));
 }
 
-function distributeDurations(total: number, count: number): number[] {
-  const base = Math.floor(total / count);
-  let rest = total - base * count;
-  return Array.from({ length: count }, () => {
-    const value = base + (rest > 0 ? 1 : 0);
-    rest -= 1;
-    return value;
+function buildKeyframes(input: PlanVideoProjectInput, styleBible: VideoStyleBible, prompt: string): VideoPlanKeyframe[] {
+  const times = keyframeTimes(input.durationSeconds, input.shotCount);
+  return times.map((timeSeconds, index) => {
+    const keyframeNo = index + 1;
+    const purpose = KEYFRAME_PURPOSES[index] ?? `关键帧 ${keyframeNo}`;
+    const baseEn = [
+      `Keyframe ${keyframeNo} at ${timeSeconds}s of a coherent 30s video.`,
+      aspectHint(input.aspectRatio),
+      styleBible.visualStyle,
+      `Theme: ${prompt}.`,
+      `Purpose: ${purpose}.`,
+      `Maintain continuity: ${styleBible.characterLock}.`,
+      `Product continuity: ${styleBible.productLock}.`,
+      `Color palette: ${styleBible.colorPalette}.`,
+      "Create a polished static boundary frame for first-and-last-frame video generation. No visible text, captions, watermark, UI, or logo artifacts.",
+    ].join(" ");
+    const zh = `第 ${keyframeNo} 个关键帧，时间点 ${timeSeconds}s。目的：${purpose}。围绕“${prompt}”生成一个可作为视频段边界的静态画面，保持人物、产品、场景、光线和风格连续。不要出现文字、水印或错误标识。`;
+    return {
+      keyframeNo,
+      timeSeconds,
+      purpose,
+      scene: purpose,
+      characterState: keyframeNo === 1 ? "主体尚未完全进入或处于建立氛围阶段" : "主体状态自然推进，身份保持一致",
+      productState: keyframeNo <= 2 ? "产品逐步出现并建立识别" : "产品形态、材质和颜色保持一致",
+      imagePrompt: zh,
+      imagePromptZh: zh,
+      imagePromptEn: baseEn,
+      negativePrompt: styleBible.negativePrompt,
+    };
+  });
+}
+
+function buildSegments(input: PlanVideoProjectInput, styleBible: VideoStyleBible, prompt: string): VideoPlanSegment[] {
+  const times = keyframeTimes(input.durationSeconds, input.shotCount);
+  return Array.from({ length: input.shotCount }, (_, index) => {
+    const segmentNo = index + 1;
+    const startTimeSeconds = times[index];
+    const endTimeSeconds = times[index + 1];
+    const durationSeconds = endTimeSeconds - startTimeSeconds;
+    const purpose = SEGMENT_PURPOSES[index] ?? `片段 ${segmentNo}`;
+    const camera = index === 0 ? "slow push-in, gentle parallax" : index === 5 ? "final subtle zoom and stable lock-off" : "smooth cinematic camera movement";
+    const subjectMotion = "natural subject motion with stable identity and consistent product handling";
+    const environmentMotion = "subtle ambient motion, soft fabric movement, gentle light and atmosphere changes";
+    const videoPromptEn = [
+      `Create segment ${segmentNo}, a smooth ${durationSeconds}-second transition from keyframe ${segmentNo} to keyframe ${segmentNo + 1}.`,
+      `Theme: ${prompt}.`,
+      `Purpose: ${purpose}.`,
+      `Camera: ${camera}.`,
+      `Subject motion: ${subjectMotion}.`,
+      `Environment motion: ${environmentMotion}.`,
+      "The first frame must match the start keyframe and the last frame must match the end keyframe.",
+      "Keep character, product, location, lighting, and style consistent. No sudden cuts, no identity drift, no visible text or watermark.",
+    ].join(" ");
+    const videoPromptZh = `片段 ${segmentNo}，从关键帧 ${segmentNo} 平滑过渡到关键帧 ${segmentNo + 1}，时长 ${durationSeconds} 秒。目的：${purpose}。运镜：${camera}。主体动作自然，环境轻微运动，首帧贴合起始关键帧，尾帧贴合结束关键帧，保持人物、产品、场景和光线一致。`;
+    return {
+      segmentNo,
+      startKeyframeNo: segmentNo,
+      endKeyframeNo: segmentNo + 1,
+      startTimeSeconds,
+      endTimeSeconds,
+      durationSeconds,
+      purpose,
+      motion: `${subjectMotion}; ${environmentMotion}`,
+      camera,
+      subjectMotion,
+      environmentMotion,
+      videoPrompt: videoPromptZh,
+      videoPromptZh,
+      videoPromptEn,
+      subtitle: "",
+      negativePrompt: styleBible.negativePrompt,
+    };
+  });
+}
+
+function segmentsToCompatShots(keyframes: VideoPlanKeyframe[], segments: VideoPlanSegment[]): VideoPlanShot[] {
+  return segments.map((segment) => {
+    const start = keyframes[segment.startKeyframeNo - 1];
+    return {
+      shotNo: segment.segmentNo,
+      durationSeconds: segment.durationSeconds,
+      purpose: segment.purpose,
+      camera: segment.camera,
+      action: segment.motion,
+      imagePrompt: start?.imagePrompt ?? "",
+      imagePromptZh: start?.imagePromptZh ?? start?.imagePrompt ?? "",
+      imagePromptEn: start?.imagePromptEn ?? start?.imagePrompt ?? "",
+      videoPrompt: segment.videoPrompt,
+      videoPromptZh: segment.videoPromptZh,
+      videoPromptEn: segment.videoPromptEn,
+      subtitle: segment.subtitle,
+      negativePrompt: segment.negativePrompt,
+    };
   });
 }
 
 export function createVideoPlan(input: PlanVideoProjectInput): OnePromptVideoPlan {
-  const durationSeconds = clampInt(input.durationSeconds, 15, 45);
-  const shotCount = clampInt(input.shotCount, 4, 8);
+  const durationSeconds = 30;
   const aspectRatio = normalizeAspectRatio(input.aspectRatio);
+  const shotCount = clampInt(input.shotCount, 2, 10);
   const prompt = normalizeText(input.userPrompt, "制作一条高级感 30 秒短视频");
   const styleBible = styleFromPreset(input.stylePreset);
-  const durations = distributeDurations(durationSeconds, shotCount);
-
-  const normalizedInput = {
-    ...input,
-    userPrompt: prompt,
-    aspectRatio,
-    durationSeconds,
-    shotCount,
-    referenceImageUrls: input.referenceImageUrls ?? [],
-  };
+  const normalizedInput = { ...input, userPrompt: prompt, aspectRatio, durationSeconds, shotCount };
+  const keyframes = buildKeyframes(normalizedInput, styleBible, prompt);
+  const segments = buildSegments(normalizedInput, styleBible, prompt);
 
   return {
     title: deriveTitle(prompt, input.stylePreset),
-    logline: `围绕“${prompt}”自动拆解为 ${shotCount} 个可审核镜头，先确认脚本和关键帧，再进入视频生成。`,
+    logline: `围绕“${prompt}”规划 7 个时间轴关键帧和 6 段首尾帧视频片段，先审核关键帧，再生成视频段并合成 30s 成片。`,
     durationSeconds,
     aspectRatio,
+    keyframeCount: keyframes.length,
+    segmentCount: segments.length,
     styleBible,
-    shots: durations.map((duration, index) => buildShot(normalizedInput, styleBible, index + 1, duration)),
+    keyframes,
+    segments,
+    shots: segmentsToCompatShots(keyframes, segments),
   };
 }
 
@@ -205,8 +235,8 @@ export function normalizePlanInput(input: {
   return {
     userPrompt: normalizeText(typeof input.userPrompt === "string" ? input.userPrompt : "", "制作一条高级感 30 秒短视频"),
     aspectRatio: normalizeAspectRatio(typeof input.aspectRatio === "string" ? input.aspectRatio : undefined),
-    durationSeconds: clampInt(typeof input.durationSeconds === "number" ? input.durationSeconds : 30, 15, 45),
-    shotCount: clampInt(typeof input.shotCount === "number" ? input.shotCount : 6, 4, 8),
+    durationSeconds: 30,
+    shotCount: clampInt(typeof input.shotCount === "number" ? input.shotCount : 6, 2, 10),
     stylePreset: typeof input.stylePreset === "string" ? input.stylePreset.trim() : "",
     referenceImageUrls: normalizeReferenceImageUrls(input.referenceImageUrls),
   };

@@ -2,121 +2,179 @@
 
 ## 1. 背景与目标
 
-当前网站已经具备“用户选择现有 SKU -> 提交上游 API -> 等待结果”的能力，也已经接入了图片、分镜、图生视频、视频增强等能力。但现在的问题是：
+当前网站已经具备“用户选择现有能力 -> 提交上游 API -> 等待结果”的基础能力，也已经接入了图片生成、图生视频、视频合成等能力。现在要升级的是“一句话成片”的生产方式：用户只输入一句话，系统自动完成剧本解析、关键帧规划、关键帧图片生成、分镜视频生成和最终 30s 合成。
 
-- 用户需要自己拆分镜头、自己写每个镜头提示词，门槛高。
-- 单个上游 API 的耗时长、排队不可控，用户只能等待，缺少中间可视化进度。
-- 出图、出视频、合成之间缺少统一编排，失败后不能局部重试。
-- 生成结果缺少审核点，用户不容易在成本投入前控制方向。
+新的核心要求是：
 
-目标是新增一条“**一句话到 30s 成片**”的长工作流：用户输入一句话，系统自动生成脚本、拆分镜头、生成分镜图片和提示词说明，用户可以逐镜头审核和调整，确认后系统生成单镜头视频并自动合成为完整 30s 视频。
+- 不再把每个关键帧当成一个镜头的中点。
+- 30s 视频固定拆成 6 段视频片段。
+- 系统先规划并生成 7 个关键帧，分别对应 30s 时间轴上的 7 个边界节点。
+- 第 1 段视频使用关键帧 1 作为首帧、关键帧 2 作为尾帧。
+- 第 2 段视频使用关键帧 2 作为首帧、关键帧 3 作为尾帧。
+- 依此类推，第 6 段视频使用关键帧 6 作为首帧、关键帧 7 作为尾帧。
 
-核心原则：**自动化负责提效，审核点负责可控，编排层负责恢复和重试。**
+也就是说，新方案是“关键帧作为首尾帧控制视频段”，而不是“关键帧作为单个镜头的中心画面”。
+
+这样做的好处：
+
+- 相邻镜头之间的视觉连续性更强。
+- 视频段生成更可控，每段都有明确起点和终点。
+- 用户审核的是完整时间轴节点，而不是孤立镜头画面。
+- 后续可以支持局部重生成：只要替换某个关键帧，就能影响它前后相邻的视频段。
+
+核心原则：
+
+**自动化负责提效，关键帧负责控制，首尾帧负责连续性，审核点负责可控。**
 
 ## 2. 推荐产品形态
 
-入口建议新增一个独立 SKU / 页面：
+入口建议保持为独立工具或 SKU：
 
 - 页面名称：`一句话成片`
 - SKU 示例：`ONE_PROMPT_30S_VIDEO`
 - providerCode 示例：`VIDEO_ORCHESTRATOR`
-- 默认输出：9:16，30 秒，6 个镜头，每镜头约 5 秒
-- 高级参数：镜头数量、视频比例、风格、节奏、角色一致性、是否自动生成字幕、是否自动加 BGM / Logo / CTA
+- 默认输出：30 秒，9:16，7 个关键帧，6 段视频，每段约 5 秒
+- 高级参数：视频比例、风格、节奏、参考图、角色一致性、是否自动生成字幕、是否自动加 BGM / Logo / CTA
 
 用户流程：
 
-1. 用户输入一句话，例如“做一条 30 秒国风护肤品广告，主角在清晨庭院使用产品，质感高级。”
-2. 系统生成 `创意大纲 + 6 个镜头脚本 + 每镜头提示词 + 负面提示词 + 镜头时长`。
-3. 用户审核脚本，可以一键接受，也可以改某个镜头。
-4. 系统生成每个镜头的关键帧图片，展示为分镜板。
-5. 用户审核图片，可以替换图片、重生成单镜头、锁定满意镜头。
-6. 用户确认后，系统按镜头生成短视频片段。
-7. 系统自动质检每个片段，失败或低分片段单独重试。
-8. 系统按时间轴合成 30s 视频，叠加字幕、BGM、Logo、转场。
-9. 用户预览成片，可以局部返工或导出。
+1. 用户输入一句话，例如：“做一条 30 秒国风护肤品广告，主角在清晨庭院使用产品，质感高级。”
+2. 用户可上传产品、人物、场景或风格参考图。
+3. 系统解析创意，生成：
+   - 创意大纲
+   - 7 个关键帧节点
+   - 每个关键帧的图片生成提示词
+   - 6 段视频片段规划
+   - 每段视频的首帧、尾帧和视频生成提示词
+4. 用户审核剧本和关键帧规划。
+5. 系统生成 7 张关键帧图片。
+6. 用户审核关键帧图片，可替换、重生成、锁定任意关键帧。
+7. 用户确认关键帧后，系统按相邻关键帧生成 6 段视频：
+   - 片段 1：关键帧 01 -> 关键帧 02
+   - 片段 2：关键帧 02 -> 关键帧 03
+   - 片段 3：关键帧 03 -> 关键帧 04
+   - 片段 4：关键帧 04 -> 关键帧 05
+   - 片段 5：关键帧 05 -> 关键帧 06
+   - 片段 6：关键帧 06 -> 关键帧 07
+8. 用户审核 6 段视频片段，可单段重试。
+9. 系统合成完整 30s 视频，叠加字幕、BGM、Logo、转场等。
+10. 用户预览成片，可局部返工或导出。
 
 ## 3. 总体架构
 
-不要把这件事做成一个“更大的 provider adapter”。建议新增一个业务编排层，负责把多个现有上游能力串起来，并保存每个中间产物。
+不要把这件事做成一个更大的 provider adapter。建议新增业务编排层 `VideoOrchestrator`，负责把 LLM 规划、图片生成、首尾帧视频生成、视频合成串起来，并保存每一步中间产物。
 
 ```mermaid
 flowchart TD
-  A["用户一句话"] --> B["项目编排器 VideoOrchestrator"]
-  B --> C["LLM: 创意理解与分镜拆解"]
-  C --> D["脚本审核点"]
-  D --> E["图片生成: 每镜头关键帧"]
-  E --> F["分镜图片审核点"]
-  F --> G["图生视频: 每镜头 4-6s 片段"]
-  G --> H["质量检测与自动重试"]
-  H --> I["FFmpeg / 后处理服务: 拼接、字幕、音频、Logo"]
+  A["用户一句话 + 可选参考图"] --> B["VideoOrchestrator 项目编排器"]
+  B --> C["LLM Planner: 剧本解析 + 7 个关键帧 + 6 段首尾帧视频规划"]
+  C --> D["剧本与关键帧计划审核"]
+  D --> E["图片生成: 7 个关键帧"]
+  E --> F["关键帧图片审核"]
+  F --> G["首尾帧视频生成: 6 段视频"]
+  G --> H["片段质检与单段重试"]
+  H --> I["视频合成: 6 段拼接 + 字幕/BGM/Logo"]
   I --> J["30s 成片预览与导出"]
 ```
 
-建议复用现有能力：
+关键实体：
 
-- 分镜出图：已有 `RH_STORYBOARD` / `RUNNINGHUB_STORYBOARD`，可作为早期版本的批量分镜图生成能力。
-- 单镜视频：复用现有 Kling / Bailian / RunningHub 图生视频适配器。
-- 任务状态：复用现有 `/api/gateway/generate` 和 `/api/gateway/task/[taskId]` 的上游任务创建与轮询思路。
-- 视频工作台：复用 `src/workbench/lib/video-workflow.ts` 中已有的草稿、精品、后处理、自动保存概念。
+- `VideoProject`：一次“一句话成片”项目。
+- `VideoKeyframe`：时间轴关键帧节点，共 7 个。
+- `VideoSegment`：由相邻两个关键帧生成的视频段，共 6 段。
+- `VideoRender`：最终成片合成任务。
+- `LLM Planner`：把一句话和参考图转成结构化 JSON。
+- `Quality Judge`：对关键帧、片段、最终视频做质量评估。
 
-新增能力：
+## 4. 核心数据关系
 
-- `VideoOrchestrator`：长工作流编排器。
-- `VideoProject`：一次“一句话成片”的项目。
-- `VideoShot`：单个镜头，包含脚本、提示词、关键帧、视频片段、状态。
-- `VideoRender`：最终合成任务。
-- `LLM Planner`：把一句话转成结构化分镜 JSON。
-- `Quality Judge`：对图片、视频片段、最终视频做自动评分和返工建议。
+旧方案中，一个 `VideoShot` 同时承担“镜头脚本、关键帧图片、视频片段”的职责。新方案建议拆成两个概念：
 
-## 4. 工作流状态机
+- `VideoKeyframe`：负责画面节点。
+- `VideoSegment`：负责两个节点之间的视频运动。
 
-一次项目不要只有 `PENDING / SUCCESS / FAILED` 三种状态，应该拆成可恢复的阶段。
+时间轴示意：
+
+```text
+0s       5s       10s      15s      20s      25s      30s
+KF01 --> KF02 --> KF03 --> KF04 --> KF05 --> KF06 --> KF07
+   S01      S02      S03      S04      S05      S06
+```
+
+关系说明：
+
+| 对象 | 数量 | 作用 |
+| --- | --- | --- |
+| `VideoProject` | 1 | 保存用户输入、项目参数、总状态 |
+| `VideoKeyframe` | 7 | 保存关键帧目的、画面描述、图片 prompt、图片 URL |
+| `VideoSegment` | 6 | 保存起始关键帧、结束关键帧、视频 prompt、视频 URL |
+
+每个视频片段都应引用两个关键帧：
+
+```text
+segment.startKeyframeId
+segment.endKeyframeId
+```
+
+这样后续如果用户重生成 `KF03`，系统可以标记：
+
+- `S02: KF02 -> KF03` 需要重生成
+- `S03: KF03 -> KF04` 需要重生成
+
+而其他片段不受影响。
+
+## 5. 工作流状态机
 
 项目级状态：
 
 | 状态 | 含义 | 用户可操作 |
 | --- | --- | --- |
-| `DRAFT` | 用户刚创建项目，还没提交规划 | 编辑输入 |
-| `PLANNING` | 正在生成脚本和分镜计划 | 等待 |
-| `PLAN_REVIEW` | 等待用户审核分镜计划 | 修改、确认、重生成 |
-| `IMAGE_GENERATING` | 正在生成镜头关键帧 | 查看进度 |
-| `IMAGE_REVIEW` | 等待用户审核关键帧 | 单张重生成、替换、锁定 |
-| `CLIP_GENERATING` | 正在生成单镜头视频 | 查看每镜头进度 |
-| `CLIP_REVIEW` | 等待用户审核视频片段 | 单镜头重试、确认 |
-| `COMPOSING` | 正在合成完整视频 | 等待 |
+| `DRAFT` | 用户刚创建项目，还没提交规划 | 编辑输入、上传参考图 |
+| `PLANNING` | 正在生成剧本、关键帧和片段规划 | 等待 |
+| `PLAN_REVIEW` | 等待用户审核规划 | 修改、确认、重生成 |
+| `KEYFRAME_GENERATING` | 正在生成 7 张关键帧 | 查看进度 |
+| `KEYFRAME_REVIEW` | 等待用户审核关键帧 | 重生成、替换、锁定 |
+| `SEGMENT_GENERATING` | 正在生成 6 段首尾帧视频 | 查看每段进度 |
+| `SEGMENT_REVIEW` | 等待用户审核视频片段 | 单段重试、确认 |
+| `COMPOSING` | 正在合成 30s 成片 | 等待 |
 | `FINAL_REVIEW` | 成片可预览 | 导出、返工 |
 | `DONE` | 已导出或归档 | 查看、下载 |
 | `FAILED` | 项目不可自动继续 | 查看失败原因、恢复 |
 
-镜头级状态：
+关键帧级状态：
 
 | 状态 | 含义 |
 | --- | --- |
-| `SCRIPT_READY` | 镜头脚本已生成 |
-| `IMAGE_PENDING` | 等待生成关键帧 |
-| `IMAGE_RUNNING` | 关键帧生成中 |
-| `IMAGE_READY` | 关键帧可审核 |
-| `IMAGE_APPROVED` | 关键帧已锁定 |
-| `CLIP_PENDING` | 等待生成视频片段 |
-| `CLIP_RUNNING` | 视频片段生成中 |
-| `CLIP_READY` | 视频片段可审核 |
-| `CLIP_APPROVED` | 视频片段已锁定 |
-| `FAILED` | 当前镜头失败，可单独重试 |
+| `SCRIPT_READY` | 关键帧描述和 prompt 已生成 |
+| `IMAGE_PENDING` | 等待生成图片 |
+| `IMAGE_RUNNING` | 图片生成中 |
+| `IMAGE_READY` | 图片可审核 |
+| `IMAGE_APPROVED` | 图片已锁定 |
+| `FAILED` | 当前关键帧失败，可单独重试 |
 
-关键点：**项目状态用于页面大流程，镜头状态用于局部重试和并发控制。**
+视频段级状态：
 
-## 5. LLM 分镜规划
+| 状态 | 含义 |
+| --- | --- |
+| `SEGMENT_PENDING` | 等待生成 |
+| `SEGMENT_RUNNING` | 首尾帧视频生成中 |
+| `SEGMENT_READY` | 视频片段可审核 |
+| `SEGMENT_APPROVED` | 视频片段已确认 |
+| `FAILED` | 当前片段失败，可单独重试 |
 
-第一步不要直接出图，而是先让 LLM 输出结构化 JSON。这样用户能在花大成本前审核方向。
+## 6. LLM 剧本与首尾帧规划
+
+第一步不直接出图，而是让 LLM 输出结构化 JSON。新方案里，LLM 不只要生成每个关键帧图片提示词，还要规划好每两个关键帧之间的视频生成提示词。
 
 输入：
 
 - 用户一句话
-- 目标时长，默认 30 秒
-- 镜头数量，默认 6 个
-- 视频比例，默认 9:16
+- 可选参考图
+- 目标时长：默认 30 秒
+- 关键帧数量：固定 7 个
+- 视频片段数量：固定 6 段
+- 视频比例：默认 9:16
 - 风格偏好
-- 品牌 / 产品 / 角色参考图，可选
 - 禁止项，例如不要文字水印、不要血腥、不要品牌露出错误
 
 输出结构建议：
@@ -127,432 +185,500 @@ flowchart TD
   "logline": "主角在清晨庭院完成护肤仪式，突出东方美学与高级质感。",
   "durationSeconds": 30,
   "aspectRatio": "9:16",
+  "keyframeCount": 7,
+  "segmentCount": 6,
   "styleBible": {
     "visualStyle": "cinematic, elegant Chinese courtyard, soft morning light",
     "characterLock": "same female lead, same face, same outfit, same hairstyle",
+    "productLock": "same skincare bottle, jade green ceramic texture, gold details",
     "colorPalette": "jade green, ivory white, warm gold",
     "negativePrompt": "logo distortion, watermark, extra fingers, text artifacts"
   },
-  "shots": [
+  "keyframes": [
     {
-      "shotNo": 1,
+      "keyframeNo": 1,
+      "timeSeconds": 0,
+      "purpose": "建立清晨庭院氛围",
+      "scene": "清晨薄雾中的中式庭院，竹影和亭台构成高级东方背景",
+      "characterState": "主角尚未入画或远处轻步入画",
+      "productState": "产品可作为远景道具轻微出现",
+      "imagePrompt": "vertical 9:16 cinematic keyframe, elegant Chinese courtyard at dawn, bamboo shadows, soft morning mist, premium skincare ad mood...",
+      "negativePrompt": "watermark, random text, logo distortion, blurry face"
+    },
+    {
+      "keyframeNo": 2,
+      "timeSeconds": 5,
+      "purpose": "主角与产品建立关系",
+      "scene": "主角站在庭院石桌旁，产品清晰可见",
+      "characterState": "主角手持护肤品，动作自然优雅",
+      "productState": "产品瓶身正面清晰，质感高级",
+      "imagePrompt": "vertical 9:16 cinematic keyframe, same female lead holding jade green skincare bottle near stone table..."
+    }
+  ],
+  "segments": [
+    {
+      "segmentNo": 1,
+      "startTimeSeconds": 0,
+      "endTimeSeconds": 5,
       "durationSeconds": 5,
-      "purpose": "建立场景与高级氛围",
-      "camera": "slow push-in, wide shot",
-      "action": "主角走入清晨庭院，手持护肤品",
-      "imagePrompt": "vertical cinematic keyframe ...",
-      "videoPrompt": "slow push-in, gentle fabric movement ...",
-      "subtitle": "清晨，从一抹东方光影开始",
-      "negativePrompt": "watermark, text, blurry face"
+      "startKeyframeNo": 1,
+      "endKeyframeNo": 2,
+      "purpose": "从环境建立过渡到主角与产品出现",
+      "motion": "slow push-in from courtyard atmosphere to the lead near the stone table",
+      "camera": "slow push-in, gentle parallax, stable cinematic movement",
+      "subjectMotion": "the female lead slowly enters or turns toward the product",
+      "environmentMotion": "morning mist drifts gently, bamboo leaves sway slightly",
+      "videoPrompt": "Create a smooth 5-second transition from keyframe 1 to keyframe 2. Keep same courtyard, same lighting, same product identity. Slow push-in, gentle bamboo movement, natural fabric motion, premium advertising pacing.",
+      "negativePrompt": "identity drift, product deformation, sudden camera shake, extra text, watermark"
     }
   ]
 }
 ```
 
-LLM 输出后必须做服务端校验：
+服务端校验规则：
 
-- 总时长必须等于目标时长，允许误差不超过 1 秒。
-- 镜头数量在 4 到 8 之间。
-- 每个镜头必须有 `imagePrompt`、`videoPrompt`、`durationSeconds`。
-- 自动追加统一的 `characterLock`、`styleBible`、安全负面词。
-- 中文输入可以保留中文说明，但给上游图像 / 视频模型的 prompt 建议转换成英文或中英混合，减少模型歧义。
+- `keyframes.length` 必须等于 7。
+- `segments.length` 必须等于 6。
+- 第 1 个关键帧 `timeSeconds = 0`，第 7 个关键帧 `timeSeconds = 30`。
+- 每个 `segments[i].startKeyframeNo = i`。
+- 每个 `segments[i].endKeyframeNo = i + 1`。
+- 所有片段时长总和必须等于 30 秒。
+- 每个关键帧必须有 `imagePrompt`。
+- 每个视频段必须有 `videoPrompt`、`startKeyframeNo`、`endKeyframeNo`、`durationSeconds`。
+- 中文说明可保留中文，但给图片 / 视频模型的 prompt 建议使用英文或中英混合。
 
-## 6. 可控与可调节设计
+## 7. 图片生成阶段
 
-要让用户觉得“系统在帮我做”，而不是“系统把我锁死”。建议把控制点分成三层。
+图片生成阶段的对象从“6 个镜头图”改为“7 个关键帧图”。
+
+生成规则：
+
+- 依次或并发生成 `KF01` 到 `KF07`。
+- 每张图都使用对应的 `keyframes[i].imagePrompt`。
+- 每张图都带统一的 `styleBible`、`characterLock`、`productLock` 和负面提示词。
+- 如果用户上传了参考图，参考图应影响所有关键帧。
+
+用户审核重点：
+
+- 角色是否一致。
+- 产品是否一致。
+- 场景时间线是否合理。
+- 相邻关键帧之间是否能自然过渡。
+- 是否有明显文字、水印、畸形、品牌错误。
+
+用户操作：
+
+- 重生成单个关键帧。
+- 上传自己的图片替换某个关键帧。
+- 锁定满意的关键帧。
+- 修改关键帧 prompt 后重生成。
+
+## 8. 首尾帧视频生成阶段
+
+视频生成阶段的对象是 6 个 `VideoSegment`。
+
+每段视频必须使用：
+
+- 起始关键帧图片：`startKeyframe.imageUrl`
+- 结束关键帧图片：`endKeyframe.imageUrl`
+- 当前片段的视频提示词：`segment.videoPrompt`
+- 当前片段时长：默认 5 秒
+
+片段生成示例：
+
+| 片段 | 首帧 | 尾帧 | 时长 |
+| --- | --- | --- | --- |
+| `S01` | `KF01` | `KF02` | 5s |
+| `S02` | `KF02` | `KF03` | 5s |
+| `S03` | `KF03` | `KF04` | 5s |
+| `S04` | `KF04` | `KF05` | 5s |
+| `S05` | `KF05` | `KF06` | 5s |
+| `S06` | `KF06` | `KF07` | 5s |
+
+对上游模型的能力要求：
+
+- 优先选择支持“首尾帧图生视频”的模型。
+- 如果某个模型只支持单首帧图生视频，则不适合作为本方案的主链路，只能作为降级方案。
+- 视频 prompt 应描述从首帧到尾帧之间的动作、运镜、环境变化和节奏，而不是只描述单个画面。
+
+用户审核重点：
+
+- 首帧是否接近起始关键帧。
+- 尾帧是否接近结束关键帧。
+- 运动是否自然。
+- 角色和产品是否漂移。
+- 相邻片段拼接是否突兀。
+
+## 9. 可控与可调节设计
 
 项目级控制：
 
-- 总时长：15s / 30s / 45s，MVP 只做 30s。
-- 镜头数量：4 / 6 / 8，MVP 默认 6。
-- 风格：电影感、广告片、短剧、产品展示、新闻口播、国风、电商种草。
-- 比例：9:16 / 16:9 / 1:1。
-- 自动模式：自动生成到最终成片，中间只在失败或低分时提醒。
+- 总时长：MVP 固定 30s。
+- 关键帧数量：MVP 固定 7。
+- 视频段数量：MVP 固定 6。
+- 视频比例：9:16 / 16:9 / 1:1。
+- 风格：电影感、广告片、短剧、产品展示、国风、电商种草等。
 - 审核模式：每个阶段都需要用户确认。
+- 自动模式：后续可支持一路生成到成片。
 
-镜头级控制：
+关键帧级控制：
 
-- 修改镜头说明。
-- 修改图片 prompt / 视频 prompt。
-- 调整时长。
-- 锁定镜头，锁定后重生成其他镜头不影响它。
-- 单独重生成图片。
-- 单独重生成视频片段。
-- 上传自己的关键帧替换 AI 出图。
+- 修改关键帧目的。
+- 修改图片 prompt。
+- 重生成关键帧。
+- 上传图片替换关键帧。
+- 锁定关键帧。
 
-质量级控制：
+片段级控制：
 
-- 质量阈值，例如 75 分以下自动建议重试。
-- 角色一致性开关。
-- 产品一致性开关。
-- 文本干净度检查，避免画面出现乱码文字。
-- 运动幅度：轻微、自然、强运动。
-- 成本上限：超过预计积分前二次确认。
+- 修改视频 prompt。
+- 调整片段动作、运镜、节奏。
+- 单独重生成某个片段。
+- 下载单个片段视频。
+- 锁定满意片段。
 
-## 7. 关键技术实现
+联动规则：
 
-### 7.1 编排层
+- 修改 `KF03` 后，应提示 `S02` 和 `S03` 可能需要重生成。
+- 修改 `S03.videoPrompt` 只影响 `S03`。
+- 锁定关键帧后，除非用户手动解锁，否则不应被自动重生成。
+- 锁定片段后，最终合成直接使用该片段。
 
-建议新增目录：
+## 10. 数据库模型建议
 
-```text
-src/services/video-orchestrator/
-  planner.ts
-  project-service.ts
-  shot-service.ts
-  queue.ts
-  quality-judge.ts
-  composer.ts
-  types.ts
-```
-
-职责：
-
-- `planner.ts`：调用 LLM，把一句话转成结构化分镜。
-- `project-service.ts`：创建项目、更新项目状态、恢复项目。
-- `shot-service.ts`：提交单镜头图片 / 视频任务，保存结果。
-- `queue.ts`：控制并发、重试、超时、取消。
-- `quality-judge.ts`：对图片、视频片段、最终成片评分。
-- `composer.ts`：调用合成服务，拼接片段并叠加字幕、音频、Logo。
-
-实现上可以先用数据库轮询任务表，后续再换 BullMQ / Redis 队列。MVP 不建议一开始引入太重的分布式工作流引擎，先把状态和幂等做好。
-
-### 7.2 数据库模型
-
-建议新增 Prisma 模型，命名可按项目习惯调整。
+建议从 `VideoShot` 单表逐步升级为 `VideoKeyframe` + `VideoSegment`。
 
 ```prisma
 enum VideoProjectStatus {
   DRAFT
   PLANNING
   PLAN_REVIEW
-  IMAGE_GENERATING
-  IMAGE_REVIEW
-  CLIP_GENERATING
-  CLIP_REVIEW
+  KEYFRAME_GENERATING
+  KEYFRAME_REVIEW
+  SEGMENT_GENERATING
+  SEGMENT_REVIEW
   COMPOSING
   FINAL_REVIEW
   DONE
   FAILED
 }
 
-enum VideoShotStatus {
+enum VideoKeyframeStatus {
   SCRIPT_READY
   IMAGE_PENDING
   IMAGE_RUNNING
   IMAGE_READY
   IMAGE_APPROVED
-  CLIP_PENDING
-  CLIP_RUNNING
-  CLIP_READY
-  CLIP_APPROVED
+  FAILED
+}
+
+enum VideoSegmentStatus {
+  SEGMENT_PENDING
+  SEGMENT_RUNNING
+  SEGMENT_READY
+  SEGMENT_APPROVED
   FAILED
 }
 
 model VideoProject {
-  id              String             @id @default(cuid())
-  userId          String             @map("user_id")
-  status          VideoProjectStatus @default(DRAFT)
-  title           String             @default("")
-  userPrompt      String             @map("user_prompt") @db.Text
-  planJson        Json?              @map("plan_json")
-  aspectRatio     String             @default("9:16") @map("aspect_ratio")
-  durationSeconds Int                @default(30) @map("duration_seconds")
-  stylePreset     String             @default("") @map("style_preset")
-  finalVideoUrl   String?            @map("final_video_url") @db.Text
-  errorMessage    String?            @map("error_message") @db.Text
-  createdAt       DateTime           @default(now()) @map("created_at")
-  updatedAt       DateTime           @updatedAt @map("updated_at")
+  id                 String             @id @default(cuid())
+  userId             String             @map("user_id")
+  status             VideoProjectStatus @default(DRAFT)
+  title              String             @default("")
+  userPrompt         String             @map("user_prompt") @db.Text
+  referenceImageUrls Json               @default("[]") @map("reference_image_urls")
+  planJson           Json?              @map("plan_json")
+  aspectRatio        String             @default("9:16") @map("aspect_ratio")
+  durationSeconds    Int                @default(30) @map("duration_seconds")
+  stylePreset        String             @default("") @map("style_preset")
+  finalVideoUrl      String?            @map("final_video_url") @db.Text
+  composeTaskId      String?            @map("compose_task_id")
+  errorMessage       String?            @map("error_message") @db.Text
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
 
-  shots VideoShot[]
+  keyframes VideoKeyframe[]
+  segments  VideoSegment[]
 
   @@index([userId, createdAt])
   @@map("video_projects")
 }
 
-model VideoShot {
-  id                 String          @id @default(cuid())
-  projectId          String          @map("project_id")
-  shotNo             Int             @map("shot_no")
-  status             VideoShotStatus @default(SCRIPT_READY)
-  durationSeconds    Int             @default(5) @map("duration_seconds")
-  purpose            String          @default("") @db.Text
-  camera             String          @default("") @db.Text
-  action             String          @default("") @db.Text
-  imagePrompt        String          @map("image_prompt") @db.Text
-  videoPrompt        String          @map("video_prompt") @db.Text
-  negativePrompt     String          @default("") @map("negative_prompt") @db.Text
-  subtitle           String          @default("") @db.Text
-  imageUrl           String?         @map("image_url") @db.Text
-  clipUrl            String?         @map("clip_url") @db.Text
-  imageTaskId        String?         @map("image_task_id")
-  clipTaskId         String?         @map("clip_task_id")
-  qualityScore       Int?            @map("quality_score")
-  errorMessage       String?         @map("error_message") @db.Text
-  locked             Boolean         @default(false)
-  createdAt          DateTime        @default(now()) @map("created_at")
-  updatedAt          DateTime        @updatedAt @map("updated_at")
+model VideoKeyframe {
+  id              String              @id @default(cuid())
+  projectId       String              @map("project_id")
+  keyframeNo      Int                 @map("keyframe_no")
+  timeSeconds     Int                 @map("time_seconds")
+  status          VideoKeyframeStatus @default(SCRIPT_READY)
+  purpose         String              @default("") @db.Text
+  scene           String              @default("") @db.Text
+  characterState  String              @default("") @map("character_state") @db.Text
+  productState    String              @default("") @map("product_state") @db.Text
+  imagePrompt     String              @map("image_prompt") @db.Text
+  negativePrompt  String              @default("") @map("negative_prompt") @db.Text
+  imageUrl        String?             @map("image_url") @db.Text
+  imageTaskId     String?             @map("image_task_id")
+  qualityScore    Int?                @map("quality_score")
+  errorMessage    String?             @map("error_message") @db.Text
+  locked          Boolean             @default(false)
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
 
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  @@unique([projectId, shotNo])
+  @@unique([projectId, keyframeNo])
   @@index([projectId, status])
-  @@map("video_shots")
+  @@map("video_keyframes")
+}
+
+model VideoSegment {
+  id                 String             @id @default(cuid())
+  projectId          String             @map("project_id")
+  segmentNo          Int                @map("segment_no")
+  status             VideoSegmentStatus @default(SEGMENT_PENDING)
+  startKeyframeNo    Int                @map("start_keyframe_no")
+  endKeyframeNo      Int                @map("end_keyframe_no")
+  startTimeSeconds   Int                @map("start_time_seconds")
+  endTimeSeconds     Int                @map("end_time_seconds")
+  durationSeconds    Int                @default(5) @map("duration_seconds")
+  purpose            String             @default("") @db.Text
+  motion             String             @default("") @db.Text
+  camera             String             @default("") @db.Text
+  subjectMotion      String             @default("") @map("subject_motion") @db.Text
+  environmentMotion  String             @default("") @map("environment_motion") @db.Text
+  videoPrompt        String             @map("video_prompt") @db.Text
+  negativePrompt     String             @default("") @map("negative_prompt") @db.Text
+  clipUrl            String?            @map("clip_url") @db.Text
+  clipTaskId         String?            @map("clip_task_id")
+  qualityScore       Int?               @map("quality_score")
+  errorMessage       String?            @map("error_message") @db.Text
+  locked             Boolean            @default(false)
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, segmentNo])
+  @@index([projectId, status])
+  @@map("video_segments")
 }
 ```
 
-后续如果要做更细的审计和恢复，可以再加 `VideoProjectEvent`，记录每次状态变化、用户修改、自动重试、扣费动作。
+如果为了兼容当前代码，也可以短期保留 `VideoShot`，把它解释为 `VideoSegment`，同时新增 `VideoKeyframe`。但从长期设计看，关键帧和片段应该分表。
 
-### 7.3 API 设计
-
-建议新增项目级 API，不要让前端自己串多个 `/gateway/generate`。
+## 11. API 设计建议
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/video-projects` | 创建项目，保存用户一句话与参数 |
-| `POST` | `/api/video-projects/[id]/plan` | 生成或重生成分镜计划 |
-| `PATCH` | `/api/video-projects/[id]/plan` | 用户编辑分镜计划 |
-| `POST` | `/api/video-projects/[id]/approve-plan` | 确认脚本，进入出图阶段 |
-| `POST` | `/api/video-projects/[id]/shots/[shotId]/image` | 生成或重生成单镜头图片 |
-| `PATCH` | `/api/video-projects/[id]/shots/[shotId]` | 修改单镜头脚本、prompt、锁定状态 |
-| `POST` | `/api/video-projects/[id]/approve-images` | 确认关键帧，进入视频片段阶段 |
-| `POST` | `/api/video-projects/[id]/shots/[shotId]/clip` | 生成或重生成单镜头视频 |
-| `POST` | `/api/video-projects/[id]/approve-clips` | 确认片段，进入合成阶段 |
+| `POST` | `/api/video-projects` | 创建项目，保存用户一句话、参考图和参数 |
+| `POST` | `/api/video-projects/[id]/plan` | 生成或重生成剧本、7 个关键帧、6 个片段规划 |
+| `PATCH` | `/api/video-projects/[id]/plan` | 用户编辑规划 |
+| `POST` | `/api/video-projects/[id]/approve-plan` | 确认规划，进入关键帧图片生成 |
+| `POST` | `/api/video-projects/[id]/keyframes/[keyframeId]/image` | 生成或重生成单个关键帧 |
+| `PATCH` | `/api/video-projects/[id]/keyframes/[keyframeId]` | 修改关键帧描述、prompt、锁定状态 |
+| `POST` | `/api/video-projects/[id]/approve-keyframes` | 确认 7 个关键帧，进入视频片段生成 |
+| `POST` | `/api/video-projects/[id]/segments/[segmentId]/clip` | 生成或重生成单个首尾帧视频片段 |
+| `PATCH` | `/api/video-projects/[id]/segments/[segmentId]` | 修改片段 prompt、锁定状态 |
+| `GET` | `/api/video-projects/[id]/segments/[segmentId]/download` | 下载单段视频 |
+| `POST` | `/api/video-projects/[id]/approve-segments` | 确认 6 个片段，进入合成阶段 |
 | `POST` | `/api/video-projects/[id]/compose` | 合成最终 30s 视频 |
-| `GET` | `/api/video-projects/[id]` | 获取项目、镜头、任务状态 |
+| `GET` | `/api/video-projects/[id]` | 获取项目、关键帧、片段和任务状态 |
+| `POST` | `/api/video-projects/[id]/sync` | 同步上游任务状态 |
 
 长任务执行方式：
 
 - API 只负责创建任务和推进状态，不阻塞等待所有上游完成。
-- 前端轮询 `GET /api/video-projects/[id]`。
-- 服务端 worker 扫描 `*_PENDING` 或 `*_RUNNING` 状态，提交上游或查询上游。
-- 每个子任务必须有幂等键，例如 `projectId + shotId + stage + attemptNo`。
+- 前端轮询项目详情或 sync 接口。
+- 服务端 worker 扫描 `*_PENDING` 和 `*_RUNNING` 状态。
+- 每个任务必须有幂等键，例如 `projectId + keyframeId + stage + attemptNo`。
 
-### 7.4 上游 provider 编排
+## 12. 上游模型编排
 
-建议保持现有 adapter 边界：
+推荐能力选择：
 
-- 文生图 / 分镜图：通过 `getProviderAdapter` 调已有图片能力，或新增专用 `RUNNINGHUB_SHOT_IMAGE`。
-- 图生视频：通过 `KLING_STD`、`KLING_PRO`、`ALIYUN_BAILIAN` 或 RunningHub 视频工作流。
-- 合成：不建议走 RunningHub，建议本地或独立后处理服务调用 FFmpeg，成本低且可控。
+| 环节 | 能力要求 |
+| --- | --- |
+| 剧本解析与规划 | 支持文本 + 可选参考图理解的多模态 LLM |
+| 关键帧图片生成 | 高质量文生图 / 图文生图 |
+| 视频片段生成 | 必须优先支持首尾帧图生视频 |
+| 最终合成 | IMS / FFmpeg / 独立视频后处理服务 |
 
-合成服务负责：
+视频片段生成请求应包含：
 
-- 按 shotNo 排序拼接片段。
-- 不足时长的片段补帧或轻微慢放。
-- 超长片段裁剪到镜头时长。
-- 添加交叉淡入淡出或硬切。
-- 叠加字幕。
-- 添加 BGM，做简单 ducking。
-- 添加 Logo / CTA。
-- 输出最终 mp4，并上传 OSS。
-
-### 7.5 并发与成本控制
-
-建议并发策略：
-
-- 单用户最多 1 个 `CLIP_GENERATING` 项目。
-- 单项目图片生成并发 2 到 3 个镜头。
-- 单项目视频片段生成并发 1 到 2 个镜头。
-- 失败自动重试最多 2 次。
-- 用户锁定的镜头不再重生成，避免浪费成本。
-
-扣费策略：
-
-- 创建项目时只预估成本，不立即扣完整费用。
-- 进入出图阶段前提示预计图片成本。
-- 进入视频阶段前提示预计视频成本，这是成本大头。
-- 每个上游任务成功后按实际 SKU 扣费。
-- 失败不扣费或只扣已成功阶段费用，具体按现有计费规则保持一致。
-- 最终合成可作为固定低成本 SKU。
-
-用户体验上必须显示：
-
-- 当前阶段。
-- 每个镜头状态。
-- 已花费积分。
-- 预计剩余积分。
-- 哪些镜头失败、哪些镜头已锁定。
-- 当前等待原因：排队中、上游处理中、合成中、重试中。
-
-## 8. 前端页面设计
-
-建议做成一个项目工作台，而不是传统表单。
-
-页面结构：
-
-```text
-顶部：项目标题 / 状态 / 总进度 / 保存时间 / 导出按钮
-
-左侧：镜头列表
-  Shot 01 5s image ready clip pending
-  Shot 02 5s image approved clip ready
-  ...
-
-中间：当前阶段主画布
-  阶段 1: 一句话与参数
-  阶段 2: 分镜脚本审核
-  阶段 3: 分镜图片审核
-  阶段 4: 视频片段审核
-  阶段 5: 成片预览
-
-右侧：当前镜头编辑面板
-  镜头目的
-  动作说明
-  图片 prompt
-  视频 prompt
-  时长
-  字幕
-  锁定 / 重生成 / 替换
+```json
+{
+  "firstFrameUrl": "KF01 image url",
+  "lastFrameUrl": "KF02 image url",
+  "prompt": "segment 01 video prompt",
+  "durationSeconds": 5,
+  "aspectRatio": "9:16"
+}
 ```
 
-审核界面重点：
+如果上游模型暂时只支持单首帧：
 
-- 脚本审核：表格或时间线，能快速编辑镜头文本。
-- 图片审核：分镜宫格，显示 shotNo、时长、镜头目的、重生成按钮。
-- 视频审核：每个镜头一个小播放器，显示质量分、失败原因、重试建议。
-- 成片审核：一个完整播放器，下方是 30s 时间线，可点击定位镜头。
+- 可以作为降级方案生成片段。
+- 但必须在 UI 上标识“非首尾帧控制”，避免用户误以为尾帧一定会对齐。
+- 长期仍应切换到支持首尾帧的视频模型。
 
-MVP 可以先做“审核模式”，等流程稳定后再加“自动模式”。
+## 13. 前端页面设计
 
-## 9. 自动质检与返工
+页面应从“镜头列表”升级为“关键帧时间轴 + 视频片段时间轴”。
 
-质检不要追求一步到位，但至少要覆盖高频坏结果。
+建议布局：
 
-图片质检：
+```text
+顶部：项目标题 / 状态 / 总进度 / 更新时间 / 导出按钮
+
+上方：一句话输入 + 参考图上传 + 参数
+
+左侧：时间轴导航
+  KF01 0s image ready
+  S01 0-5s clip ready
+  KF02 5s image ready
+  S02 5-10s clip pending
+  ...
+  KF07 30s image ready
+
+中间：当前阶段主画布
+  阶段 1：剧本、关键帧、片段规划审核
+  阶段 2：7 个关键帧图片审核
+  阶段 3：6 个视频片段审核
+  阶段 4：30s 成片预览
+
+右侧：当前关键帧或片段编辑面板
+  关键帧：目的、画面描述、图片 prompt、重生成、替换、锁定
+  片段：首帧、尾帧、视频 prompt、运动说明、下载、重生成、锁定
+```
+
+关键 UI 点：
+
+- 关键帧审核界面要同时显示 7 张图。
+- 视频段审核界面要显示 6 个播放器。
+- 每个视频段要清晰标注“KF01 -> KF02”。
+- 用户点某个关键帧时，应提示它影响哪两个相邻片段。
+- 用户点某个视频段时，应同时展示首帧和尾帧，方便判断是否对齐。
+
+## 14. 质量检测与返工
+
+关键帧质检：
 
 - 是否有图片 URL。
-- 图片尺寸是否符合目标比例。
-- 是否疑似黑图 / 白图 / 空图。
-- 是否出现明显文字水印。
-- 如果有参考图，检查角色或产品描述是否偏离，早期可用 LLM 视觉模型判断。
+- 图片比例是否正确。
+- 是否黑图、白图、空图。
+- 是否有明显文字水印。
+- 人物、产品、场景是否符合参考图和 styleBible。
+- 相邻关键帧是否有过大跳变。
 
-视频片段质检：
+视频段质检：
 
 - 是否有可播放 URL。
-- 时长是否接近目标镜头时长。
-- 是否首帧和关键帧差异过大。
-- 是否画面严重变形。
-- 是否有明显文字乱码。
-- 是否运动过强或过弱。
+- 时长是否接近目标时长。
+- 首帧是否接近起始关键帧。
+- 尾帧是否接近结束关键帧。
+- 是否出现人物漂移、产品变形。
+- 是否有明显文字乱码、水印、闪烁。
+- 运动是否过强或过弱。
 
-自动返工规则：
+返工规则：
 
-- 无结果 URL：直接重试。
-- 时长严重不符：重试或合成时裁剪。
-- 质量分低于阈值：提示用户，可选择自动重试。
-- 同一镜头连续失败 2 次：暂停该镜头，展示错误原因，等待人工处理。
+- 单个关键帧失败，只重试该关键帧。
+- 单个片段失败，只重试该片段。
+- 修改关键帧后，只提示并重生成相邻片段。
+- 修改片段 prompt 后，只重生成该片段。
+- 合成失败不需要重生成关键帧和片段。
 
-## 10. MVP 落地路径
+## 15. MVP 落地路径
 
-### 第一期：可审核分镜项目
+### 第一阶段：7 关键帧规划与审核
 
-目标：用户一句话生成可编辑分镜脚本和关键帧图片。
+目标：用户一句话生成可编辑的 7 个关键帧规划和 6 个片段规划。
 
 范围：
 
-- 新增 `VideoProject` / `VideoShot` 表。
-- 新增项目创建、规划、计划审核 API。
-- LLM 输出结构化分镜 JSON。
-- 复用现有图片 / storyboard 能力生成关键帧。
-- 前端实现分镜脚本审核和图片审核。
-- 支持单镜头重生成图片。
+- 新增或调整数据模型，支持 `VideoKeyframe` 和 `VideoSegment`。
+- LLM 输出结构化 JSON。
+- 前端展示关键帧时间轴和片段时间轴。
+- 支持编辑关键帧 prompt 和片段 prompt。
 
 验收标准：
 
-- 用户输入一句话后，能得到 6 个镜头的脚本和图片。
-- 用户能修改任意镜头 prompt。
-- 用户能锁定满意图片。
-- 任一镜头失败不影响其他镜头继续。
+- 用户输入一句话后，得到 7 个关键帧节点和 6 个片段规划。
+- 每个关键帧都有图片 prompt。
+- 每个片段都有首尾帧编号和视频 prompt。
+- 服务端能校验 7/6 结构是否合法。
 
-### 第二期：单镜头视频生成
+### 第二阶段：7 张关键帧图片生成
 
-目标：从审核后的关键帧批量生成镜头视频。
+目标：生成并审核 7 张关键帧图片。
 
 范围：
 
-- 新增镜头级 clip 生成 worker。
-- 接入 Kling / Bailian / RunningHub 图生视频。
-- 每个镜头独立轮询、独立失败、独立重试。
-- 前端支持视频片段审核。
-- 增加基础质量评分。
+- 调用图片生成模型。
+- 保存关键帧图片 URL。
+- 支持单张重生成、替换、锁定。
+- 支持参考图影响关键帧生成。
 
 验收标准：
 
-- 6 个镜头可以逐个生成视频片段。
-- 用户能单独重试某个失败片段。
-- 用户能确认片段进入最终合成。
+- 7 张关键帧能全部生成。
+- 用户能锁定满意关键帧。
+- 任意关键帧失败不影响其他关键帧继续。
 
-### 第三期：30s 成片合成
+### 第三阶段：6 段首尾帧视频生成
 
-目标：把多个片段合成完整视频。
+目标：用 7 张关键帧生成 6 段视频。
 
 范围：
 
-- 新增 `composer.ts` 或独立后处理服务。
-- FFmpeg 拼接、裁剪、转场、字幕、BGM、Logo。
-- 输出 mp4 上传 OSS。
-- 前端成片预览与导出。
+- 接入支持首尾帧的视频模型。
+- 每段视频使用相邻两个关键帧作为首尾帧。
+- 支持单段轮询、失败、重试、下载。
+- 前端支持 6 段视频审核。
+
+验收标准：
+
+- 6 段视频可以逐个生成。
+- 每段视频能看到、能下载、能重试。
+- 用户确认后进入最终合成。
+
+### 第四阶段：30s 成片合成
+
+目标：把 6 段视频合成完整 30s 视频。
+
+范围：
+
+- 按 `segmentNo` 顺序拼接。
+- 裁剪或补齐时长。
+- 可选叠加字幕、BGM、Logo、CTA。
+- 输出 mp4 并上传 OSS。
 
 验收标准：
 
 - 能生成完整 30s mp4。
-- 成片包含用户确认的镜头顺序。
-- 字幕和音频可开关。
-- 合成失败可重试，不需要重新生成镜头。
+- 成片顺序符合 6 段片段顺序。
+- 合成失败可重试，不需要重新生成片段。
 
-### 第四期：自动模式与优化
-
-目标：降低用户操作成本，提高成功率。
-
-范围：
-
-- 自动模式，一句话后自动跑到成片，只在关键失败时通知。
-- 更强质量检测。
-- 失败原因聚类和后台报表。
-- 根据用户历史偏好自动生成风格参数。
-- A/B 测试不同上游模型和 prompt 模板。
-
-## 11. 风险与处理
+## 16. 风险与处理
 
 | 风险 | 表现 | 处理 |
 | --- | --- | --- |
-| 上游耗时不可控 | 用户长时间等待 | 项目级进度 + 镜头级进度 + 可离开页面后回来 |
-| 单镜头失败影响全片 | 一个失败导致整片失败 | 镜头独立状态、独立重试、失败不阻塞其他镜头 |
-| 角色不一致 | 每个镜头人物变脸 | styleBible + characterLock + 参考图 + 锁定关键帧 |
-| 成本不可控 | 自动重试烧积分 | 进入视频阶段前确认预算，重试次数上限 |
-| 用户不满意但不知道改哪里 | 只能重来 | 分阶段审核，支持局部修改 |
-| 提示词质量不稳定 | 出图偏题 | LLM planner 输出 JSON 后服务端校验和 prompt 模板增强 |
-| 合成质量差 | 时长不齐、字幕错位 | FFmpeg 后处理统一裁剪、补齐、字幕按 shot 时间轴生成 |
+| 首尾帧模型不可用 | 无法保证尾帧对齐 | 优先选支持首尾帧的模型；单首帧模型只做降级 |
+| 相邻关键帧差异过大 | 视频段过渡困难 | LLM 规划时限制相邻帧变化幅度；关键帧审核时提示跳变 |
+| 角色或产品漂移 | 片段中人物变脸、产品变形 | styleBible + reference images + 关键帧锁定 + 片段质检 |
+| 单段失败影响成片 | 某段失败导致无法合成 | 片段独立状态、独立重试 |
+| 用户修改关键帧后依赖混乱 | 不知道哪些片段要重生成 | 明确依赖关系，自动标记相邻片段需更新 |
+| 成本不可控 | 重试烧积分 | 进入关键帧和视频阶段前分别确认预算，限制重试次数 |
+| 上游耗时长 | 用户等待焦虑 | 项目级进度 + 关键帧/片段级进度 + 日志 |
 
-## 12. 与当前项目的结合点
+## 17. 推荐最终效果
 
-当前项目已有这些基础，适合直接承接：
+用户看到的不是“等待一个神秘 API 返回”，而是一个可控的视频制作台：
 
-- `src/services/providers/ProviderFactory.ts` 已有 SKU 到 provider 的映射，可以继续注册新 SKU。
-- `src/services/providers/types.ts` 已有 `IProviderAdapter`，单个上游任务继续走适配器。
-- `src/app/api/gateway/generate/route.ts` 已有登录、扣费、并发限制、任务落库逻辑，可以复用其中的计费和上游提交策略。
-- `src/components/TaskStatusViewer/StoryboardResultGrid.tsx` 已能展示多张分镜图，可扩展为镜头审核卡片。
-- `src/workbench/lib/video-workflow.ts` 已有视频工作台状态、草稿、最终视频、后处理配置概念，可作为新工作台的数据结构参考。
-- `src/workbench/lib/video-automation.ts` 已有 prompt 构建、质量评分、字幕切分等工具，可复用到新工作流。
+- “剧本已生成：7 个关键帧，6 段视频，请确认。”
+- “正在生成关键帧 1/7。”
+- “关键帧 03 被修改，建议重生成片段 02 和片段 03。”
+- “片段 04 已生成，可预览，可下载，可重试。”
+- “6 段片段已确认，正在合成 30s 成片。”
 
-建议不要直接把“一句话成片”塞进现有 `/api/gateway/generate` 的单任务模型里。`gateway` 适合提交单个上游任务，`video-orchestrator` 适合管理一组有依赖关系的任务。两者关系应该是：
-
-```text
-VideoOrchestrator
-  -> 调用内部服务
-  -> 内部服务复用 provider adapter
-  -> provider adapter 提交 RunningHub / Kling / Bailian / OpenAI-compatible API
-```
-
-## 13. 推荐最终效果
-
-用户看到的不是“等待一个神秘 API 返回”，而是一个可控的制作台：
-
-- “脚本已生成，6 个镜头，请确认。”
-- “正在生成第 1、2、3 个镜头图片。”
-- “第 4 个镜头图片偏离产品，建议重生成。”
-- “5 个视频片段已通过，1 个片段低于 75 分，是否自动重试？”
-- “成片已合成，可预览，支持替换第 3 镜头后重新合成。”
-
-这样用户仍然只输入一句话，但每一步都有中间产物、审核点、局部返工能力和清晰成本预期。对于 30s 视频这种长耗时任务，这会比单纯再接一个“一键生成视频 API”稳定得多，也更适合作为一个真正可商业化的视频生产工具。
+这样用户仍然只需要输入一句话，但系统内部已经从“单点关键帧生成视频”升级成“关键帧时间轴 + 首尾帧视频段”的可控生产流程。对于 30 秒视频这种长耗时任务，这会比单纯的一键生成更稳定，也更适合商业化的视频生产工具。

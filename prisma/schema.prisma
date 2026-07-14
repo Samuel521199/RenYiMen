@@ -93,7 +93,9 @@ model VideoProject {
     errorMessage    String?            @map("error_message") @db.Text
 
   user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  shots VideoShot[]
+  shots     VideoShot[]
+  keyframes VideoKeyframe[]
+  segments  VideoSegment[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -131,6 +133,68 @@ model VideoShot {
   @@unique([projectId, shotNo])
   @@index([projectId, status])
   @@map("video_shots")
+}
+
+model VideoKeyframe {
+  id             String          @id @default(cuid())
+  projectId      String          @map("project_id")
+  keyframeNo     Int             @map("keyframe_no")
+  timeSeconds    Int             @map("time_seconds")
+  status         VideoShotStatus @default(SCRIPT_READY)
+  purpose        String          @default("") @db.Text
+  scene          String          @default("") @db.Text
+  characterState String          @default("") @map("character_state") @db.Text
+  productState   String          @default("") @map("product_state") @db.Text
+  imagePrompt    String          @map("image_prompt") @db.Text
+  negativePrompt String          @default("") @map("negative_prompt") @db.Text
+  imageUrl       String?         @map("image_url") @db.Text
+  imageTaskId    String?         @map("image_task_id")
+  qualityScore   Int?            @map("quality_score")
+  errorMessage   String?         @map("error_message") @db.Text
+  locked         Boolean         @default(false)
+
+  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([projectId, keyframeNo])
+  @@index([projectId, status])
+  @@map("video_keyframes")
+}
+
+model VideoSegment {
+  id                String          @id @default(cuid())
+  projectId         String          @map("project_id")
+  segmentNo         Int             @map("segment_no")
+  status            VideoShotStatus @default(SCRIPT_READY)
+  startKeyframeNo   Int             @map("start_keyframe_no")
+  endKeyframeNo     Int             @map("end_keyframe_no")
+  startTimeSeconds  Int             @map("start_time_seconds")
+  endTimeSeconds    Int             @map("end_time_seconds")
+  durationSeconds   Int             @default(5) @map("duration_seconds")
+  purpose           String          @default("") @db.Text
+  motion            String          @default("") @db.Text
+  camera            String          @default("") @db.Text
+  subjectMotion     String          @default("") @map("subject_motion") @db.Text
+  environmentMotion String          @default("") @map("environment_motion") @db.Text
+  videoPrompt       String          @map("video_prompt") @db.Text
+  negativePrompt    String          @default("") @map("negative_prompt") @db.Text
+  subtitle          String          @default("") @db.Text
+  clipUrl           String?         @map("clip_url") @db.Text
+  clipTaskId        String?         @map("clip_task_id")
+  qualityScore      Int?            @map("quality_score")
+  errorMessage      String?         @map("error_message") @db.Text
+  locked            Boolean         @default(false)
+
+  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([projectId, segmentNo])
+  @@index([projectId, status])
+  @@map("video_segments")
 }
 model Account {
   id                String  @id @default(cuid())

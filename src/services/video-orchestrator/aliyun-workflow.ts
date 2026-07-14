@@ -8,23 +8,26 @@ const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
 const VIDEO_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
 const STORYBOARD_SYSTEM_PROMPT = `You are a senior commercial video director and AI storyboard prompt engineer.
 
-Create a controllable storyboard for AI image generation and image-to-video generation based on the user's structured request.
+Create a controllable 30-second first-and-last-frame video plan based on the user's structured request.
 
 Return only valid JSON. No markdown, no explanations, no comments.
 
 Hard constraints:
-- Generate exactly the requested shot_count.
-- Total shot duration must equal exactly duration_seconds.
-- shot sequence must start from 1 and increase continuously with no gaps or duplicates.
-- Each shot must have a distinct narrative purpose and visually advance the story.
+- Generate exactly keyframe_count keyframes and exactly segment_count video segments.
+- Keyframes are timeline boundary frames, not shot midpoint frames.
+- Keyframe 1 is at 0s and the final keyframe is at duration_seconds.
+- Segment 1 uses keyframe 1 as first frame and keyframe 2 as last frame.
+- Segment 2 uses keyframe 2 as first frame and keyframe 3 as last frame.
+- Continue this pattern until the final segment uses the last two keyframes.
+- Total segment duration must equal exactly duration_seconds.
 - If reference images are provided, use them to infer product appearance, character styling, scene mood, color palette, and visual constraints. Do not invent conflicting product details.
 - Maintain strict continuity of character identity, face, age, hairstyle, clothing, props, location, architecture, lighting, time of day, weather, and visual style.
-- image_prompt_zh and image_prompt_en describe only the static first frame.
+- image_prompt_zh and image_prompt_en describe only the static keyframe boundary image.
 - They must include subject, appearance, environment, composition, shot size, camera angle, lighting, and visible pose.
 - They must not include camera movement, temporal progression, or motion verbs.
-- video_prompt_zh and video_prompt_en describe only subject motion, environment motion, camera movement, and pacing.
+- video_prompt_zh and video_prompt_en describe the transition from start keyframe to end keyframe, including subject motion, environment motion, camera movement, and pacing.
 - They must include motion speed, amplitude, and stability.
-- Every shot must be independently editable and generatable.
+- Every keyframe image and every segment video must be independently editable and generatable.
 - Use Chinese for all *_zh fields and user-facing descriptions.
 - Use English for all *_en fields and generation prompts.
 - Do not include visible text, subtitles, logos, watermarks, UI, captions, signs, or typography in generated images.
@@ -49,22 +52,35 @@ Return this exact structure:
       "consistency_prompt": ""
     }
   ],
-  "shots": [
+  "keyframes": [
     {
-      "shot_id": "shot_01",
-      "sequence": 1,
-      "duration_seconds": 5,
-      "scene_description": "",
-      "character_action": "",
-      "shot_size": "",
-      "camera_angle": "",
-      "camera_movement": "",
-      "dialogue": "",
-      "narration": "",
+      "keyframe_no": 1,
+      "time_seconds": 0,
+      "purpose": "",
+      "scene": "",
+      "character_state": "",
+      "product_state": "",
       "image_prompt_zh": "",
       "image_prompt_en": "",
+      "negative_prompt": ""
+    }
+  ],
+  "segments": [
+    {
+      "segment_no": 1,
+      "start_keyframe_no": 1,
+      "end_keyframe_no": 2,
+      "start_time_seconds": 0,
+      "end_time_seconds": 5,
+      "duration_seconds": 5,
+      "purpose": "",
+      "motion": "",
+      "camera": "",
+      "subject_motion": "",
+      "environment_motion": "",
       "video_prompt_zh": "",
       "video_prompt_en": "",
+      "subtitle": "",
       "negative_prompt": ""
     }
   ],
@@ -129,6 +145,16 @@ function imageSizeFromAspectRatio(aspectRatio: VideoAspectRatio): string {
   return "864*1536";
 }
 
+function supportsLastFrameMedia(modelName: string): boolean {
+  const model = modelName.trim().toLowerCase();
+  if (model.includes("happyhorse")) return false;
+  return true;
+}
+
+function supportsOrderedFrameReferences(modelName: string): boolean {
+  return modelName.trim().toLowerCase().includes("happyhorse");
+}
+
 export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): Promise<OnePromptVideoPlan> {
   const fallback = createVideoPlan(input);
   const referenceImageUrls = input.referenceImageUrls.slice(0, 4);
@@ -183,12 +209,14 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
     const plan = normalizeModelPlan(parsed, fallback, input);
     await logOnePromptVideo("aliyun.storyboard.parsed", {
       title: plan.title,
-      shots: plan.shots.map((shot) => ({
-        shotNo: shot.shotNo,
-        durationSeconds: shot.durationSeconds,
-        purpose: shot.purpose,
-      imagePromptLength: (shot.imagePromptEn ?? shot.imagePrompt).length,
-      videoPromptLength: (shot.videoPromptEn ?? shot.videoPrompt).length,
+      keyframeCount: plan.keyframes.length,
+      segmentCount: plan.segments.length,
+      segments: plan.segments.map((segment) => ({
+        segmentNo: segment.segmentNo,
+        durationSeconds: segment.durationSeconds,
+        startKeyframeNo: segment.startKeyframeNo,
+        endKeyframeNo: segment.endKeyframeNo,
+        videoPromptLength: (segment.videoPromptEn ?? segment.videoPrompt).length,
       })),
     });
     return plan;
@@ -206,13 +234,16 @@ function buildStoryboardUserContent(
     user_idea: input.userPrompt,
     aspect_ratio: input.aspectRatio,
     duration_seconds: input.durationSeconds,
-    shot_count: input.shotCount,
+    keyframe_count: input.shotCount + 1,
+    segment_count: input.shotCount,
     style_preset: input.stylePreset,
     constraints: {
-      exact_shot_count: true,
+      exact_keyframe_count: input.shotCount + 1,
+      exact_segment_count: input.shotCount,
       exact_total_duration: true,
-      min_shot_duration_seconds: 3,
-      max_shot_duration_seconds: 6,
+      keyframes_are_timeline_boundaries: true,
+      segments_use_adjacent_keyframes_as_first_and_last_frames: true,
+      average_segment_duration_seconds: input.durationSeconds / input.shotCount,
       display_prompt_languages: ["zh", "en"],
       generation_prompt_language: "en",
       no_visible_text_in_images: true,
@@ -267,19 +298,43 @@ export async function submitAliyunImageTask(params: {
 
 export async function submitAliyunImageToVideoTask(params: {
   imageUrl: string;
+  lastFrameUrl?: string;
   prompt: string;
   durationSeconds: number;
 }): Promise<string> {
-  const i2vModel = model("ALIYUN_I2V_MODEL", "wan2.7-i2v-2026-04-25");
+  const i2vModel = model("ALIYUN_I2V_MODEL", "happyhorse-1.1-i2v");
+  const shouldSendTypedLastFrame = Boolean(params.lastFrameUrl && supportsLastFrameMedia(i2vModel));
+  const shouldSendOrderedFrameReference = Boolean(params.lastFrameUrl && supportsOrderedFrameReferences(i2vModel));
+  const prompt = shouldSendOrderedFrameReference
+    ? [
+        "Use the uploaded images as ordered frame references: Image 1 is the first frame, Image 2 is the final frame. Generate a smooth transition from Image 1 to Image 2 while following the motion instructions below.",
+        params.prompt,
+      ].join("\n")
+    : params.prompt;
   const body = {
     model: i2vModel,
     input: {
-      prompt: params.prompt.slice(0, 5000),
+      prompt: prompt.slice(0, 5000),
       media: [
         {
           type: "first_frame",
           url: params.imageUrl,
         },
+        ...(shouldSendTypedLastFrame
+          ? [
+              {
+                type: "last_frame",
+                url: params.lastFrameUrl,
+              },
+            ]
+          : shouldSendOrderedFrameReference
+            ? [
+                {
+                  type: "first_frame",
+                  url: params.lastFrameUrl,
+                },
+              ]
+          : []),
       ],
     },
     parameters: {
@@ -292,7 +347,9 @@ export async function submitAliyunImageToVideoTask(params: {
   await logOnePromptVideo("aliyun.i2v.submit.prepare", {
     model: i2vModel,
     imageUrl: params.imageUrl,
-    promptLength: params.prompt.length,
+    lastFrameUrl: params.lastFrameUrl,
+    lastFrameMode: shouldSendTypedLastFrame ? "last_frame" : shouldSendOrderedFrameReference ? "ordered_first_frame" : "none",
+    promptLength: prompt.length,
     durationSeconds: params.durationSeconds,
     resolution: process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P",
   });
@@ -589,33 +646,66 @@ function parseJsonObject(text: string): unknown {
 
 function normalizeModelPlan(raw: unknown, fallback: OnePromptVideoPlan, input: PlanVideoProjectInput): OnePromptVideoPlan {
   const plan = isRecord(raw) ? raw : {};
-  const shotsRaw = Array.isArray(plan.shots) ? plan.shots : [];
-  const fallbackByNo = new Map(fallback.shots.map((shot) => [shot.shotNo, shot]));
-  const durations = normalizeShotDurations(shotsRaw, fallback, input);
-  const shots = Array.from({ length: input.shotCount }, (_, index) => {
-    const shotNo = index + 1;
-    const source = isRecord(shotsRaw[index]) ? shotsRaw[index] : {};
-    const fb = fallbackByNo.get(shotNo) ?? fallback.shots[index];
+  const keyframesRaw = Array.isArray(plan.keyframes) ? plan.keyframes : [];
+  const segmentsRaw = Array.isArray(plan.segments) ? plan.segments : [];
+  const segmentCount = Math.max(2, Math.min(10, input.shotCount || fallback.segmentCount || fallback.segments.length || 6));
+  const keyframeCount = segmentCount + 1;
+  const keyframes = Array.from({ length: keyframeCount }, (_, index) => {
+    const keyframeNo = index + 1;
+    const source = isRecord(keyframesRaw[index]) ? keyframesRaw[index] : {};
+    const fb = fallback.keyframes[index];
     return {
-      shotNo,
-      durationSeconds: durations[index] ?? fb.durationSeconds,
-      purpose: stringOr(source.purpose ?? source.scene_description, fb.purpose),
-      camera: stringOr(
-        source.camera ??
-          [source.shot_size, source.camera_angle, source.camera_movement]
-            .filter((item) => typeof item === "string" && item.trim())
-            .join(", "),
-        fb.camera
-      ),
-      action: stringOr(source.action ?? source.character_action, fb.action),
+      keyframeNo,
+      timeSeconds: Number(source.timeSeconds ?? source.time_seconds ?? fb.timeSeconds),
+      purpose: stringOr(source.purpose, fb.purpose),
+      scene: stringOr(source.scene ?? source.scene_description, fb.scene),
+      characterState: stringOr(source.characterState ?? source.character_state, fb.characterState),
+      productState: stringOr(source.productState ?? source.product_state, fb.productState),
       imagePrompt: stringOr(source.imagePromptZh ?? source.image_prompt_zh ?? source.imagePrompt ?? source.image_prompt, fb.imagePromptZh ?? fb.imagePrompt),
       imagePromptZh: stringOr(source.imagePromptZh ?? source.image_prompt_zh ?? source.imagePrompt ?? source.image_prompt, fb.imagePromptZh ?? fb.imagePrompt),
       imagePromptEn: stringOr(source.imagePromptEn ?? source.image_prompt_en ?? source.imagePrompt ?? source.image_prompt, fb.imagePromptEn ?? fb.imagePrompt),
+      negativePrompt: stringOr(source.negativePrompt ?? source.negative_prompt, fb.negativePrompt),
+    };
+  });
+  const segments = Array.from({ length: segmentCount }, (_, index) => {
+    const segmentNo = index + 1;
+    const source = isRecord(segmentsRaw[index]) ? segmentsRaw[index] : {};
+    const fb = fallback.segments[index];
+    return {
+      segmentNo,
+      startKeyframeNo: clamp(Number(source.startKeyframeNo ?? source.start_keyframe_no ?? segmentNo), 1, keyframeCount),
+      endKeyframeNo: clamp(Number(source.endKeyframeNo ?? source.end_keyframe_no ?? segmentNo + 1), 1, keyframeCount),
+      startTimeSeconds: Number(source.startTimeSeconds ?? source.start_time_seconds ?? fb.startTimeSeconds),
+      endTimeSeconds: Number(source.endTimeSeconds ?? source.end_time_seconds ?? fb.endTimeSeconds),
+      durationSeconds: clamp(Number(source.durationSeconds ?? source.duration_seconds ?? fb.durationSeconds), 2, 15),
+      purpose: stringOr(source.purpose, fb.purpose),
+      motion: stringOr(source.motion, fb.motion),
+      camera: stringOr(source.camera ?? source.camera_movement, fb.camera),
+      subjectMotion: stringOr(source.subjectMotion ?? source.subject_motion, fb.subjectMotion),
+      environmentMotion: stringOr(source.environmentMotion ?? source.environment_motion, fb.environmentMotion),
       videoPrompt: stringOr(source.videoPromptZh ?? source.video_prompt_zh ?? source.videoPrompt ?? source.video_prompt, fb.videoPromptZh ?? fb.videoPrompt),
       videoPromptZh: stringOr(source.videoPromptZh ?? source.video_prompt_zh ?? source.videoPrompt ?? source.video_prompt, fb.videoPromptZh ?? fb.videoPrompt),
       videoPromptEn: stringOr(source.videoPromptEn ?? source.video_prompt_en ?? source.videoPrompt ?? source.video_prompt, fb.videoPromptEn ?? fb.videoPrompt),
       subtitle: stringOr(source.subtitle ?? source.narration ?? source.dialogue, fb.subtitle),
       negativePrompt: stringOr(source.negativePrompt ?? source.negative_prompt, fb.negativePrompt),
+    };
+  });
+  const shots = segments.map((segment) => {
+    const start = keyframes[segment.startKeyframeNo - 1];
+    return {
+      shotNo: segment.segmentNo,
+      durationSeconds: segment.durationSeconds,
+      purpose: segment.purpose,
+      camera: segment.camera,
+      action: segment.motion,
+      imagePrompt: start?.imagePrompt ?? "",
+      imagePromptZh: start?.imagePromptZh ?? start?.imagePrompt ?? "",
+      imagePromptEn: start?.imagePromptEn ?? start?.imagePrompt ?? "",
+      videoPrompt: segment.videoPrompt,
+      videoPromptZh: segment.videoPromptZh,
+      videoPromptEn: segment.videoPromptEn,
+      subtitle: segment.subtitle,
+      negativePrompt: segment.negativePrompt,
     };
   });
   const firstCharacter = Array.isArray(plan.characters) && isRecord(plan.characters[0]) ? plan.characters[0] : undefined;
@@ -624,53 +714,31 @@ function normalizeModelPlan(raw: unknown, fallback: OnePromptVideoPlan, input: P
     logline: stringOr(plan.logline, fallback.logline),
     durationSeconds: input.durationSeconds,
     aspectRatio: input.aspectRatio,
+    keyframeCount: keyframes.length,
+    segmentCount: segments.length,
     styleBible: isRecord(plan.styleBible)
       ? {
           visualStyle: stringOr(plan.styleBible.visualStyle, fallback.styleBible.visualStyle),
           characterLock: stringOr(plan.styleBible.characterLock, fallback.styleBible.characterLock),
+          productLock: stringOr(plan.styleBible.productLock, fallback.styleBible.productLock ?? ""),
           colorPalette: stringOr(plan.styleBible.colorPalette, fallback.styleBible.colorPalette),
           negativePrompt: stringOr(plan.styleBible.negativePrompt, fallback.styleBible.negativePrompt),
         }
       : {
           visualStyle: stringOr(plan.visual_style, fallback.styleBible.visualStyle),
           characterLock: stringOr(firstCharacter?.consistency_prompt, fallback.styleBible.characterLock),
+          productLock: fallback.styleBible.productLock,
           colorPalette: fallback.styleBible.colorPalette,
           negativePrompt: fallback.styleBible.negativePrompt,
         },
+    keyframes,
+    segments,
     shots,
   };
 }
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
-}
-
-function normalizeShotDurations(
-  shotsRaw: unknown[],
-  fallback: OnePromptVideoPlan,
-  input: PlanVideoProjectInput
-): number[] {
-  const target = input.durationSeconds;
-  const values = Array.from({ length: input.shotCount }, (_, index) => {
-    const source = isRecord(shotsRaw[index]) ? shotsRaw[index] : {};
-    const fb = fallback.shots[index];
-    return clamp(Number(source.durationSeconds ?? source.duration_seconds ?? fb?.durationSeconds ?? 5), 3, 6);
-  });
-  let total = values.reduce((sum, value) => sum + value, 0);
-  let guard = 0;
-  while (total !== target && guard++ < 100) {
-    const direction = total < target ? 1 : -1;
-    let changed = false;
-    for (let i = 0; i < values.length && total !== target; i += 1) {
-      const next = values[i] + direction;
-      if (next < 3 || next > 6) continue;
-      values[i] = next;
-      total += direction;
-      changed = true;
-    }
-    if (!changed) break;
-  }
-  return total === target ? values : fallback.shots.map((shot) => shot.durationSeconds).slice(0, input.shotCount);
 }
 
 function extractResultUrl(raw: unknown): string | undefined {
