@@ -5,9 +5,146 @@ export interface VideoStyleBible {
   characterLock: string;
   productLock?: string;
   colorPalette: string;
+  colorToneLock?: string;
+  lightingToneLock?: string;
   negativePrompt: string;
   negativePromptZh?: string;
   negativePromptEn?: string;
+}
+
+export type VideoConsistencyAnchorType =
+  | "person"
+  | "product"
+  | "prop"
+  | "location"
+  | "style"
+  | "brand_visual"
+  | "task_object"
+  | "effect_state"
+  | "vehicle"
+  | "food"
+  | "space_layout"
+  | "custom";
+
+export interface VideoConsistencyAnchor {
+  id: string;
+  type: VideoConsistencyAnchorType;
+  displayNameZh?: string;
+  displayNameEn?: string;
+  mustStayConsistent: boolean;
+  needsReferenceImage: boolean;
+  referenceStrength?: "hard" | "medium" | "soft";
+  descriptionZh?: string;
+  descriptionEn?: string;
+  visualLock?: {
+    shape?: string;
+    material?: string;
+    color?: string;
+    markings?: string;
+    scale?: string;
+    state?: string;
+    forbiddenDrift?: string[];
+  };
+  appliesTo?: Array<"keyframes" | "segments" | "micro_shots">;
+  userEditable?: boolean;
+  imagePromptZh?: string;
+  imagePromptEn?: string;
+}
+
+export interface VideoTimelineBlueprintSegment {
+  segmentNo: number;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  durationSeconds: number;
+  beatRole?: "hook" | "setup" | "interaction" | "proof" | "payoff" | "ending" | "custom";
+  purposeZh?: string;
+  purposeEn?: string;
+  splitReasonZh?: string;
+  subtitleIntentZh?: string;
+  audioIntentZh?: string;
+  requiredAnchorIds?: string[];
+  boundaryModeHint?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
+}
+
+export interface VideoSubtitlePolicy {
+  needed: boolean;
+  reasonZh?: string;
+  contentRole?: "none" | "brand_slogan" | "product_selling_points" | "voiceover_caption" | "dialogue_caption" | "emotional_copy" | "instructional_steps" | "custom";
+  language?: string;
+  styleZh?: string;
+  timingStrategyZh?: string;
+  placementZh?: string;
+  maxCharsPerLine?: number;
+  maxLines?: number;
+  avoidRegionsZh?: string[];
+  userEditable?: boolean;
+}
+
+export interface VideoPlanningManifest {
+  projectIntent?: {
+    videoType?: string;
+    primaryGoalZh?: string;
+    primaryGoalEn?: string;
+    targetViewerZh?: string;
+    targetViewerEn?: string;
+    successCriteria?: string[];
+  };
+  storyStrategy?: {
+    narrativeArcZh?: string;
+    narrativeArcEn?: string;
+    recommendedSegmentDensity?: "low" | "medium" | "high";
+    subtitleStrategyZh?: string;
+    audioStrategyZh?: string;
+  };
+  subtitlePolicy?: VideoSubtitlePolicy;
+  timelineBlueprint: {
+    segmentCount: number;
+    totalDurationSeconds: number;
+    segmentDurationMinSeconds: number;
+    segmentDurationMaxSeconds: number;
+    splitStrategyZh?: string;
+    segments: VideoTimelineBlueprintSegment[];
+  };
+  consistencyManifest: {
+    anchors: VideoConsistencyAnchor[];
+  };
+  globalStyle?: {
+    visualStyle?: string;
+    colorPalette?: string;
+    colorToneLock?: string;
+    lightingToneLock?: string;
+    negativePrompt?: string;
+  };
+  risks?: Array<{
+    type?: string;
+    descriptionZh?: string;
+    mitigationZh?: string;
+  }>;
+}
+
+export interface VideoPromptDetailPlan {
+  keyframePrompts?: Array<{
+    keyframeNo: number;
+    imagePromptZh?: string;
+    imagePromptEn?: string;
+    negativePromptZh?: string;
+    negativePromptEn?: string;
+  }>;
+  segmentVideoPrompts?: Array<{
+    segmentNo: number;
+    videoPromptZh?: string;
+    videoPromptEn?: string;
+    negativePromptZh?: string;
+    negativePromptEn?: string;
+  }>;
+  microShotImagePrompts?: Array<{
+    segmentNo: number;
+    microShotNo: number;
+    imagePromptZh?: string;
+    imagePromptEn?: string;
+  }>;
+  negativePromptGroups?: VideoNegativePromptGroups[];
+  generationNotes?: string[];
 }
 
 export interface VideoPlanKeyframe {
@@ -16,10 +153,35 @@ export interface VideoPlanKeyframe {
   frameRole?: "video_start" | "segment_start" | "segment_end" | "shared_boundary" | "video_end" | "internal_reference";
   timeSeconds: number;
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   scene: string;
   characterState: string;
   productState: string;
   frameDesign?: VideoFrameDesign;
+  imagePrompt: string;
+  imagePromptZh?: string;
+  imagePromptEn?: string;
+  negativePromptGroups?: VideoNegativePromptGroups;
+  negativePrompt: string;
+  negativePromptZh?: string;
+  negativePromptEn?: string;
+  usesConsistencyAnchors?: string[];
+}
+
+export type VideoConsistencyReferenceKind = "character" | "scene";
+
+export interface VideoConsistencyReference {
+  kind: VideoConsistencyReferenceKind;
+  needed: boolean;
+  keyframeNo: number;
+  frameId?: string;
+  purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
+  scene: string;
+  characterState: string;
+  productState: string;
   imagePrompt: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
@@ -96,6 +258,8 @@ export interface VideoMicroShot {
   endSeconds?: number;
   absoluteTimeSeconds: number;
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   scene: string;
   action: string;
   camera?: string;
@@ -103,6 +267,11 @@ export interface VideoMicroShot {
   imagePrompt?: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
+  imageUrl?: string;
+  imageTaskId?: string;
+  imageStatus?: "idle" | "pending" | "running" | "ready" | "failed";
+  errorMessage?: string;
+  usesConsistencyAnchors?: string[];
   prompt: string;
   promptZh?: string;
   promptEn?: string;
@@ -130,6 +299,8 @@ export interface VideoPlanSegment {
   durationSeconds: number;
   boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   motion: string;
   camera: string;
   subjectMotion: string;
@@ -146,6 +317,7 @@ export interface VideoPlanSegment {
   negativePrompt: string;
   negativePromptZh?: string;
   negativePromptEn?: string;
+  usesConsistencyAnchors?: string[];
 }
 
 export interface VideoPlanShot {
@@ -153,6 +325,8 @@ export interface VideoPlanShot {
   durationSeconds: number;
   boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   camera: string;
   action: string;
   imagePrompt: string;
@@ -170,6 +344,7 @@ export interface VideoPlanShot {
   negativePrompt: string;
   negativePromptZh?: string;
   negativePromptEn?: string;
+  usesConsistencyAnchors?: string[];
 }
 
 export interface OnePromptVideoPlan {
@@ -180,6 +355,12 @@ export interface OnePromptVideoPlan {
   keyframeCount: number;
   segmentCount: number;
   styleBible: VideoStyleBible;
+  planningManifest?: VideoPlanningManifest;
+  consistencyManifest?: VideoPlanningManifest["consistencyManifest"];
+  timelineBlueprint?: VideoPlanningManifest["timelineBlueprint"];
+  storyboardPlan?: unknown;
+  promptDetailPlan?: VideoPromptDetailPlan;
+  consistencyReferences?: VideoConsistencyReference[];
   keyframes: VideoPlanKeyframe[];
   segments: VideoPlanSegment[];
   /**
@@ -202,8 +383,8 @@ export interface PlanVideoProjectInput {
   userPrompt: string;
   aspectRatio: VideoAspectRatio;
   durationSeconds: number;
-  /** Fallback segment count only. The storyboard model may choose the final count. */
-  shotCount: number;
+  /** Optional fallback segment count only. The storyboard model chooses the final count. */
+  shotCount?: number;
   stylePreset?: string;
   referenceImageUrls: string[];
 }

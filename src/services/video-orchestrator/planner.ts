@@ -60,6 +60,25 @@ const SEGMENT_PURPOSES = [
   "从品牌记忆点过渡到最终收束画面",
 ];
 
+const KEYFRAME_PURPOSES_EN = [
+  "Establish the scene and overall atmosphere",
+  "Introduce the protagonist or core product",
+  "Show the first interaction between person and product",
+  "Highlight the key selling point or emotional turn",
+  "Present the effect, texture, or story progression",
+  "Reinforce brand memory and completion",
+  "Close the theme with a final impression",
+];
+
+const SEGMENT_PURPOSES_EN = [
+  "Transition from environment establishment to subject reveal",
+  "Transition from subject reveal to interaction",
+  "Transition from interaction to key selling point",
+  "Transition from selling point to visible effect",
+  "Transition from effect to brand memory",
+  "Transition from brand memory to final closing image",
+];
+
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, Math.round(value)));
@@ -79,8 +98,14 @@ function segmentCountBounds(totalSeconds: number): { min: number; max: number } 
 
 function normalizeFallbackSegmentCount(value: unknown, totalSeconds: number): number {
   const bounds = segmentCountBounds(totalSeconds);
-  const numeric = typeof value === "number" ? value : Math.round(totalSeconds / 5);
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Math.round(totalSeconds / 5);
   return clampInt(numeric, bounds.min, bounds.max);
+}
+
+function normalizeOptionalFallbackSegmentCount(value: unknown, totalSeconds: number): number | undefined {
+  return typeof value === "number" || typeof value === "string"
+    ? normalizeFallbackSegmentCount(value, totalSeconds)
+    : undefined;
 }
 
 function normalizeAspectRatio(value: string | undefined): VideoAspectRatio {
@@ -131,11 +156,12 @@ function keyframeTimes(total: number, segmentCount: number): number[] {
   return Array.from({ length: segmentCount + 1 }, (_, index) => Math.round((total / segmentCount) * index));
 }
 
-function buildKeyframes(input: PlanVideoProjectInput, styleBible: VideoStyleBible, prompt: string): VideoPlanKeyframe[] {
+function buildKeyframes(input: PlanVideoProjectInput & { shotCount: number }, styleBible: VideoStyleBible, prompt: string): VideoPlanKeyframe[] {
   const times = keyframeTimes(input.durationSeconds, input.shotCount);
   return times.map((timeSeconds, index) => {
     const keyframeNo = index + 1;
     const purpose = KEYFRAME_PURPOSES[index] ?? `边界参考帧 ${keyframeNo}`;
+    const purposeEn = KEYFRAME_PURPOSES_EN[index] ?? `Boundary reference frame ${keyframeNo}`;
     const baseEn = [
       `Static boundary reference frame ${keyframeNo}; timeline position T+${timeSeconds}s is metadata only, not an image or video duration.`,
       aspectHint(input.aspectRatio),
@@ -152,6 +178,8 @@ function buildKeyframes(input: PlanVideoProjectInput, styleBible: VideoStyleBibl
       keyframeNo,
       timeSeconds,
       purpose,
+      purposeZh: purpose,
+      purposeEn,
       scene: purpose,
       characterState: keyframeNo === 1 ? "主体尚未完全进入或处于建立氛围阶段" : "主体状态自然推进，身份保持一致",
       productState: keyframeNo <= 2 ? "产品逐步出现并建立识别" : "产品形态、材质和颜色保持一致",
@@ -165,7 +193,7 @@ function buildKeyframes(input: PlanVideoProjectInput, styleBible: VideoStyleBibl
   });
 }
 
-function buildSegments(input: PlanVideoProjectInput, styleBible: VideoStyleBible, prompt: string): VideoPlanSegment[] {
+function buildSegments(input: PlanVideoProjectInput & { shotCount: number }, styleBible: VideoStyleBible, prompt: string): VideoPlanSegment[] {
   const times = keyframeTimes(input.durationSeconds, input.shotCount);
   return Array.from({ length: input.shotCount }, (_, index) => {
     const segmentNo = index + 1;
@@ -173,6 +201,7 @@ function buildSegments(input: PlanVideoProjectInput, styleBible: VideoStyleBible
     const endTimeSeconds = times[index + 1];
     const durationSeconds = endTimeSeconds - startTimeSeconds;
     const purpose = SEGMENT_PURPOSES[index] ?? `片段 ${segmentNo}`;
+    const purposeEn = SEGMENT_PURPOSES_EN[index] ?? `Video segment ${segmentNo}`;
     const camera = index === 0 ? "slow push-in, gentle parallax" : index === 5 ? "final subtle zoom and stable lock-off" : "smooth cinematic camera movement";
     const subjectMotion = "natural subject motion with stable identity and consistent product handling";
     const environmentMotion = "subtle ambient motion, soft fabric movement, gentle light and atmosphere changes";
@@ -185,16 +214,17 @@ function buildSegments(input: PlanVideoProjectInput, styleBible: VideoStyleBible
       prompt,
     });
     const videoPromptEn = [
-      `Create segment ${segmentNo}, a smooth ${durationSeconds}-second transition from boundary reference frame ${segmentNo} to boundary reference frame ${segmentNo + 1}.`,
+      `Create segment ${segmentNo} as one continuous unbroken ${durationSeconds}-second camera take from boundary reference frame ${segmentNo} to boundary reference frame ${segmentNo + 1}.`,
       `Theme: ${prompt}.`,
       `Purpose: ${purpose}.`,
       `Camera: ${camera}.`,
       `Subject motion: ${subjectMotion}.`,
       `Environment motion: ${environmentMotion}.`,
       "The first video frame must match the start boundary reference image and the last video frame must match the end boundary reference image.",
-      "Keep character, product, location, lighting, and style consistent. No sudden cuts, no identity drift, no visible text or watermark.",
+      "No internal cuts, jump cuts, crossfades, dissolves, fades, montage edits, ghost overlays, scene swaps, teleportation, or hard visual transitions inside this clip.",
+      "Keep character, product, location, camera axis, composition logic, lighting, and style consistent. No identity drift, no visible text or watermark.",
     ].join(" ");
-    const videoPromptZh = `片段 ${segmentNo}，从边界参考帧 ${segmentNo} 平滑过渡到边界参考帧 ${segmentNo + 1}，时长 ${durationSeconds} 秒。目的：${purpose}。运镜：${camera}。主体动作自然，环境轻微运动，首帧贴合起始参考图，尾帧贴合结束参考图，保持人物、产品、场景和光线一致。`;
+    const videoPromptZh = `片段 ${segmentNo}，用一镜到底的连续镜头从边界参考帧 ${segmentNo} 自然运动到边界参考帧 ${segmentNo + 1}，时长 ${durationSeconds} 秒。目的：${purpose}。运镜：${camera}。主体动作自然，环境轻微运动，首帧贴合起始参考图，尾帧贴合结束参考图，段内禁止切镜、跳切、叠化、淡入淡出、蒙太奇、幽灵重影、场景替换或硬转场，保持人物、产品、场景、机位轴线、构图逻辑和光线一致。`;
     return {
       segmentNo,
       startKeyframeNo: segmentNo,
@@ -204,6 +234,8 @@ function buildSegments(input: PlanVideoProjectInput, styleBible: VideoStyleBible
       durationSeconds,
       boundaryMode: "continuous",
       purpose,
+      purposeZh: purpose,
+      purposeEn,
       motion: `${subjectMotion}; ${environmentMotion}`,
       camera,
       subjectMotion,
@@ -245,9 +277,13 @@ function buildFallbackMicroShots(params: {
   camera: string;
   prompt: string;
 }): VideoMicroShot[] {
-  const localTimes = params.durationSeconds >= 8
-    ? [0, Math.round(params.durationSeconds / 2), params.durationSeconds]
-    : [0, params.durationSeconds];
+  const localTimes = params.durationSeconds >= 11
+    ? [0, Math.round(params.durationSeconds * 0.28), Math.round(params.durationSeconds * 0.58), Math.round(params.durationSeconds * 0.82), params.durationSeconds]
+    : params.durationSeconds >= 7
+      ? [0, Math.round(params.durationSeconds * 0.4), Math.round(params.durationSeconds * 0.75), params.durationSeconds]
+      : params.durationSeconds >= 4
+        ? [0, Math.round(params.durationSeconds * 0.55), params.durationSeconds]
+        : [0, params.durationSeconds];
   return localTimes.map((localTimeSeconds, index) => {
     const microShotNo = index + 1;
     const phase = index === 0
@@ -261,9 +297,20 @@ function buildFallbackMicroShots(params: {
       `Theme: ${params.prompt}.`,
       `Segment purpose: ${params.purpose}.`,
       `Camera: ${params.camera}.`,
-      "Use this as an internal control point, not as an extra video clip.",
+      "Use this as a same-take internal motion checkpoint, not as an extra video clip, not as a separate shot, and not as a scene transition.",
+      "Keep the same scene, camera axis family, lighting direction, color tone, subject identity, product identity, and prop layout as the rest of the segment.",
+    ].join(" ");
+    const imagePromptEn = [
+      `Static internal reference image for segment ${params.segmentNo}, beat ${microShotNo}.`,
+      `Show the exact still visual state for: ${phase}.`,
+      `Theme: ${params.prompt}.`,
+      `Segment purpose: ${params.purpose}.`,
+      `Composition and camera: ${params.camera}.`,
+      "This still must belong to the same continuous take as the rest of the segment; keep the same scene, camera axis family, lighting direction, color tone, subject identity, product identity, and prop layout.",
+      "One polished still image only, no labels, no split-screen, no timeline text, no subtitles, no watermark.",
     ].join(" ");
     const promptZh = `片段 ${params.segmentNo} 的内部子分镜 ${microShotNo}，局部时间 +${localTimeSeconds}s，用于限制本片段内部画面和动作，不是额外视频片段。`;
+    const imagePromptZh = `片段 ${params.segmentNo} 的内部参考图 ${microShotNo}，静态画面，只表现 ${phase} 的明确视觉状态；主题：${params.prompt}；片段目的：${params.purpose}；构图和机位：${params.camera}；只生成一张可预览的内部控制图，不要文字、时间轴、拼图、字幕或水印。`;
     return {
       microShotNo,
       localTimeSeconds,
@@ -272,10 +319,10 @@ function buildFallbackMicroShots(params: {
       scene: params.purpose,
       action: phase,
       camera: params.camera,
-      referenceType: index === 1 ? "mixed" : "text",
-      imagePrompt: promptZh,
-      imagePromptZh: promptZh,
-      imagePromptEn: promptEn,
+      referenceType: "mixed",
+      imagePrompt: imagePromptZh,
+      imagePromptZh,
+      imagePromptEn,
       prompt: promptZh,
       promptZh,
       promptEn,
@@ -291,6 +338,8 @@ function segmentsToCompatShots(keyframes: VideoPlanKeyframe[], segments: VideoPl
       durationSeconds: segment.durationSeconds,
       boundaryMode: segment.boundaryMode,
       purpose: segment.purpose,
+      purposeZh: segment.purposeZh,
+      purposeEn: segment.purposeEn,
       camera: segment.camera,
       action: segment.motion,
       imagePrompt: start?.imagePrompt ?? "",
@@ -345,11 +394,12 @@ export function normalizePlanInput(input: {
   referenceImageUrls?: unknown;
 }): PlanVideoProjectInput {
   const durationSeconds = normalizeDurationSeconds(input.durationSeconds);
+  const shotCount = normalizeOptionalFallbackSegmentCount(input.shotCount, durationSeconds);
   return {
     userPrompt: normalizeText(typeof input.userPrompt === "string" ? input.userPrompt : "", "制作一条高级感 30 秒短视频"),
     aspectRatio: normalizeAspectRatio(typeof input.aspectRatio === "string" ? input.aspectRatio : undefined),
     durationSeconds,
-    shotCount: normalizeFallbackSegmentCount(input.shotCount, durationSeconds),
+    ...(shotCount ? { shotCount } : {}),
     stylePreset: typeof input.stylePreset === "string" ? input.stylePreset.trim() : "",
     referenceImageUrls: normalizeReferenceImageUrls(input.referenceImageUrls),
   };

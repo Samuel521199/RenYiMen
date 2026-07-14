@@ -11,7 +11,13 @@ interface LocalComposeParams {
   title: string;
   clipUrls: string[];
   clipDurations?: number[];
+  subtitles?: LocalComposeSubtitle[];
   aspectRatio: VideoAspectRatio;
+}
+
+interface LocalComposeSubtitle {
+  text: string;
+  durationSeconds?: number;
 }
 
 interface OssConfig {
@@ -47,7 +53,7 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       clipPaths.push(clipPath);
     }
 
-    const outputPath = path.join(workDir, "final.mp4");
+    const composedPath = path.join(workDir, "composed-raw.mp4");
     const transitionSeconds = composeTransitionSeconds(params.clipDurations);
     const audioPresence = await Promise.all(clipPaths.map((clipPath) => probeClipHasAudio(ffmpegPath, clipPath)));
     await logOnePromptVideo("compose.local.audio_probe", {
@@ -57,11 +63,21 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       audioPresence,
     }, audioPresence.every(Boolean) ? "info" : "warn");
     if (clipPaths.length > 1 && transitionSeconds > 0) {
-      await composeWithXfade(ffmpegPath, clipPaths, params.clipDurations ?? [], transitionSeconds, outputPath, audioPresence);
+      await composeWithXfade(ffmpegPath, clipPaths, params.clipDurations ?? [], transitionSeconds, composedPath, audioPresence);
     } else {
-      await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), outputPath);
+      await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath);
     }
 
+    const outputPath = await burnSubtitlesIfNeeded({
+      ffmpegPath,
+      inputPath: composedPath,
+      workDir,
+      projectId: params.projectId,
+      aspectRatio: params.aspectRatio,
+      subtitles: params.subtitles ?? [],
+      durations: params.clipDurations ?? [],
+      transitionSeconds,
+    });
     const key = `one-prompt-video/final/${params.projectId}-${Date.now()}.mp4`;
     const publicUrl = await uploadFileToOss(cfg, key, outputPath);
     await logOnePromptVideo("compose.local.success", {
@@ -80,6 +96,162 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
+}
+
+async function burnSubtitlesIfNeeded(params: {
+  ffmpegPath: string;
+  inputPath: string;
+  workDir: string;
+  projectId: string;
+  aspectRatio: VideoAspectRatio;
+  subtitles: LocalComposeSubtitle[];
+  durations: number[];
+  transitionSeconds: number;
+}): Promise<string> {
+  const enabled = process.env.ONE_PROMPT_BURN_SUBTITLES?.trim().toLowerCase() !== "false";
+  const events = buildSubtitleEvents(params.subtitles, params.durations, params.transitionSeconds);
+  await logOnePromptVideo("compose.local.subtitles.prepare", {
+    projectId: params.projectId,
+    enabled,
+    subtitleCount: events.length,
+  });
+  if (!enabled || !events.length) return params.inputPath;
+
+  const assPath = path.join(params.workDir, "subtitles.ass");
+  const outputPath = path.join(params.workDir, "final-with-subtitles.mp4");
+  await writeFile(assPath, buildAssSubtitleFile(events, params.aspectRatio), "utf8");
+  await runFfmpeg(params.ffmpegPath, [
+    "-y",
+    "-i",
+    params.inputPath,
+    "-vf",
+    `subtitles=${escapeSubtitleFilterPath(assPath)}`,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "copy",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ]);
+  await logOnePromptVideo("compose.local.subtitles.success", {
+    projectId: params.projectId,
+    subtitleCount: events.length,
+  });
+  return outputPath;
+}
+
+interface SubtitleEvent {
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+}
+
+function buildSubtitleEvents(subtitles: LocalComposeSubtitle[], durations: number[], transitionSeconds: number): SubtitleEvent[] {
+  const starts: number[] = [];
+  let cursor = 0;
+  for (let index = 0; index < subtitles.length; index += 1) {
+    starts.push(Math.max(0, cursor));
+    const duration = safeSubtitleDuration(subtitles[index]?.durationSeconds ?? durations[index]);
+    cursor += duration - (index < subtitles.length - 1 ? transitionSeconds : 0);
+  }
+  return subtitles
+    .map((item, index) => {
+      const text = normalizeSubtitleText(item.text);
+      if (!text) return null;
+      const duration = safeSubtitleDuration(item.durationSeconds ?? durations[index]);
+      const start = starts[index] ?? 0;
+      const nextStart = starts[index + 1];
+      const naturalEnd = start + duration;
+      const end = Number.isFinite(nextStart) ? Math.max(start + 0.5, Math.min(naturalEnd, nextStart)) : naturalEnd;
+      return { startSeconds: start, endSeconds: end, text };
+    })
+    .filter((item): item is SubtitleEvent => Boolean(item));
+}
+
+function safeSubtitleDuration(value: unknown): number {
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration > 0 ? duration : 5;
+}
+
+function normalizeSubtitleText(text: string): string {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
+
+function buildAssSubtitleFile(events: SubtitleEvent[], aspectRatio: VideoAspectRatio): string {
+  const { width, height, fontSize, marginV } = assLayoutForAspectRatio(aspectRatio);
+  return [
+    "[Script Info]",
+    "ScriptType: v4.00+",
+    "WrapStyle: 0",
+    "ScaledBorderAndShadow: yes",
+    `PlayResX: ${width}`,
+    `PlayResY: ${height}`,
+    "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    `Style: Default,Microsoft YaHei,${fontSize},&H00FFFFFF,&H00FFFFFF,&HAA000000,&H66000000,1,0,0,0,100,100,0,0,1,3,1,2,56,56,${marginV},1`,
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ...events.map((event) => `Dialogue: 0,${formatAssTime(event.startSeconds)},${formatAssTime(event.endSeconds)},Default,,0,0,0,,${escapeAssText(wrapSubtitleText(event.text, 14, 2))}`),
+    "",
+  ].join("\n");
+}
+
+function assLayoutForAspectRatio(aspectRatio: VideoAspectRatio): { width: number; height: number; fontSize: number; marginV: number } {
+  if (aspectRatio === "16:9") return { width: 1920, height: 1080, fontSize: 54, marginV: 78 };
+  if (aspectRatio === "1:1") return { width: 1080, height: 1080, fontSize: 52, marginV: 82 };
+  return { width: 1080, height: 1920, fontSize: 62, marginV: 150 };
+}
+
+function wrapSubtitleText(text: string, maxCharsPerLine: number, maxLines: number): string {
+  const normalized = normalizeSubtitleText(text);
+  if (!normalized) return "";
+  if (/^[\x00-\x7F]+$/.test(normalized)) {
+    const lines: string[] = [];
+    let current = "";
+    for (const word of normalized.split(" ")) {
+      const next = current ? `${current} ${word}` : word;
+      if (next.length > maxCharsPerLine && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = next;
+      }
+      if (lines.length >= maxLines) break;
+    }
+    if (current && lines.length < maxLines) lines.push(current);
+    return lines.slice(0, maxLines).join("\\N");
+  }
+  const chars = Array.from(normalized);
+  const lines: string[] = [];
+  for (let index = 0; index < chars.length && lines.length < maxLines; index += maxCharsPerLine) {
+    lines.push(chars.slice(index, index + maxCharsPerLine).join(""));
+  }
+  return lines.join("\\N");
+}
+
+function escapeAssText(text: string): string {
+  return text.replace(/[{}]/g, "").replace(/\r?\n/g, "\\N");
+}
+
+function formatAssTime(seconds: number): string {
+  const safe = Math.max(0, seconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const wholeSeconds = Math.floor(safe % 60);
+  const centiseconds = Math.floor((safe - Math.floor(safe)) * 100);
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+}
+
+function escapeSubtitleFilterPath(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "$1\\:");
+  return `'${normalized.replace(/'/g, "\\'")}'`;
 }
 
 function readOssConfig(): OssConfig {

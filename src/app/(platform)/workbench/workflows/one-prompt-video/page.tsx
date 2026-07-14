@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import {
   Check,
   Clapperboard,
@@ -29,6 +29,7 @@ type ProjectStatus =
   | "PLAN_REVIEW"
   | "IMAGE_GENERATING"
   | "IMAGE_REVIEW"
+  | "MICRO_SHOT_REVIEW"
   | "CLIP_GENERATING"
   | "CLIP_REVIEW"
   | "COMPOSING"
@@ -51,6 +52,21 @@ type ShotStatus =
 type AspectRatio = "9:16" | "16:9" | "1:1";
 type PageLang = "zh" | "en";
 type ProjectView = "frames" | "clips" | "final";
+type OptimisticProgressPhase = "creating" | "understanding" | "storyboard" | "prompts" | "waiting" | "done" | "failed";
+
+interface OptimisticProgress {
+  active: boolean;
+  phase: OptimisticProgressPhase;
+  percent: number;
+  startedAt: number;
+}
+
+interface WorkflowProgressView {
+  percent: number;
+  title: string;
+  detail: string;
+  tone: "running" | "success" | "failed" | "idle";
+}
 
 interface TimedPrompt {
   timeSeconds: number;
@@ -67,6 +83,8 @@ interface MicroShot {
   endSeconds?: number;
   absoluteTimeSeconds: number;
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   scene: string;
   action: string;
   camera?: string;
@@ -74,6 +92,10 @@ interface MicroShot {
   imagePrompt?: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
+  imageUrl?: string;
+  imageTaskId?: string;
+  imageStatus?: "idle" | "pending" | "running" | "ready" | "failed";
+  errorMessage?: string;
   prompt: string;
   promptZh?: string;
   promptEn?: string;
@@ -98,6 +120,8 @@ interface VideoShot {
   status: ShotStatus;
   durationSeconds: number;
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   camera: string;
   action: string;
   imagePrompt: string;
@@ -134,6 +158,8 @@ interface VideoKeyframe {
   timeSeconds: number;
   status: ShotStatus;
   purpose: string;
+  purposeZh?: string;
+  purposeEn?: string;
   imagePrompt: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
@@ -153,6 +179,8 @@ interface VideoSegment {
   durationSeconds: number;
   boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut" | string;
   purpose?: string;
+  purposeZh?: string;
+  purposeEn?: string;
   motion?: string;
   camera?: string;
   videoPrompt?: string;
@@ -212,6 +240,7 @@ type Copy = {
   generating: string;
   approveScript: string;
   approveFrames: string;
+  approveMicroShots: string;
   approveClips: string;
   confirmFinal: string;
   shots: string;
@@ -231,6 +260,11 @@ type Copy = {
   microShot: string;
   microShotHint: string;
   addMicroShot: string;
+  generateMicroShotImage: string;
+  regenerateMicroShotImage: string;
+  microShotImageHint: string;
+  microShotImageRunning: string;
+  microShotImageFailed: string;
   audioPlan: string;
   spokenLines: string;
   referenceType: string;
@@ -243,12 +277,18 @@ type Copy = {
   action: string;
   camera: string;
   subtitle: string;
+  subtitleHint: string;
   imagePrompt: string;
   videoPrompt: string;
   negativePrompt: string;
   clipPreview: string;
   keyframePreview: string;
   finalVideo: string;
+  preview: string;
+  ready: string;
+  pending: string;
+  finalVideoNotReady: string;
+  firstLastFrameClips: string;
   downloadClip: string;
   saveShot: string;
   regenerate: string;
@@ -258,6 +298,7 @@ type Copy = {
   keyframesReady: string;
   keyframeRegenerated: string;
   framesApproved: string;
+  microShotsApproved: string;
   clipsComposed: string;
   finalApproved: string;
   loadFailed: string;
@@ -305,6 +346,7 @@ const TEXT: Record<PageLang, Copy> = {
     generating: "\u751f\u6210\u4e2d",
     approveScript: "\u786e\u8ba4\u811a\u672c",
     approveFrames: "\u786e\u8ba4\u8fb9\u754c\u53c2\u8003\u5e27",
+    approveMicroShots: "\u786e\u8ba4\u5185\u90e8\u5b50\u5206\u955c",
     approveClips: "\u786e\u8ba4\u7247\u6bb5\u5e76\u5408\u6210",
     confirmFinal: "\u786e\u8ba4\u6210\u7247",
     shots: "\u955c\u5934",
@@ -324,6 +366,11 @@ const TEXT: Record<PageLang, Copy> = {
     microShot: "\u5b50\u5206\u955c",
     microShotHint: "\u7528\u4e8e\u9650\u5236\u8fd9\u4e00\u6bb5\u89c6\u9891\u5185\u90e8\u7684\u573a\u666f\u3001\u52a8\u4f5c\u3001\u955c\u5934\u548c\u53ef\u9009\u53c2\u8003\u56fe Prompt\uff0c\u4e0d\u662f\u989d\u5916\u89c6\u9891\u7247\u6bb5",
     addMicroShot: "\u6dfb\u52a0\u5b50\u5206\u955c",
+    generateMicroShotImage: "\u751f\u6210\u53c2\u8003\u56fe",
+    regenerateMicroShotImage: "\u91cd\u751f\u6210\u53c2\u8003\u56fe",
+    microShotImageHint: "\u9009\u62e9 image_prompt / mixed \u540e\uff0c\u53ef\u5c06\u56fe\u7247 Prompt \u751f\u6210\u4e3a\u53ef\u9884\u89c8\u7684\u5185\u90e8\u53c2\u8003\u56fe",
+    microShotImageRunning: "\u53c2\u8003\u56fe\u751f\u6210\u4e2d",
+    microShotImageFailed: "\u53c2\u8003\u56fe\u751f\u6210\u5931\u8d25",
     audioPlan: "\u58f0\u97f3\u89c4\u5212",
     spokenLines: "\u53f0\u8bcd/\u65c1\u767d",
     referenceType: "\u53c2\u8003\u7c7b\u578b",
@@ -336,12 +383,18 @@ const TEXT: Record<PageLang, Copy> = {
     action: "\u52a8\u4f5c\u8bf4\u660e",
     camera: "\u8fd0\u955c",
     subtitle: "\u5b57\u5e55",
+    subtitleHint: "\u53ef\u81ea\u5b9a\u4e49\u4fee\u6539\uff0c\u7528\u4e8e\u540e\u671f\u53e0\u52a0/\u5ba1\u6838\uff1b\u5efa\u8bae 8-18 \u5b57\uff0c\u6700\u591a 24 \u5b57",
     imagePrompt: "\u56fe\u7247 Prompt",
     videoPrompt: "\u89c6\u9891 Prompt",
     negativePrompt: "\u53cd\u5411\u63d0\u793a\u8bcd\uff08\u907f\u514d\u51fa\u73b0\uff09",
     clipPreview: "\u5206\u955c\u7247\u6bb5",
     keyframePreview: "\u8fb9\u754c\u53c2\u8003\u5e27",
     finalVideo: "\u6700\u7ec8\u6210\u7247",
+    preview: "\u9884\u89c8",
+    ready: "\u5df2\u5b8c\u6210",
+    pending: "\u5f85\u5904\u7406",
+    finalVideoNotReady: "\u6700\u7ec8\u6210\u7247\u5c1a\u672a\u751f\u6210\u3002",
+    firstLastFrameClips: "\u9996\u5c3e\u5e27\u5206\u955c\u7247\u6bb5",
     downloadClip: "\u4e0b\u8f7d\u5206\u955c\u89c6\u9891",
     saveShot: "\u4fdd\u5b58\u955c\u5934",
     regenerate: "\u91cd\u751f\u6210",
@@ -350,7 +403,8 @@ const TEXT: Record<PageLang, Copy> = {
     saved: (shotNo) => `\u955c\u5934 ${shotNo} \u5df2\u4fdd\u5b58`,
     keyframesReady: "\u8fb9\u754c\u53c2\u8003\u5e27\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4\uff0c\u6b63\u5728\u8f6e\u8be2\u7ed3\u679c",
     keyframeRegenerated: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u91cd\u751f\u6210",
-    framesApproved: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u786e\u8ba4\uff0c\u89c6\u9891\u7247\u6bb5\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4",
+    framesApproved: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u786e\u8ba4\uff0c\u8bf7\u5ba1\u6838\u5185\u90e8\u5b50\u5206\u955c\u6587\u5b57\u548c\u53c2\u8003\u56fe",
+    microShotsApproved: "\u5185\u90e8\u5b50\u5206\u955c\u5df2\u786e\u8ba4\uff0c\u89c6\u9891\u7247\u6bb5\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4",
     clipsComposed: "\u7247\u6bb5\u5df2\u786e\u8ba4\uff0c\u6210\u7247\u5df2\u5408\u6210",
     finalApproved: "\u6210\u7247\u5df2\u786e\u8ba4\uff0c\u9879\u76ee\u5df2\u5b8c\u6210",
     loadFailed: "\u9879\u76ee\u52a0\u8f7d\u5931\u8d25",
@@ -379,6 +433,7 @@ const TEXT: Record<PageLang, Copy> = {
       PLAN_REVIEW: "\u811a\u672c\u5ba1\u6838",
       IMAGE_GENERATING: "\u8fb9\u754c\u5e27\u751f\u6210",
       IMAGE_REVIEW: "\u8fb9\u754c\u5e27\u5ba1\u6838",
+      MICRO_SHOT_REVIEW: "\u5b50\u5206\u955c\u5ba1\u6838",
       CLIP_GENERATING: "\u89c6\u9891\u751f\u6210",
       CLIP_REVIEW: "\u7247\u6bb5\u5ba1\u6838",
       COMPOSING: "\u5408\u6210\u4e2d",
@@ -401,6 +456,7 @@ const TEXT: Record<PageLang, Copy> = {
     stages: {
       PLAN_REVIEW: "\u811a\u672c",
       IMAGE_REVIEW: "\u8fb9\u754c\u5e27",
+      MICRO_SHOT_REVIEW: "\u5b50\u5206\u955c",
       CLIP_REVIEW: "\u7247\u6bb5",
       FINAL_REVIEW: "\u6210\u7247",
     },
@@ -430,6 +486,7 @@ const TEXT: Record<PageLang, Copy> = {
     generating: "Generating",
     approveScript: "Approve script",
     approveFrames: "Approve boundary frames",
+    approveMicroShots: "Approve internal micro-shots",
     approveClips: "Approve clips and compose",
     confirmFinal: "Approve final",
     shots: "Shots",
@@ -449,6 +506,11 @@ const TEXT: Record<PageLang, Copy> = {
     microShot: "Micro-shot",
     microShotHint: "Controls scene, action, camera, and optional reference-image prompts inside this one video segment. These are not extra video clips.",
     addMicroShot: "Add micro-shot",
+    generateMicroShotImage: "Generate reference image",
+    regenerateMicroShotImage: "Regenerate reference image",
+    microShotImageHint: "Choose image_prompt or mixed to turn the image prompt into a previewable internal reference image.",
+    microShotImageRunning: "Reference image generating",
+    microShotImageFailed: "Reference image failed",
     audioPlan: "Audio plan",
     spokenLines: "Spoken lines",
     referenceType: "Reference type",
@@ -461,12 +523,18 @@ const TEXT: Record<PageLang, Copy> = {
     action: "Action",
     camera: "Camera",
     subtitle: "Subtitle",
+    subtitleHint: "Custom editable overlay copy for review/composition. Aim for 3-8 words, max 72 characters.",
     imagePrompt: "Image prompt",
     videoPrompt: "Video prompt",
     negativePrompt: "Negative prompt",
     clipPreview: "Clip preview",
     keyframePreview: "Boundary frame",
     finalVideo: "Final video",
+    preview: "Preview",
+    ready: "ready",
+    pending: "pending",
+    finalVideoNotReady: "Final video is not ready yet.",
+    firstLastFrameClips: "first-last-frame clips",
     downloadClip: "Download clip",
     saveShot: "Save shot",
     regenerate: "Regenerate",
@@ -475,7 +543,8 @@ const TEXT: Record<PageLang, Copy> = {
     saved: (shotNo) => `Shot ${shotNo} saved`,
     keyframesReady: "Boundary reference frame generation tasks submitted. Polling results.",
     keyframeRegenerated: "Boundary reference frame regenerated",
-    framesApproved: "Boundary reference frames approved. Clip generation tasks submitted.",
+    framesApproved: "Boundary reference frames approved. Review internal micro-shot text and reference images next.",
+    microShotsApproved: "Internal micro-shots approved. Clip generation tasks submitted.",
     clipsComposed: "Clips approved. Final video composed.",
     finalApproved: "Final approved. Project is complete.",
     loadFailed: "Load failed",
@@ -504,6 +573,7 @@ const TEXT: Record<PageLang, Copy> = {
       PLAN_REVIEW: "Script review",
       IMAGE_GENERATING: "Boundary frames",
       IMAGE_REVIEW: "Boundary frame review",
+      MICRO_SHOT_REVIEW: "Micro-shot review",
       CLIP_GENERATING: "Clips",
       CLIP_REVIEW: "Clip review",
       COMPOSING: "Composing",
@@ -526,6 +596,7 @@ const TEXT: Record<PageLang, Copy> = {
     stages: {
       PLAN_REVIEW: "Script",
       IMAGE_REVIEW: "Frames",
+      MICRO_SHOT_REVIEW: "Micro-shots",
       CLIP_REVIEW: "Clips",
       FINAL_REVIEW: "Final",
     },
@@ -535,17 +606,26 @@ const TEXT: Record<PageLang, Copy> = {
 const STAGES = [
   { key: "PLAN_REVIEW", icon: FileText },
   { key: "IMAGE_REVIEW", icon: ImageIcon },
+  { key: "MICRO_SHOT_REVIEW", icon: FileText },
   { key: "CLIP_REVIEW", icon: Clapperboard },
   { key: "FINAL_REVIEW", icon: Check },
 ] as const;
 
 const DEFAULT_PROMPTS = [TEXT.zh.defaultPrompt, TEXT.en.defaultPrompt];
 const PROJECT_STORAGE_KEY = "one-prompt-video-active-project-id";
+const DETAIL_PANEL_WIDTH_STORAGE_KEY = "one-prompt-video-detail-panel-width";
+const DETAIL_PANEL_MIN_WIDTH = 280;
+const DETAIL_PANEL_MAX_WIDTH = 720;
 const RUNNING_PROJECT_STATUSES: ProjectStatus[] = ["IMAGE_GENERATING", "CLIP_GENERATING", "COMPOSING"];
 
 function clampProjectDuration(value: number): number {
   if (!Number.isFinite(value)) return 30;
   return Math.max(3, Math.min(180, Math.round(value)));
+}
+
+function clampDetailPanelWidth(value: number): number {
+  if (!Number.isFinite(value)) return 360;
+  return Math.max(DETAIL_PANEL_MIN_WIDTH, Math.min(DETAIL_PANEL_MAX_WIDTH, Math.round(value)));
 }
 
 export default function OnePromptVideoPage() {
@@ -572,6 +652,10 @@ export default function OnePromptVideoPage() {
   const [uploadingReferences, setUploadingReferences] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [optimisticProgress, setOptimisticProgress] = useState<OptimisticProgress | null>(null);
+  const [detailPanelWidth, setDetailPanelWidth] = useState(360);
+  const [resizingDetailPanel, setResizingDetailPanel] = useState(false);
+  const projectLayoutRef = useRef<HTMLElement | null>(null);
 
   const selectedShot = useMemo(
     () => project?.shots.find((shot) => shot.id === selectedShotId) ?? project?.shots[0],
@@ -600,14 +684,36 @@ export default function OnePromptVideoPage() {
   const completeClips = project?.segments?.length
     ? project.segments.filter((segment) => Boolean(segment.clipUrl) || segment.status === "CLIP_READY" || segment.status === "CLIP_APPROVED").length
     : project?.shots.filter((shot) => Boolean(shot.clipUrl) || shot.status === "CLIP_READY" || shot.status === "CLIP_APPROVED").length ?? 0;
+  const microShotImageStats = project ? microShotImageProgress(project) : { required: 0, ready: 0, running: 0, failed: 0, missing: 0 };
+  const keyframesApproved = Boolean(project?.keyframes?.length && project.keyframes.every((keyframe) => keyframe.status === "IMAGE_APPROVED" || keyframe.locked));
   const runningProjectIds = useMemo(
-    () => projects.filter((item) => RUNNING_PROJECT_STATUSES.includes(item.status)).map((item) => item.id),
+    () => projects
+      .filter((item) => RUNNING_PROJECT_STATUSES.includes(item.status) || hasRunningMicroShotImage(item))
+      .map((item) => item.id),
     [projects],
   );
   const canApproveScript = Boolean(project && project.shots.length > 0 && project.status === "PLAN_REVIEW");
-  const canApproveFrames = Boolean(project && keyframeTotal > 0 && completeImages === keyframeTotal && project.status === "IMAGE_REVIEW");
+  const canApproveFrames = Boolean(project && keyframeTotal > 0 && completeImages === keyframeTotal && project.status === "IMAGE_REVIEW" && !keyframesApproved);
+  const canApproveMicroShots = Boolean(project && (project.status === "MICRO_SHOT_REVIEW" || (project.status === "IMAGE_REVIEW" && keyframesApproved)) && microShotImageStats.running === 0 && microShotImageStats.failed === 0 && microShotImageStats.missing === 0);
   const canApproveClips = Boolean(project && segmentTotal > 0 && completeClips === segmentTotal && project.status === "CLIP_REVIEW");
   const canConfirmFinal = Boolean(project && project.status === "FINAL_REVIEW");
+  const workflowProgress = useMemo(() => {
+    if (optimisticProgress) return optimisticWorkflowProgressView(optimisticProgress, pageLang);
+    if (!project) return null;
+    return projectWorkflowProgressView(project, projectProgress(project), pageLang);
+  }, [optimisticProgress, pageLang, project]);
+  const workflowProgressBarClass =
+    workflowProgress?.tone === "failed"
+      ? "bg-red-400"
+      : workflowProgress?.tone === "success"
+        ? "bg-emerald-400"
+        : "bg-cyan-400";
+  const workflowProgressBorderClass =
+    workflowProgress?.tone === "failed"
+      ? "border-red-400/25 bg-red-400/10"
+      : workflowProgress?.tone === "success"
+        ? "border-emerald-400/25 bg-emerald-400/10"
+        : "border-cyan-400/25 bg-cyan-400/10";
 
   useEffect(() => {
     setPrompt((current) => (DEFAULT_PROMPTS.includes(current) ? copy.defaultPrompt : current));
@@ -617,6 +723,60 @@ export default function OnePromptVideoPage() {
     void loadProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const saved = Number(window.localStorage.getItem(DETAIL_PANEL_WIDTH_STORAGE_KEY));
+    if (Number.isFinite(saved) && saved > 0) setDetailPanelWidth(clampDetailPanelWidth(saved));
+  }, []);
+
+  useEffect(() => {
+    if (!resizingDetailPanel) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    function onPointerMove(event: PointerEvent) {
+      const rect = projectLayoutRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setDetailPanelWidth(clampDetailPanelWidth(rect.right - event.clientX));
+    }
+
+    function onPointerUp() {
+      setResizingDetailPanel(false);
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, [resizingDetailPanel]);
+
+  useEffect(() => {
+    window.localStorage.setItem(DETAIL_PANEL_WIDTH_STORAGE_KEY, String(detailPanelWidth));
+  }, [detailPanelWidth]);
+
+  useEffect(() => {
+    if (!optimisticProgress?.active) return;
+    const timer = window.setInterval(() => {
+      setOptimisticProgress((current) => {
+        if (!current?.active) return current;
+        const next = estimatePlanningProgress(Date.now() - current.startedAt);
+        return {
+          ...current,
+          phase: next.phase,
+          percent: Math.max(current.percent, next.percent),
+        };
+      });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [optimisticProgress?.active]);
 
   useEffect(() => {
     if (!project?.shots.length) return;
@@ -651,7 +811,7 @@ export default function OnePromptVideoPage() {
   useEffect(() => {
     if (!selectedShot) return;
     setDraft({
-      purpose: selectedShot.purpose,
+      purpose: localizedShotPurpose(selectedShot, pageLang),
       camera: selectedShot.camera,
       action: selectedShot.action,
       imagePrompt: localizedShotPrompt(selectedShot, "image", pageLang),
@@ -666,7 +826,7 @@ export default function OnePromptVideoPage() {
   useEffect(() => {
     if (!selectedKeyframe) return;
     setKeyframeDraft({
-      purpose: selectedKeyframe.purpose,
+      purpose: localizedKeyframePurpose(selectedKeyframe, pageLang),
       imagePrompt: localizedKeyframeImagePrompt(selectedKeyframe, pageLang),
       negativePrompt: localizedKeyframeNegativePrompt(selectedKeyframe, pageLang),
     });
@@ -723,6 +883,12 @@ export default function OnePromptVideoPage() {
     setDurationSeconds(nextProject.durationSeconds || 30);
     setStylePreset(nextProject.stylePreset || "cinematic");
     if (typeof window !== "undefined") window.localStorage.setItem(PROJECT_STORAGE_KEY, nextProject.id);
+  }
+
+  function selectShot(shotId: string) {
+    setProjectView("clips");
+    setSelectedShotId(shotId);
+    setSelectedKeyframeId("");
   }
 
   function beginEditProject(nextProject: VideoProject) {
@@ -794,6 +960,7 @@ export default function OnePromptVideoPage() {
     setStylePreset("guofeng");
     setError("");
     setMessage("");
+    setOptimisticProgress(null);
     if (typeof window !== "undefined") window.localStorage.removeItem(PROJECT_STORAGE_KEY);
   }
 
@@ -823,6 +990,8 @@ export default function OnePromptVideoPage() {
   }
 
   async function createAndPlan() {
+    let completed = false;
+    setOptimisticProgress({ active: true, phase: "creating", percent: 3, startedAt: Date.now() });
     await runAction(async () => {
       const totalDurationSeconds = clampProjectDuration(durationSeconds);
       const created = await fetchJson("/api/video-projects", copy, {
@@ -837,8 +1006,19 @@ export default function OnePromptVideoPage() {
       if (!planned.project) throw new Error(copy.planFailed);
       rememberProject(planned.project);
       activateProject(planned.project);
+      completed = true;
+      setOptimisticProgress({ active: false, phase: "done", percent: 100, startedAt: Date.now() });
+      window.setTimeout(() => {
+        setOptimisticProgress((current) => (current?.phase === "done" ? null : current));
+      }, 1200);
       setMessage(copy.planned);
     });
+    if (!completed) {
+      setOptimisticProgress((current) => current && current.phase !== "done"
+        ? { ...current, active: false, phase: "failed", percent: Math.max(current.percent, 8) }
+        : current,
+      );
+    }
   }
 
   function updateDraftMicroShot(index: number, patch: Partial<MicroShot>) {
@@ -904,6 +1084,31 @@ export default function OnePromptVideoPage() {
     });
   }
 
+  async function generateMicroShotImage(index: number) {
+    if (!project || !selectedShot) return;
+    const microShot = ((draft.microShots as MicroShot[] | undefined) ?? [])[index];
+    if (!microShot) return;
+    await runAction(async () => {
+      const res = await fetchJson(
+        `/api/video-projects/${project.id}/shots/${selectedShot.id}/micro-shots/${index + 1}/image`,
+        copy,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            locale: pageLang,
+            microShot: {
+              ...microShot,
+              microShotNo: index + 1,
+            },
+          }),
+        },
+      );
+      if (!res.project) throw new Error(copy.regenerateFailed);
+      rememberProject(res.project);
+      setMessage(copy.microShotImageRunning);
+    });
+  }
+
   async function saveKeyframe() {
     if (!project || !selectedKeyframe) return;
     await runAction(async () => {
@@ -956,6 +1161,16 @@ export default function OnePromptVideoPage() {
       if (!res.project) throw new Error(copy.approveFailed);
       rememberProject(res.project);
       setMessage(copy.framesApproved);
+    });
+  }
+
+  async function approveMicroShots() {
+    if (!project) return;
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}/approve-micro-shots`, copy, { method: "POST" });
+      if (!res.project) throw new Error(copy.approveFailed);
+      rememberProject(res.project);
+      setMessage(copy.microShotsApproved);
     });
   }
 
@@ -1185,6 +1400,26 @@ export default function OnePromptVideoPage() {
           </div>
         </section>
 
+        {workflowProgress && (
+          <section className={`rounded-md border px-4 py-3 text-sm ${workflowProgressBorderClass}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-medium text-white">{workflowProgress.title}</p>
+                <p className="mt-1 text-xs text-slate-400">{workflowProgress.detail}</p>
+              </div>
+              <span className="rounded-md border border-white/10 bg-black/20 px-2.5 py-1 text-sm font-semibold text-white">
+                {workflowProgress.percent}%
+              </span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-black/30">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${workflowProgressBarClass}`}
+                style={{ width: `${workflowProgress.percent}%` }}
+              />
+            </div>
+          </section>
+        )}
+
         {(error || message || project?.errorMessage) && (
           <div className="rounded-md border border-white/10 bg-slate-900 px-4 py-3 text-sm">
             {error && <p className="text-red-300">{error}</p>}
@@ -1194,8 +1429,8 @@ export default function OnePromptVideoPage() {
         )}
 
         {project && (
-          <section className="grid grid-cols-1 gap-5 xl:grid-cols-[250px_minmax(0,1fr)_360px]">
-            <aside className="border-r border-white/10 pr-4">
+          <section ref={projectLayoutRef} className="grid grid-cols-1 gap-5 xl:flex xl:items-start">
+            <aside className="border-r border-white/10 pr-4 xl:w-[250px] xl:shrink-0">
               <div className="mb-4 grid grid-cols-4 gap-2">
                 {STAGES.map((stage) => {
                   const Icon = stage.icon;
@@ -1214,7 +1449,7 @@ export default function OnePromptVideoPage() {
               </div>
               <div className="space-y-2">
                 {project.shots.map((shot) => (
-                  <button key={shot.id} type="button" onClick={() => { setProjectView("clips"); setSelectedShotId(shot.id); setSelectedKeyframeId(""); }} className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm ${!selectedKeyframe && selectedShot?.id === shot.id ? "border-cyan-400/50 bg-cyan-400/10 text-white" : "border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]"}`}>
+                  <button key={shot.id} type="button" onClick={() => selectShot(shot.id)} className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm ${!selectedKeyframe && selectedShot?.id === shot.id ? "border-cyan-400/50 bg-cyan-400/10 text-white" : "border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]"}`}>
                     <span className="font-medium">{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
                     <span className="text-xs text-slate-500">{copy.shotStatus[shot.status]}</span>
                   </button>
@@ -1222,7 +1457,7 @@ export default function OnePromptVideoPage() {
               </div>
             </aside>
 
-            <main className="min-w-0 space-y-5">
+            <main className="min-w-0 space-y-5 xl:flex-1">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-xl font-semibold text-white">{project.title || copy.untitled}</h2>
@@ -1234,6 +1469,9 @@ export default function OnePromptVideoPage() {
                   </button>
                   <button type="button" onClick={approveImages} disabled={loading || !canApproveFrames} className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08] disabled:opacity-50">
                     <Check className="h-4 w-4" /> {copy.approveFrames}
+                  </button>
+                  <button type="button" onClick={approveMicroShots} disabled={loading || !canApproveMicroShots} className="inline-flex h-9 items-center gap-2 rounded-md border border-fuchsia-300/30 bg-fuchsia-300/10 px-3 text-sm font-medium text-fuchsia-100 hover:bg-fuchsia-300/15 disabled:opacity-50">
+                    <ImageIcon className="h-4 w-4" /> {copy.approveMicroShots}
                   </button>
                   <button type="button" onClick={approveClips} disabled={loading || !canApproveClips} className="inline-flex h-9 items-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 px-3 text-sm font-medium text-cyan-100 hover:bg-cyan-400/15 disabled:opacity-50">
                     <Clapperboard className="h-4 w-4" /> {copy.approveClips}
@@ -1248,7 +1486,7 @@ export default function OnePromptVideoPage() {
                 {([
                   { key: "frames" as const, label: copy.frames, meta: `${completeImages}/${keyframeTotal}` },
                   { key: "clips" as const, label: copy.shots, meta: `${completeClips}/${segmentTotal}` },
-                  { key: "final" as const, label: copy.finalVideo, meta: project.finalVideoUrl ? "ready" : "pending" },
+      { key: "final" as const, label: copy.finalVideo, meta: project.finalVideoUrl ? copy.ready : copy.pending },
                 ]).map((item) => (
                   <button
                     key={item.key}
@@ -1285,7 +1523,7 @@ export default function OnePromptVideoPage() {
 
               {projectView === "final" && !project.finalVideoUrl && (
                 <section className="rounded-md border border-white/10 bg-white/[0.03] px-4 py-12 text-center text-sm text-slate-500">
-                  {pageLang === "en" ? "Final video is not ready yet." : "最终成片尚未生成。"}
+                  {copy.finalVideoNotReady}
                 </section>
               )}
 
@@ -1320,12 +1558,12 @@ export default function OnePromptVideoPage() {
                           </span>
                           {keyframe.imageUrl && (
                             <span className="absolute bottom-2 right-2 rounded-md border border-black/30 bg-black/60 px-2 py-1 text-[11px] text-white">
-                              Preview
+                              {copy.preview}
                             </span>
                           )}
                         </button>
                         <div className="space-y-2 px-3 py-3">
-                          <p className="text-sm font-semibold text-white">{keyframe.purpose}</p>
+                          <p className="text-sm font-semibold text-white">{localizedKeyframePurpose(keyframe, pageLang)}</p>
                           <p className="line-clamp-4 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
                           <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || keyframe.locked} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
                             <RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}
@@ -1341,16 +1579,32 @@ export default function OnePromptVideoPage() {
               <section className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <h3 className="text-sm font-semibold text-slate-200">{copy.shots} {completeClips}/{segmentTotal}</h3>
-                  <span className="text-xs text-slate-500">{segmentTotal} first-last-frame clips</span>
+                  <span className="text-xs text-slate-500">{segmentTotal} {copy.firstLastFrameClips}</span>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
                 {project.shots.map((shot) => (
-                  <div key={shot.id} className="overflow-hidden rounded-md border border-white/10 bg-white/[0.03]">
+                  <div
+                    key={shot.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => selectShot(shot.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        selectShot(shot.id);
+                      }
+                    }}
+                    className={`overflow-hidden rounded-md border bg-white/[0.03] outline-none transition ${
+                      selectedShot?.id === shot.id && !selectedKeyframe
+                        ? "border-cyan-400/60 ring-1 ring-cyan-400/30"
+                        : "border-white/10 hover:border-cyan-400/35 focus-visible:border-cyan-400/60"
+                    }`}
+                  >
                     <div className={`relative bg-slate-900 ${aspectClass(project.aspectRatio)}`}>
                       {shot.clipUrl ? (
                         <video src={shot.clipUrl} controls playsInline preload="metadata" poster={shot.imageUrl || undefined} className="h-full w-full object-cover" />
                       ) : (
-                        <button type="button" onClick={() => { setProjectView("clips"); setSelectedShotId(shot.id); setSelectedKeyframeId(""); }} className="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
+                        <button type="button" onClick={() => selectShot(shot.id)} className="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
                           <Clapperboard className="h-5 w-5" />
                           <span>{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
                           {shot.startKeyframeNo && shot.endKeyframeNo && (
@@ -1395,7 +1649,7 @@ export default function OnePromptVideoPage() {
                           {copy.segmentDurationPolicy}
                         </span>
                       </div>
-                      <p className="min-h-10 overflow-hidden text-sm leading-5 text-slate-400">{shot.purpose}</p>
+                      <p className="min-h-10 overflow-hidden text-sm leading-5 text-slate-400">{localizedShotPurpose(shot, pageLang)}</p>
                       {Boolean(shot.constraints?.length) && (
                         <div className="flex flex-wrap gap-1.5">
                           {shot.constraints?.slice(0, 3).map((constraint) => (
@@ -1438,7 +1692,38 @@ export default function OnePromptVideoPage() {
               )}
             </main>
 
-            <aside className="border-l border-white/10 pl-4">
+            <button
+              type="button"
+              aria-label={pageLang === "en" ? "Resize details panel" : "调整详情面板宽度"}
+              title={pageLang === "en" ? "Drag to resize the details panel" : "拖动调整右侧详情面板宽度"}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                setResizingDetailPanel(true);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowLeft") {
+                  event.preventDefault();
+                  setDetailPanelWidth((width) => clampDetailPanelWidth(width + 24));
+                } else if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  setDetailPanelWidth((width) => clampDetailPanelWidth(width - 24));
+                } else if (event.key === "Home") {
+                  event.preventDefault();
+                  setDetailPanelWidth(DETAIL_PANEL_MIN_WIDTH);
+                } else if (event.key === "End") {
+                  event.preventDefault();
+                  setDetailPanelWidth(DETAIL_PANEL_MAX_WIDTH);
+                }
+              }}
+              className={`hidden self-stretch px-1 outline-none xl:flex xl:w-3 xl:shrink-0 xl:cursor-col-resize xl:items-stretch xl:justify-center ${resizingDetailPanel ? "text-cyan-200" : "text-slate-700 hover:text-cyan-300 focus-visible:text-cyan-300"}`}
+            >
+              <span className={`my-1 w-px rounded-full bg-current ${resizingDetailPanel ? "shadow-[0_0_0_3px_rgba(34,211,238,0.18)]" : ""}`} />
+            </button>
+
+            <aside
+              className="w-full border-l border-white/10 pl-4 xl:w-[var(--detail-panel-width)] xl:shrink-0"
+              style={{ "--detail-panel-width": `${detailPanelWidth}px` } as CSSProperties}
+            >
               {selectedKeyframe ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
@@ -1612,7 +1897,42 @@ export default function OnePromptVideoPage() {
                               </select>
                             </label>
                           </div>
-                          <Field label={copy.purpose}><input value={item.purpose ?? ""} onChange={(event) => updateDraftMicroShot(index, { purpose: event.target.value })} className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                          {item.referenceType !== "text" && (
+                            <div className="space-y-2 rounded-md border border-cyan-300/15 bg-cyan-300/[0.04] p-2">
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="text-[11px] leading-5 text-slate-500">{copy.microShotImageHint}</p>
+                                <button
+                                  type="button"
+                                  onClick={() => generateMicroShotImage(index)}
+                                  disabled={
+                                    loading ||
+                                    item.imageStatus === "running" ||
+                                    !localizedMicroShotImagePrompt(item, pageLang).trim()
+                                  }
+                                  className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-cyan-300/20 px-2 text-xs text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-50"
+                                >
+                                  {item.imageStatus === "running"
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : item.imageUrl
+                                      ? <RefreshCw className="h-3.5 w-3.5" />
+                                      : <ImageIcon className="h-3.5 w-3.5" />}
+                                  {item.imageUrl ? copy.regenerateMicroShotImage : copy.generateMicroShotImage}
+                                </button>
+                              </div>
+                              {item.imageStatus === "running" && (
+                                <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>
+                              )}
+                              {item.imageStatus === "failed" && (
+                                <p className="text-xs text-rose-200">{item.errorMessage || copy.microShotImageFailed}</p>
+                              )}
+                              {item.imageUrl && (
+                                <a href={item.imageUrl} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-white/10 bg-slate-950">
+                                  <img src={item.imageUrl} alt={`${copy.microShot} ${index + 1}`} className="max-h-52 w-full object-contain" />
+                                </a>
+                              )}
+                            </div>
+                          )}
+                          <Field label={copy.purpose}><input value={localizedMicroShotPurpose(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { purposeEn: event.target.value, purpose: event.target.value } : { purposeZh: event.target.value, purpose: event.target.value })} className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                           <Field label={copy.scene}><textarea value={item.scene ?? ""} onChange={(event) => updateDraftMicroShot(index, { scene: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                           <Field label={copy.action}><textarea value={item.action ?? ""} onChange={(event) => updateDraftMicroShot(index, { action: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                           <Field label={copy.imagePrompt}><textarea value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
@@ -1635,7 +1955,18 @@ export default function OnePromptVideoPage() {
                   <Field label={copy.purpose}><textarea value={String(draft.purpose ?? "")} onChange={(event) => setDraft((current) => ({ ...current, purpose: event.target.value }))} className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.action}><textarea value={String(draft.action ?? "")} onChange={(event) => setDraft((current) => ({ ...current, action: event.target.value }))} className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.camera}><input value={String(draft.camera ?? "")} onChange={(event) => setDraft((current) => ({ ...current, camera: event.target.value }))} className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <Field label={copy.subtitle}><input value={String(draft.subtitle ?? "")} onChange={(event) => setDraft((current) => ({ ...current, subtitle: event.target.value }))} className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
+                  <Field label={copy.subtitle}>
+                    <textarea
+                      maxLength={subtitleLimitForLang(pageLang)}
+                      value={String(draft.subtitle ?? "")}
+                      onChange={(event) => setDraft((current) => ({ ...current, subtitle: event.target.value }))}
+                      className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
+                    />
+                    <div className="flex items-center justify-between gap-3 text-[11px] leading-5 text-slate-500">
+                      <span>{copy.subtitleHint}</span>
+                      <span className="shrink-0">{String(draft.subtitle ?? "").length}/{subtitleLimitForLang(pageLang)}</span>
+                    </div>
+                  </Field>
                   <Field label={copy.videoPrompt}><textarea value={String(draft.videoPrompt ?? "")} onChange={(event) => setDraft((current) => ({ ...current, videoPrompt: event.target.value }))} className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <button type="button" onClick={saveShot} disabled={loading} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60"><Save className="h-4 w-4" /> {copy.saveShot}</button>
                 </div>
@@ -1651,7 +1982,7 @@ export default function OnePromptVideoPage() {
             <div className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-white">{safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)}</p>
-                <p className="truncate text-xs text-slate-400">{previewKeyframe.purpose}</p>
+                <p className="truncate text-xs text-slate-400">{localizedKeyframePurpose(previewKeyframe, pageLang)}</p>
               </div>
               <button type="button" onClick={() => setPreviewKeyframeId("")} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 text-slate-200 hover:bg-white/[0.08]">
                 <X className="h-4 w-4" />
@@ -1683,6 +2014,10 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   return <label className="block space-y-1.5"><span className="text-xs font-medium text-slate-500">{label}</span>{children}</label>;
 }
 
+function subtitleLimitForLang(lang: PageLang): number {
+  return lang === "en" ? 72 : 24;
+}
+
 function sortProjects(items: VideoProject[]): VideoProject[] {
   return [...items].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 }
@@ -1712,6 +2047,29 @@ function localizedShotPrompt(shot: VideoShot, kind: "image" | "video", lang: Pag
   return lang === "en"
     ? shot.videoPromptEn || shot.videoPrompt
     : shot.videoPromptZh || shot.videoPrompt;
+}
+
+function localizedShotPurpose(shot: VideoShot, lang: PageLang): string {
+  if (lang === "en") return shot.purposeEn || titleFromPrompt(shot.videoPromptEn || shot.videoPrompt || shot.purpose, `Shot ${shot.shotNo}`);
+  return shot.purposeZh || shot.purpose;
+}
+
+function localizedKeyframePurpose(keyframe: VideoKeyframe, lang: PageLang): string {
+  if (lang === "en") return keyframe.purposeEn || titleFromPrompt(keyframe.imagePromptEn || keyframe.imagePrompt || keyframe.purpose, `Boundary frame ${keyframe.keyframeNo}`);
+  return keyframe.purposeZh || keyframe.purpose;
+}
+
+function localizedMicroShotPurpose(microShot: MicroShot, lang: PageLang): string {
+  if (lang === "en") return microShot.purposeEn || titleFromPrompt(microShot.promptEn || microShot.imagePromptEn || microShot.purpose, `Micro-shot ${microShot.microShotNo}`);
+  return microShot.purposeZh || microShot.purpose;
+}
+
+function titleFromPrompt(text: string, fallback: string): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return fallback;
+  const purposeMatch = cleaned.match(/\bPurpose:\s*([^.;。]+)/i);
+  const source = purposeMatch?.[1]?.trim() || cleaned.split(/[.;。]/)[0]?.trim() || fallback;
+  return source.length > 96 ? `${source.slice(0, 93)}...` : source;
 }
 
 function localizedShotNegativePrompt(shot: VideoShot, lang: PageLang): string {
@@ -1786,8 +2144,8 @@ function timedPromptRangeLabel(prompt: TimedPrompt): string {
 
 function localizedMicroShotPrompt(microShot: MicroShot, lang: PageLang): string {
   return lang === "en"
-    ? microShot.promptEn || microShot.prompt || microShot.action || microShot.purpose
-    : microShot.promptZh || microShot.prompt || microShot.action || microShot.purpose;
+    ? microShot.promptEn || microShot.prompt || microShot.action || localizedMicroShotPurpose(microShot, lang)
+    : microShot.promptZh || microShot.prompt || microShot.action || localizedMicroShotPurpose(microShot, lang);
 }
 
 function localizedMicroShotImagePrompt(microShot: MicroShot, lang: PageLang): string {
@@ -1814,32 +2172,8 @@ function localizedAudioPlanSummary(audioPlan: AudioPlan, lang: PageLang): string
 }
 
 function boundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang: PageLang): string {
-  if (frame.keyframeNo === 1) return lang === "en" ? "First-frame reference" : "棣栧抚鍙傝€冨浘";
-  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End-frame reference" : "灏惧抚鍙傝€冨浘";
-  return lang === "en"
-    ? `Boundary frame ${String(frame.keyframeNo).padStart(2, "0")}`
-    : `杈圭晫甯?${String(frame.keyframeNo).padStart(2, "0")}`;
-}
-
-function boundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds: number, lang: PageLang): string {
-  if (!frame) return lang === "en" ? "Frame" : "鍙傝€冨抚";
-  if (frame.keyframeNo === 1) return lang === "en" ? "First" : "棣栧抚";
-  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End" : "灏惧抚";
-  return lang === "en" ? `F${String(frame.keyframeNo).padStart(2, "0")}` : `杈圭晫${String(frame.keyframeNo).padStart(2, "0")}`;
-}
-
-function boundaryRangeLabel(
-  shot: Pick<VideoShot, "startKeyframeNo" | "endKeyframeNo">,
-  keyframeByNo: Map<number, VideoKeyframe>,
-  totalSeconds: number,
-  lang: PageLang,
-): string {
-  const start = shot.startKeyframeNo ? keyframeByNo.get(shot.startKeyframeNo) : undefined;
-  const end = shot.endKeyframeNo ? keyframeByNo.get(shot.endKeyframeNo) : undefined;
-  return `${boundaryFrameShortLabel(start, totalSeconds, lang)} -> ${boundaryFrameShortLabel(end, totalSeconds, lang)}`;
-}
-
-function safeBoundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang: PageLang): string {
+  const consistencyLabel = consistencyFrameLabel(frame, lang);
+  if (consistencyLabel) return consistencyLabel;
   if (frame.keyframeNo === 1) return lang === "en" ? "First-frame reference" : "首帧参考图";
   if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End-frame reference" : "尾帧参考图";
   return lang === "en"
@@ -1847,11 +2181,33 @@ function safeBoundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang
     : `边界帧 ${String(frame.keyframeNo).padStart(2, "0")}`;
 }
 
-function safeBoundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds: number, lang: PageLang): string {
+function boundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds: number, lang: PageLang): string {
   if (!frame) return lang === "en" ? "Frame" : "参考帧";
+  const consistencyLabel = consistencyFrameShortLabel(frame, lang);
+  if (consistencyLabel) return consistencyLabel;
   if (frame.keyframeNo === 1) return lang === "en" ? "First" : "首帧";
   if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End" : "尾帧";
   return lang === "en" ? `F${String(frame.keyframeNo).padStart(2, "0")}` : `边界${String(frame.keyframeNo).padStart(2, "0")}`;
+}
+
+function safeBoundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang: PageLang): string {
+  return boundaryFrameLabel(frame, totalSeconds, lang);
+}
+
+function safeBoundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds: number, lang: PageLang): string {
+  return boundaryFrameShortLabel(frame, totalSeconds, lang);
+}
+
+function consistencyFrameLabel(frame: VideoKeyframe, lang: PageLang): string {
+  if (frame.keyframeNo === -2) return lang === "en" ? "Character consistency reference" : "人物一致性参考图";
+  if (frame.keyframeNo === -1) return lang === "en" ? "Scene consistency reference" : "场景一致性参考图";
+  return "";
+}
+
+function consistencyFrameShortLabel(frame: VideoKeyframe, lang: PageLang): string {
+  if (frame.keyframeNo === -2) return lang === "en" ? "Character" : "人物参考";
+  if (frame.keyframeNo === -1) return lang === "en" ? "Scene" : "场景参考";
+  return "";
 }
 
 function safeBoundaryRangeLabel(
@@ -1863,6 +2219,95 @@ function safeBoundaryRangeLabel(
   const start = shot.startKeyframeNo ? keyframeByNo.get(shot.startKeyframeNo) : undefined;
   const end = shot.endKeyframeNo ? keyframeByNo.get(shot.endKeyframeNo) : undefined;
   return `${safeBoundaryFrameShortLabel(start, totalSeconds, lang)} -> ${safeBoundaryFrameShortLabel(end, totalSeconds, lang)}`;
+}
+
+function estimatePlanningProgress(elapsedMs: number): Pick<OptimisticProgress, "phase" | "percent"> {
+  const seconds = Math.max(0, elapsedMs / 1000);
+  if (seconds < 2) return { phase: "creating", percent: Math.round(3 + seconds * 5) };
+  if (seconds < 8) return { phase: "understanding", percent: Math.round(13 + (seconds - 2) * 4) };
+  if (seconds < 20) return { phase: "storyboard", percent: Math.round(37 + (seconds - 8) * 2.25) };
+  if (seconds < 38) return { phase: "prompts", percent: Math.round(64 + (seconds - 20) * 1.15) };
+  return { phase: "waiting", percent: Math.min(94, Math.round(85 + Math.log1p(seconds - 38) * 3)) };
+}
+
+function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: PageLang): WorkflowProgressView {
+  const text: Record<OptimisticProgressPhase, { zh: [string, string]; en: [string, string]; tone: WorkflowProgressView["tone"] }> = {
+    creating: {
+      zh: ["正在创建项目", "已提交创作需求，正在准备进入剧本拆解。"],
+      en: ["Creating project", "The request is submitted and the storyboard planner is warming up."],
+      tone: "running",
+    },
+    understanding: {
+      zh: ["大模型正在理解需求", "正在识别主题、人物/场景参考、色调锁和画幅约束。"],
+      en: ["Understanding brief", "Reading the theme, references, tone locks, and aspect ratio constraints."],
+      tone: "running",
+    },
+    storyboard: {
+      zh: ["正在拆解剧本与边界关键帧", "规划首尾帧时间线、镜头数量和每段叙事节拍。"],
+      en: ["Splitting script and boundary frames", "Planning the first-last-frame timeline, segment count, and story beats."],
+      tone: "running",
+    },
+    prompts: {
+      zh: ["正在生成结构化提示词", "整理图片 Prompt、视频 Prompt、负向约束和连续性锁定。"],
+      en: ["Building structured prompts", "Preparing image prompts, video prompts, negative constraints, and continuity locks."],
+      tone: "running",
+    },
+    waiting: {
+      zh: ["等待模型返回完整结果", "复杂需求可能会多等一会儿，返回后会自动进入审核。"],
+      en: ["Waiting for the model result", "Complex briefs can take longer. The review stage will open automatically when it returns."],
+      tone: "running",
+    },
+    done: {
+      zh: ["分镜计划已完成", "已拿到大模型返回的分镜、关键帧和片段提示词。"],
+      en: ["Storyboard plan complete", "The model returned the storyboard, keyframes, and segment prompts."],
+      tone: "success",
+    },
+    failed: {
+      zh: ["分镜计划生成失败", "请查看下方错误信息，修正后可以重新生成。"],
+      en: ["Storyboard planning failed", "Check the error below, then adjust and try again."],
+      tone: "failed",
+    },
+  };
+  const item = text[progress.phase];
+  const [title, detail] = lang === "en" ? item.en : item.zh;
+  return { percent: Math.max(0, Math.min(100, Math.round(progress.percent))), title, detail, tone: item.tone };
+}
+
+function projectWorkflowProgressView(
+  project: VideoProject,
+  progress: ReturnType<typeof projectProgress>,
+  lang: PageLang,
+): WorkflowProgressView {
+  const zh: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
+    DRAFT: ["等待开始", "填写一句话需求后即可生成分镜计划。", "idle"],
+    PLANNING: ["正在生成分镜计划", "大模型正在拆解剧本、关键帧和片段提示词。", "running"],
+    PLAN_REVIEW: ["分镜计划待审核", `已生成 ${project.shots.length} 个镜头，请先确认脚本与关键帧规划。`, "idle"],
+    IMAGE_GENERATING: ["正在生成边界参考帧", `已完成 ${progress.images}/${progress.imageTotal} 张关键帧图片。`, "running"],
+    IMAGE_REVIEW: ["关键帧待审核", `已完成 ${progress.images}/${progress.imageTotal} 张关键帧图片，请确认后进入内部子分镜审核。`, "idle"],
+    MICRO_SHOT_REVIEW: ["内部子分镜待审核", "请确认每个片段内部子分镜的文字和参考图，完成后再生成视频片段。", "idle"],
+    CLIP_GENERATING: ["正在生成分镜视频片段", `已完成 ${progress.clips}/${progress.clipTotal} 段视频片段。`, "running"],
+    CLIP_REVIEW: ["片段待审核", `已完成 ${progress.clips}/${progress.clipTotal} 段视频片段，请确认后合成成片。`, "idle"],
+    COMPOSING: ["正在合成最终成片", "正在拼接所有分镜片段并处理转场与声音。", "running"],
+    FINAL_REVIEW: ["最终成片待确认", "成片已生成，请预览确认。", "idle"],
+    DONE: ["成片已完成", "这个项目已经完成，可以下载或继续新建项目。", "success"],
+    FAILED: ["任务失败", "请查看错误信息，修改后重新发起对应步骤。", "failed"],
+  };
+  const en: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
+    DRAFT: ["Ready to start", "Enter a one-line brief to generate the storyboard plan.", "idle"],
+    PLANNING: ["Planning storyboard", "The model is splitting the script, keyframes, and segment prompts.", "running"],
+    PLAN_REVIEW: ["Storyboard awaiting review", `${project.shots.length} shots are ready. Review the script and keyframe plan first.`, "idle"],
+    IMAGE_GENERATING: ["Generating boundary reference frames", `${progress.images}/${progress.imageTotal} keyframe images are ready.`, "running"],
+    IMAGE_REVIEW: ["Keyframes awaiting review", `${progress.images}/${progress.imageTotal} keyframe images are ready. Approve them to review internal micro-shots.`, "idle"],
+    MICRO_SHOT_REVIEW: ["Internal micro-shots awaiting review", "Review the internal micro-shot text and generated reference images before generating video clips.", "idle"],
+    CLIP_GENERATING: ["Generating video clips", `${progress.clips}/${progress.clipTotal} clips are ready.`, "running"],
+    CLIP_REVIEW: ["Clips awaiting review", `${progress.clips}/${progress.clipTotal} clips are ready. Approve them to compose the final video.`, "idle"],
+    COMPOSING: ["Composing final video", "Joining all clips and applying transitions and audio.", "running"],
+    FINAL_REVIEW: ["Final video awaiting review", "The final video is ready for preview.", "idle"],
+    DONE: ["Final video complete", "This project is complete and ready to download.", "success"],
+    FAILED: ["Task failed", "Check the error message, then retry the relevant step.", "failed"],
+  };
+  const [title, detail, tone] = lang === "en" ? en[project.status] : zh[project.status];
+  return { percent: progress.percent, title, detail, tone };
 }
 
 function projectProgress(project: VideoProject): { images: number; clips: number; imageTotal: number; clipTotal: number; percent: number } {
@@ -1882,6 +2327,7 @@ function projectProgress(project: VideoProject): { images: number; clips: number
     PLAN_REVIEW: 15,
     IMAGE_GENERATING: 20 + (images / safeImageTotal) * 25,
     IMAGE_REVIEW: 50,
+    MICRO_SHOT_REVIEW: 54,
     CLIP_GENERATING: 55 + (clips / safeClipTotal) * 30,
     CLIP_REVIEW: 86,
     COMPOSING: 92,
@@ -1890,6 +2336,24 @@ function projectProgress(project: VideoProject): { images: number; clips: number
     FAILED: Math.max(10, Math.round(((images / safeImageTotal + clips / safeClipTotal) / 2) * 85)),
   };
   return { images, clips, imageTotal, clipTotal, percent: Math.round(stageWeight[project.status] ?? 0) };
+}
+
+function hasRunningMicroShotImage(project: VideoProject): boolean {
+  return project.shots.some((shot) => shot.microShots?.some((item) => item.imageStatus === "running" && Boolean(item.imageTaskId)));
+}
+
+function microShotImageProgress(project: VideoProject): { required: number; ready: number; running: number; failed: number; missing: number } {
+  const items = project.shots.flatMap((shot) => shot.microShots ?? []).filter((item) => item.referenceType === "image_prompt" || item.referenceType === "mixed");
+  const ready = items.filter((item) => Boolean(item.imageUrl)).length;
+  const running = items.filter((item) => item.imageStatus === "running" && Boolean(item.imageTaskId)).length;
+  const failed = items.filter((item) => item.imageStatus === "failed").length;
+  return {
+    required: items.length,
+    ready,
+    running,
+    failed,
+    missing: items.length - ready - running - failed,
+  };
 }
 
 async function fetchJson(path: string, copy: Copy, init?: RequestInit): Promise<ApiResponse> {
