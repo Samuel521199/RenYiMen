@@ -8,9 +8,9 @@ import {
   queryImsComposeJob,
   submitAliyunImageTask,
   submitAliyunImageToVideoTask,
-  submitImsComposeJob,
 } from "./aliyun-workflow";
 import { errorForLog, logOnePromptVideo } from "./logger";
+import { composeVideoClipsLocally } from "./local-compose";
 import type { CreateVideoProjectInput, OnePromptVideoPlan, UpdateShotInput } from "./types";
 
 const PROJECT_INCLUDE = {
@@ -25,6 +25,8 @@ export type VideoProjectWithShots = Prisma.VideoProjectGetPayload<{
 
 export function serializeVideoProject(project: VideoProjectWithShots) {
   const planShots = readPlanShotMap(project.planJson);
+  const planKeyframes = readPlanKeyframeMap(project.planJson);
+  const planSegments = readPlanSegmentMap(project.planJson);
   const keyframes = "keyframes" in project ? project.keyframes : [];
   const segments = "segments" in project ? project.segments : [];
   const keyframeMap = new Map(keyframes.map((frame) => [frame.keyframeNo, frame]));
@@ -36,6 +38,14 @@ export function serializeVideoProject(project: VideoProjectWithShots) {
         imagePromptEn: readPlanShotString(planShots.get(shot.shotNo), ["imagePromptEn", "image_prompt_en"]) || shot.imagePrompt,
         videoPromptZh: readPlanShotString(planShots.get(shot.shotNo), ["videoPromptZh", "video_prompt_zh"]) || shot.videoPrompt,
         videoPromptEn: readPlanShotString(planShots.get(shot.shotNo), ["videoPromptEn", "video_prompt_en"]) || shot.videoPrompt,
+        negativePromptZh: readPlanShotString(planShots.get(shot.shotNo), ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(shot.negativePrompt),
+        negativePromptEn: readPlanShotString(planShots.get(shot.shotNo), ["negativePromptEn", "negative_prompt_en"]) || shot.negativePrompt,
+        boundaryMode: readPlanBoundaryMode(planShots.get(shot.shotNo)),
+        outputMode: readPlanShotString(planShots.get(shot.shotNo), ["outputMode", "output_mode"]),
+        constraints: readPlanStringArray(planShots.get(shot.shotNo), ["constraints"]),
+        timedPrompts: readPlanTimedPrompts(planShots.get(shot.shotNo)),
+        microShots: readPlanMicroShots(planShots.get(shot.shotNo)),
+        audioPlan: readPlanAudioPlan(planShots.get(shot.shotNo)),
         createdAt: shot.createdAt.toISOString(),
         updatedAt: shot.updatedAt.toISOString(),
       }));
@@ -46,11 +56,17 @@ export function serializeVideoProject(project: VideoProjectWithShots) {
     updatedAt: project.updatedAt.toISOString(),
     keyframes: keyframes.map((frame) => ({
       ...frame,
+      imagePromptZh: readPlanShotString(planKeyframes.get(frame.keyframeNo), ["imagePromptZh", "image_prompt_zh"]) || frame.imagePrompt,
+      imagePromptEn: readPlanShotString(planKeyframes.get(frame.keyframeNo), ["imagePromptEn", "image_prompt_en"]) || frame.imagePrompt,
+      negativePromptZh: readPlanShotString(planKeyframes.get(frame.keyframeNo), ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(frame.negativePrompt),
+      negativePromptEn: readPlanShotString(planKeyframes.get(frame.keyframeNo), ["negativePromptEn", "negative_prompt_en"]) || frame.negativePrompt,
       createdAt: frame.createdAt.toISOString(),
       updatedAt: frame.updatedAt.toISOString(),
     })),
     segments: segments.map((segment) => ({
       ...segment,
+      negativePromptZh: readPlanShotString(planSegments.get(segment.segmentNo), ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(segment.negativePrompt),
+      negativePromptEn: readPlanShotString(planSegments.get(segment.segmentNo), ["negativePromptEn", "negative_prompt_en"]) || segment.negativePrompt,
       createdAt: segment.createdAt.toISOString(),
       updatedAt: segment.updatedAt.toISOString(),
     })),
@@ -80,7 +96,15 @@ function serializeSegmentAsShot(
     videoPrompt: segment.videoPrompt,
     videoPromptZh: readPlanShotString(planShot, ["videoPromptZh", "video_prompt_zh"]) || segment.videoPrompt,
     videoPromptEn: readPlanShotString(planShot, ["videoPromptEn", "video_prompt_en"]) || segment.videoPrompt,
+    boundaryMode: readPlanBoundaryMode(planShot),
+    outputMode: readPlanShotString(planShot, ["outputMode", "output_mode"]),
+    constraints: readPlanStringArray(planShot, ["constraints"]),
+    timedPrompts: readPlanTimedPrompts(planShot),
+    microShots: readPlanMicroShots(planShot),
+    audioPlan: readPlanAudioPlan(planShot),
     negativePrompt: segment.negativePrompt,
+    negativePromptZh: readPlanShotString(planShot, ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(segment.negativePrompt),
+    negativePromptEn: readPlanShotString(planShot, ["negativePromptEn", "negative_prompt_en"]) || segment.negativePrompt,
     subtitle: segment.subtitle,
     imageUrl: start?.imageUrl ?? null,
     endImageUrl: end?.imageUrl ?? null,
@@ -151,6 +175,175 @@ function readPlanShotString(shot: Record<string, unknown> | undefined, keys: str
   return "";
 }
 
+function toChineseNegativePrompt(prompt: string): string {
+  const dictionary: Record<string, string> = {
+    text: "文字",
+    subtitles: "字幕",
+    captions: "字幕",
+    logos: "标志",
+    logo: "标志",
+    watermarks: "水印",
+    watermark: "水印",
+    ui: "界面元素",
+    "modern objects": "现代物件",
+    "harsh lighting": "刺眼光线",
+    "oversaturated colors": "颜色过饱和",
+    "deformed hands": "手部变形",
+    "extra fingers": "多余手指",
+    "random text": "随机文字",
+    "logo distortion": "标志变形",
+    "deformed face": "脸部变形",
+    "low quality": "低质量",
+    blurry: "模糊",
+    "duplicated body": "身体重复",
+  };
+  return prompt
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => dictionary[item.toLowerCase()] ?? item)
+    .join("，");
+}
+
+function readPlanStringArray(shot: Record<string, unknown> | undefined, keys: string[]): string[] {
+  if (!shot) return [];
+  for (const key of keys) {
+    const value = shot[key];
+    if (!Array.isArray(value)) continue;
+    return value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+  }
+  return [];
+}
+
+function readPlanTimedPrompts(shot: Record<string, unknown> | undefined): Array<{ timeSeconds: number; startSeconds?: number; endSeconds?: number; prompt: string; promptZh?: string; promptEn?: string }> {
+  const value = shot?.timedPrompts ?? shot?.timed_prompts;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const startSecondsRaw = Number(item.startSeconds ?? item.start_seconds);
+    const endSecondsRaw = Number(item.endSeconds ?? item.end_seconds);
+    const timeSeconds = Number(item.timeSeconds ?? item.time_seconds ?? startSecondsRaw);
+    const promptZh = readPlanShotString(item, ["promptZh", "prompt_zh"]);
+    const promptEn = readPlanShotString(item, ["promptEn", "prompt_en"]);
+    const prompt = readPlanShotString(item, ["prompt"]) || promptZh || promptEn;
+    if (!Number.isFinite(timeSeconds) || !prompt) return [];
+    return [{
+      timeSeconds,
+      startSeconds: Number.isFinite(startSecondsRaw) ? startSecondsRaw : undefined,
+      endSeconds: Number.isFinite(endSecondsRaw) ? endSecondsRaw : undefined,
+      prompt,
+      promptZh,
+      promptEn,
+    }];
+  });
+}
+
+function readPlanOutputMode(shot: Record<string, unknown> | undefined): "text" | "image" | "mixed" | undefined {
+  const value = readPlanShotString(shot, ["outputMode", "output_mode"]);
+  return value === "text" || value === "image" || value === "mixed" ? value : undefined;
+}
+
+function readPlanBoundaryMode(shot: Record<string, unknown> | undefined): "continuous" | "hard_cut" | "dissolve" | "match_cut" | undefined {
+  const value = readPlanShotString(shot, ["boundaryMode", "boundary_mode"]);
+  return value === "continuous" || value === "hard_cut" || value === "dissolve" || value === "match_cut" ? value : undefined;
+}
+
+function readPlanAudioPlan(shot: Record<string, unknown> | undefined): {
+  mode: "ambient" | "voiceover" | "dialogue" | "mixed" | "silent";
+  needsVoiceover: boolean;
+  needsDialogue: boolean;
+  language?: string;
+  speaker?: string;
+  voiceStyle?: string;
+  lines?: string[];
+  linesZh?: string[];
+  linesEn?: string[];
+  rationale?: string;
+} | undefined {
+  const raw = shot?.audioPlan ?? shot?.audio_plan;
+  if (!isRecord(raw)) return undefined;
+  const modeRaw = raw.mode;
+  const mode = modeRaw === "voiceover" || modeRaw === "dialogue" || modeRaw === "mixed" || modeRaw === "silent" || modeRaw === "ambient"
+    ? modeRaw
+    : "ambient";
+  const linesZh = readPlanStringArray(raw, ["linesZh", "lines_zh"]);
+  const linesEn = readPlanStringArray(raw, ["linesEn", "lines_en"]);
+  const lines = readPlanStringArray(raw, ["lines"]);
+  return {
+    mode,
+    needsVoiceover: typeof raw.needsVoiceover === "boolean" ? raw.needsVoiceover : typeof raw.needs_voiceover === "boolean" ? raw.needs_voiceover : mode === "voiceover" || mode === "mixed",
+    needsDialogue: typeof raw.needsDialogue === "boolean" ? raw.needsDialogue : typeof raw.needs_dialogue === "boolean" ? raw.needs_dialogue : mode === "dialogue" || mode === "mixed",
+    language: readPlanShotString(raw, ["language"]),
+    speaker: readPlanShotString(raw, ["speaker"]),
+    voiceStyle: readPlanShotString(raw, ["voiceStyle", "voice_style"]),
+    lines,
+    linesZh,
+    linesEn,
+    rationale: readPlanShotString(raw, ["rationale", "reason"]),
+  };
+}
+
+function readPlanMicroShots(shot: Record<string, unknown> | undefined): Array<{
+  microShotNo: number;
+  localTimeSeconds: number;
+  endSeconds?: number;
+  absoluteTimeSeconds: number;
+  purpose: string;
+  scene: string;
+  action: string;
+  camera?: string;
+  referenceType?: "text" | "image_prompt" | "mixed";
+  imagePrompt?: string;
+  imagePromptZh?: string;
+  imagePromptEn?: string;
+  prompt: string;
+  promptZh?: string;
+  promptEn?: string;
+}> {
+  const value = shot?.microShots ?? shot?.micro_shots ?? shot?.internalStoryboard ?? shot?.internal_storyboard ?? shot?.subShots ?? shot?.sub_shots;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    if (!isRecord(item)) return [];
+    const localTimeSeconds = Number(item.localTimeSeconds ?? item.local_time_seconds ?? item.startSeconds ?? item.start_seconds ?? item.offset_seconds ?? 0);
+    const endSeconds = Number(item.endSeconds ?? item.end_seconds);
+    const absoluteTimeSeconds = Number(item.absoluteTimeSeconds ?? item.absolute_time_seconds ?? localTimeSeconds);
+    const purpose = readPlanShotString(item, ["purpose"]);
+    const scene = readPlanShotString(item, ["scene", "scene_limit"]);
+    const action = readPlanShotString(item, ["action", "action_limit"]);
+    const camera = readPlanShotString(item, ["camera", "camera_limit"]);
+    const imagePromptZh = readPlanShotString(item, ["imagePromptZh", "image_prompt_zh"]);
+    const imagePromptEn = readPlanShotString(item, ["imagePromptEn", "image_prompt_en"]);
+    const imagePrompt = readPlanShotString(item, ["imagePrompt", "image_prompt"]) || imagePromptZh || imagePromptEn;
+    const promptZh = readPlanShotString(item, ["promptZh", "prompt_zh"]);
+    const promptEn = readPlanShotString(item, ["promptEn", "prompt_en"]);
+    const prompt = readPlanShotString(item, ["prompt"]) || promptZh || promptEn || action || purpose;
+    if (!prompt && !purpose && !scene && !action && !imagePrompt) return [];
+    const referenceTypeValue = item.referenceType ?? item.reference_type;
+    const referenceType = referenceTypeValue === "text" || referenceTypeValue === "image_prompt" || referenceTypeValue === "mixed"
+      ? referenceTypeValue
+      : referenceTypeValue === "image"
+        ? "image_prompt"
+        : undefined;
+    return [{
+      microShotNo: Number(item.microShotNo ?? item.micro_shot_no ?? index + 1),
+      localTimeSeconds: Number.isFinite(localTimeSeconds) ? localTimeSeconds : 0,
+      endSeconds: Number.isFinite(endSeconds) ? endSeconds : undefined,
+      absoluteTimeSeconds: Number.isFinite(absoluteTimeSeconds) ? absoluteTimeSeconds : 0,
+      purpose,
+      scene,
+      action,
+      camera,
+      referenceType,
+      imagePrompt,
+      imagePromptZh,
+      imagePromptEn,
+      prompt,
+      promptZh,
+      promptEn,
+    }];
+  });
+}
+
 export async function listVideoProjects(userId: string): Promise<VideoProjectWithShots[]> {
   await logOnePromptVideo("project.list.request", { userId });
   const projects = await prisma.videoProject.findMany({
@@ -177,7 +370,7 @@ export async function createVideoProject(
     userPromptLength: planInput.userPrompt.length,
     aspectRatio: planInput.aspectRatio,
     durationSeconds: planInput.durationSeconds,
-    shotCount: planInput.shotCount,
+    fallbackSegmentCount: planInput.shotCount,
     stylePreset: planInput.stylePreset,
     referenceImageCount: planInput.referenceImageUrls.length,
   });
@@ -280,7 +473,7 @@ export async function planVideoProject(
     userId,
     projectId,
     status: project.status,
-    shotCount: input.shotCount,
+    fallbackSegmentCount: input.shotCount,
     durationSeconds: input.durationSeconds,
     aspectRatio: input.aspectRatio,
     stylePreset: input.stylePreset,
@@ -389,7 +582,7 @@ export async function updateVideoShot(
     if (typeof input.negativePrompt === "string") data.negativePrompt = input.negativePrompt;
     if (typeof input.subtitle === "string") data.subtitle = input.subtitle;
     if (typeof input.durationSeconds === "number") {
-      data.durationSeconds = Math.max(2, Math.min(15, Math.round(input.durationSeconds)));
+      data.durationSeconds = Math.max(3, Math.min(15, Math.round(input.durationSeconds)));
     }
     if (typeof input.locked === "boolean") {
       data.locked = input.locked;
@@ -406,7 +599,13 @@ export async function updateVideoShot(
       });
       updatedFields.push("imagePrompt");
     }
-    await syncPlanJsonFromShots(projectId, { shotId, locale: input.locale });
+    if (Array.isArray(input.microShots)) updatedFields.push("microShots");
+    await syncPlanJsonFromShots(projectId, {
+      shotId,
+      locale: input.locale,
+      microShots: input.microShots,
+      negativePromptUpdated: typeof input.negativePrompt === "string",
+    });
   } else {
     const keyframe = project.keyframes.find((item) => item.id === shotId);
     if (keyframe) {
@@ -426,7 +625,11 @@ export async function updateVideoShot(
         await prisma.videoKeyframe.update({ where: { id: shotId, projectId }, data });
         updatedFields.push(...Object.keys(data));
       }
-      await syncPlanJsonFromShots(projectId, { shotId, locale: input.locale });
+      await syncPlanJsonFromShots(projectId, {
+        shotId,
+        locale: input.locale,
+        negativePromptUpdated: typeof input.negativePrompt === "string",
+      });
     } else {
     const data: Prisma.VideoShotUpdateInput = {};
     if (typeof input.purpose === "string") data.purpose = input.purpose;
@@ -443,7 +646,11 @@ export async function updateVideoShot(
     }
     await prisma.videoShot.update({ where: { id: shotId, projectId }, data });
     updatedFields.push(...Object.keys(data));
-    await syncPlanJsonFromShots(projectId, { shotId, locale: input.locale });
+    await syncPlanJsonFromShots(projectId, {
+      shotId,
+      locale: input.locale,
+      negativePromptUpdated: typeof input.negativePrompt === "string",
+    });
     }
   }
   await logOnePromptVideo("shot.update.success", {
@@ -464,46 +671,39 @@ export async function approveVideoPlan(userId: string, projectId: string): Promi
     status: project.status,
   });
 
-  for (const keyframe of project.keyframes) {
-    if (keyframe.locked && keyframe.imageUrl) continue;
-    let taskId: string;
-    try {
-      taskId = await submitAliyunImageTask({
-        prompt: [generationPromptForKeyframe(project, keyframe), keyframe.negativePrompt ? `Negative prompt: ${keyframe.negativePrompt}` : ""]
-          .filter(Boolean)
-          .join("\n"),
-        aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
-        seed: keyframe.keyframeNo,
-      });
-    } catch (error) {
-      await logOnePromptVideo("image.submit.error", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo, ...errorForLog(error) }, "error");
-      throw error;
-    }
-    await prisma.videoKeyframe.update({
-      where: { id: keyframe.id },
-      data: {
-        imageTaskId: taskId,
-        imageUrl: null,
-        status: VideoShotStatus.IMAGE_RUNNING,
-        qualityScore: null,
-        errorMessage: null,
-      },
-    });
-    await logOnePromptVideo("image.submit.success", {
-      userId,
+  await prisma.videoKeyframe.updateMany({
+    where: {
       projectId,
-      keyframeId: keyframe.id,
-      keyframeNo: keyframe.keyframeNo,
-      imageTaskId: taskId,
-    });
-  }
+      NOT: { locked: true, imageUrl: { not: null } },
+    },
+    data: {
+      imageTaskId: null,
+      imageUrl: null,
+      status: VideoShotStatus.IMAGE_PENDING,
+      qualityScore: null,
+      errorMessage: null,
+    },
+  });
 
-  const updated = await prisma.videoProject.update({
+  const queued = await prisma.videoProject.update({
     where: { id: project.id },
     data: { status: VideoProjectStatus.IMAGE_GENERATING, errorMessage: null },
     include: PROJECT_INCLUDE,
   });
-  await logOnePromptVideo("image.batch.submit.done", { userId, projectId, status: updated.status });
+  await submitNextImageTask({
+    userId,
+    projectId,
+    keyframes: queued.keyframes,
+    logEventPrefix: "image.batch",
+  });
+  const updated = await requireVideoProject(userId, projectId);
+  await logOnePromptVideo("image.batch.submit.done", {
+    userId,
+    projectId,
+    status: updated.status,
+    runningCount: updated.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_RUNNING).length,
+    pendingCount: updated.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_PENDING).length,
+  });
   return updated;
 }
 
@@ -516,14 +716,13 @@ export async function regenerateShotImage(
   const segment = project.segments.find((item) => item.id === shotId);
   const keyframe = project.keyframes.find((item) => item.id === shotId) ??
     (segment ? project.keyframes.find((item) => item.keyframeNo === segment.startKeyframeNo) : undefined);
-  if (!keyframe) throw new Error("关键帧不存在");
-  if (keyframe.locked) throw new Error("关键帧已锁定，请先解锁再重生成");
+  if (!keyframe) throw new Error("边界参考帧不存在");
+  if (keyframe.locked) throw new Error("边界参考帧已锁定，请先解锁再重生成");
 
   await logOnePromptVideo("image.regenerate.start", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo });
   const taskId = await submitAliyunImageTask({
-    prompt: [generationPromptForKeyframe(project, keyframe), keyframe.negativePrompt ? `Negative prompt: ${keyframe.negativePrompt}` : ""]
-      .filter(Boolean)
-      .join("\n"),
+    prompt: generationPromptForKeyframe(project, keyframe),
+    negativePrompt: generationNegativePromptForKeyframe(project, keyframe),
     aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
     seed: Date.now() % 2147483647,
   });
@@ -550,7 +749,7 @@ export async function regenerateShotImage(
 export async function approveShotImages(userId: string, projectId: string): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
   const missing = project.keyframes.filter((keyframe) => !keyframe.imageUrl);
-  if (missing.length) throw new Error("还有关键帧没有生成完成，不能进入视频阶段");
+  if (missing.length) throw new Error("还有边界参考帧没有生成完成，不能进入视频阶段");
   await logOnePromptVideo("clip.batch.submit.start", {
     userId,
     projectId,
@@ -606,10 +805,12 @@ export async function composeVideoProject(userId: string, projectId: string): Pr
     title: project.title,
   });
 
-  const jobId = await submitImsComposeJob({
+  const clipDurations = (project.segments.length ? project.segments : project.shots).map((item) => item.durationSeconds);
+  const finalVideoUrl = await composeVideoClipsLocally({
     projectId,
     title: project.title,
     clipUrls,
+    clipDurations,
     aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
   });
 
@@ -628,13 +829,21 @@ export async function composeVideoProject(userId: string, projectId: string): Pr
   const updated = await prisma.videoProject.update({
     where: { id: projectId },
     data: {
-      status: VideoProjectStatus.COMPOSING,
-      composeTaskId: jobId,
+      status: VideoProjectStatus.FINAL_REVIEW,
+      composeTaskId: null,
+      finalVideoUrl,
       errorMessage: null,
     },
     include: PROJECT_INCLUDE,
   });
-  await logOnePromptVideo("compose.submit.success", { userId, projectId, composeTaskId: jobId, status: updated.status });
+  await logOnePromptVideo("compose.submit.success", {
+    userId,
+    projectId,
+    composeTaskId: null,
+    localCompose: true,
+    finalVideoUrl: updated.finalVideoUrl,
+    status: updated.status,
+  });
   return updated;
 }
 export async function finishVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
@@ -728,7 +937,7 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
     } else if (result.status === "failed") {
       await prisma.videoKeyframe.update({
         where: { id: keyframe.id },
-        data: { status: VideoShotStatus.FAILED, errorMessage: result.errorMessage || "关键帧生成失败" },
+        data: { status: VideoShotStatus.FAILED, errorMessage: result.errorMessage || "边界参考帧生成失败" },
       });
     }
   }
@@ -739,7 +948,7 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
   if (failed) {
     await prisma.videoProject.update({
       where: { id: project.id },
-      data: { status: VideoProjectStatus.FAILED, errorMessage: failed.errorMessage || "关键帧生成失败" },
+      data: { status: VideoProjectStatus.FAILED, errorMessage: failed.errorMessage || "边界参考帧生成失败" },
     });
     await logOnePromptVideo("image.sync.project.failed", {
       projectId: project.id,
@@ -758,6 +967,98 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
       status: VideoProjectStatus.IMAGE_REVIEW,
       imageCount: latest.keyframes.length,
     });
+  }
+  const stillRunning = latest.keyframes.some((keyframe) => keyframe.status === VideoShotStatus.IMAGE_RUNNING);
+  const pending = latest.keyframes.some((keyframe) => keyframe.status === VideoShotStatus.IMAGE_PENDING);
+  if (!stillRunning && pending) {
+    await submitNextImageTask({
+      projectId: project.id,
+      keyframes: latest.keyframes,
+      logEventPrefix: "image.sync",
+    });
+  }
+}
+
+async function submitNextImageTask(params: {
+  userId?: string;
+  projectId: string;
+  keyframes: VideoProjectWithShots["keyframes"];
+  logEventPrefix: string;
+}): Promise<void> {
+  const running = params.keyframes.find((keyframe) => keyframe.status === VideoShotStatus.IMAGE_RUNNING && keyframe.imageTaskId);
+  if (running) {
+    await logOnePromptVideo(`${params.logEventPrefix}.submit.skip_running`, {
+      userId: params.userId,
+      projectId: params.projectId,
+      keyframeNo: running.keyframeNo,
+      imageTaskId: running.imageTaskId,
+    });
+    return;
+  }
+
+  const nextKeyframe = [...params.keyframes]
+    .sort((a, b) => a.keyframeNo - b.keyframeNo)
+    .find((keyframe) => {
+      if (keyframe.locked && keyframe.imageUrl) return false;
+      if (keyframe.imageUrl) return false;
+      return keyframe.status !== VideoShotStatus.IMAGE_READY && keyframe.status !== VideoShotStatus.IMAGE_APPROVED;
+    });
+  if (!nextKeyframe) {
+    await logOnePromptVideo(`${params.logEventPrefix}.submit.no_pending`, {
+      userId: params.userId,
+      projectId: params.projectId,
+    });
+    return;
+  }
+
+  const project = await prisma.videoProject.findUnique({
+    where: { id: params.projectId },
+    include: PROJECT_INCLUDE,
+  });
+  if (!project) return;
+
+  try {
+    const taskId = await submitAliyunImageTask({
+      prompt: generationPromptForKeyframe(project, nextKeyframe),
+      negativePrompt: generationNegativePromptForKeyframe(project, nextKeyframe),
+      aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
+      seed: nextKeyframe.keyframeNo,
+    });
+    await prisma.videoKeyframe.update({
+      where: { id: nextKeyframe.id },
+      data: {
+        imageTaskId: taskId,
+        imageUrl: null,
+        status: VideoShotStatus.IMAGE_RUNNING,
+        qualityScore: null,
+        errorMessage: null,
+      },
+    });
+    await logOnePromptVideo(`${params.logEventPrefix}.submit.success`, {
+      userId: params.userId,
+      projectId: params.projectId,
+      keyframeId: nextKeyframe.id,
+      keyframeNo: nextKeyframe.keyframeNo,
+      imageTaskId: taskId,
+    });
+  } catch (error) {
+    const retryable = isAliyunRateLimitError(error);
+    await prisma.videoKeyframe.update({
+      where: { id: nextKeyframe.id },
+      data: {
+        status: retryable ? VideoShotStatus.IMAGE_PENDING : VideoShotStatus.FAILED,
+        errorMessage: retryable ? "Aliyun rate limit, will retry later" : error instanceof Error ? error.message : "Image submit failed",
+      },
+    });
+    await logOnePromptVideo(`${params.logEventPrefix}.submit.error`, {
+      userId: params.userId,
+      projectId: params.projectId,
+      keyframeId: nextKeyframe.id,
+      keyframeNo: nextKeyframe.keyframeNo,
+      retryable,
+      ...errorForLog(error),
+    }, retryable ? "warn" : "error");
+    if (!retryable) throw error;
   }
 }
 
@@ -890,8 +1191,8 @@ async function submitNextClipTask(params: {
       lastFrameUrl: endKeyframe.imageUrl,
       prompt: [
         generationPromptForSegment(project, nextSegment),
-        `Start keyframe ${nextSegment.startKeyframeNo}: ${startKeyframe.purpose}. ${startKeyframe.scene}`,
-        `End keyframe ${nextSegment.endKeyframeNo}: ${endKeyframe.purpose}. ${endKeyframe.scene}`,
+        `Start boundary reference frame ${nextSegment.startKeyframeNo}: ${startKeyframe.purpose}. ${startKeyframe.scene}`,
+        `End boundary reference frame ${nextSegment.endKeyframeNo}: ${endKeyframe.purpose}. ${endKeyframe.scene}`,
         nextSegment.camera,
         nextSegment.motion,
       ].filter(Boolean).join("\n"),
@@ -918,7 +1219,7 @@ async function submitNextClipTask(params: {
       durationSeconds: nextSegment.durationSeconds,
     });
   } catch (error) {
-    const isThrottle = error instanceof Error && /Throttling|RateQuota|rate limit/i.test(error.message);
+    const isThrottle = isAliyunRateLimitError(error);
     await prisma.videoSegment.update({
       where: { id: nextSegment.id },
       data: {
@@ -937,6 +1238,11 @@ async function submitNextClipTask(params: {
     if (!isThrottle) throw error;
   }
 }
+
+function isAliyunRateLimitError(error: unknown): boolean {
+  return error instanceof Error && /Throttling|RateQuota|rate limit|Requests rate limit exceeded/i.test(error.message);
+}
+
 async function syncComposeTask(projectId: string, jobId: string): Promise<void> {
   const result = await queryImsComposeJob(jobId);
   await logOnePromptVideo("compose.sync.result", {
@@ -1001,10 +1307,83 @@ function generationPromptForKeyframe(
   const en = readPlanShotString(planKeyframe, ["imagePromptEn", "image_prompt_en"]);
   const zh = readPlanShotString(planKeyframe, ["imagePromptZh", "image_prompt_zh"]);
   const fallback = keyframe.imagePrompt;
-  if (en && zh && zh !== en) {
-    return `${en}\nUser-facing Chinese revision to respect: ${zh}`;
-  }
+  const identityLock = characterIdentityLockForPrompt(project.planJson);
+  const base = en && zh && zh !== en
+    ? `${en}\nUser-facing Chinese revision to respect: ${zh}`
+    : en || zh || fallback;
+  return [
+    base,
+    identityLock ? `Hard character identity lock, must be preserved exactly in this still image: ${identityLock}` : "",
+    "If the main person appears, keep the exact same face, age, hairstyle, hair color, outfit, body type, skin tone, and distinctive accessories as in all other boundary reference frames. Do not generate a different-looking person.",
+    "Generate exactly one still boundary reference image only. Timeline labels such as 0s, 30s, or the final duration are placement metadata, not image duration and not video duration.",
+  ].filter(Boolean).join("\n");
+}
+
+function generationNegativePromptForKeyframe(
+  project: Pick<VideoProjectWithShots, "planJson">,
+  keyframe: VideoProjectWithShots["keyframes"][number],
+): string {
+  const planKeyframe = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo);
+  return bilingualNegativePromptForGeneration(planKeyframe, keyframe.negativePrompt);
+}
+
+function generationNegativePromptForSegment(
+  project: Pick<VideoProjectWithShots, "planJson">,
+  segment: VideoProjectWithShots["segments"][number],
+): string {
+  const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
+  return bilingualNegativePromptForGeneration(planSegment, segment.negativePrompt);
+}
+
+function bilingualNegativePromptForGeneration(source: Record<string, unknown> | undefined, fallback: string): string {
+  const en = readPlanShotString(source, ["negativePromptEn", "negative_prompt_en"]);
+  const zh = readPlanShotString(source, ["negativePromptZh", "negative_prompt_zh"]);
+  if (en && zh && zh !== en) return `${en}\nAlso avoid the user-facing Chinese exclusions: ${zh}`;
   return en || zh || fallback;
+}
+
+function characterIdentityLockForPrompt(planJson: Prisma.JsonValue | null): string {
+  const plan = isRecord(planJson) ? planJson : {};
+  const styleBible = isRecord(plan.styleBible) ? plan.styleBible : isRecord(plan.style_bible) ? plan.style_bible : undefined;
+  const styleLock = readPlanShotString(styleBible, ["characterLock", "character_lock"]);
+  const characters = Array.isArray(plan.characters) ? plan.characters : [];
+  const locks = characters.flatMap((character) => {
+    if (!isRecord(character)) return [];
+    const parts = [
+      readPlanShotString(character, ["name"]),
+      readPlanShotString(character, ["appearance"]),
+      readPlanShotString(character, ["clothing"]),
+      readPlanShotString(character, ["consistencyPrompt", "consistency_prompt"]),
+    ].filter(Boolean);
+    return parts.length ? [parts.join("; ")] : [];
+  });
+  return [styleLock, ...locks].filter(Boolean).join("\n");
+}
+
+function audioPromptInstruction(audioPlan: NonNullable<ReturnType<typeof readPlanAudioPlan>>): string {
+  const lines = [
+    ...(audioPlan.linesEn ?? []),
+    ...(audioPlan.linesZh ?? []),
+    ...(audioPlan.lines ?? []),
+  ].filter(Boolean);
+  if (audioPlan.mode === "voiceover" || audioPlan.mode === "dialogue" || audioPlan.mode === "mixed" || audioPlan.needsVoiceover || audioPlan.needsDialogue) {
+    return [
+      "Audio/speech direction:",
+      `- Mode: ${audioPlan.mode}.`,
+      audioPlan.language ? `- Language: ${audioPlan.language}.` : "",
+      audioPlan.speaker ? `- Speaker: ${audioPlan.speaker}.` : "",
+      audioPlan.voiceStyle ? `- Voice style: ${audioPlan.voiceStyle}.` : "",
+      lines.length ? `- Spoken lines: ${lines.join(" / ")}` : "",
+      audioPlan.rationale ? `- Reason: ${audioPlan.rationale}` : "",
+      "- If the video model supports audio, include this voice/dialogue naturally. Do not add unrelated speech.",
+    ].filter(Boolean).join("\n");
+  }
+  return [
+    "Audio/speech direction:",
+    `- Mode: ${audioPlan.mode}.`,
+    "- No voiceover or character dialogue is required for this segment unless the model can only produce ambient audio.",
+    audioPlan.rationale ? `- Reason: ${audioPlan.rationale}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 function generationPromptForSegment(
@@ -1014,16 +1393,62 @@ function generationPromptForSegment(
   const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
   const en = readPlanShotString(planSegment, ["videoPromptEn", "video_prompt_en"]);
   const zh = readPlanShotString(planSegment, ["videoPromptZh", "video_prompt_zh"]);
+  const boundaryMode = readPlanBoundaryMode(planSegment);
+  const outputMode = readPlanShotString(planSegment, ["outputMode", "output_mode"]);
+  const constraints = readPlanStringArray(planSegment, ["constraints"]);
+  const timedPrompts = readPlanTimedPrompts(planSegment);
+  const microShots = readPlanMicroShots(planSegment);
+  const audioPlan = readPlanAudioPlan(planSegment);
+  const identityLock = characterIdentityLockForPrompt(project.planJson);
+  const negativePrompt = generationNegativePromptForSegment(project, segment);
   const fallback = segment.videoPrompt;
+  const base = en && zh && zh !== en
+    ? `${en}\nUser-facing Chinese revision to respect: ${zh}`
+    : en || zh || fallback;
+  const additions = [
+    boundaryMode ? `Boundary transition mode: ${boundaryMode}.` : "",
+    outputMode ? `Output constraint mode: ${outputMode}.` : "",
+    identityLock ? `Hard character identity lock for the entire video segment:\n${identityLock}\nPreserve the same person across all frames. Do not morph into a different face, age, hairstyle, outfit, or body type.` : "",
+    negativePrompt ? `Avoid / negative prompt:\n${negativePrompt}` : "",
+    audioPlan ? audioPromptInstruction(audioPlan) : "",
+    constraints.length ? `Segment constraints:\n${constraints.map((item) => `- ${item}`).join("\n")}` : "",
+    microShots.length
+      ? `Internal storyboard controls for this ${segment.durationSeconds}s segment:\n${microShots.map((item) => {
+          const parts = [
+            `+${item.localTimeSeconds}s`,
+            item.purpose ? `purpose: ${item.purpose}` : "",
+            item.scene ? `scene: ${item.scene}` : "",
+            item.action ? `action: ${item.action}` : "",
+            item.camera ? `camera: ${item.camera}` : "",
+            item.imagePromptEn || item.imagePromptZh || item.imagePrompt ? `reference image prompt: ${item.imagePromptEn || item.imagePromptZh || item.imagePrompt}` : "",
+            item.promptEn || item.promptZh || item.prompt ? `control prompt: ${item.promptEn || item.promptZh || item.prompt}` : "",
+          ].filter(Boolean).join("; ");
+          return `- ${parts}`;
+        }).join("\n")}` : "",
+    timedPrompts.length
+      ? `Timed control prompts:\n${timedPrompts.map((item) => {
+          const range = typeof item.startSeconds === "number" && typeof item.endSeconds === "number"
+            ? `${item.startSeconds}-${item.endSeconds}s`
+            : `${item.timeSeconds}s`;
+          return `- At ${range}: ${item.promptEn || item.promptZh || item.prompt}`;
+        }).join("\n")}`
+      : "",
+  ].filter(Boolean);
+  if (additions.length) return [base, ...additions].join("\n");
   if (en && zh && zh !== en) {
     return `${en}\nUser-facing Chinese revision to respect: ${zh}`;
   }
-  return en || zh || fallback;
+  return base;
 }
 
 async function syncPlanJsonFromShots(
   projectId: string,
-  localizedUpdate?: { shotId: string; locale?: "zh" | "en" },
+  localizedUpdate?: {
+    shotId: string;
+    locale?: "zh" | "en";
+    microShots?: UpdateShotInput["microShots"];
+    negativePromptUpdated?: boolean;
+  },
 ): Promise<void> {
   const project = await prisma.videoProject.findUnique({
     where: { id: projectId },
@@ -1053,6 +1478,13 @@ async function syncPlanJsonFromShots(
       const imagePromptEn = localizedImageUpdate && localizedUpdate?.locale === "en"
         ? keyframe.imagePrompt
         : readPlanShotString(previous, ["imagePromptEn", "image_prompt_en"]) || keyframe.imagePrompt;
+      const localizedNegativeUpdate = localizedUpdate?.negativePromptUpdated && localizedUpdate?.shotId === keyframe.id;
+      const negativePromptZh = localizedNegativeUpdate && localizedUpdate?.locale !== "en"
+        ? keyframe.negativePrompt
+        : readPlanShotString(previous, ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(keyframe.negativePrompt);
+      const negativePromptEn = localizedNegativeUpdate && localizedUpdate?.locale === "en"
+        ? keyframe.negativePrompt
+        : readPlanShotString(previous, ["negativePromptEn", "negative_prompt_en"]) || keyframe.negativePrompt;
       return {
         ...previous,
         keyframeNo: keyframe.keyframeNo,
@@ -1065,6 +1497,8 @@ async function syncPlanJsonFromShots(
         imagePromptZh,
         imagePromptEn,
         negativePrompt: keyframe.negativePrompt,
+        negativePromptZh,
+        negativePromptEn,
       };
     });
 
@@ -1077,6 +1511,21 @@ async function syncPlanJsonFromShots(
       const videoPromptEn = localizedVideoUpdate && localizedUpdate?.locale === "en"
         ? segment.videoPrompt
         : readPlanShotString(previous, ["videoPromptEn", "video_prompt_en"]) || segment.videoPrompt;
+      const localizedNegativeUpdate = localizedUpdate?.negativePromptUpdated && localizedUpdate?.shotId === segment.id;
+      const negativePromptZh = localizedNegativeUpdate && localizedUpdate?.locale !== "en"
+        ? segment.negativePrompt
+        : readPlanShotString(previous, ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(segment.negativePrompt);
+      const negativePromptEn = localizedNegativeUpdate && localizedUpdate?.locale === "en"
+        ? segment.negativePrompt
+        : readPlanShotString(previous, ["negativePromptEn", "negative_prompt_en"]) || segment.negativePrompt;
+      const microShots = localizedVideoUpdate && Array.isArray(localizedUpdate?.microShots)
+        ? localizedUpdate.microShots.map((item, index) => ({
+            ...item,
+            microShotNo: index + 1,
+            localTimeSeconds: Math.max(0, Math.min(segment.durationSeconds, Math.round(Number(item.localTimeSeconds) || 0))),
+            absoluteTimeSeconds: segment.startTimeSeconds + Math.max(0, Math.min(segment.durationSeconds, Math.round(Number(item.localTimeSeconds) || 0))),
+          }))
+        : readPlanMicroShots(previous);
       return {
         ...previous,
         segmentNo: segment.segmentNo,
@@ -1085,6 +1534,7 @@ async function syncPlanJsonFromShots(
         startTimeSeconds: segment.startTimeSeconds,
         endTimeSeconds: segment.endTimeSeconds,
         durationSeconds: segment.durationSeconds,
+        boundaryMode: readPlanBoundaryMode(previous) || "continuous",
         purpose: segment.purpose,
         motion: segment.motion,
         camera: segment.camera,
@@ -1094,7 +1544,14 @@ async function syncPlanJsonFromShots(
         videoPromptZh,
         videoPromptEn,
         subtitle: segment.subtitle,
+        outputMode: readPlanOutputMode(previous),
+        constraints: readPlanStringArray(previous, ["constraints"]),
+        timedPrompts: readPlanTimedPrompts(previous),
+        microShots,
+        audioPlan: readPlanAudioPlan(previous),
         negativePrompt: segment.negativePrompt,
+        negativePromptZh,
+        negativePromptEn,
       };
     });
 
@@ -1115,8 +1572,16 @@ async function syncPlanJsonFromShots(
         videoPrompt: segment.videoPrompt,
         videoPromptZh: planSegment?.videoPromptZh || segment.videoPrompt,
         videoPromptEn: planSegment?.videoPromptEn || segment.videoPrompt,
+        boundaryMode: planSegment?.boundaryMode,
+        outputMode: planSegment?.outputMode,
+        constraints: planSegment?.constraints,
+        timedPrompts: planSegment?.timedPrompts,
+        microShots: planSegment?.microShots,
+        audioPlan: planSegment?.audioPlan,
         subtitle: segment.subtitle,
         negativePrompt: segment.negativePrompt,
+        negativePromptZh: planSegment?.negativePromptZh,
+        negativePromptEn: planSegment?.negativePromptEn,
       };
     });
 
@@ -1166,6 +1631,14 @@ async function syncPlanJsonFromShots(
           : readPlanShotString(previousShots.get(shot.shotNo), ["videoPromptEn", "video_prompt_en"]) || shot.videoPrompt,
       subtitle: shot.subtitle,
       negativePrompt: shot.negativePrompt,
+      negativePromptZh:
+        localizedUpdate?.negativePromptUpdated && localizedUpdate?.shotId === shot.id && localizedUpdate.locale !== "en"
+          ? shot.negativePrompt
+          : readPlanShotString(previousShots.get(shot.shotNo), ["negativePromptZh", "negative_prompt_zh"]) || toChineseNegativePrompt(shot.negativePrompt),
+      negativePromptEn:
+        localizedUpdate?.negativePromptUpdated && localizedUpdate?.shotId === shot.id && localizedUpdate.locale === "en"
+          ? shot.negativePrompt
+          : readPlanShotString(previousShots.get(shot.shotNo), ["negativePromptEn", "negative_prompt_en"]) || shot.negativePrompt,
     })),
   };
   await prisma.videoProject.update({

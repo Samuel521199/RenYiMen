@@ -50,6 +50,47 @@ type ShotStatus =
 
 type AspectRatio = "9:16" | "16:9" | "1:1";
 type PageLang = "zh" | "en";
+type ProjectView = "frames" | "clips" | "final";
+
+interface TimedPrompt {
+  timeSeconds: number;
+  startSeconds?: number;
+  endSeconds?: number;
+  prompt: string;
+  promptZh?: string;
+  promptEn?: string;
+}
+
+interface MicroShot {
+  microShotNo: number;
+  localTimeSeconds: number;
+  endSeconds?: number;
+  absoluteTimeSeconds: number;
+  purpose: string;
+  scene: string;
+  action: string;
+  camera?: string;
+  referenceType?: "text" | "image_prompt" | "mixed";
+  imagePrompt?: string;
+  imagePromptZh?: string;
+  imagePromptEn?: string;
+  prompt: string;
+  promptZh?: string;
+  promptEn?: string;
+}
+
+interface AudioPlan {
+  mode: "ambient" | "voiceover" | "dialogue" | "mixed" | "silent";
+  needsVoiceover: boolean;
+  needsDialogue: boolean;
+  language?: string;
+  speaker?: string;
+  voiceStyle?: string;
+  lines?: string[];
+  linesZh?: string[];
+  linesEn?: string[];
+  rationale?: string;
+}
 
 interface VideoShot {
   id: string;
@@ -65,7 +106,15 @@ interface VideoShot {
   videoPrompt: string;
   videoPromptZh?: string;
   videoPromptEn?: string;
+  boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut" | string;
+  outputMode?: string;
+  constraints?: string[];
+  timedPrompts?: TimedPrompt[];
+  microShots?: MicroShot[];
+  audioPlan?: AudioPlan;
   negativePrompt: string;
+  negativePromptZh?: string;
+  negativePromptEn?: string;
   subtitle: string;
   imageUrl?: string | null;
   endImageUrl?: string | null;
@@ -86,7 +135,11 @@ interface VideoKeyframe {
   status: ShotStatus;
   purpose: string;
   imagePrompt: string;
+  imagePromptZh?: string;
+  imagePromptEn?: string;
   negativePrompt?: string;
+  negativePromptZh?: string;
+  negativePromptEn?: string;
   imageUrl?: string | null;
   locked: boolean;
 }
@@ -98,10 +151,14 @@ interface VideoSegment {
   startKeyframeNo: number;
   endKeyframeNo: number;
   durationSeconds: number;
+  boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut" | string;
   purpose?: string;
   motion?: string;
   camera?: string;
   videoPrompt?: string;
+  negativePrompt?: string;
+  negativePromptZh?: string;
+  negativePromptEn?: string;
   subtitle?: string;
   clipUrl?: string | null;
 }
@@ -159,6 +216,26 @@ type Copy = {
   confirmFinal: string;
   shots: string;
   frames: string;
+  boundaryFrameHint: string;
+  autoShotPlan: string;
+  autoShotPlanHint: string;
+  segmentDurationPolicy: string;
+  totalDuration: string;
+  totalDurationHint: string;
+  duration: string;
+  boundaryMode: string;
+  outputMode: string;
+  constraints: string;
+  timedPrompts: string;
+  microShots: string;
+  microShot: string;
+  microShotHint: string;
+  addMicroShot: string;
+  audioPlan: string;
+  spokenLines: string;
+  referenceType: string;
+  scene: string;
+  prompt: string;
   shot: string;
   noShot: string;
   untitled: string;
@@ -168,6 +245,7 @@ type Copy = {
   subtitle: string;
   imagePrompt: string;
   videoPrompt: string;
+  negativePrompt: string;
   clipPreview: string;
   keyframePreview: string;
   finalVideo: string;
@@ -219,18 +297,38 @@ const TEXT: Record<PageLang, Copy> = {
     deleteProject: "\u5220\u9664",
     saveProject: "\u4fdd\u5b58",
     cancel: "\u53d6\u6d88",
-    saveKeyframe: "\u4fdd\u5b58\u5173\u952e\u5e27",
+    saveKeyframe: "\u4fdd\u5b58\u8fb9\u754c\u53c2\u8003\u5e27",
     projectRenamed: "\u9879\u76ee\u5df2\u91cd\u547d\u540d",
     projectDeleted: "\u9879\u76ee\u5df2\u5220\u9664",
     deleteProjectConfirm: "\u786e\u5b9a\u5220\u9664\u8fd9\u4e2a\u9879\u76ee\u5417\uff1f\u5df2\u751f\u6210\u7684\u5206\u955c\u3001\u56fe\u7247\u548c\u7247\u6bb5\u8bb0\u5f55\u4f1a\u4e00\u8d77\u79fb\u9664\u3002",
     generatePlan: "\u751f\u6210\u5206\u955c\u8ba1\u5212",
     generating: "\u751f\u6210\u4e2d",
     approveScript: "\u786e\u8ba4\u811a\u672c",
-    approveFrames: "\u786e\u8ba4\u5173\u952e\u5e27",
+    approveFrames: "\u786e\u8ba4\u8fb9\u754c\u53c2\u8003\u5e27",
     approveClips: "\u786e\u8ba4\u7247\u6bb5\u5e76\u5408\u6210",
     confirmFinal: "\u786e\u8ba4\u6210\u7247",
     shots: "\u955c\u5934",
-    frames: "\u5173\u952e\u5e27",
+    frames: "\u8fb9\u754c\u53c2\u8003\u5e27",
+    boundaryFrameHint: "\u9759\u6001\u9996\u5c3e\u5e27\u53c2\u8003\u56fe\uff0c\u4e0d\u662f\u89c6\u9891\u65f6\u957f",
+    autoShotPlan: "AI \u81ea\u52a8\u62c6\u955c",
+    autoShotPlanHint: "\u5927\u6a21\u578b\u4f1a\u6309\u5267\u60c5\u81ea\u4e3b\u51b3\u5b9a\u955c\u5934\u6570\uff0cHappyHorse \u6bcf\u6bb5 3-15s",
+    segmentDurationPolicy: "\u6bcf\u6bb5 3-15s",
+    totalDuration: "\u603b\u65f6\u957f",
+    totalDurationHint: "\u6210\u7247\u603b\u65f6\u957f\uff0c\u9ed8\u8ba4 30s",
+    duration: "\u65f6\u957f",
+    boundaryMode: "\u8fb9\u754c\u8f6c\u573a",
+    outputMode: "\u8f93\u51fa\u7ea6\u675f",
+    constraints: "\u9650\u5236",
+    timedPrompts: "\u65f6\u95f4\u70b9\u63d0\u793a",
+    microShots: "\u7247\u6bb5\u5185\u90e8\u5b50\u5206\u955c",
+    microShot: "\u5b50\u5206\u955c",
+    microShotHint: "\u7528\u4e8e\u9650\u5236\u8fd9\u4e00\u6bb5\u89c6\u9891\u5185\u90e8\u7684\u573a\u666f\u3001\u52a8\u4f5c\u3001\u955c\u5934\u548c\u53ef\u9009\u53c2\u8003\u56fe Prompt\uff0c\u4e0d\u662f\u989d\u5916\u89c6\u9891\u7247\u6bb5",
+    addMicroShot: "\u6dfb\u52a0\u5b50\u5206\u955c",
+    audioPlan: "\u58f0\u97f3\u89c4\u5212",
+    spokenLines: "\u53f0\u8bcd/\u65c1\u767d",
+    referenceType: "\u53c2\u8003\u7c7b\u578b",
+    scene: "\u573a\u666f",
+    prompt: "Prompt",
     shot: "\u955c\u5934",
     noShot: "\u6682\u65e0\u9009\u4e2d\u955c\u5934",
     untitled: "\u672a\u547d\u540d\u9879\u76ee",
@@ -240,8 +338,9 @@ const TEXT: Record<PageLang, Copy> = {
     subtitle: "\u5b57\u5e55",
     imagePrompt: "\u56fe\u7247 Prompt",
     videoPrompt: "\u89c6\u9891 Prompt",
+    negativePrompt: "\u53cd\u5411\u63d0\u793a\u8bcd\uff08\u907f\u514d\u51fa\u73b0\uff09",
     clipPreview: "\u5206\u955c\u7247\u6bb5",
-    keyframePreview: "\u5173\u952e\u5e27",
+    keyframePreview: "\u8fb9\u754c\u53c2\u8003\u5e27",
     finalVideo: "\u6700\u7ec8\u6210\u7247",
     downloadClip: "\u4e0b\u8f7d\u5206\u955c\u89c6\u9891",
     saveShot: "\u4fdd\u5b58\u955c\u5934",
@@ -249,17 +348,17 @@ const TEXT: Record<PageLang, Copy> = {
     languageButton: "EN",
     planned: "\u5206\u955c\u811a\u672c\u5df2\u751f\u6210",
     saved: (shotNo) => `\u955c\u5934 ${shotNo} \u5df2\u4fdd\u5b58`,
-    keyframesReady: "\u5173\u952e\u5e27\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4\uff0c\u6b63\u5728\u8f6e\u8be2\u7ed3\u679c",
-    keyframeRegenerated: "\u5173\u952e\u5e27\u5df2\u91cd\u751f\u6210",
-    framesApproved: "\u5173\u952e\u5e27\u5df2\u786e\u8ba4\uff0c\u89c6\u9891\u7247\u6bb5\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4",
-    clipsComposed: "\u7247\u6bb5\u5df2\u786e\u8ba4\uff0cIMS \u5408\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4",
+    keyframesReady: "\u8fb9\u754c\u53c2\u8003\u5e27\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4\uff0c\u6b63\u5728\u8f6e\u8be2\u7ed3\u679c",
+    keyframeRegenerated: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u91cd\u751f\u6210",
+    framesApproved: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u786e\u8ba4\uff0c\u89c6\u9891\u7247\u6bb5\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4",
+    clipsComposed: "\u7247\u6bb5\u5df2\u786e\u8ba4\uff0c\u6210\u7247\u5df2\u5408\u6210",
     finalApproved: "\u6210\u7247\u5df2\u786e\u8ba4\uff0c\u9879\u76ee\u5df2\u5b8c\u6210",
     loadFailed: "\u9879\u76ee\u52a0\u8f7d\u5931\u8d25",
     createFailed: "\u9879\u76ee\u521b\u5efa\u5931\u8d25",
     planFailed: "\u5206\u955c\u89c4\u5212\u5931\u8d25",
     saveFailed: "\u4fdd\u5b58\u5931\u8d25",
     uploadReferenceFailed: "\u53c2\u8003\u56fe\u4e0a\u4f20\u5931\u8d25",
-    keyframeFailed: "\u5173\u952e\u5e27\u751f\u6210\u5931\u8d25",
+    keyframeFailed: "\u8fb9\u754c\u53c2\u8003\u5e27\u751f\u6210\u5931\u8d25",
     regenerateFailed: "\u91cd\u751f\u6210\u5931\u8d25",
     lockFailed: "\u9501\u5b9a\u72b6\u6001\u66f4\u65b0\u5931\u8d25",
     approveFailed: "\u786e\u8ba4\u5931\u8d25",
@@ -278,8 +377,8 @@ const TEXT: Record<PageLang, Copy> = {
       DRAFT: "\u8349\u7a3f",
       PLANNING: "\u89c4\u5212\u4e2d",
       PLAN_REVIEW: "\u811a\u672c\u5ba1\u6838",
-      IMAGE_GENERATING: "\u5173\u952e\u5e27\u751f\u6210",
-      IMAGE_REVIEW: "\u5173\u952e\u5e27\u5ba1\u6838",
+      IMAGE_GENERATING: "\u8fb9\u754c\u5e27\u751f\u6210",
+      IMAGE_REVIEW: "\u8fb9\u754c\u5e27\u5ba1\u6838",
       CLIP_GENERATING: "\u89c6\u9891\u751f\u6210",
       CLIP_REVIEW: "\u7247\u6bb5\u5ba1\u6838",
       COMPOSING: "\u5408\u6210\u4e2d",
@@ -301,7 +400,7 @@ const TEXT: Record<PageLang, Copy> = {
     },
     stages: {
       PLAN_REVIEW: "\u811a\u672c",
-      IMAGE_REVIEW: "\u5173\u952e\u5e27",
+      IMAGE_REVIEW: "\u8fb9\u754c\u5e27",
       CLIP_REVIEW: "\u7247\u6bb5",
       FINAL_REVIEW: "\u6210\u7247",
     },
@@ -323,18 +422,38 @@ const TEXT: Record<PageLang, Copy> = {
     deleteProject: "Delete",
     saveProject: "Save",
     cancel: "Cancel",
-    saveKeyframe: "Save keyframe",
+    saveKeyframe: "Save boundary frame",
     projectRenamed: "Project renamed",
     projectDeleted: "Project deleted",
     deleteProjectConfirm: "Delete this project? Storyboard, frame, and clip records will be removed.",
     generatePlan: "Generate plan",
     generating: "Generating",
     approveScript: "Approve script",
-    approveFrames: "Approve frames",
+    approveFrames: "Approve boundary frames",
     approveClips: "Approve clips and compose",
     confirmFinal: "Approve final",
     shots: "Shots",
-    frames: "frames",
+    frames: "boundary frames",
+    boundaryFrameHint: "Static first/end-frame reference images, not video durations",
+    autoShotPlan: "AI decides shots",
+    autoShotPlanHint: "The storyboard model chooses the count by story rhythm. HappyHorse clips are 3-15s each.",
+    segmentDurationPolicy: "3-15s per clip",
+    totalDuration: "Total duration",
+    totalDurationHint: "Final video duration, default 30s",
+    duration: "Duration",
+    boundaryMode: "Boundary mode",
+    outputMode: "Output mode",
+    constraints: "Constraints",
+    timedPrompts: "Timed prompts",
+    microShots: "Internal micro-shots",
+    microShot: "Micro-shot",
+    microShotHint: "Controls scene, action, camera, and optional reference-image prompts inside this one video segment. These are not extra video clips.",
+    addMicroShot: "Add micro-shot",
+    audioPlan: "Audio plan",
+    spokenLines: "Spoken lines",
+    referenceType: "Reference type",
+    scene: "Scene",
+    prompt: "Prompt",
     shot: "Shot",
     noShot: "No shot selected",
     untitled: "Untitled project",
@@ -344,8 +463,9 @@ const TEXT: Record<PageLang, Copy> = {
     subtitle: "Subtitle",
     imagePrompt: "Image prompt",
     videoPrompt: "Video prompt",
+    negativePrompt: "Negative prompt",
     clipPreview: "Clip preview",
-    keyframePreview: "Keyframe",
+    keyframePreview: "Boundary frame",
     finalVideo: "Final video",
     downloadClip: "Download clip",
     saveShot: "Save shot",
@@ -353,17 +473,17 @@ const TEXT: Record<PageLang, Copy> = {
     languageButton: "\u4e2d\u6587",
     planned: "Storyboard plan generated",
     saved: (shotNo) => `Shot ${shotNo} saved`,
-    keyframesReady: "Keyframe generation tasks submitted. Polling results.",
-    keyframeRegenerated: "Keyframe regenerated",
-    framesApproved: "Keyframes approved. Clip generation tasks submitted.",
-    clipsComposed: "Clips approved. IMS composition task submitted.",
+    keyframesReady: "Boundary reference frame generation tasks submitted. Polling results.",
+    keyframeRegenerated: "Boundary reference frame regenerated",
+    framesApproved: "Boundary reference frames approved. Clip generation tasks submitted.",
+    clipsComposed: "Clips approved. Final video composed.",
     finalApproved: "Final approved. Project is complete.",
     loadFailed: "Load failed",
     createFailed: "Create failed",
     planFailed: "Plan failed",
     saveFailed: "Save failed",
     uploadReferenceFailed: "Reference image upload failed",
-    keyframeFailed: "Keyframe generation failed",
+    keyframeFailed: "Boundary reference frame generation failed",
     regenerateFailed: "Regenerate failed",
     lockFailed: "Lock update failed",
     approveFailed: "Approve failed",
@@ -382,8 +502,8 @@ const TEXT: Record<PageLang, Copy> = {
       DRAFT: "Draft",
       PLANNING: "Planning",
       PLAN_REVIEW: "Script review",
-      IMAGE_GENERATING: "Keyframes",
-      IMAGE_REVIEW: "Image review",
+      IMAGE_GENERATING: "Boundary frames",
+      IMAGE_REVIEW: "Boundary frame review",
       CLIP_GENERATING: "Clips",
       CLIP_REVIEW: "Clip review",
       COMPOSING: "Composing",
@@ -423,14 +543,19 @@ const DEFAULT_PROMPTS = [TEXT.zh.defaultPrompt, TEXT.en.defaultPrompt];
 const PROJECT_STORAGE_KEY = "one-prompt-video-active-project-id";
 const RUNNING_PROJECT_STATUSES: ProjectStatus[] = ["IMAGE_GENERATING", "CLIP_GENERATING", "COMPOSING"];
 
+function clampProjectDuration(value: number): number {
+  if (!Number.isFinite(value)) return 30;
+  return Math.max(3, Math.min(180, Math.round(value)));
+}
+
 export default function OnePromptVideoPage() {
   const { lang, toggleLang } = useLanguage();
   const pageLang: PageLang = lang === "en" ? "en" : "zh";
   const copy = TEXT[pageLang];
   const [prompt, setPrompt] = useState(copy.defaultPrompt);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>("9:16");
+  const [durationSeconds, setDurationSeconds] = useState(30);
   const [stylePreset, setStylePreset] = useState("guofeng");
-  const [shotCount, setShotCount] = useState(6);
   const [referenceImageUrls, setReferenceImageUrls] = useState<string[]>([]);
   const [projects, setProjects] = useState<VideoProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -439,6 +564,8 @@ export default function OnePromptVideoPage() {
   const [project, setProject] = useState<VideoProject | null>(null);
   const [selectedShotId, setSelectedShotId] = useState("");
   const [selectedKeyframeId, setSelectedKeyframeId] = useState("");
+  const [previewKeyframeId, setPreviewKeyframeId] = useState("");
+  const [projectView, setProjectView] = useState<ProjectView>("clips");
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
   const [loading, setLoading] = useState(false);
@@ -454,6 +581,10 @@ export default function OnePromptVideoPage() {
     () => project?.keyframes?.find((keyframe) => keyframe.id === selectedKeyframeId),
     [project?.keyframes, selectedKeyframeId],
   );
+  const previewKeyframe = useMemo(
+    () => project?.keyframes?.find((keyframe) => keyframe.id === previewKeyframeId),
+    [project?.keyframes, previewKeyframeId],
+  );
   const keyframeByNo = useMemo(
     () => new Map((project?.keyframes ?? []).map((keyframe) => [keyframe.keyframeNo, keyframe])),
     [project?.keyframes],
@@ -461,6 +592,7 @@ export default function OnePromptVideoPage() {
   const selectedStartKeyframe = selectedShot?.startKeyframeNo ? keyframeByNo.get(selectedShot.startKeyframeNo) : undefined;
   const selectedEndKeyframe = selectedShot?.endKeyframeNo ? keyframeByNo.get(selectedShot.endKeyframeNo) : undefined;
   const keyframeTotal = project?.keyframes?.length || project?.shots.length || 0;
+  const previewTotalDuration = project?.durationSeconds ?? previewKeyframe?.timeSeconds ?? 30;
   const segmentTotal = project?.segments?.length || project?.shots.length || 0;
   const completeImages = project?.keyframes?.length
     ? project.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
@@ -501,6 +633,22 @@ export default function OnePromptVideoPage() {
   }, [project, selectedKeyframeId]);
 
   useEffect(() => {
+    if (!previewKeyframeId) return;
+    if (!project?.keyframes?.some((keyframe) => keyframe.id === previewKeyframeId)) {
+      setPreviewKeyframeId("");
+    }
+  }, [project, previewKeyframeId]);
+
+  useEffect(() => {
+    if (!previewKeyframeId) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setPreviewKeyframeId("");
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewKeyframeId]);
+
+  useEffect(() => {
     if (!selectedShot) return;
     setDraft({
       purpose: selectedShot.purpose,
@@ -508,9 +656,10 @@ export default function OnePromptVideoPage() {
       action: selectedShot.action,
       imagePrompt: localizedShotPrompt(selectedShot, "image", pageLang),
       videoPrompt: localizedShotPrompt(selectedShot, "video", pageLang),
-      negativePrompt: selectedShot.negativePrompt,
+      negativePrompt: localizedShotNegativePrompt(selectedShot, pageLang),
       subtitle: selectedShot.subtitle,
       durationSeconds: selectedShot.durationSeconds,
+      microShots: selectedShot.microShots ?? [],
     });
   }, [selectedShot, pageLang]);
 
@@ -518,10 +667,10 @@ export default function OnePromptVideoPage() {
     if (!selectedKeyframe) return;
     setKeyframeDraft({
       purpose: selectedKeyframe.purpose,
-      imagePrompt: selectedKeyframe.imagePrompt,
-      negativePrompt: selectedKeyframe.negativePrompt ?? "",
+      imagePrompt: localizedKeyframeImagePrompt(selectedKeyframe, pageLang),
+      negativePrompt: localizedKeyframeNegativePrompt(selectedKeyframe, pageLang),
     });
-  }, [selectedKeyframe]);
+  }, [selectedKeyframe, pageLang]);
 
   const rememberProject = useCallback((nextProject: VideoProject) => {
     setProjects((current) => sortProjects(upsertProject(current, nextProject)));
@@ -567,9 +716,11 @@ export default function OnePromptVideoPage() {
     setProject(nextProject);
     setSelectedShotId(nextProject.shots[0]?.id ?? "");
     setSelectedKeyframeId("");
+    setProjectView(nextProject.finalVideoUrl ? "final" : "clips");
     setPrompt(nextProject.userPrompt);
     setReferenceImageUrls(nextProject.referenceImageUrls ?? []);
     setAspectRatio(nextProject.aspectRatio);
+    setDurationSeconds(nextProject.durationSeconds || 30);
     setStylePreset(nextProject.stylePreset || "cinematic");
     if (typeof window !== "undefined") window.localStorage.setItem(PROJECT_STORAGE_KEY, nextProject.id);
   }
@@ -619,8 +770,8 @@ export default function OnePromptVideoPage() {
           setPrompt(copy.defaultPrompt);
           setReferenceImageUrls([]);
           setAspectRatio("9:16");
+          setDurationSeconds(30);
           setStylePreset("guofeng");
-          setShotCount(6);
           if (typeof window !== "undefined") window.localStorage.removeItem(PROJECT_STORAGE_KEY);
         }
       }
@@ -639,8 +790,8 @@ export default function OnePromptVideoPage() {
     setPrompt(copy.defaultPrompt);
     setReferenceImageUrls([]);
     setAspectRatio("9:16");
+    setDurationSeconds(30);
     setStylePreset("guofeng");
-    setShotCount(6);
     setError("");
     setMessage("");
     if (typeof window !== "undefined") window.localStorage.removeItem(PROJECT_STORAGE_KEY);
@@ -673,20 +824,61 @@ export default function OnePromptVideoPage() {
 
   async function createAndPlan() {
     await runAction(async () => {
+      const totalDurationSeconds = clampProjectDuration(durationSeconds);
       const created = await fetchJson("/api/video-projects", copy, {
         method: "POST",
-        body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: 30, shotCount, stylePreset, referenceImageUrls }),
+        body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: totalDurationSeconds, stylePreset, referenceImageUrls }),
       });
       if (!created.project) throw new Error(copy.createFailed);
       const planned = await fetchJson(`/api/video-projects/${created.project.id}/plan`, copy, {
         method: "POST",
-        body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: 30, shotCount, stylePreset, referenceImageUrls }),
+        body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: totalDurationSeconds, stylePreset, referenceImageUrls }),
       });
       if (!planned.project) throw new Error(copy.planFailed);
       rememberProject(planned.project);
       activateProject(planned.project);
       setMessage(copy.planned);
     });
+  }
+
+  function updateDraftMicroShot(index: number, patch: Partial<MicroShot>) {
+    setDraft((current) => {
+      const items = [...((current.microShots as MicroShot[] | undefined) ?? [])];
+      const existing = items[index];
+      if (!existing) return current;
+      items[index] = { ...existing, ...patch };
+      return { ...current, microShots: items };
+    });
+  }
+
+  function addDraftMicroShot() {
+    setDraft((current) => {
+      const items = [...((current.microShots as MicroShot[] | undefined) ?? [])];
+      const duration = Number(current.durationSeconds ?? selectedShot?.durationSeconds ?? 3);
+      const localTimeSeconds = Math.max(0, Math.min(duration, items.length ? Math.round(duration / 2) : 0));
+      items.push({
+        microShotNo: items.length + 1,
+        localTimeSeconds,
+        absoluteTimeSeconds: (selectedShot?.startTimeSeconds ?? 0) + localTimeSeconds,
+        purpose: "",
+        scene: "",
+        action: "",
+        camera: "",
+        referenceType: "mixed",
+        imagePrompt: "",
+        prompt: "",
+      });
+      return { ...current, microShots: items };
+    });
+  }
+
+  function removeDraftMicroShot(index: number) {
+    setDraft((current) => ({
+      ...current,
+      microShots: ((current.microShots as MicroShot[] | undefined) ?? [])
+        .filter((_, itemIndex) => itemIndex !== index)
+        .map((item, itemIndex) => ({ ...item, microShotNo: itemIndex + 1 })),
+    }));
   }
 
   async function saveShot() {
@@ -702,6 +894,7 @@ export default function OnePromptVideoPage() {
           negativePrompt: draft.negativePrompt,
           subtitle: draft.subtitle,
           durationSeconds: draft.durationSeconds,
+          microShots: draft.microShots,
           locale: pageLang,
         }),
       });
@@ -912,7 +1105,7 @@ export default function OnePromptVideoPage() {
           )}
         </section>
 
-        <section className="grid gap-3 border-b border-white/10 pb-5 lg:grid-cols-[minmax(0,1fr)_170px_150px_120px]">
+        <section className="grid gap-3 border-b border-white/10 pb-5 lg:grid-cols-[minmax(0,1fr)_160px_120px_130px_190px]">
           <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-24 resize-none rounded-md border border-white/10 bg-slate-900 px-4 py-3 text-sm leading-6 text-slate-100 outline-none focus:border-cyan-400" />
           <select value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none focus:border-cyan-400">
             {Object.entries(copy.styles).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
@@ -922,18 +1115,29 @@ export default function OnePromptVideoPage() {
             <option value="16:9">16:9</option>
             <option value="1:1">1:1</option>
           </select>
-          <input
-            type="number"
-            min={2}
-            max={10}
-            step={1}
-            value={shotCount}
-            onChange={(event) => setShotCount(clampShotCount(Number(event.target.value)))}
-            onBlur={() => setShotCount((value) => clampShotCount(value))}
-            aria-label={copy.shots}
-            className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none focus:border-cyan-400"
-          />
-          <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.03] p-3 lg:col-span-4">
+          <label className="flex h-11 items-center gap-2 rounded-md border border-white/10 bg-slate-900 px-3 focus-within:border-cyan-400">
+            <span className="shrink-0 text-xs text-slate-500">{copy.totalDuration}</span>
+            <input
+              type="number"
+              min={3}
+              max={180}
+              step={1}
+              value={durationSeconds}
+              onChange={(event) => setDurationSeconds(Number(event.target.value))}
+              onBlur={() => setDurationSeconds((value) => clampProjectDuration(value))}
+              title={copy.totalDurationHint}
+              className="min-w-0 flex-1 bg-transparent text-sm text-slate-100 outline-none"
+            />
+            <span className="text-xs text-slate-500">s</span>
+          </label>
+          <div className="flex min-h-11 items-center gap-2 rounded-md border border-cyan-400/20 bg-cyan-400/10 px-3">
+            <Sparkles className="h-4 w-4 shrink-0 text-cyan-200" />
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-cyan-100">{copy.autoShotPlan}</p>
+              <p className="truncate text-[11px] text-cyan-100/60">{copy.totalDuration}: {clampProjectDuration(durationSeconds)}s / {copy.segmentDurationPolicy}</p>
+            </div>
+          </div>
+          <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.03] p-3 lg:col-span-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-medium text-slate-200">{copy.referenceImages}</p>
@@ -973,7 +1177,7 @@ export default function OnePromptVideoPage() {
               </div>
             )}
           </div>
-          <div className="lg:col-span-4">
+          <div className="lg:col-span-5">
             <button type="button" onClick={createAndPlan} disabled={loading || prompt.trim().length < 4} className="inline-flex h-10 items-center gap-2 rounded-md bg-cyan-500 px-4 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60">
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               {loading ? copy.generating : copy.generatePlan}
@@ -1010,7 +1214,7 @@ export default function OnePromptVideoPage() {
               </div>
               <div className="space-y-2">
                 {project.shots.map((shot) => (
-                  <button key={shot.id} type="button" onClick={() => { setSelectedShotId(shot.id); setSelectedKeyframeId(""); }} className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm ${!selectedKeyframe && selectedShot?.id === shot.id ? "border-cyan-400/50 bg-cyan-400/10 text-white" : "border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]"}`}>
+                  <button key={shot.id} type="button" onClick={() => { setProjectView("clips"); setSelectedShotId(shot.id); setSelectedKeyframeId(""); }} className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm ${!selectedKeyframe && selectedShot?.id === shot.id ? "border-cyan-400/50 bg-cyan-400/10 text-white" : "border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]"}`}>
                     <span className="font-medium">{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
                     <span className="text-xs text-slate-500">{copy.shotStatus[shot.status]}</span>
                   </button>
@@ -1040,7 +1244,36 @@ export default function OnePromptVideoPage() {
                 </div>
               </div>
 
-              {project.finalVideoUrl && (
+              <div className="flex flex-wrap gap-2 border-b border-white/10 pb-3">
+                {([
+                  { key: "frames" as const, label: copy.frames, meta: `${completeImages}/${keyframeTotal}` },
+                  { key: "clips" as const, label: copy.shots, meta: `${completeClips}/${segmentTotal}` },
+                  { key: "final" as const, label: copy.finalVideo, meta: project.finalVideoUrl ? "ready" : "pending" },
+                ]).map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => {
+                      setProjectView(item.key);
+                      if (item.key === "frames") {
+                        setSelectedKeyframeId(project.keyframes?.[0]?.id ?? "");
+                      } else {
+                        setSelectedKeyframeId("");
+                      }
+                    }}
+                    className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium ${
+                      projectView === item.key
+                        ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-100"
+                        : "border-white/10 bg-white/[0.03] text-slate-400 hover:bg-white/[0.06]"
+                    }`}
+                  >
+                    <span>{item.label}</span>
+                    <span className="rounded bg-black/20 px-1.5 py-0.5 text-[11px] text-slate-400">{item.meta}</span>
+                  </button>
+                ))}
+              </div>
+
+              {projectView === "final" && project.finalVideoUrl && (
                 <section className="space-y-2 rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3">
                   <div className="flex items-center gap-2 text-sm font-medium text-emerald-100">
                     <Clapperboard className="h-4 w-4" />
@@ -1050,31 +1283,50 @@ export default function OnePromptVideoPage() {
                 </section>
               )}
 
-              {project.keyframes?.length ? (
+              {projectView === "final" && !project.finalVideoUrl && (
+                <section className="rounded-md border border-white/10 bg-white/[0.03] px-4 py-12 text-center text-sm text-slate-500">
+                  {pageLang === "en" ? "Final video is not ready yet." : "最终成片尚未生成。"}
+                </section>
+              )}
+
+              {projectView === "frames" && project.keyframes?.length ? (
                 <section className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <h3 className="text-sm font-semibold text-slate-200">{copy.frames} {completeImages}/{keyframeTotal}</h3>
-                    <span className="text-xs text-slate-500">{keyframeTotal} boundary keyframes</span>
+                    <span className="text-xs text-slate-500">{copy.boundaryFrameHint}</span>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                     {project.keyframes.map((keyframe) => (
                       <div key={keyframe.id} className={`overflow-hidden rounded-md border bg-white/[0.03] ${selectedKeyframe?.id === keyframe.id ? "border-cyan-400/60" : "border-white/10"}`}>
-                        <button type="button" onClick={() => setSelectedKeyframeId(keyframe.id)} className={`relative block w-full bg-slate-900 text-left ${aspectClass(project.aspectRatio)}`}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProjectView("frames");
+                            setSelectedKeyframeId(keyframe.id);
+                            if (keyframe.imageUrl) setPreviewKeyframeId(keyframe.id);
+                          }}
+                          className={`relative block w-full bg-slate-900 text-left ${aspectClass(project.aspectRatio)}`}
+                        >
                           {keyframe.imageUrl ? (
-                            <img src={keyframe.imageUrl} alt={`KF ${keyframe.keyframeNo}`} className="h-full w-full object-cover" />
+                            <img src={keyframe.imageUrl} alt={safeBoundaryFrameLabel(keyframe, project.durationSeconds, pageLang)} className="h-full w-full object-cover" />
                           ) : (
-                            <div className="flex h-full items-center justify-center text-sm text-slate-600">KF{String(keyframe.keyframeNo).padStart(2, "0")}</div>
+                            <div className="flex h-full items-center justify-center text-sm text-slate-600">{safeBoundaryFrameShortLabel(keyframe, project.durationSeconds, pageLang)}</div>
                           )}
                           <span className="absolute left-2 top-2 rounded-md border border-black/30 bg-black/60 px-2 py-1 text-[11px] font-medium text-white">
-                            KF{String(keyframe.keyframeNo).padStart(2, "0")} · {keyframe.timeSeconds}s
+                            {safeBoundaryFrameLabel(keyframe, project.durationSeconds, pageLang)}
                           </span>
                           <span className="absolute right-2 top-2 rounded-md border border-black/30 bg-black/60 px-2 py-1 text-[11px] text-white">
                             {copy.shotStatus[keyframe.status]}
                           </span>
+                          {keyframe.imageUrl && (
+                            <span className="absolute bottom-2 right-2 rounded-md border border-black/30 bg-black/60 px-2 py-1 text-[11px] text-white">
+                              Preview
+                            </span>
+                          )}
                         </button>
                         <div className="space-y-2 px-3 py-3">
                           <p className="text-sm font-semibold text-white">{keyframe.purpose}</p>
-                          <p className="line-clamp-4 text-xs leading-5 text-slate-400">{keyframe.imagePrompt}</p>
+                          <p className="line-clamp-4 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
                           <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || keyframe.locked} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
                             <RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}
                           </button>
@@ -1085,6 +1337,7 @@ export default function OnePromptVideoPage() {
                 </section>
               ) : null}
 
+              {projectView === "clips" && (
               <section className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <h3 className="text-sm font-semibold text-slate-200">{copy.shots} {completeClips}/{segmentTotal}</h3>
@@ -1097,11 +1350,11 @@ export default function OnePromptVideoPage() {
                       {shot.clipUrl ? (
                         <video src={shot.clipUrl} controls playsInline preload="metadata" poster={shot.imageUrl || undefined} className="h-full w-full object-cover" />
                       ) : (
-                        <button type="button" onClick={() => { setSelectedShotId(shot.id); setSelectedKeyframeId(""); }} className="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
+                        <button type="button" onClick={() => { setProjectView("clips"); setSelectedShotId(shot.id); setSelectedKeyframeId(""); }} className="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
                           <Clapperboard className="h-5 w-5" />
                           <span>{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
                           {shot.startKeyframeNo && shot.endKeyframeNo && (
-                            <span className="text-xs text-cyan-200/80">KF{String(shot.startKeyframeNo).padStart(2, "0")} - KF{String(shot.endKeyframeNo).padStart(2, "0")}</span>
+                            <span className="text-xs text-cyan-200/80">{safeBoundaryRangeLabel(shot, keyframeByNo, project.durationSeconds, pageLang)}</span>
                           )}
                         </button>
                       )}
@@ -1115,9 +1368,58 @@ export default function OnePromptVideoPage() {
                         <span className="text-xs text-slate-500">{shot.durationSeconds}s</span>
                       </div>
                       {shot.startKeyframeNo && shot.endKeyframeNo && (
-                        <p className="text-xs text-cyan-200/80">KF{String(shot.startKeyframeNo).padStart(2, "0")} - KF{String(shot.endKeyframeNo).padStart(2, "0")}</p>
+                        <p className="text-xs text-cyan-200/80">{safeBoundaryRangeLabel(shot, keyframeByNo, project.durationSeconds, pageLang)}</p>
                       )}
+                      <div className="flex flex-wrap gap-1.5">
+                        {shot.boundaryMode && (
+                          <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
+                            {copy.boundaryMode}: {shot.boundaryMode}
+                          </span>
+                        )}
+                        {shot.outputMode && (
+                          <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100">
+                            {copy.outputMode}: {shot.outputMode}
+                          </span>
+                        )}
+                        {Boolean(shot.microShots?.length) && (
+                          <span className="rounded-md border border-fuchsia-300/20 bg-fuchsia-300/10 px-2 py-1 text-[11px] text-fuchsia-100/80">
+                            {copy.microShots}: {shot.microShots?.length}
+                          </span>
+                        )}
+                        {shot.audioPlan && (
+                          <span className="rounded-md border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[11px] text-amber-100/80">
+                            {copy.audioPlan}: {shot.audioPlan.mode}
+                          </span>
+                        )}
+                        <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
+                          {copy.segmentDurationPolicy}
+                        </span>
+                      </div>
                       <p className="min-h-10 overflow-hidden text-sm leading-5 text-slate-400">{shot.purpose}</p>
+                      {Boolean(shot.constraints?.length) && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {shot.constraints?.slice(0, 3).map((constraint) => (
+                            <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
+                              {constraint}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {Boolean(shot.timedPrompts?.length) && (
+                        <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
+                          {copy.timedPrompts}: {shot.timedPrompts?.slice(0, 2).map((item) => `${timedPromptRangeLabel(item)} ${localizedTimedPrompt(item, pageLang)}`).join(" / ")}
+                        </p>
+                      )}
+                      {Boolean(shot.microShots?.length) && (
+                        <p className="line-clamp-2 text-xs leading-5 text-fuchsia-100/70">
+                          {copy.microShots}: {shot.microShots?.slice(0, 2).map((item) => `+${item.localTimeSeconds}s ${localizedMicroShotPrompt(item, pageLang)}`).join(" / ")}
+                        </p>
+                      )}
+                      {shot.audioPlan && (
+                        <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
+                          {copy.audioPlan}: {localizedAudioPlanSummary(shot.audioPlan, pageLang)}
+                        </p>
+                      )}
                       <p className="line-clamp-4 text-xs leading-5 text-slate-500">{localizedShotPrompt(shot, "video", pageLang)}</p>
                       <div className="flex gap-2">
                         <button type="button" onClick={() => regenerateImage(shot.id)} disabled={loading || shot.locked} className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}</button>
@@ -1133,29 +1435,32 @@ export default function OnePromptVideoPage() {
                 ))}
                 </div>
               </section>
+              )}
             </main>
 
             <aside className="border-l border-white/10 pl-4">
               {selectedKeyframe ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-base font-semibold text-white">KF{String(selectedKeyframe.keyframeNo).padStart(2, "0")}</h3>
+                    <h3 className="text-base font-semibold text-white">{safeBoundaryFrameLabel(selectedKeyframe, project.durationSeconds, pageLang)}</h3>
                     <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedKeyframe.status]}</span>
                   </div>
                   <div className="space-y-2">
                     <p className="text-xs font-medium text-slate-500">{copy.keyframePreview}</p>
                     <div className={`overflow-hidden rounded-md border border-white/10 bg-slate-900 ${aspectClass(project.aspectRatio)}`}>
                       {selectedKeyframe.imageUrl ? (
-                        <img src={selectedKeyframe.imageUrl} alt={`KF ${selectedKeyframe.keyframeNo}`} className="h-full w-full object-cover" />
+                        <button type="button" onClick={() => setPreviewKeyframeId(selectedKeyframe.id)} className="block h-full w-full">
+                          <img src={selectedKeyframe.imageUrl} alt={safeBoundaryFrameLabel(selectedKeyframe, project.durationSeconds, pageLang)} className="h-full w-full object-cover" />
+                        </button>
                       ) : (
-                        <div className="flex h-full items-center justify-center text-sm text-slate-600">KF{String(selectedKeyframe.keyframeNo).padStart(2, "0")}</div>
+                        <div className="flex h-full items-center justify-center text-sm text-slate-600">{safeBoundaryFrameShortLabel(selectedKeyframe, project.durationSeconds, pageLang)}</div>
                       )}
                     </div>
-                    <p className="text-xs text-slate-500">KF{String(selectedKeyframe.keyframeNo).padStart(2, "0")} · {selectedKeyframe.timeSeconds}s</p>
+                    <p className="text-xs text-slate-500">{copy.boundaryFrameHint}</p>
                   </div>
                   <Field label={copy.purpose}><textarea value={String(keyframeDraft.purpose ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, purpose: event.target.value }))} className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.imagePrompt}><textarea value={String(keyframeDraft.imagePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, imagePrompt: event.target.value }))} className="min-h-40 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <Field label="Negative Prompt"><textarea value={String(keyframeDraft.negativePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, negativePrompt: event.target.value }))} className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
+                  <Field label={copy.negativePrompt}><textarea value={String(keyframeDraft.negativePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, negativePrompt: event.target.value }))} className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <div className="flex gap-2">
                     <button type="button" onClick={saveKeyframe} disabled={loading} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60"><Save className="h-4 w-4" /> {copy.saveKeyframe}</button>
                     <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || selectedKeyframe.locked} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-4 w-4" /></button>
@@ -1180,7 +1485,7 @@ export default function OnePromptVideoPage() {
                       )}
                     </div>
                     {selectedShot.startKeyframeNo && selectedShot.endKeyframeNo && (
-                      <p className="text-xs text-slate-500">KF{String(selectedShot.startKeyframeNo).padStart(2, "0")} - KF{String(selectedShot.endKeyframeNo).padStart(2, "0")}</p>
+                      <p className="text-xs text-slate-500">{safeBoundaryRangeLabel(selectedShot, keyframeByNo, project.durationSeconds, pageLang)}</p>
                     )}
                     {(selectedStartKeyframe || selectedEndKeyframe) && (
                       <div className="grid grid-cols-2 gap-2">
@@ -1188,13 +1493,13 @@ export default function OnePromptVideoPage() {
                           <div key={keyframe?.id ?? "empty"} className="overflow-hidden rounded-md border border-white/10 bg-slate-900">
                             <div className={`relative ${aspectClass(project.aspectRatio)}`}>
                               {keyframe?.imageUrl ? (
-                                <img src={keyframe.imageUrl} alt={`KF ${keyframe.keyframeNo}`} className="h-full w-full object-cover" />
+                                <img src={keyframe.imageUrl} alt={safeBoundaryFrameLabel(keyframe, project.durationSeconds, pageLang)} className="h-full w-full object-cover" />
                               ) : (
                                 <div className="flex h-full items-center justify-center text-xs text-slate-600">KF</div>
                               )}
                               {keyframe && (
                                 <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
-                                  KF{String(keyframe.keyframeNo).padStart(2, "0")}
+                                  {safeBoundaryFrameShortLabel(keyframe, project.durationSeconds, pageLang)}
                                 </span>
                               )}
                             </div>
@@ -1208,7 +1513,125 @@ export default function OnePromptVideoPage() {
                         {copy.downloadClip}
                       </a>
                     )}
+                    <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedShot.boundaryMode && (
+                          <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
+                            {copy.boundaryMode}: {selectedShot.boundaryMode}
+                          </span>
+                        )}
+                        {selectedShot.outputMode && (
+                          <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100">
+                            {copy.outputMode}: {selectedShot.outputMode}
+                          </span>
+                        )}
+                        <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
+                          {copy.segmentDurationPolicy}
+                        </span>
+                      </div>
+                      {Boolean(selectedShot.constraints?.length) && (
+                        <div className="space-y-1">
+                          <p className="text-xs font-medium text-slate-500">{copy.constraints}</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {selectedShot.constraints?.map((constraint) => (
+                              <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
+                                {constraint}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {Boolean(selectedShot.timedPrompts?.length) && (
+                        <div className="space-y-1">
+                          <p className="text-xs font-medium text-slate-500">{copy.timedPrompts}</p>
+                          {selectedShot.timedPrompts?.map((item) => (
+                            <p key={`${item.timeSeconds}-${item.prompt}`} className="text-xs leading-5 text-amber-100/75">
+                              {timedPromptRangeLabel(item)}: {localizedTimedPrompt(item, pageLang)}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                      {selectedShot.audioPlan && (
+                        <div className="space-y-1">
+                          <p className="text-xs font-medium text-slate-500">{copy.audioPlan}</p>
+                          <p className="text-xs leading-5 text-amber-100/75">{localizedAudioPlanSummary(selectedShot.audioPlan, pageLang)}</p>
+                          {audioPlanLines(selectedShot.audioPlan, pageLang).length > 0 && (
+                            <div className="space-y-1">
+                              <p className="text-[11px] font-medium text-slate-500">{copy.spokenLines}</p>
+                              {audioPlanLines(selectedShot.audioPlan, pageLang).map((line) => (
+                                <p key={line} className="text-xs leading-5 text-slate-300">{line}</p>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
+                  <section className="space-y-3 rounded-md border border-fuchsia-300/15 bg-fuchsia-300/[0.04] p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-fuchsia-100">{copy.microShots}</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-500">{copy.microShotHint}</p>
+                      </div>
+                      <button type="button" onClick={addDraftMicroShot} className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-fuchsia-300/20 px-2 text-xs text-fuchsia-100 hover:bg-fuchsia-300/10">
+                        <Plus className="h-3.5 w-3.5" /> {copy.addMicroShot}
+                      </button>
+                    </div>
+                    <div className="space-y-3">
+                      {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => (
+                        <div key={`${item.microShotNo}-${index}`} className="space-y-2 rounded-md border border-white/10 bg-slate-950/60 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-semibold text-slate-200">{copy.microShot} {String(index + 1).padStart(2, "0")}</p>
+                            <button type="button" onClick={() => removeDraftMicroShot(index)} className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-400 hover:bg-white/[0.06]">
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-[90px_minmax(0,1fr)] gap-2">
+                            <label className="space-y-1">
+                              <span className="text-[11px] text-slate-500">+s</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
+                                step={1}
+                                value={Number(item.localTimeSeconds ?? 0)}
+                                onChange={(event) => updateDraftMicroShot(index, { localTimeSeconds: Number(event.target.value) })}
+                                className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300"
+                              />
+                            </label>
+                            <label className="space-y-1">
+                              <span className="text-[11px] text-slate-500">{copy.referenceType}</span>
+                              <select
+                                value={item.referenceType ?? "mixed"}
+                                onChange={(event) => updateDraftMicroShot(index, { referenceType: event.target.value as MicroShot["referenceType"] })}
+                                className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300"
+                              >
+                                <option value="text">text</option>
+                                <option value="image_prompt">image_prompt</option>
+                                <option value="mixed">mixed</option>
+                              </select>
+                            </label>
+                          </div>
+                          <Field label={copy.purpose}><input value={item.purpose ?? ""} onChange={(event) => updateDraftMicroShot(index, { purpose: event.target.value })} className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                          <Field label={copy.scene}><textarea value={item.scene ?? ""} onChange={(event) => updateDraftMicroShot(index, { scene: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                          <Field label={copy.action}><textarea value={item.action ?? ""} onChange={(event) => updateDraftMicroShot(index, { action: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                          <Field label={copy.imagePrompt}><textarea value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                          <Field label={copy.prompt}><textarea value={localizedMicroShotPrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { promptEn: event.target.value, prompt: event.target.value } : { promptZh: event.target.value, prompt: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                  <Field label={`${copy.duration} (${copy.segmentDurationPolicy})`}>
+                    <input
+                      type="number"
+                      min={3}
+                      max={15}
+                      step={1}
+                      value={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
+                      onChange={(event) => setDraft((current) => ({ ...current, durationSeconds: Number(event.target.value) }))}
+                      className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
+                    />
+                  </Field>
                   <Field label={copy.purpose}><textarea value={String(draft.purpose ?? "")} onChange={(event) => setDraft((current) => ({ ...current, purpose: event.target.value }))} className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.action}><textarea value={String(draft.action ?? "")} onChange={(event) => setDraft((current) => ({ ...current, action: event.target.value }))} className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.camera}><input value={String(draft.camera ?? "")} onChange={(event) => setDraft((current) => ({ ...current, camera: event.target.value }))} className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
@@ -1221,6 +1644,37 @@ export default function OnePromptVideoPage() {
           </section>
         )}
       </div>
+
+      {previewKeyframe?.imageUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewKeyframeId("")}>
+          <div className="flex max-h-[92vh] w-full max-w-6xl flex-col gap-3" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-white">{safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)}</p>
+                <p className="truncate text-xs text-slate-400">{previewKeyframe.purpose}</p>
+              </div>
+              <button type="button" onClick={() => setPreviewKeyframeId("")} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 text-slate-200 hover:bg-white/[0.08]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
+              <div className="flex min-h-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black">
+                <img src={previewKeyframe.imageUrl} alt={safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)} className="max-h-[78vh] max-w-full object-contain" />
+              </div>
+              <aside className="max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
+                <p className="text-xs font-medium text-slate-500">{copy.imagePrompt}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{localizedKeyframeImagePrompt(previewKeyframe, pageLang)}</p>
+                {previewKeyframe.negativePrompt && (
+                  <>
+                    <p className="mt-4 text-xs font-medium text-slate-500">{copy.negativePrompt}</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-400">{localizedKeyframeNegativePrompt(previewKeyframe, pageLang)}</p>
+                  </>
+                )}
+              </aside>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1260,9 +1714,155 @@ function localizedShotPrompt(shot: VideoShot, kind: "image" | "video", lang: Pag
     : shot.videoPromptZh || shot.videoPrompt;
 }
 
-function clampShotCount(value: number): number {
-  if (!Number.isFinite(value)) return 6;
-  return Math.max(2, Math.min(10, Math.round(value)));
+function localizedShotNegativePrompt(shot: VideoShot, lang: PageLang): string {
+  return localizedNegativePrompt(
+    shot.negativePrompt,
+    lang,
+    shot.negativePromptZh,
+    shot.negativePromptEn,
+  );
+}
+
+function localizedKeyframeImagePrompt(keyframe: VideoKeyframe, lang: PageLang): string {
+  return lang === "en"
+    ? keyframe.imagePromptEn || keyframe.imagePrompt
+    : keyframe.imagePromptZh || keyframe.imagePrompt;
+}
+
+function localizedKeyframeNegativePrompt(keyframe: VideoKeyframe, lang: PageLang): string {
+  return localizedNegativePrompt(
+    keyframe.negativePrompt ?? "",
+    lang,
+    keyframe.negativePromptZh,
+    keyframe.negativePromptEn,
+  );
+}
+
+function localizedNegativePrompt(base: string, lang: PageLang, zh?: string, en?: string): string {
+  if (lang === "en") return en || base;
+  return zh || translateNegativePromptToZh(base);
+}
+
+function translateNegativePromptToZh(prompt: string): string {
+  const dictionary: Record<string, string> = {
+    text: "文字",
+    subtitles: "字幕",
+    captions: "字幕",
+    logos: "标志",
+    logo: "标志",
+    watermarks: "水印",
+    watermark: "水印",
+    ui: "界面元素",
+    "modern objects": "现代物件",
+    "harsh lighting": "刺眼光线",
+    "oversaturated colors": "颜色过饱和",
+    "deformed hands": "手部变形",
+    "extra fingers": "多余手指",
+    "random text": "随机文字",
+    "logo distortion": "标志变形",
+    "deformed face": "脸部变形",
+    "low quality": "低质量",
+    blurry: "模糊",
+    "duplicated body": "身体重复",
+  };
+  return prompt
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => dictionary[item.toLowerCase()] ?? item)
+    .join("，");
+}
+
+function localizedTimedPrompt(prompt: TimedPrompt, lang: PageLang): string {
+  return lang === "en" ? prompt.promptEn || prompt.prompt : prompt.promptZh || prompt.prompt;
+}
+
+function timedPromptRangeLabel(prompt: TimedPrompt): string {
+  if (typeof prompt.startSeconds === "number" && typeof prompt.endSeconds === "number") {
+    return `${prompt.startSeconds}-${prompt.endSeconds}s`;
+  }
+  return `${prompt.timeSeconds}s`;
+}
+
+function localizedMicroShotPrompt(microShot: MicroShot, lang: PageLang): string {
+  return lang === "en"
+    ? microShot.promptEn || microShot.prompt || microShot.action || microShot.purpose
+    : microShot.promptZh || microShot.prompt || microShot.action || microShot.purpose;
+}
+
+function localizedMicroShotImagePrompt(microShot: MicroShot, lang: PageLang): string {
+  return lang === "en"
+    ? microShot.imagePromptEn || microShot.imagePrompt || ""
+    : microShot.imagePromptZh || microShot.imagePrompt || "";
+}
+
+function audioPlanLines(audioPlan: AudioPlan, lang: PageLang): string[] {
+  const preferred = lang === "en" ? audioPlan.linesEn : audioPlan.linesZh;
+  return (preferred?.length ? preferred : audioPlan.lines?.length ? audioPlan.lines : lang === "en" ? audioPlan.linesZh : audioPlan.linesEn) ?? [];
+}
+
+function localizedAudioPlanSummary(audioPlan: AudioPlan, lang: PageLang): string {
+  const lines = audioPlanLines(audioPlan, lang);
+  const speech = lines.length
+    ? lines.slice(0, 2).join(" / ")
+    : lang === "en"
+      ? "no spoken lines"
+      : "no spoken lines";
+  const voice = [audioPlan.speaker, audioPlan.voiceStyle, audioPlan.language].filter(Boolean).join(" / ");
+  const reason = audioPlan.rationale ? ` - ${audioPlan.rationale}` : "";
+  return [audioPlan.mode, voice, speech].filter(Boolean).join(" | ") + reason;
+}
+
+function boundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang: PageLang): string {
+  if (frame.keyframeNo === 1) return lang === "en" ? "First-frame reference" : "棣栧抚鍙傝€冨浘";
+  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End-frame reference" : "灏惧抚鍙傝€冨浘";
+  return lang === "en"
+    ? `Boundary frame ${String(frame.keyframeNo).padStart(2, "0")}`
+    : `杈圭晫甯?${String(frame.keyframeNo).padStart(2, "0")}`;
+}
+
+function boundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds: number, lang: PageLang): string {
+  if (!frame) return lang === "en" ? "Frame" : "鍙傝€冨抚";
+  if (frame.keyframeNo === 1) return lang === "en" ? "First" : "棣栧抚";
+  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End" : "灏惧抚";
+  return lang === "en" ? `F${String(frame.keyframeNo).padStart(2, "0")}` : `杈圭晫${String(frame.keyframeNo).padStart(2, "0")}`;
+}
+
+function boundaryRangeLabel(
+  shot: Pick<VideoShot, "startKeyframeNo" | "endKeyframeNo">,
+  keyframeByNo: Map<number, VideoKeyframe>,
+  totalSeconds: number,
+  lang: PageLang,
+): string {
+  const start = shot.startKeyframeNo ? keyframeByNo.get(shot.startKeyframeNo) : undefined;
+  const end = shot.endKeyframeNo ? keyframeByNo.get(shot.endKeyframeNo) : undefined;
+  return `${boundaryFrameShortLabel(start, totalSeconds, lang)} -> ${boundaryFrameShortLabel(end, totalSeconds, lang)}`;
+}
+
+function safeBoundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang: PageLang): string {
+  if (frame.keyframeNo === 1) return lang === "en" ? "First-frame reference" : "首帧参考图";
+  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End-frame reference" : "尾帧参考图";
+  return lang === "en"
+    ? `Boundary frame ${String(frame.keyframeNo).padStart(2, "0")}`
+    : `边界帧 ${String(frame.keyframeNo).padStart(2, "0")}`;
+}
+
+function safeBoundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds: number, lang: PageLang): string {
+  if (!frame) return lang === "en" ? "Frame" : "参考帧";
+  if (frame.keyframeNo === 1) return lang === "en" ? "First" : "首帧";
+  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End" : "尾帧";
+  return lang === "en" ? `F${String(frame.keyframeNo).padStart(2, "0")}` : `边界${String(frame.keyframeNo).padStart(2, "0")}`;
+}
+
+function safeBoundaryRangeLabel(
+  shot: Pick<VideoShot, "startKeyframeNo" | "endKeyframeNo">,
+  keyframeByNo: Map<number, VideoKeyframe>,
+  totalSeconds: number,
+  lang: PageLang,
+): string {
+  const start = shot.startKeyframeNo ? keyframeByNo.get(shot.startKeyframeNo) : undefined;
+  const end = shot.endKeyframeNo ? keyframeByNo.get(shot.endKeyframeNo) : undefined;
+  return `${safeBoundaryFrameShortLabel(start, totalSeconds, lang)} -> ${safeBoundaryFrameShortLabel(end, totalSeconds, lang)}`;
 }
 
 function projectProgress(project: VideoProject): { images: number; clips: number; imageTotal: number; clipTotal: number; percent: number } {
@@ -1333,3 +1933,4 @@ async function uploadReferenceImage(file: File): Promise<string> {
   if (!uploadRes.ok) throw new Error(`Upload failed ${uploadRes.status}`);
   return presignJson.publicUrl;
 }
+
