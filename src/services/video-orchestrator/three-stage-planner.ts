@@ -300,7 +300,7 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
   const referenceImageUrls = input.referenceImageUrls.slice(0, 4);
   const fallback = createVideoPlan(input);
   const visionModel = referenceImageUrls.length
-    ? model("ALIYUN_STORYBOARD_VISION_MODEL", "qwen-vl-max-latest")
+    ? model("ALIYUN_STORYBOARD_VISION_MODEL", "qwen-vl-max")
     : model("ALIYUN_STORYBOARD_MODEL", "qwen3.7-plus");
   const textModel = model("ALIYUN_STORYBOARD_MODEL", "qwen3.7-plus");
 
