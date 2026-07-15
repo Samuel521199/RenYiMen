@@ -18,6 +18,7 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Undo2,
   Unlock,
   X,
 } from "lucide-react";
@@ -52,6 +53,7 @@ type ShotStatus =
 type AspectRatio = "9:16" | "16:9" | "1:1";
 type PageLang = "zh" | "en";
 type ProjectView = "frames" | "clips" | "final";
+type RollbackTarget = "PLAN_REVIEW" | "IMAGE_REVIEW" | "MICRO_SHOT_REVIEW" | "CLIP_REVIEW";
 type OptimisticProgressPhase = "creating" | "understanding" | "storyboard" | "prompts" | "waiting" | "done" | "failed";
 
 interface OptimisticProgress {
@@ -243,6 +245,10 @@ type Copy = {
   approveMicroShots: string;
   approveClips: string;
   confirmFinal: string;
+  rollback: string;
+  rollbackTo: string;
+  rollbackConfirm: string;
+  rollbackDone: string;
   shots: string;
   frames: string;
   boundaryFrameHint: string;
@@ -318,6 +324,7 @@ type Copy = {
   status: Record<ProjectStatus, string>;
   shotStatus: Record<ShotStatus, string>;
   stages: Record<string, string>;
+  rollbackTargets: Record<RollbackTarget, string>;
 };
 
 const TEXT: Record<PageLang, Copy> = {
@@ -349,6 +356,10 @@ const TEXT: Record<PageLang, Copy> = {
     approveMicroShots: "\u786e\u8ba4\u5185\u90e8\u5b50\u5206\u955c",
     approveClips: "\u786e\u8ba4\u7247\u6bb5\u5e76\u5408\u6210",
     confirmFinal: "\u786e\u8ba4\u6210\u7247",
+    rollback: "\u56de\u9000",
+    rollbackTo: "\u56de\u9000\u5230",
+    rollbackConfirm: "\u786e\u5b9a\u8981\u56de\u9000\u5230\u9009\u4e2d\u9636\u6bb5\u5417\uff1f\u9009\u4e2d\u9636\u6bb5\u4e4b\u540e\u7684\u751f\u6210\u7ed3\u679c\u53ef\u80fd\u4f1a\u88ab\u6e05\u7a7a\u6216\u89e3\u9501\u3002",
+    rollbackDone: "\u5df2\u56de\u9000\u5230\u9009\u4e2d\u9636\u6bb5",
     shots: "\u955c\u5934",
     frames: "\u8fb9\u754c\u53c2\u8003\u5e27",
     boundaryFrameHint: "\u9759\u6001\u9996\u5c3e\u5e27\u53c2\u8003\u56fe\uff0c\u4e0d\u662f\u89c6\u9891\u65f6\u957f",
@@ -460,6 +471,12 @@ const TEXT: Record<PageLang, Copy> = {
       CLIP_REVIEW: "\u7247\u6bb5",
       FINAL_REVIEW: "\u6210\u7247",
     },
+    rollbackTargets: {
+      PLAN_REVIEW: "\u811a\u672c\u5ba1\u6838",
+      IMAGE_REVIEW: "\u53c2\u8003\u56fe\u5ba1\u6838",
+      MICRO_SHOT_REVIEW: "\u5185\u90e8\u5b50\u5206\u955c\u5ba1\u6838",
+      CLIP_REVIEW: "\u7247\u6bb5\u5ba1\u6838",
+    },
   },
   en: {
     title: "One Prompt Video Studio",
@@ -489,6 +506,10 @@ const TEXT: Record<PageLang, Copy> = {
     approveMicroShots: "Approve internal micro-shots",
     approveClips: "Approve clips and compose",
     confirmFinal: "Approve final",
+    rollback: "Rollback",
+    rollbackTo: "Rollback to",
+    rollbackConfirm: "Rollback to the selected stage? Outputs after that stage may be cleared or unlocked.",
+    rollbackDone: "Rolled back to the selected stage",
     shots: "Shots",
     frames: "boundary frames",
     boundaryFrameHint: "Static first/end-frame reference images, not video durations",
@@ -600,6 +621,12 @@ const TEXT: Record<PageLang, Copy> = {
       CLIP_REVIEW: "Clips",
       FINAL_REVIEW: "Final",
     },
+    rollbackTargets: {
+      PLAN_REVIEW: "Script review",
+      IMAGE_REVIEW: "Reference image review",
+      MICRO_SHOT_REVIEW: "Internal micro-shot review",
+      CLIP_REVIEW: "Clip review",
+    },
   },
 };
 
@@ -646,6 +673,7 @@ export default function OnePromptVideoPage() {
   const [selectedKeyframeId, setSelectedKeyframeId] = useState("");
   const [previewKeyframeId, setPreviewKeyframeId] = useState("");
   const [projectView, setProjectView] = useState<ProjectView>("clips");
+  const [rollbackTarget, setRollbackTarget] = useState<RollbackTarget>("PLAN_REVIEW");
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
   const [loading, setLoading] = useState(false);
@@ -697,6 +725,8 @@ export default function OnePromptVideoPage() {
   const canApproveMicroShots = Boolean(project && (project.status === "MICRO_SHOT_REVIEW" || (project.status === "IMAGE_REVIEW" && keyframesApproved)) && microShotImageStats.running === 0 && microShotImageStats.failed === 0 && microShotImageStats.missing === 0);
   const canApproveClips = Boolean(project && segmentTotal > 0 && completeClips === segmentTotal && project.status === "CLIP_REVIEW");
   const canConfirmFinal = Boolean(project && project.status === "FINAL_REVIEW");
+  const rollbackOptions = useMemo(() => project ? rollbackTargetsForStatus(project.status) : [], [project]);
+  const canRollback = Boolean(project && rollbackOptions.length > 0);
   const workflowProgress = useMemo(() => {
     if (optimisticProgress) return optimisticWorkflowProgressView(optimisticProgress, pageLang);
     if (!project) return null;
@@ -784,6 +814,13 @@ export default function OnePromptVideoPage() {
       setSelectedShotId(project.shots[0].id);
     }
   }, [project, selectedShotId]);
+
+  useEffect(() => {
+    if (!rollbackOptions.length) return;
+    if (!rollbackOptions.includes(rollbackTarget)) {
+      setRollbackTarget(rollbackOptions[rollbackOptions.length - 1]);
+    }
+  }, [rollbackOptions, rollbackTarget]);
 
   useEffect(() => {
     if (!selectedKeyframeId) return;
@@ -1194,6 +1231,23 @@ export default function OnePromptVideoPage() {
     });
   }
 
+  async function rollbackProject() {
+    if (!project || !canRollback) return;
+    if (!window.confirm(copy.rollbackConfirm)) return;
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}/rollback`, copy, {
+        method: "POST",
+        body: JSON.stringify({ targetStatus: rollbackTarget }),
+      });
+      if (!res.project) throw new Error(copy.approveFailed);
+      rememberProject(res.project);
+      setProjectView(projectViewForStatus(res.project.status));
+      setSelectedShotId(res.project.shots[0]?.id ?? "");
+      setSelectedKeyframeId(res.project.keyframes?.[0]?.id ?? "");
+      setMessage(copy.rollbackDone);
+    });
+  }
+
   async function runAction(action: () => Promise<void>) {
     setLoading(true);
     setError("");
@@ -1464,6 +1518,30 @@ export default function OnePromptVideoPage() {
                   <p className="mt-1 text-sm text-slate-500">{project.durationSeconds}s / {project.aspectRatio} / {keyframeTotal} {copy.frames} / {segmentTotal} {copy.shots}</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <div className="inline-flex h-9 overflow-hidden rounded-md border border-white/10 bg-white/[0.04]">
+                    <label className="inline-flex items-center gap-1.5 border-r border-white/10 px-2 text-xs text-slate-400">
+                      <Undo2 className="h-3.5 w-3.5" />
+                      {copy.rollbackTo}
+                    </label>
+                    <select
+                      value={rollbackTarget}
+                      onChange={(event) => setRollbackTarget(event.target.value as RollbackTarget)}
+                      disabled={loading || !canRollback}
+                      className="min-w-[132px] bg-slate-950 px-2 text-sm text-slate-200 outline-none disabled:opacity-50"
+                    >
+                      {rollbackOptions.map((target) => (
+                        <option key={target} value={target}>{copy.rollbackTargets[target]}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={rollbackProject}
+                      disabled={loading || !canRollback}
+                      className="inline-flex items-center gap-1.5 border-l border-white/10 px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08] disabled:opacity-50"
+                    >
+                      {copy.rollback}
+                    </button>
+                  </div>
                   <button type="button" onClick={approvePlan} disabled={loading || !canApproveScript} className="inline-flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-200 hover:bg-emerald-400/15 disabled:opacity-50">
                     <ImageIcon className="h-4 w-4" /> {copy.approveScript}
                   </button>
@@ -2336,6 +2414,32 @@ function projectProgress(project: VideoProject): { images: number; clips: number
     FAILED: Math.max(10, Math.round(((images / safeImageTotal + clips / safeClipTotal) / 2) * 85)),
   };
   return { images, clips, imageTotal, clipTotal, percent: Math.round(stageWeight[project.status] ?? 0) };
+}
+
+function projectViewForStatus(status: ProjectStatus): ProjectView {
+  if (status === "FINAL_REVIEW" || status === "DONE") return "final";
+  if (status === "CLIP_REVIEW" || status === "CLIP_GENERATING" || status === "COMPOSING" || status === "MICRO_SHOT_REVIEW") return "clips";
+  return "frames";
+}
+
+function rollbackTargetsForStatus(status: ProjectStatus): RollbackTarget[] {
+  const targets: RollbackTarget[] = [];
+  const stageOrder = rollbackStageOrder(status);
+  if (stageOrder > 1) targets.push("PLAN_REVIEW");
+  if (stageOrder > 2) targets.push("IMAGE_REVIEW");
+  if (stageOrder > 3) targets.push("MICRO_SHOT_REVIEW");
+  if (stageOrder > 4) targets.push("CLIP_REVIEW");
+  return targets;
+}
+
+function rollbackStageOrder(status: ProjectStatus): number {
+  if (status === "PLAN_REVIEW") return 1;
+  if (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW") return 2;
+  if (status === "MICRO_SHOT_REVIEW") return 3;
+  if (status === "CLIP_GENERATING" || status === "CLIP_REVIEW") return 4;
+  if (status === "COMPOSING" || status === "FINAL_REVIEW") return 5;
+  if (status === "DONE" || status === "FAILED") return 6;
+  return 0;
 }
 
 function hasRunningMicroShotImage(project: VideoProject): boolean {

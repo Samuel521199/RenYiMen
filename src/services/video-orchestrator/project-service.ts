@@ -1133,6 +1133,228 @@ export async function finishVideoProject(userId: string, projectId: string): Pro
   return updated;
 }
 
+export type VideoProjectRollbackTarget = "PLAN_REVIEW" | "IMAGE_REVIEW" | "MICRO_SHOT_REVIEW" | "CLIP_REVIEW";
+
+export async function rollbackVideoProject(
+  userId: string,
+  projectId: string,
+  targetStatus?: VideoProjectRollbackTarget,
+): Promise<VideoProjectWithShots> {
+  const project = await requireVideoProject(userId, projectId);
+  const target = targetStatus ?? previousRollbackTarget(project.status);
+  if (!target) throw new Error("Current project stage cannot be rolled back");
+  if (!canRollbackTo(project.status, target)) throw new Error(`Cannot rollback from ${project.status} to ${target}`);
+
+  await logOnePromptVideo("project.rollback.start", {
+    userId,
+    projectId,
+    fromStatus: project.status,
+    targetStatus: target,
+  }, "warn");
+
+  await prisma.$transaction(async (tx) => {
+    if (target === "PLAN_REVIEW") {
+      await tx.videoKeyframe.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.SCRIPT_READY,
+          imageTaskId: null,
+          imageUrl: null,
+          qualityScore: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await tx.videoSegment.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.SCRIPT_READY,
+          clipTaskId: null,
+          clipUrl: null,
+          qualityScore: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await tx.videoShot.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.SCRIPT_READY,
+          imageTaskId: null,
+          imageUrl: null,
+          clipTaskId: null,
+          clipUrl: null,
+          qualityScore: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await rollbackPlanMicroShotImages(projectId, tx);
+    } else if (target === "IMAGE_REVIEW") {
+      await tx.videoKeyframe.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.IMAGE_READY,
+          imageTaskId: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await tx.videoKeyframe.updateMany({
+        where: { projectId, imageUrl: null },
+        data: { status: VideoShotStatus.SCRIPT_READY },
+      });
+      await tx.videoSegment.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.SCRIPT_READY,
+          clipTaskId: null,
+          clipUrl: null,
+          qualityScore: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await tx.videoShot.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.IMAGE_READY,
+          clipTaskId: null,
+          clipUrl: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await rollbackPlanMicroShotImages(projectId, tx);
+    } else if (target === "MICRO_SHOT_REVIEW") {
+      await tx.videoKeyframe.updateMany({
+        where: { projectId, imageUrl: { not: null } },
+        data: { status: VideoShotStatus.IMAGE_APPROVED, locked: true, imageTaskId: null, errorMessage: null },
+      });
+      await tx.videoSegment.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.SCRIPT_READY,
+          clipTaskId: null,
+          clipUrl: null,
+          qualityScore: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      await tx.videoShot.updateMany({
+        where: { projectId },
+        data: {
+          status: VideoShotStatus.IMAGE_APPROVED,
+          clipTaskId: null,
+          clipUrl: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+    } else if (target === "CLIP_REVIEW") {
+      await tx.videoSegment.updateMany({
+        where: { projectId, clipUrl: { not: null } },
+        data: { status: VideoShotStatus.CLIP_READY, clipTaskId: null, errorMessage: null, locked: false },
+      });
+      await tx.videoShot.updateMany({
+        where: { projectId, clipUrl: { not: null } },
+        data: { status: VideoShotStatus.CLIP_READY, clipTaskId: null, errorMessage: null, locked: false },
+      });
+    }
+
+    await tx.videoProject.update({
+      where: { id: projectId },
+      data: {
+        status: target as VideoProjectStatus,
+        finalVideoUrl: target === "CLIP_REVIEW" ? project.finalVideoUrl : null,
+        composeTaskId: null,
+        errorMessage: null,
+      },
+    });
+  });
+
+  const updated = await requireVideoProject(userId, projectId);
+  await logOnePromptVideo("project.rollback.done", {
+    userId,
+    projectId,
+    fromStatus: project.status,
+    targetStatus: target,
+    status: updated.status,
+  }, "warn");
+  return updated;
+}
+
+function previousRollbackTarget(status: VideoProjectStatus): VideoProjectRollbackTarget | undefined {
+  if (status === VideoProjectStatus.IMAGE_REVIEW || status === VideoProjectStatus.IMAGE_GENERATING) return "PLAN_REVIEW";
+  if (status === VideoProjectStatus.MICRO_SHOT_REVIEW) return "IMAGE_REVIEW";
+  if (status === VideoProjectStatus.CLIP_GENERATING || status === VideoProjectStatus.CLIP_REVIEW) return "MICRO_SHOT_REVIEW";
+  if (status === VideoProjectStatus.COMPOSING || status === VideoProjectStatus.FINAL_REVIEW || status === VideoProjectStatus.DONE) return "CLIP_REVIEW";
+  return undefined;
+}
+
+function canRollbackTo(current: VideoProjectStatus, target: VideoProjectRollbackTarget): boolean {
+  const order: Record<VideoProjectStatus, number> = {
+    DRAFT: 0,
+    PLANNING: 0,
+    PLAN_REVIEW: 1,
+    IMAGE_GENERATING: 2,
+    IMAGE_REVIEW: 2,
+    MICRO_SHOT_REVIEW: 3,
+    CLIP_GENERATING: 4,
+    CLIP_REVIEW: 4,
+    COMPOSING: 5,
+    FINAL_REVIEW: 5,
+    DONE: 6,
+    FAILED: 6,
+  };
+  const targetOrder: Record<VideoProjectRollbackTarget, number> = {
+    PLAN_REVIEW: 1,
+    IMAGE_REVIEW: 2,
+    MICRO_SHOT_REVIEW: 3,
+    CLIP_REVIEW: 4,
+  };
+  return order[current] > targetOrder[target];
+}
+
+async function rollbackPlanMicroShotImages(
+  projectId: string,
+  tx: Prisma.TransactionClient,
+): Promise<void> {
+  const project = await tx.videoProject.findUnique({ where: { id: projectId } });
+  if (!project?.planJson) return;
+  const plan = cloneJsonRecord(project.planJson);
+  clearPlanMicroShotImages(plan, "segments");
+  clearPlanMicroShotImages(plan, "shots");
+  await tx.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: plan as Prisma.InputJsonValue },
+  });
+}
+
+function clearPlanMicroShotImages(plan: Record<string, unknown>, collectionKey: "segments" | "shots"): void {
+  const collection = plan[collectionKey];
+  if (!Array.isArray(collection)) return;
+  for (const item of collection) {
+    if (!isRecord(item)) continue;
+    const rawMicroShots = item.microShots ?? item.micro_shots ?? item.internalStoryboard ?? item.internal_storyboard ?? item.subShots ?? item.sub_shots;
+    if (!Array.isArray(rawMicroShots)) continue;
+    item.microShots = rawMicroShots.map((microShot) => {
+      if (!isRecord(microShot)) return microShot;
+      const next = { ...microShot };
+      delete next.imageUrl;
+      delete next.image_url;
+      delete next.imageTaskId;
+      delete next.image_task_id;
+      delete next.errorMessage;
+      delete next.error_message;
+      next.imageStatus = "idle";
+      next.image_status = "idle";
+      return next;
+    });
+  }
+}
+
 export async function syncVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
   await logOnePromptVideo("project.sync.start", {
@@ -1324,9 +1546,29 @@ async function submitNextImageTask(params: {
       if (keyframe.imageUrl) return false;
       if (keyframe.status === VideoShotStatus.IMAGE_RUNNING) return false;
       return keyframe.status !== VideoShotStatus.IMAGE_READY && keyframe.status !== VideoShotStatus.IMAGE_APPROVED;
-    })
-    .slice(0, availableSlots);
-  if (!nextKeyframes.length) {
+    });
+  const consistencyReferences = params.keyframes.filter((keyframe) => isConsistencyKeyframeNo(keyframe.keyframeNo));
+  const waitingForConsistencyReferences = consistencyReferences.some((keyframe) => !keyframe.imageUrl);
+  const candidateKeyframes = waitingForConsistencyReferences
+    ? nextKeyframes.filter((keyframe) => isConsistencyKeyframeNo(keyframe.keyframeNo))
+    : nextKeyframes;
+  if (waitingForConsistencyReferences && !candidateKeyframes.length) {
+    await logOnePromptVideo(`${params.logEventPrefix}.submit.wait_consistency_references`, {
+      userId: params.userId,
+      projectId: params.projectId,
+      runningCount: running.length,
+      concurrency,
+      consistencyReferences: consistencyReferences.map((keyframe) => ({
+        keyframeNo: keyframe.keyframeNo,
+        status: keyframe.status,
+        imageTaskId: keyframe.imageTaskId,
+        hasImageUrl: Boolean(keyframe.imageUrl),
+      })),
+    });
+    return;
+  }
+  const nextKeyframesToSubmit = candidateKeyframes.slice(0, availableSlots);
+  if (!nextKeyframesToSubmit.length) {
     await logOnePromptVideo(`${params.logEventPrefix}.submit.no_pending`, {
       userId: params.userId,
       projectId: params.projectId,
@@ -1347,11 +1589,12 @@ async function submitNextImageTask(params: {
     projectId: params.projectId,
     runningCount: running.length,
     concurrency,
-    submitCount: nextKeyframes.length,
-    keyframeNos: nextKeyframes.map((keyframe) => keyframe.keyframeNo),
+    submitCount: nextKeyframesToSubmit.length,
+    keyframeNos: nextKeyframesToSubmit.map((keyframe) => keyframe.keyframeNo),
+    consistencyGateActive: waitingForConsistencyReferences,
   });
 
-  for (const nextKeyframe of nextKeyframes) {
+  for (const nextKeyframe of nextKeyframesToSubmit) {
     try {
       const taskId = await submitAliyunImageTask({
         prompt: generationPromptForKeyframe(project, nextKeyframe),
