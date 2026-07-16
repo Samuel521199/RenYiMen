@@ -66,6 +66,7 @@ services:
 
   workbench-backend:
     container_name: workflow-workbench-backend
+    image: workflow-workbench-backend:latest
     restart: always
     build:
       context: ./ai-workflow-code/backend

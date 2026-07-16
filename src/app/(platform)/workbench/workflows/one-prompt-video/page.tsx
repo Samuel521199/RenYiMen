@@ -693,6 +693,11 @@ function clampDetailPreviewHeight(value: number): number {
   return Math.max(DETAIL_PREVIEW_MIN_HEIGHT, Math.min(DETAIL_PREVIEW_MAX_HEIGHT, Math.round(value)));
 }
 
+function formatProgressPercent(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
 export default function OnePromptVideoPage() {
   const { lang, toggleLang } = useLanguage();
   const pageLang: PageLang = lang === "en" ? "en" : "zh";
@@ -866,7 +871,7 @@ export default function OnePromptVideoPage() {
           percent: Math.max(current.percent, next.percent),
         };
       });
-    }, 500);
+    }, 1000);
     return () => window.clearInterval(timer);
   }, [optimisticProgress?.active]);
 
@@ -1663,13 +1668,13 @@ export default function OnePromptVideoPage() {
                   </button>
                 )}
                 <span className="rounded-md border border-white/10 bg-black/20 px-2.5 py-1 text-sm font-semibold text-white">
-                  {workflowProgress.percent}%
+                  {formatProgressPercent(workflowProgress.percent)}%
                 </span>
               </div>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-black/30">
               <div
-                className={`h-full rounded-full transition-all duration-500 ${workflowProgressBarClass}`}
+                className={`h-full rounded-full transition-all duration-1000 ease-linear ${workflowProgressBarClass} ${workflowProgress.tone === "running" ? "animate-pulse" : ""}`}
                 style={{ width: `${workflowProgress.percent}%` }}
               />
             </div>
@@ -2845,11 +2850,14 @@ function safeBoundaryRangeLabel(
 
 function estimatePlanningProgress(elapsedMs: number): Pick<OptimisticProgress, "phase" | "percent"> {
   const seconds = Math.max(0, elapsedMs / 1000);
-  if (seconds < 2) return { phase: "creating", percent: Math.round(3 + seconds * 5) };
-  if (seconds < 8) return { phase: "understanding", percent: Math.round(13 + (seconds - 2) * 4) };
-  if (seconds < 20) return { phase: "storyboard", percent: Math.round(37 + (seconds - 8) * 2.25) };
-  if (seconds < 38) return { phase: "prompts", percent: Math.round(64 + (seconds - 20) * 1.15) };
-  return { phase: "waiting", percent: Math.min(94, Math.round(85 + Math.log1p(seconds - 38) * 3)) };
+  if (seconds < 3) return { phase: "creating", percent: 3 + seconds * 4 };
+  if (seconds < 18) return { phase: "understanding", percent: 15 + (seconds - 3) * 2.2 };
+  if (seconds < 55) return { phase: "storyboard", percent: 48 + (seconds - 18) * 0.75 };
+  if (seconds < 110) return { phase: "prompts", percent: 75 + (seconds - 55) * 0.22 };
+
+  const waitingSeconds = seconds - 110;
+  const slowCurve = 87 + waitingSeconds * 0.012 + Math.log1p(waitingSeconds) * 0.55;
+  return { phase: "waiting", percent: Math.min(99.2, slowCurve) };
 }
 
 function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: PageLang): WorkflowProgressView {
@@ -2892,7 +2900,7 @@ function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: Page
   };
   const item = text[progress.phase];
   const [title, detail] = lang === "en" ? item.en : item.zh;
-  return { percent: Math.max(0, Math.min(100, Math.round(progress.percent))), title, detail, tone: item.tone };
+  return { percent: Math.max(0, Math.min(100, Math.round(progress.percent * 10) / 10)), title, detail, tone: item.tone };
 }
 
 function projectWorkflowProgressView(
