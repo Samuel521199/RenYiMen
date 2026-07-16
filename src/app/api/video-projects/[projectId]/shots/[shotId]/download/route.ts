@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { auth } from "@/auth";
 import { getVideoShotClipForDownload } from "@/services/video-orchestrator/project-service";
 
@@ -18,6 +20,10 @@ export async function GET(_req: Request, ctx: RouteContext) {
 
     const { projectId, shotId } = await ctx.params;
     const clip = await getVideoShotClipForDownload(session.user.id, projectId, shotId);
+    if (isPublicAssetPath(clip.clipUrl)) {
+      return downloadPublicAsset(clip.clipUrl, buildClipFilename(clip.title, clip.shotNo));
+    }
+
     const upstream = await fetch(clip.clipUrl, { cache: "no-store" });
     if (!upstream.ok || !upstream.body) {
       return NextResponse.json({ ok: false, error: `视频文件拉取失败 ${upstream.status}` }, { status: 502 });
@@ -39,6 +45,25 @@ export async function GET(_req: Request, ctx: RouteContext) {
       { status: 400 },
     );
   }
+}
+
+async function downloadPublicAsset(assetUrl: string, filename: string): Promise<Response> {
+  const publicRoot = path.resolve(process.cwd(), "public");
+  const assetPath = path.resolve(publicRoot, assetUrl.replace(/^\/+/, ""));
+  if (!assetPath.startsWith(publicRoot + path.sep)) {
+    return NextResponse.json({ ok: false, error: "Invalid local clip path" }, { status: 400 });
+  }
+  const [file, fileStat] = await Promise.all([readFile(assetPath), stat(assetPath)]);
+  const headers = new Headers();
+  headers.set("Content-Type", "video/mp4");
+  headers.set("Content-Disposition", contentDisposition(filename));
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("Content-Length", String(fileStat.size));
+  return new Response(file, { status: 200, headers });
+}
+
+function isPublicAssetPath(value: string): boolean {
+  return value.startsWith("/") && !value.startsWith("//");
 }
 
 function buildClipFilename(title: string, shotNo: number): string {

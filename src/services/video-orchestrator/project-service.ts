@@ -38,6 +38,10 @@ function clipTaskConcurrency(): number {
 
 const CHARACTER_CONSISTENCY_KEYFRAME_NO = -2;
 const SCENE_CONSISTENCY_KEYFRAME_NO = -1;
+const DEMO_PROJECT_TITLE = "Tongits King: 欢乐竞技，智取王座";
+const DEMO_PROJECT_SOURCE_IDS = ["cmrlwfpz10001tvu4g80aou8c", "cmrlur1ue0001tvw42u6de3yr"];
+const DEMO_PROJECT_PROMPT = "如图这个游戏，我要做一个30s的广告宣传片，要求引人入胜，画面精良，且整个视频前后人物要一致";
+const DEMO_PROJECT_FINAL_VIDEO_URL = "/demo/tongits/final.mp4";
 
 export type VideoProjectWithShots = Prisma.VideoProjectGetPayload<{
   include: typeof PROJECT_INCLUDE;
@@ -408,18 +412,544 @@ function readPlanMicroShots(shot: Record<string, unknown> | undefined): VideoMic
 
 export async function listVideoProjects(userId: string): Promise<VideoProjectWithShots[]> {
   await logOnePromptVideo("project.list.request", { userId });
-  const projects = await prisma.videoProject.findMany({
+  let projects = await prisma.videoProject.findMany({
     where: { userId },
     include: PROJECT_INCLUDE,
     orderBy: { updatedAt: "desc" },
     take: 20,
   });
+  if (!projects.length) {
+    const demoProject = await ensureDemoVideoProject(userId);
+    if (demoProject) {
+      projects = [demoProject];
+    }
+  }
   await logOnePromptVideo("project.list.response", {
     userId,
     count: projects.length,
     projects: projects.map((project) => ({ id: project.id, status: project.status, title: project.title })),
   });
   return projects;
+}
+
+async function ensureDemoVideoProject(userId: string): Promise<VideoProjectWithShots | null> {
+  const existing = await prisma.videoProject.findFirst({
+    where: { userId },
+    include: PROJECT_INCLUDE,
+    orderBy: { updatedAt: "desc" },
+  });
+  if (existing) return existing;
+
+  const source = await findDemoSourceProject(userId);
+  const project = source
+    ? await cloneDemoSourceProject(userId, source)
+    : await createFallbackDemoProject(userId);
+
+  await logOnePromptVideo("project.demo.seeded", {
+    userId,
+    projectId: project.id,
+    clonedFromProjectId: source?.id ?? null,
+    title: project.title,
+  });
+  return project;
+}
+
+async function findDemoSourceProject(userId: string): Promise<VideoProjectWithShots | null> {
+  const configuredId = process.env.ONE_PROMPT_VIDEO_DEMO_SOURCE_PROJECT_ID?.trim();
+  const sourceIds = configuredId ? [configuredId, ...DEMO_PROJECT_SOURCE_IDS] : DEMO_PROJECT_SOURCE_IDS;
+  const byId = await prisma.videoProject.findFirst({
+    where: {
+      id: { in: sourceIds },
+      userId: { not: userId },
+      status: VideoProjectStatus.DONE,
+      finalVideoUrl: { not: null },
+    },
+    include: PROJECT_INCLUDE,
+    orderBy: { updatedAt: "desc" },
+  });
+  if (byId) return byId;
+
+  return prisma.videoProject.findFirst({
+    where: {
+      userId: { not: userId },
+      status: VideoProjectStatus.DONE,
+      finalVideoUrl: { not: null },
+      OR: [
+        { title: DEMO_PROJECT_TITLE },
+        { title: { contains: "Tongits King", mode: "insensitive" } },
+      ],
+    },
+    include: PROJECT_INCLUDE,
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
+async function cloneDemoSourceProject(userId: string, source: VideoProjectWithShots): Promise<VideoProjectWithShots> {
+  const created = await prisma.$transaction(async (tx) => {
+    const project = await tx.videoProject.create({
+      data: {
+        userId,
+        status: VideoProjectStatus.DONE,
+        title: source.title || DEMO_PROJECT_TITLE,
+        userPrompt: source.userPrompt || DEMO_PROJECT_PROMPT,
+        referenceImageUrls: cloneJsonValue(source.referenceImageUrls),
+        planJson: source.planJson ? cloneJsonValue(source.planJson) : undefined,
+        aspectRatio: source.aspectRatio,
+        durationSeconds: source.durationSeconds,
+        stylePreset: source.stylePreset,
+        finalVideoUrl: DEMO_PROJECT_FINAL_VIDEO_URL,
+        composeTaskId: null,
+        errorMessage: null,
+      },
+    });
+    if (source.keyframes.length) {
+      await tx.videoKeyframe.createMany({
+        data: source.keyframes.map((keyframe) => ({
+          projectId: project.id,
+          keyframeNo: keyframe.keyframeNo,
+          timeSeconds: keyframe.timeSeconds,
+          status: keyframe.imageUrl ? VideoShotStatus.IMAGE_APPROVED : keyframe.status,
+          purpose: keyframe.purpose,
+          scene: keyframe.scene,
+          characterState: keyframe.characterState,
+          productState: keyframe.productState,
+          imagePrompt: keyframe.imagePrompt,
+          negativePrompt: keyframe.negativePrompt,
+          imageUrl: demoKeyframeAssetUrl(keyframe.keyframeNo) ?? keyframe.imageUrl,
+          imageTaskId: null,
+          qualityScore: keyframe.qualityScore,
+          errorMessage: null,
+          locked: Boolean(keyframe.imageUrl),
+        })),
+      });
+    }
+    if (source.segments.length) {
+      await tx.videoSegment.createMany({
+        data: source.segments.map((segment) => ({
+          projectId: project.id,
+          segmentNo: segment.segmentNo,
+          status: segment.clipUrl ? VideoShotStatus.CLIP_APPROVED : segment.status,
+          startKeyframeNo: segment.startKeyframeNo,
+          endKeyframeNo: segment.endKeyframeNo,
+          startTimeSeconds: segment.startTimeSeconds,
+          endTimeSeconds: segment.endTimeSeconds,
+          durationSeconds: segment.durationSeconds,
+          purpose: segment.purpose,
+          motion: segment.motion,
+          camera: segment.camera,
+          subjectMotion: segment.subjectMotion,
+          environmentMotion: segment.environmentMotion,
+          videoPrompt: segment.videoPrompt,
+          negativePrompt: segment.negativePrompt,
+          subtitle: segment.subtitle,
+          clipUrl: demoClipAssetUrl(segment.segmentNo) ?? segment.clipUrl,
+          clipTaskId: null,
+          qualityScore: segment.qualityScore,
+          errorMessage: null,
+          locked: Boolean(segment.clipUrl),
+        })),
+      });
+    }
+    if (source.shots.length) {
+      await tx.videoShot.createMany({
+        data: source.shots.map((shot) => ({
+          projectId: project.id,
+          shotNo: shot.shotNo,
+          status: shot.status,
+          durationSeconds: shot.durationSeconds,
+          purpose: shot.purpose,
+          camera: shot.camera,
+          action: shot.action,
+          imagePrompt: shot.imagePrompt,
+          videoPrompt: shot.videoPrompt,
+          negativePrompt: shot.negativePrompt,
+          subtitle: shot.subtitle,
+          imageUrl: shot.imageUrl,
+          clipUrl: shot.clipUrl,
+          imageTaskId: null,
+          clipTaskId: null,
+          qualityScore: shot.qualityScore,
+          errorMessage: null,
+          locked: shot.locked,
+        })),
+      });
+    }
+    return project;
+  });
+  return requireVideoProject(userId, created.id);
+}
+
+async function createFallbackDemoProject(userId: string): Promise<VideoProjectWithShots> {
+  const plan = fallbackDemoPlan();
+  const created = await prisma.$transaction(async (tx) => {
+    const project = await tx.videoProject.create({
+      data: {
+        userId,
+        status: VideoProjectStatus.DONE,
+        title: DEMO_PROJECT_TITLE,
+        userPrompt: DEMO_PROJECT_PROMPT,
+        referenceImageUrls: [],
+        planJson: plan as unknown as Prisma.InputJsonValue,
+        aspectRatio: "9:16",
+        durationSeconds: 30,
+        stylePreset: "cartoon",
+        finalVideoUrl: DEMO_PROJECT_FINAL_VIDEO_URL,
+        composeTaskId: null,
+        errorMessage: null,
+      },
+    });
+    await tx.videoKeyframe.createMany({
+      data: [
+        ...(plan.consistencyReferences ?? []).filter((reference) => reference.needed).map((reference) => ({
+          projectId: project.id,
+          keyframeNo: reference.keyframeNo,
+          timeSeconds: 0,
+          status: VideoShotStatus.IMAGE_APPROVED,
+          purpose: reference.purpose,
+          scene: reference.scene,
+          characterState: reference.characterState,
+          productState: reference.productState,
+          imagePrompt: reference.imagePromptZh ?? reference.imagePrompt,
+          negativePrompt: reference.negativePrompt,
+          imageUrl: referenceImageForDemoKeyframe(reference.keyframeNo),
+          imageTaskId: null,
+          qualityScore: 90,
+          errorMessage: null,
+          locked: true,
+        })),
+        ...plan.keyframes.map((keyframe) => ({
+          projectId: project.id,
+          keyframeNo: keyframe.keyframeNo,
+          timeSeconds: keyframe.timeSeconds,
+          status: VideoShotStatus.IMAGE_APPROVED,
+          purpose: keyframe.purpose,
+          scene: keyframe.scene,
+          characterState: keyframe.characterState,
+          productState: keyframe.productState,
+          imagePrompt: keyframe.imagePromptZh ?? keyframe.imagePrompt,
+          negativePrompt: keyframe.negativePrompt,
+          imageUrl: referenceImageForDemoKeyframe(keyframe.keyframeNo),
+          imageTaskId: null,
+          qualityScore: 90,
+          errorMessage: null,
+          locked: true,
+        })),
+      ],
+    });
+    await tx.videoSegment.createMany({
+      data: plan.segments.map((segment) => ({
+        projectId: project.id,
+        segmentNo: segment.segmentNo,
+        status: VideoShotStatus.CLIP_APPROVED,
+        startKeyframeNo: segment.startKeyframeNo,
+        endKeyframeNo: segment.endKeyframeNo,
+        startTimeSeconds: segment.startTimeSeconds,
+        endTimeSeconds: segment.endTimeSeconds,
+        durationSeconds: segment.durationSeconds,
+        purpose: segment.purpose,
+        motion: segment.motion,
+        camera: segment.camera,
+        subjectMotion: segment.subjectMotion,
+        environmentMotion: segment.environmentMotion,
+        videoPrompt: segment.videoPromptZh ?? segment.videoPrompt,
+        negativePrompt: segment.negativePrompt,
+        subtitle: segment.subtitle,
+        clipUrl: DEMO_PROJECT_FINAL_VIDEO_URL,
+        clipTaskId: null,
+        qualityScore: 90,
+        errorMessage: null,
+        locked: true,
+      })),
+    });
+    return project;
+  });
+  return requireVideoProject(userId, created.id);
+}
+
+function cloneJsonValue(value: Prisma.JsonValue): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function referenceImageForDemoKeyframe(keyframeNo: number): string {
+  return demoKeyframeAssetUrl(keyframeNo) ?? "/covers/sample-a.png";
+}
+
+function demoKeyframeAssetUrl(keyframeNo: number): string | null {
+  if (keyframeNo === CHARACTER_CONSISTENCY_KEYFRAME_NO) return "/demo/tongits/keyframe--2.png";
+  if (keyframeNo >= 1 && keyframeNo <= 7) return `/demo/tongits/keyframe-${keyframeNo}.png`;
+  return null;
+}
+
+function demoClipAssetUrl(segmentNo: number): string | null {
+  if (segmentNo >= 1 && segmentNo <= 6) return `/demo/tongits/clip-${segmentNo}.mp4`;
+  return null;
+}
+
+function fallbackDemoPlan(): OnePromptVideoPlan {
+  const negativePrompt = "realistic, dark, gloomy, low resolution, blurry, distorted, extra limbs, deformed face, inconsistent clothing, missing logo elements";
+  const negativePromptZh = "写实风格、昏暗、低清晰度、模糊、畸变、多余肢体、脸部变形、服装不一致、品牌元素缺失";
+  const keyframes = [
+    demoKeyframe(1, 0, "神秘光影中引入主角牛角色，营造期待感", "Introduce the mascot in mysterious spotlight and build anticipation", negativePrompt, negativePromptZh),
+    demoKeyframe(2, 5, "角色完全展现，准备进入明亮游戏世界", "Reveal the mascot and move toward the bright game world", negativePrompt, negativePromptZh),
+    demoKeyframe(3, 9, "展示热带游戏世界全景", "Show the tropical card-game world", negativePrompt, negativePromptZh),
+    demoKeyframe(4, 15, "角色操作卡牌，展示互动性", "Show the mascot playing cards and making a smart move", negativePrompt, negativePromptZh),
+    demoKeyframe(5, 20, "胜利瞬间，角色欢呼", "Celebrate the winning moment", negativePrompt, negativePromptZh),
+    demoKeyframe(6, 25, "品牌LOGO完全展现", "Reveal the Tongits King logo", negativePrompt, negativePromptZh),
+    demoKeyframe(7, 30, "行动号召，引导下载", "End with a download call to action", negativePrompt, negativePromptZh),
+  ];
+  const segments = [
+    demoSegment(1, 1, 2, 0, 5, "通过神秘光影引入主角牛角色，营造期待感", "A continuous push-in reveals the smiling mascot under warm spotlight.", negativePrompt, negativePromptZh),
+    demoSegment(2, 2, 3, 5, 9, "展示游戏界面与环境，突出热带主题与卡牌元素", "The camera opens into a sunny tropical game world with cards and playful motion.", negativePrompt, negativePromptZh),
+    demoSegment(3, 3, 4, 9, 15, "展示角色操作卡牌，体现游戏互动性", "The mascot picks cards, considers strategy, and makes a confident move.", negativePrompt, negativePromptZh),
+    demoSegment(4, 4, 5, 15, 20, "展示胜利瞬间，角色欢呼，增强情感共鸣", "The mascot wins, jumps in celebration, and the scene fills with festive effects.", negativePrompt, negativePromptZh),
+    demoSegment(5, 5, 6, 20, 25, "品牌LOGO浮现，强化记忆点", "The Tongits King logo emerges clearly with cards and tropical leaves.", negativePrompt, negativePromptZh),
+    demoSegment(6, 6, 7, 25, 30, "行动号召，引导下载", "The logo holds while a clean download call to action appears.", negativePrompt, negativePromptZh),
+  ];
+  return {
+    title: DEMO_PROJECT_TITLE,
+    logline: "Tongits King 30s game ad demo with a consistent mascot, tropical card-game energy, and a clear call to action.",
+    durationSeconds: 30,
+    aspectRatio: "9:16",
+    keyframeCount: keyframes.length,
+    segmentCount: segments.length,
+    styleBible: {
+      visualStyle: "bright cinematic cartoon game advertisement",
+      characterLock: "same cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly confident smile",
+      productLock: "Tongits King card-game brand, tropical playing-card visual language",
+      colorPalette: "green, blue, yellow, warm gold highlights",
+      colorToneLock: "bright saturated tropical colors",
+      lightingToneLock: "warm commercial lighting with clear readable subjects",
+      negativePrompt,
+      negativePromptZh,
+      negativePromptEn: negativePrompt,
+    },
+    planningManifest: {
+      projectIntent: {
+        videoType: "game_ad",
+        primaryGoalZh: "用30秒展示 Tongits King 的欢乐竞技氛围并引导下载",
+        primaryGoalEn: "Show Tongits King's joyful competitive mood in 30 seconds and drive installs",
+      },
+      storyStrategy: {
+        narrativeArcZh: "角色登场、进入游戏世界、策略互动、胜利庆祝、品牌露出、行动号召",
+        narrativeArcEn: "Mascot reveal, game-world entry, strategic interaction, victory, brand reveal, call to action",
+      },
+      timelineBlueprint: {
+        segmentCount: segments.length,
+        totalDurationSeconds: 30,
+        segmentDurationMinSeconds: 3,
+        segmentDurationMaxSeconds: 15,
+        splitStrategyZh: "按广告叙事节拍拆分为6段，每段3-15秒",
+        segments: segments.map((segment) => ({
+          segmentNo: segment.segmentNo,
+          startTimeSeconds: segment.startTimeSeconds,
+          endTimeSeconds: segment.endTimeSeconds,
+          durationSeconds: segment.durationSeconds,
+          purposeZh: segment.purposeZh,
+          purposeEn: segment.purposeEn,
+          requiredAnchorIds: ["mascot-bull", "tongits-brand"],
+          boundaryModeHint: "continuous",
+        })),
+      },
+      consistencyManifest: {
+        anchors: [
+          {
+            id: "mascot-bull",
+            type: "person",
+            displayNameZh: "主角牛角色",
+            displayNameEn: "Bull mascot",
+            mustStayConsistent: true,
+            needsReferenceImage: true,
+            referenceStrength: "hard",
+            descriptionZh: "草帽、红围巾、蓝外套、金色徽章的卡通牛",
+            descriptionEn: "Cartoon bull with straw hat, red scarf, blue jacket, and gold badge",
+            appliesTo: ["keyframes", "segments", "micro_shots"],
+            userEditable: true,
+            imagePromptZh: "卡通牛，草帽，红围巾，蓝外套，金色徽章，微笑，明亮背景",
+            imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
+          },
+          {
+            id: "tongits-brand",
+            type: "brand_visual",
+            displayNameZh: "Tongits King 品牌视觉",
+            displayNameEn: "Tongits King brand visual",
+            mustStayConsistent: true,
+            needsReferenceImage: false,
+            referenceStrength: "medium",
+            descriptionZh: "明亮热带卡牌游戏品牌，绿色叶子、扑克牌和清晰LOGO",
+            descriptionEn: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
+            appliesTo: ["keyframes", "segments", "micro_shots"],
+            userEditable: true,
+          },
+        ],
+      },
+    },
+    consistencyManifest: {
+      anchors: [
+        {
+          id: "mascot-bull",
+          type: "person",
+          displayNameZh: "主角牛角色",
+          displayNameEn: "Bull mascot",
+          mustStayConsistent: true,
+          needsReferenceImage: true,
+          referenceStrength: "hard",
+          descriptionZh: "草帽、红围巾、蓝外套、金色徽章的卡通牛",
+          descriptionEn: "Cartoon bull with straw hat, red scarf, blue jacket, and gold badge",
+          appliesTo: ["keyframes", "segments", "micro_shots"],
+          userEditable: true,
+        imagePromptZh: "卡通牛，草帽，红围巾，蓝外套，金色徽章，微笑，明亮背景",
+        imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
+      },
+      {
+        id: "tongits-brand",
+        type: "brand_visual",
+        displayNameZh: "Tongits King 品牌视觉",
+        displayNameEn: "Tongits King brand visual",
+        mustStayConsistent: true,
+        needsReferenceImage: false,
+        referenceStrength: "medium",
+        descriptionZh: "明亮热带卡牌游戏品牌，绿色叶子、扑克牌和清晰LOGO",
+        descriptionEn: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
+        appliesTo: ["keyframes", "segments", "micro_shots"],
+        userEditable: true,
+      },
+    ],
+  },
+    timelineBlueprint: {
+      segmentCount: segments.length,
+      totalDurationSeconds: 30,
+      segmentDurationMinSeconds: 3,
+      segmentDurationMaxSeconds: 15,
+      splitStrategyZh: "按广告叙事节拍拆分为6段，每段3-15秒",
+      segments: segments.map((segment) => ({
+        segmentNo: segment.segmentNo,
+        startTimeSeconds: segment.startTimeSeconds,
+        endTimeSeconds: segment.endTimeSeconds,
+        durationSeconds: segment.durationSeconds,
+        purposeZh: segment.purposeZh,
+        purposeEn: segment.purposeEn,
+        requiredAnchorIds: ["mascot-bull", "tongits-brand"],
+        boundaryModeHint: "continuous",
+      })),
+    },
+    consistencyReferences: [
+      {
+        kind: "character",
+        needed: true,
+        keyframeNo: CHARACTER_CONSISTENCY_KEYFRAME_NO,
+        frameId: "mascot-bull-reference",
+        purpose: "牛角色",
+        purposeZh: "牛角色",
+        purposeEn: "Bull mascot identity reference",
+        scene: "clean bright reference background",
+        characterState: "same cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge",
+        productState: "Tongits King game identity",
+        imagePrompt: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
+        imagePromptZh: "卡通牛，草帽，红围巾，蓝外套，金色徽章，微笑，明亮背景",
+        imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
+        negativePrompt,
+        negativePromptZh,
+        negativePromptEn: negativePrompt,
+      },
+    ],
+    keyframes,
+    segments,
+    shots: segments.map((segment) => ({
+      shotNo: segment.segmentNo,
+      durationSeconds: segment.durationSeconds,
+      boundaryMode: segment.boundaryMode,
+      purpose: segment.purpose,
+      purposeZh: segment.purposeZh,
+      purposeEn: segment.purposeEn,
+      camera: segment.camera,
+      action: segment.motion,
+      imagePrompt: keyframes.find((keyframe) => keyframe.keyframeNo === segment.startKeyframeNo)?.imagePrompt ?? "",
+      imagePromptZh: keyframes.find((keyframe) => keyframe.keyframeNo === segment.startKeyframeNo)?.imagePromptZh ?? "",
+      imagePromptEn: keyframes.find((keyframe) => keyframe.keyframeNo === segment.startKeyframeNo)?.imagePromptEn ?? "",
+      videoPrompt: segment.videoPrompt,
+      videoPromptZh: segment.videoPromptZh,
+      videoPromptEn: segment.videoPromptEn,
+      outputMode: "mixed",
+      constraints: ["保持主角牛角色造型一致", "保持品牌色彩明亮清晰", "无水印、无UI、无字幕"],
+      subtitle: "",
+      negativePrompt,
+      negativePromptZh,
+      negativePromptEn: negativePrompt,
+      usesConsistencyAnchors: ["mascot-bull", "tongits-brand"],
+    })),
+  };
+}
+
+function demoKeyframe(
+  keyframeNo: number,
+  timeSeconds: number,
+  purposeZh: string,
+  purposeEn: string,
+  negativePrompt: string,
+  negativePromptZh: string,
+) {
+  const imagePromptZh = `电影级卡通游戏广告，${purposeZh}，同一只草帽红围巾蓝外套金色徽章的卡通牛角色，热带卡牌游戏氛围，9:16竖构图，明亮高饱和商业质感，无水印，无UI，无字幕`;
+  const imagePromptEn = `Cinematic cartoon game advertisement, ${purposeEn}, same bull mascot with straw hat, red scarf, blue jacket, and gold badge, tropical card-game mood, vertical 9:16 composition, bright saturated commercial quality, no watermark, no UI, no subtitles`;
+  return {
+    keyframeNo,
+    frameId: `KF${String(keyframeNo).padStart(2, "0")}`,
+    frameRole: keyframeNo === 1 ? "video_start" as const : keyframeNo === 7 ? "video_end" as const : "shared_boundary" as const,
+    timeSeconds,
+    purpose: purposeZh,
+    purposeZh,
+    purposeEn,
+    scene: "bright tropical cartoon card-game world",
+    characterState: "same bull mascot with straw hat, red scarf, blue jacket, gold badge",
+    productState: "Tongits King game brand remains readable and festive",
+    imagePrompt: imagePromptZh,
+    imagePromptZh,
+    imagePromptEn,
+    negativePrompt,
+    negativePromptZh,
+    negativePromptEn: negativePrompt,
+    usesConsistencyAnchors: ["mascot-bull", "tongits-brand"],
+  };
+}
+
+function demoSegment(
+  segmentNo: number,
+  startKeyframeNo: number,
+  endKeyframeNo: number,
+  startTimeSeconds: number,
+  endTimeSeconds: number,
+  purposeZh: string,
+  videoPromptEn: string,
+  negativePrompt: string,
+  negativePromptZh: string,
+) {
+  const durationSeconds = endTimeSeconds - startTimeSeconds;
+  const videoPromptZh = `单段一镜到底连续镜头，${purposeZh}。保持同一只草帽红围巾蓝外套金色徽章的卡通牛角色，保持热带卡牌游戏世界、明亮商业卡通质感和品牌色彩一致。禁止切镜、跳切、淡入淡出、场景替换、角色漂移、文字水印和UI。`;
+  return {
+    segmentNo,
+    startKeyframeNo,
+    endKeyframeNo,
+    startTimeSeconds,
+    endTimeSeconds,
+    durationSeconds,
+    boundaryMode: "continuous" as const,
+    purpose: purposeZh,
+    purposeZh,
+    purposeEn: videoPromptEn,
+    motion: purposeZh,
+    camera: "smooth continuous commercial camera movement",
+    subjectMotion: "mascot performs one clear advertising beat with natural motion",
+    environmentMotion: "subtle tropical ambience, cards and celebratory effects remain coherent",
+    videoPrompt: videoPromptZh,
+    videoPromptZh,
+    videoPromptEn,
+    subtitle: "",
+    outputMode: "mixed" as const,
+    constraints: ["保持主角牛角色造型一致", "保持品牌色彩明亮清晰", "无水印、无UI、无字幕"],
+    negativePrompt,
+    negativePromptZh,
+    negativePromptEn: negativePrompt,
+    usesConsistencyAnchors: ["mascot-bull", "tongits-brand"],
+  };
 }
 
 export async function createVideoProject(
