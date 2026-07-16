@@ -145,7 +145,7 @@ const CATALOG: SkuDefinition[] = [
       "输入一句话，自动拆分 30s 分镜脚本，生成可审核关键帧，并预留逐镜头视频与最终合成流程。",
     descriptionEn:
       "Enter one prompt to generate an editable 30-second storyboard plan, review keyframes, then continue toward shot clips and final composition.",
-    sellCredits: 0,
+    sellCredits: 5000,
     href: "/workbench/tools/one-prompt-video",
     uiSchema: textToImageWorkflowMock,
   },  {

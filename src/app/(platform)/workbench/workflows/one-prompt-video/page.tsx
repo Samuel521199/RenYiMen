@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
   Clapperboard,
   Download,
   FileText,
@@ -225,6 +227,10 @@ type Copy = {
   newProject: string;
   noProjects: string;
   activeProject: string;
+  setupPanel: string;
+  setupPanelHint: string;
+  collapseSetup: string;
+  expandSetup: string;
   referenceImages: string;
   uploadReference: string;
   uploadingReference: string;
@@ -240,6 +246,9 @@ type Copy = {
   deleteProjectConfirm: string;
   generatePlan: string;
   generating: string;
+  stopGeneration: string;
+  stoppingGeneration: string;
+  generationStopped: string;
   approveScript: string;
   approveFrames: string;
   approveMicroShots: string;
@@ -291,12 +300,14 @@ type Copy = {
   keyframePreview: string;
   finalVideo: string;
   preview: string;
+  previewSize: string;
   ready: string;
   pending: string;
   finalVideoNotReady: string;
   firstLastFrameClips: string;
   downloadClip: string;
   saveShot: string;
+  editShot: string;
   regenerate: string;
   languageButton: string;
   planned: string;
@@ -336,6 +347,10 @@ const TEXT: Record<PageLang, Copy> = {
     newProject: "\u65b0\u5efa\u9879\u76ee",
     noProjects: "\u6682\u65e0\u9879\u76ee",
     activeProject: "\u5f53\u524d",
+    setupPanel: "创作入口",
+    setupPanelHint: "项目、提示词、参考图和生成设置",
+    collapseSetup: "收起",
+    expandSetup: "展开",
     referenceImages: "\u8f85\u52a9\u53c2\u8003\u56fe",
     uploadReference: "\u4e0a\u4f20\u53c2\u8003\u56fe",
     uploadingReference: "\u4e0a\u4f20\u4e2d",
@@ -351,6 +366,9 @@ const TEXT: Record<PageLang, Copy> = {
     deleteProjectConfirm: "\u786e\u5b9a\u5220\u9664\u8fd9\u4e2a\u9879\u76ee\u5417\uff1f\u5df2\u751f\u6210\u7684\u5206\u955c\u3001\u56fe\u7247\u548c\u7247\u6bb5\u8bb0\u5f55\u4f1a\u4e00\u8d77\u79fb\u9664\u3002",
     generatePlan: "\u751f\u6210\u5206\u955c\u8ba1\u5212",
     generating: "\u751f\u6210\u4e2d",
+    stopGeneration: "停止生成",
+    stoppingGeneration: "停止中",
+    generationStopped: "已停止生成",
     approveScript: "\u786e\u8ba4\u811a\u672c",
     approveFrames: "\u786e\u8ba4\u8fb9\u754c\u53c2\u8003\u5e27",
     approveMicroShots: "\u786e\u8ba4\u5185\u90e8\u5b50\u5206\u955c",
@@ -402,12 +420,14 @@ const TEXT: Record<PageLang, Copy> = {
     keyframePreview: "\u8fb9\u754c\u53c2\u8003\u5e27",
     finalVideo: "\u6700\u7ec8\u6210\u7247",
     preview: "\u9884\u89c8",
+    previewSize: "\u9884\u89c8\u5927\u5c0f",
     ready: "\u5df2\u5b8c\u6210",
     pending: "\u5f85\u5904\u7406",
     finalVideoNotReady: "\u6700\u7ec8\u6210\u7247\u5c1a\u672a\u751f\u6210\u3002",
     firstLastFrameClips: "\u9996\u5c3e\u5e27\u5206\u955c\u7247\u6bb5",
     downloadClip: "\u4e0b\u8f7d\u5206\u955c\u89c6\u9891",
     saveShot: "\u4fdd\u5b58\u955c\u5934",
+    editShot: "编辑镜头",
     regenerate: "\u91cd\u751f\u6210",
     languageButton: "EN",
     planned: "\u5206\u955c\u811a\u672c\u5df2\u751f\u6210",
@@ -486,6 +506,10 @@ const TEXT: Record<PageLang, Copy> = {
     newProject: "New project",
     noProjects: "No projects",
     activeProject: "Active",
+    setupPanel: "Creation setup",
+    setupPanelHint: "Projects, prompt, references, and generation settings",
+    collapseSetup: "Collapse",
+    expandSetup: "Expand",
     referenceImages: "Reference images",
     uploadReference: "Upload references",
     uploadingReference: "Uploading",
@@ -501,6 +525,9 @@ const TEXT: Record<PageLang, Copy> = {
     deleteProjectConfirm: "Delete this project? Storyboard, frame, and clip records will be removed.",
     generatePlan: "Generate plan",
     generating: "Generating",
+    stopGeneration: "Stop generation",
+    stoppingGeneration: "Stopping",
+    generationStopped: "Generation stopped",
     approveScript: "Approve script",
     approveFrames: "Approve boundary frames",
     approveMicroShots: "Approve internal micro-shots",
@@ -552,12 +579,14 @@ const TEXT: Record<PageLang, Copy> = {
     keyframePreview: "Boundary frame",
     finalVideo: "Final video",
     preview: "Preview",
+    previewSize: "Preview size",
     ready: "ready",
     pending: "pending",
     finalVideoNotReady: "Final video is not ready yet.",
     firstLastFrameClips: "first-last-frame clips",
     downloadClip: "Download clip",
     saveShot: "Save shot",
+    editShot: "Edit shot",
     regenerate: "Regenerate",
     languageButton: "\u4e2d\u6587",
     planned: "Storyboard plan generated",
@@ -640,10 +669,14 @@ const STAGES = [
 
 const DEFAULT_PROMPTS = [TEXT.zh.defaultPrompt, TEXT.en.defaultPrompt];
 const PROJECT_STORAGE_KEY = "one-prompt-video-active-project-id";
+const SETUP_PANEL_COLLAPSED_STORAGE_KEY = "one-prompt-video-setup-panel-collapsed";
 const DETAIL_PANEL_WIDTH_STORAGE_KEY = "one-prompt-video-detail-panel-width";
+const DETAIL_PREVIEW_HEIGHT_STORAGE_KEY = "one-prompt-video-detail-preview-height";
 const DETAIL_PANEL_MIN_WIDTH = 280;
 const DETAIL_PANEL_MAX_WIDTH = 720;
-const RUNNING_PROJECT_STATUSES: ProjectStatus[] = ["IMAGE_GENERATING", "CLIP_GENERATING", "COMPOSING"];
+const DETAIL_PREVIEW_MIN_HEIGHT = 180;
+const DETAIL_PREVIEW_MAX_HEIGHT = 760;
+const RUNNING_PROJECT_STATUSES: ProjectStatus[] = ["PLANNING", "IMAGE_GENERATING", "CLIP_GENERATING", "COMPOSING"];
 
 function clampProjectDuration(value: number): number {
   if (!Number.isFinite(value)) return 30;
@@ -653,6 +686,11 @@ function clampProjectDuration(value: number): number {
 function clampDetailPanelWidth(value: number): number {
   if (!Number.isFinite(value)) return 360;
   return Math.max(DETAIL_PANEL_MIN_WIDTH, Math.min(DETAIL_PANEL_MAX_WIDTH, Math.round(value)));
+}
+
+function clampDetailPreviewHeight(value: number): number {
+  if (!Number.isFinite(value)) return 360;
+  return Math.max(DETAIL_PREVIEW_MIN_HEIGHT, Math.min(DETAIL_PREVIEW_MAX_HEIGHT, Math.round(value)));
 }
 
 export default function OnePromptVideoPage() {
@@ -681,7 +719,13 @@ export default function OnePromptVideoPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [optimisticProgress, setOptimisticProgress] = useState<OptimisticProgress | null>(null);
+  const [generationAbortController, setGenerationAbortController] = useState<AbortController | null>(null);
+  const [generationProjectId, setGenerationProjectId] = useState("");
+  const [stoppingGeneration, setStoppingGeneration] = useState(false);
+  const [setupPanelCollapsed, setSetupPanelCollapsed] = useState(false);
+  const [shotEditorOpen, setShotEditorOpen] = useState(false);
   const [detailPanelWidth, setDetailPanelWidth] = useState(360);
+  const [detailPreviewHeight, setDetailPreviewHeight] = useState(360);
   const [resizingDetailPanel, setResizingDetailPanel] = useState(false);
   const projectLayoutRef = useRef<HTMLElement | null>(null);
 
@@ -727,6 +771,11 @@ export default function OnePromptVideoPage() {
   const canConfirmFinal = Boolean(project && project.status === "FINAL_REVIEW");
   const rollbackOptions = useMemo(() => project ? rollbackTargetsForStatus(project.status) : [], [project]);
   const canRollback = Boolean(project && rollbackOptions.length > 0);
+  const canStopGeneration = Boolean(
+    generationAbortController ||
+    optimisticProgress?.active ||
+    (project && RUNNING_PROJECT_STATUSES.includes(project.status)),
+  );
   const workflowProgress = useMemo(() => {
     if (optimisticProgress) return optimisticWorkflowProgressView(optimisticProgress, pageLang);
     if (!project) return null;
@@ -755,9 +804,18 @@ export default function OnePromptVideoPage() {
   }, []);
 
   useEffect(() => {
+    setSetupPanelCollapsed(window.localStorage.getItem(SETUP_PANEL_COLLAPSED_STORAGE_KEY) === "true");
     const saved = Number(window.localStorage.getItem(DETAIL_PANEL_WIDTH_STORAGE_KEY));
     if (Number.isFinite(saved) && saved > 0) setDetailPanelWidth(clampDetailPanelWidth(saved));
+    const savedPreviewHeight = Number(window.localStorage.getItem(DETAIL_PREVIEW_HEIGHT_STORAGE_KEY));
+    if (Number.isFinite(savedPreviewHeight) && savedPreviewHeight > 0) {
+      setDetailPreviewHeight(clampDetailPreviewHeight(savedPreviewHeight));
+    }
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(SETUP_PANEL_COLLAPSED_STORAGE_KEY, String(setupPanelCollapsed));
+  }, [setupPanelCollapsed]);
 
   useEffect(() => {
     if (!resizingDetailPanel) return;
@@ -791,6 +849,10 @@ export default function OnePromptVideoPage() {
   useEffect(() => {
     window.localStorage.setItem(DETAIL_PANEL_WIDTH_STORAGE_KEY, String(detailPanelWidth));
   }, [detailPanelWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem(DETAIL_PREVIEW_HEIGHT_STORAGE_KEY, String(detailPreviewHeight));
+  }, [detailPreviewHeight]);
 
   useEffect(() => {
     if (!optimisticProgress?.active) return;
@@ -844,6 +906,19 @@ export default function OnePromptVideoPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [previewKeyframeId]);
+
+  useEffect(() => {
+    if (!shotEditorOpen) return;
+    if (!selectedShot) {
+      setShotEditorOpen(false);
+      return;
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setShotEditorOpen(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedShot, shotEditorOpen]);
 
   useEffect(() => {
     if (!selectedShot) return;
@@ -913,6 +988,7 @@ export default function OnePromptVideoPage() {
     setProject(nextProject);
     setSelectedShotId(nextProject.shots[0]?.id ?? "");
     setSelectedKeyframeId("");
+    setShotEditorOpen(false);
     setProjectView(nextProject.finalVideoUrl ? "final" : "clips");
     setPrompt(nextProject.userPrompt);
     setReferenceImageUrls(nextProject.referenceImageUrls ?? []);
@@ -926,6 +1002,7 @@ export default function OnePromptVideoPage() {
     setProjectView("clips");
     setSelectedShotId(shotId);
     setSelectedKeyframeId("");
+    setShotEditorOpen(true);
   }
 
   function beginEditProject(nextProject: VideoProject) {
@@ -968,6 +1045,7 @@ export default function OnePromptVideoPage() {
           setProject(null);
           setSelectedShotId("");
           setSelectedKeyframeId("");
+          setShotEditorOpen(false);
           setDraft({});
           setKeyframeDraft({});
           setPrompt(copy.defaultPrompt);
@@ -987,6 +1065,7 @@ export default function OnePromptVideoPage() {
     setProject(null);
     setSelectedShotId("");
     setSelectedKeyframeId("");
+    setShotEditorOpen(false);
     setDraft({});
     setKeyframeDraft({});
     cancelEditProject();
@@ -1028,16 +1107,24 @@ export default function OnePromptVideoPage() {
 
   async function createAndPlan() {
     let completed = false;
+    const controller = new AbortController();
+    setGenerationAbortController(controller);
+    setGenerationProjectId("");
     setOptimisticProgress({ active: true, phase: "creating", percent: 3, startedAt: Date.now() });
     await runAction(async () => {
       const totalDurationSeconds = clampProjectDuration(durationSeconds);
       const created = await fetchJson("/api/video-projects", copy, {
         method: "POST",
+        signal: controller.signal,
         body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: totalDurationSeconds, stylePreset, referenceImageUrls }),
       });
       if (!created.project) throw new Error(copy.createFailed);
+      setGenerationProjectId(created.project.id);
+      rememberProject(created.project);
+      activateProject(created.project);
       const planned = await fetchJson(`/api/video-projects/${created.project.id}/plan`, copy, {
         method: "POST",
+        signal: controller.signal,
         body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: totalDurationSeconds, stylePreset, referenceImageUrls }),
       });
       if (!planned.project) throw new Error(copy.planFailed);
@@ -1050,11 +1137,42 @@ export default function OnePromptVideoPage() {
       }, 1200);
       setMessage(copy.planned);
     });
+    setGenerationAbortController(null);
+    setGenerationProjectId("");
     if (!completed) {
       setOptimisticProgress((current) => current && current.phase !== "done"
         ? { ...current, active: false, phase: "failed", percent: Math.max(current.percent, 8) }
         : current,
       );
+    }
+  }
+
+  async function stopGeneration() {
+    const controller = generationAbortController;
+    const projectId = generationProjectId || project?.id || "";
+    if (!controller && !projectId) return;
+    setStoppingGeneration(true);
+    controller?.abort();
+    setOptimisticProgress((current) => current
+      ? { ...current, active: false, phase: "failed", percent: Math.max(current.percent, 8) }
+      : { active: false, phase: "failed", percent: 8, startedAt: Date.now() },
+    );
+    try {
+      if (projectId) {
+        const res = await fetchJson(`/api/video-projects/${projectId}/cancel`, copy, { method: "POST" });
+        if (res.project) {
+          rememberProject(res.project);
+          if (project?.id === res.project.id || selectedProjectId === res.project.id || generationProjectId === res.project.id) activateProject(res.project);
+        }
+      }
+      setMessage(copy.generationStopped);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.actionFailed);
+    } finally {
+      setStoppingGeneration(false);
+      setLoading(false);
+      setGenerationAbortController(null);
+      setGenerationProjectId("");
     }
   }
 
@@ -1255,16 +1373,70 @@ export default function OnePromptVideoPage() {
     try {
       await action();
     } catch (err) {
-      setError(err instanceof Error ? err.message : copy.actionFailed);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setMessage(copy.generationStopped);
+      } else {
+        setError(err instanceof Error ? err.message : copy.actionFailed);
+      }
     } finally {
       setLoading(false);
     }
   }
 
+  const primaryStageAction: {
+    label: string;
+    icon: ReactNode;
+    onClick: () => void;
+    className: string;
+  } | null = (() => {
+    if (!project) return null;
+    if (canApproveScript) {
+      return {
+        label: copy.approveScript,
+        icon: <ImageIcon className="h-4 w-4" />,
+        onClick: approvePlan,
+        className: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/15",
+      };
+    }
+    if (canApproveFrames) {
+      return {
+        label: copy.approveFrames,
+        icon: <Check className="h-4 w-4" />,
+        onClick: approveImages,
+        className: "border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15",
+      };
+    }
+    if (canApproveMicroShots) {
+      return {
+        label: copy.approveMicroShots,
+        icon: <ImageIcon className="h-4 w-4" />,
+        onClick: approveMicroShots,
+        className: "border-fuchsia-300/30 bg-fuchsia-300/10 text-fuchsia-100 hover:bg-fuchsia-300/15",
+      };
+    }
+    if (canApproveClips) {
+      return {
+        label: copy.approveClips,
+        icon: <Clapperboard className="h-4 w-4" />,
+        onClick: approveClips,
+        className: "border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15",
+      };
+    }
+    if (canConfirmFinal && project.status !== "DONE") {
+      return {
+        label: copy.confirmFinal,
+        icon: <Check className="h-4 w-4" />,
+        onClick: confirmFinal,
+        className: "border-amber-300/30 bg-amber-300/10 text-amber-100 hover:bg-amber-300/15",
+      };
+    }
+    return null;
+  })();
+
   return (
-    <div className="min-h-full bg-slate-950 text-slate-100">
-      <div className="mx-auto flex max-w-[1500px] flex-col gap-5">
-        <header className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-5">
+    <div className="min-h-full bg-[#070b16] text-slate-100">
+      <div className="mx-auto flex max-w-[1480px] flex-col gap-4 px-4 py-5 sm:px-6">
+        <header className="flex flex-wrap items-center justify-between gap-4 rounded-md border border-white/10 bg-slate-950/80 px-4 py-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]">
           <div>
             <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-xs font-medium text-cyan-200">
               <Sparkles className="h-3.5 w-3.5" />
@@ -1276,7 +1448,7 @@ export default function OnePromptVideoPage() {
             <button
               type="button"
               onClick={toggleLang}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08]"
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:border-cyan-400/30 hover:bg-white/[0.08]"
             >
               <Languages className="h-4 w-4" />
               {copy.languageButton}
@@ -1290,7 +1462,29 @@ export default function OnePromptVideoPage() {
           </div>
         </header>
 
-        <section className="space-y-3 border-b border-white/10 pb-5">
+        <section className="overflow-hidden rounded-md border border-white/10 bg-slate-950/70 shadow-[0_18px_60px_rgba(0,0,0,0.22)]">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-semibold text-white">{copy.setupPanel}</p>
+                <span className="rounded-md border border-white/10 bg-black/20 px-2 py-0.5 text-xs text-slate-400">{copy.projects} {projects.length}</span>
+                {project && <span className="max-w-[320px] truncate rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-0.5 text-xs text-cyan-100">{project.title || copy.untitled}</span>}
+              </div>
+              <p className="mt-1 truncate text-xs text-slate-500">{copy.setupPanelHint}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSetupPanelCollapsed((value) => !value)}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:border-cyan-400/30 hover:bg-white/[0.08]"
+            >
+              {setupPanelCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+              {setupPanelCollapsed ? copy.expandSetup : copy.collapseSetup}
+            </button>
+          </div>
+
+          {!setupPanelCollapsed && (
+          <div className="grid gap-4 border-t border-white/10 p-4 xl:grid-cols-[300px_minmax(0,1fr)]">
+        <section className="space-y-3 rounded-md border border-white/10 bg-slate-950/70 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.22)]">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex items-center gap-2 text-sm font-medium text-slate-300">
               <FolderOpen className="h-4 w-4 text-cyan-300" />
@@ -1300,14 +1494,14 @@ export default function OnePromptVideoPage() {
             <button
               type="button"
               onClick={startNewProject}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08]"
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:border-cyan-400/30 hover:bg-white/[0.08]"
             >
               <Plus className="h-4 w-4" />
               {copy.newProject}
             </button>
           </div>
           {projects.length ? (
-            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            <div className="grid max-h-[360px] min-w-0 gap-2 overflow-y-auto overflow-x-hidden pr-1">
               {projects.map((item) => {
                 const progress = projectProgress(item);
                 const active = item.id === project?.id;
@@ -1315,9 +1509,9 @@ export default function OnePromptVideoPage() {
                 return (
                   <div
                     key={item.id}
-                    className={`min-h-28 rounded-md border px-3 py-3 transition ${active ? "border-cyan-400/60 bg-cyan-400/10" : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]"}`}
+                    className={`relative min-w-0 rounded-md border px-3 py-3 transition ${active ? "border-cyan-400/60 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]" : "border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]"}`}
                   >
-                    <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
                       {editing ? (
                         <input
                           value={editingTitle}
@@ -1326,17 +1520,16 @@ export default function OnePromptVideoPage() {
                             if (event.key === "Enter") void saveProjectTitle(item.id);
                             if (event.key === "Escape") cancelEditProject();
                           }}
-                          className="min-w-0 flex-1 rounded-md border border-cyan-400/40 bg-slate-950 px-2 py-1.5 text-sm font-semibold text-white outline-none"
+                          className="w-full rounded-md border border-cyan-400/40 bg-slate-950 px-2 py-1.5 text-sm font-semibold text-white outline-none"
                           autoFocus
                         />
                       ) : (
-                        <button type="button" onClick={() => activateProject(item)} className="min-w-0 flex-1 text-left">
-                          <p className="truncate text-sm font-semibold text-white">{item.title || copy.untitled}</p>
-                          <p className="mt-1 truncate text-xs text-slate-500">{item.userPrompt}</p>
+                        <button type="button" onClick={() => activateProject(item)} className="block w-full min-w-0 overflow-hidden text-left">
+                          <p className="block w-full truncate text-sm font-semibold text-white">{item.title || copy.untitled}</p>
+                          <p className="mt-1 block w-full truncate text-xs text-slate-500">{item.userPrompt}</p>
                         </button>
                       )}
-                      <div className="flex shrink-0 items-center gap-1">
-                        {active && <span className="rounded-md border border-cyan-400/30 px-2 py-0.5 text-[11px] text-cyan-100">{copy.activeProject}</span>}
+                      <div className="mt-2 flex shrink-0 items-center gap-1">
                         {editing ? (
                           <>
                             <button type="button" onClick={() => saveProjectTitle(item.id)} disabled={loading} title={copy.saveProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-emerald-400/30 text-emerald-200 hover:bg-emerald-400/10 disabled:opacity-50">
@@ -1358,9 +1551,11 @@ export default function OnePromptVideoPage() {
                         )}
                       </div>
                     </div>
-                    <div className="mt-3 flex items-center justify-between text-xs">
-                      <span className="text-slate-400">{copy.status[item.status]}</span>
-                      <span className="text-slate-500">{copy.frames} {progress.images}/{progress.imageTotal} / {copy.stages.CLIP_REVIEW} {progress.clips}/{progress.clipTotal}</span>
+                    <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
+                      {active && <span className="rounded-md border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-cyan-100">{copy.activeProject}</span>}
+                      <span className="rounded-md border border-white/10 bg-black/20 px-2 py-0.5 text-slate-300">{copy.status[item.status]}</span>
+                      <span className="rounded-md border border-white/10 bg-black/20 px-2 py-0.5 text-slate-500">{copy.frames} {progress.images}/{progress.imageTotal}</span>
+                      <span className="rounded-md border border-white/10 bg-black/20 px-2 py-0.5 text-slate-500">{copy.stages.CLIP_REVIEW} {progress.clips}/{progress.clipTotal}</span>
                     </div>
                     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
                       <div className="h-full rounded-full bg-cyan-400" style={{ width: `${progress.percent}%` }} />
@@ -1374,17 +1569,17 @@ export default function OnePromptVideoPage() {
           )}
         </section>
 
-        <section className="grid gap-3 border-b border-white/10 pb-5 lg:grid-cols-[minmax(0,1fr)_160px_120px_130px_190px]">
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-24 resize-none rounded-md border border-white/10 bg-slate-900 px-4 py-3 text-sm leading-6 text-slate-100 outline-none focus:border-cyan-400" />
-          <select value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none focus:border-cyan-400">
+        <section className="grid gap-3 rounded-md border border-white/10 bg-slate-950/70 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.22)] lg:grid-cols-[minmax(0,1fr)_170px_130px_140px]">
+          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-24 resize-none rounded-md border border-white/10 bg-slate-900/90 px-4 py-3 text-sm leading-6 text-slate-100 outline-none transition focus:border-cyan-400 focus:bg-slate-900" />
+          <select value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400">
             {Object.entries(copy.styles).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
-          <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AspectRatio)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none focus:border-cyan-400">
+          <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AspectRatio)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400">
             <option value="9:16">9:16</option>
             <option value="16:9">16:9</option>
             <option value="1:1">1:1</option>
           </select>
-          <label className="flex h-11 items-center gap-2 rounded-md border border-white/10 bg-slate-900 px-3 focus-within:border-cyan-400">
+          <label className="flex h-11 items-center gap-2 rounded-md border border-white/10 bg-slate-900 px-3 transition focus-within:border-cyan-400">
             <span className="shrink-0 text-xs text-slate-500">{copy.totalDuration}</span>
             <input
               type="number"
@@ -1399,20 +1594,13 @@ export default function OnePromptVideoPage() {
             />
             <span className="text-xs text-slate-500">s</span>
           </label>
-          <div className="flex min-h-11 items-center gap-2 rounded-md border border-cyan-400/20 bg-cyan-400/10 px-3">
-            <Sparkles className="h-4 w-4 shrink-0 text-cyan-200" />
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-cyan-100">{copy.autoShotPlan}</p>
-              <p className="truncate text-[11px] text-cyan-100/60">{copy.totalDuration}: {clampProjectDuration(durationSeconds)}s / {copy.segmentDurationPolicy}</p>
-            </div>
-          </div>
-          <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.03] p-3 lg:col-span-5">
+          <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.03] p-3 lg:col-span-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-medium text-slate-200">{copy.referenceImages}</p>
                 <p className="mt-1 text-xs text-slate-500">{copy.referenceImageHint}</p>
               </div>
-              <label className={`inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08] ${referenceImageUrls.length >= 4 || uploadingReferences ? "pointer-events-none opacity-50" : "bg-white/[0.04]"}`}>
+              <label className={`inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 hover:border-cyan-400/30 hover:bg-white/[0.08] ${referenceImageUrls.length >= 4 || uploadingReferences ? "pointer-events-none opacity-50" : "bg-white/[0.04]"}`}>
                 {uploadingReferences ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageIcon className="h-4 w-4" />}
                 {uploadingReferences ? copy.uploadingReference : copy.uploadReference}
                 <input
@@ -1446,24 +1634,38 @@ export default function OnePromptVideoPage() {
               </div>
             )}
           </div>
-          <div className="lg:col-span-5">
-            <button type="button" onClick={createAndPlan} disabled={loading || prompt.trim().length < 4} className="inline-flex h-10 items-center gap-2 rounded-md bg-cyan-500 px-4 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60">
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              {loading ? copy.generating : copy.generatePlan}
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 lg:col-span-4">
+            <p className="text-xs text-slate-500">{copy.autoShotPlanHint}</p>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={createAndPlan} disabled={loading || prompt.trim().length < 4} className="inline-flex h-10 items-center gap-2 rounded-md bg-cyan-400 px-4 text-sm font-semibold text-slate-950 shadow-[0_12px_30px_rgba(34,211,238,0.18)] hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60">
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {loading ? copy.generating : copy.generatePlan}
+              </button>
+            </div>
           </div>
+        </section>
+          </div>
+          )}
         </section>
 
         {workflowProgress && (
-          <section className={`rounded-md border px-4 py-3 text-sm ${workflowProgressBorderClass}`}>
+          <section className={`rounded-md border px-4 py-3 text-sm shadow-[0_12px_40px_rgba(0,0,0,0.18)] ${workflowProgressBorderClass}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="font-medium text-white">{workflowProgress.title}</p>
                 <p className="mt-1 text-xs text-slate-400">{workflowProgress.detail}</p>
               </div>
-              <span className="rounded-md border border-white/10 bg-black/20 px-2.5 py-1 text-sm font-semibold text-white">
-                {workflowProgress.percent}%
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {canStopGeneration && (
+                  <button type="button" onClick={stopGeneration} disabled={stoppingGeneration} className="inline-flex h-8 items-center gap-2 rounded-md border border-red-300/30 bg-red-400/10 px-3 text-xs font-semibold text-red-100 hover:bg-red-400/15 disabled:cursor-not-allowed disabled:opacity-60">
+                    {stoppingGeneration ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                    {stoppingGeneration ? copy.stoppingGeneration : copy.stopGeneration}
+                  </button>
+                )}
+                <span className="rounded-md border border-white/10 bg-black/20 px-2.5 py-1 text-sm font-semibold text-white">
+                  {workflowProgress.percent}%
+                </span>
+              </div>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-black/30">
               <div
@@ -1483,35 +1685,9 @@ export default function OnePromptVideoPage() {
         )}
 
         {project && (
-          <section ref={projectLayoutRef} className="grid grid-cols-1 gap-5 xl:flex xl:items-start">
-            <aside className="border-r border-white/10 pr-4 xl:w-[250px] xl:shrink-0">
-              <div className="mb-4 grid grid-cols-4 gap-2">
-                {STAGES.map((stage) => {
-                  const Icon = stage.icon;
-                  const active = stage.key === project.status;
-                  return (
-                    <div key={stage.key} className={`flex h-16 flex-col items-center justify-center rounded-md border text-xs ${active ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-100" : "border-white/10 bg-white/[0.03] text-slate-500"}`}>
-                      <Icon className="mb-1 h-4 w-4" />
-                      {copy.stages[stage.key]}
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
-                <span>{copy.shots}</span>
-                <span>{completeImages}/{keyframeTotal} {copy.frames} / {completeClips}/{segmentTotal} {copy.stages.CLIP_REVIEW}</span>
-              </div>
-              <div className="space-y-2">
-                {project.shots.map((shot) => (
-                  <button key={shot.id} type="button" onClick={() => selectShot(shot.id)} className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm ${!selectedKeyframe && selectedShot?.id === shot.id ? "border-cyan-400/50 bg-cyan-400/10 text-white" : "border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]"}`}>
-                    <span className="font-medium">{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
-                    <span className="text-xs text-slate-500">{copy.shotStatus[shot.status]}</span>
-                  </button>
-                ))}
-              </div>
-            </aside>
-
+          <section ref={projectLayoutRef} className="grid grid-cols-1 gap-5 rounded-md border border-white/10 bg-slate-950/70 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.24)] xl:flex xl:items-start">
             <main className="min-w-0 space-y-5 xl:flex-1">
+              <div className="rounded-md border border-white/10 bg-white/[0.025] p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-xl font-semibold text-white">{project.title || copy.untitled}</h2>
@@ -1519,48 +1695,43 @@ export default function OnePromptVideoPage() {
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <div className="inline-flex h-9 overflow-hidden rounded-md border border-white/10 bg-white/[0.04]">
-                    <label className="inline-flex items-center gap-1.5 border-r border-white/10 px-2 text-xs text-slate-400">
+                    <button
+                      type="button"
+                      onClick={rollbackProject}
+                      disabled={loading || !canRollback}
+                      title={copy.rollback}
+                      className="inline-flex items-center gap-1.5 border-r border-white/10 px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08] disabled:opacity-50"
+                    >
                       <Undo2 className="h-3.5 w-3.5" />
-                      {copy.rollbackTo}
-                    </label>
+                      {copy.rollback}
+                    </button>
                     <select
                       value={rollbackTarget}
                       onChange={(event) => setRollbackTarget(event.target.value as RollbackTarget)}
                       disabled={loading || !canRollback}
-                      className="min-w-[132px] bg-slate-950 px-2 text-sm text-slate-200 outline-none disabled:opacity-50"
+                      title={copy.rollbackTo}
+                      className="min-w-[120px] bg-slate-950 px-2 text-sm text-slate-200 outline-none disabled:opacity-50"
                     >
                       {rollbackOptions.map((target) => (
                         <option key={target} value={target}>{copy.rollbackTargets[target]}</option>
                       ))}
                     </select>
+                  </div>
+                  {primaryStageAction && (
                     <button
                       type="button"
-                      onClick={rollbackProject}
-                      disabled={loading || !canRollback}
-                      className="inline-flex items-center gap-1.5 border-l border-white/10 px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08] disabled:opacity-50"
+                      onClick={primaryStageAction.onClick}
+                      disabled={loading}
+                      className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium disabled:opacity-50 ${primaryStageAction.className}`}
                     >
-                      {copy.rollback}
+                      {primaryStageAction.icon}
+                      {primaryStageAction.label}
                     </button>
-                  </div>
-                  <button type="button" onClick={approvePlan} disabled={loading || !canApproveScript} className="inline-flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-200 hover:bg-emerald-400/15 disabled:opacity-50">
-                    <ImageIcon className="h-4 w-4" /> {copy.approveScript}
-                  </button>
-                  <button type="button" onClick={approveImages} disabled={loading || !canApproveFrames} className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm font-medium text-slate-200 hover:bg-white/[0.08] disabled:opacity-50">
-                    <Check className="h-4 w-4" /> {copy.approveFrames}
-                  </button>
-                  <button type="button" onClick={approveMicroShots} disabled={loading || !canApproveMicroShots} className="inline-flex h-9 items-center gap-2 rounded-md border border-fuchsia-300/30 bg-fuchsia-300/10 px-3 text-sm font-medium text-fuchsia-100 hover:bg-fuchsia-300/15 disabled:opacity-50">
-                    <ImageIcon className="h-4 w-4" /> {copy.approveMicroShots}
-                  </button>
-                  <button type="button" onClick={approveClips} disabled={loading || !canApproveClips} className="inline-flex h-9 items-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 px-3 text-sm font-medium text-cyan-100 hover:bg-cyan-400/15 disabled:opacity-50">
-                    <Clapperboard className="h-4 w-4" /> {copy.approveClips}
-                  </button>
-                  <button type="button" onClick={confirmFinal} disabled={loading || !canConfirmFinal || project.status === "DONE"} className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300/30 bg-amber-300/10 px-3 text-sm font-medium text-amber-100 hover:bg-amber-300/15 disabled:opacity-50">
-                    <Check className="h-4 w-4" /> {copy.confirmFinal}
-                  </button>
+                  )}
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2 border-b border-white/10 pb-3">
+              <div className="mt-4 flex flex-wrap gap-2 border-t border-white/10 pt-3">
                 {([
                   { key: "frames" as const, label: copy.frames, meta: `${completeImages}/${keyframeTotal}` },
                   { key: "clips" as const, label: copy.shots, meta: `${completeClips}/${segmentTotal}` },
@@ -1577,10 +1748,10 @@ export default function OnePromptVideoPage() {
                         setSelectedKeyframeId("");
                       }
                     }}
-                    className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium ${
+                    className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium transition ${
                       projectView === item.key
                         ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-100"
-                        : "border-white/10 bg-white/[0.03] text-slate-400 hover:bg-white/[0.06]"
+                        : "border-white/10 bg-slate-950/50 text-slate-400 hover:border-white/20 hover:bg-white/[0.06]"
                     }`}
                   >
                     <span>{item.label}</span>
@@ -1588,14 +1759,17 @@ export default function OnePromptVideoPage() {
                   </button>
                 ))}
               </div>
+              </div>
 
               {projectView === "final" && project.finalVideoUrl && (
-                <section className="space-y-2 rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3">
+                <section className="space-y-3 rounded-md border border-emerald-400/20 bg-emerald-400/5 p-4">
                   <div className="flex items-center gap-2 text-sm font-medium text-emerald-100">
                     <Clapperboard className="h-4 w-4" />
                     {copy.finalVideo}
                   </div>
-                  <video src={project.finalVideoUrl} controls playsInline preload="metadata" className={`w-full rounded-md border border-white/10 bg-black ${aspectClass(project.aspectRatio)}`} />
+                  <div className={`mx-auto overflow-hidden rounded-md border border-white/10 bg-black ${finalVideoPreviewClass(project.aspectRatio)}`}>
+                    <video src={project.finalVideoUrl} controls playsInline preload="metadata" className="h-full w-full object-contain" />
+                  </div>
                 </section>
               )}
 
@@ -1613,7 +1787,7 @@ export default function OnePromptVideoPage() {
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                     {project.keyframes.map((keyframe) => (
-                      <div key={keyframe.id} className={`overflow-hidden rounded-md border bg-white/[0.03] ${selectedKeyframe?.id === keyframe.id ? "border-cyan-400/60" : "border-white/10"}`}>
+                      <div key={keyframe.id} className={`overflow-hidden rounded-md border bg-white/[0.03] transition ${selectedKeyframe?.id === keyframe.id ? "border-cyan-400/60 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]" : "border-white/10 hover:border-white/20"}`}>
                         <button
                           type="button"
                           onClick={() => {
@@ -1703,56 +1877,62 @@ export default function OnePromptVideoPage() {
                         <p className="text-xs text-cyan-200/80">{safeBoundaryRangeLabel(shot, keyframeByNo, project.durationSeconds, pageLang)}</p>
                       )}
                       <div className="flex flex-wrap gap-1.5">
+                        <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
+                          {copy.segmentDurationPolicy}
+                        </span>
                         {shot.boundaryMode && (
                           <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
-                            {copy.boundaryMode}: {shot.boundaryMode}
-                          </span>
-                        )}
-                        {shot.outputMode && (
-                          <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100">
-                            {copy.outputMode}: {shot.outputMode}
+                            {shot.boundaryMode}
                           </span>
                         )}
                         {Boolean(shot.microShots?.length) && (
                           <span className="rounded-md border border-fuchsia-300/20 bg-fuchsia-300/10 px-2 py-1 text-[11px] text-fuchsia-100/80">
-                            {copy.microShots}: {shot.microShots?.length}
+                            {copy.microShots} {shot.microShots?.length}
                           </span>
                         )}
                         {shot.audioPlan && (
                           <span className="rounded-md border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[11px] text-amber-100/80">
-                            {copy.audioPlan}: {shot.audioPlan.mode}
+                            {shot.audioPlan.mode}
                           </span>
                         )}
-                        <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
-                          {copy.segmentDurationPolicy}
-                        </span>
                       </div>
-                      <p className="min-h-10 overflow-hidden text-sm leading-5 text-slate-400">{localizedShotPurpose(shot, pageLang)}</p>
-                      {Boolean(shot.constraints?.length) && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {shot.constraints?.slice(0, 3).map((constraint) => (
-                            <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
-                              {constraint}
-                            </span>
-                          ))}
-                        </div>
+                      <p className="line-clamp-3 min-h-10 text-sm leading-5 text-slate-300">{localizedShotPurpose(shot, pageLang)}</p>
+                      {(Boolean(shot.constraints?.length) || Boolean(shot.timedPrompts?.length) || Boolean(shot.microShots?.length) || Boolean(shot.audioPlan) || Boolean(shot.videoPrompt)) && (
+                        <details className="group rounded-md border border-white/10 bg-slate-950/45 px-3 py-2">
+                          <summary className="cursor-pointer list-none text-xs font-medium text-slate-400 transition hover:text-slate-200">
+                            {pageLang === "en" ? "Details" : "展开细节"}
+                            <span className="ml-2 text-slate-600 group-open:hidden">+</span>
+                            <span className="ml-2 hidden text-slate-600 group-open:inline">-</span>
+                          </summary>
+                          <div className="mt-3 space-y-2">
+                            {Boolean(shot.constraints?.length) && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {shot.constraints?.slice(0, 3).map((constraint) => (
+                                  <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
+                                    {constraint}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {Boolean(shot.timedPrompts?.length) && (
+                              <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
+                                {copy.timedPrompts}: {shot.timedPrompts?.slice(0, 2).map((item) => `${timedPromptRangeLabel(item)} ${localizedTimedPrompt(item, pageLang)}`).join(" / ")}
+                              </p>
+                            )}
+                            {Boolean(shot.microShots?.length) && (
+                              <p className="line-clamp-2 text-xs leading-5 text-fuchsia-100/70">
+                                {copy.microShots}: {shot.microShots?.slice(0, 2).map((item) => `+${item.localTimeSeconds}s ${localizedMicroShotPrompt(item, pageLang)}`).join(" / ")}
+                              </p>
+                            )}
+                            {shot.audioPlan && (
+                              <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
+                                {copy.audioPlan}: {localizedAudioPlanSummary(shot.audioPlan, pageLang)}
+                              </p>
+                            )}
+                            <p className="line-clamp-4 text-xs leading-5 text-slate-500">{localizedShotPrompt(shot, "video", pageLang)}</p>
+                          </div>
+                        </details>
                       )}
-                      {Boolean(shot.timedPrompts?.length) && (
-                        <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
-                          {copy.timedPrompts}: {shot.timedPrompts?.slice(0, 2).map((item) => `${timedPromptRangeLabel(item)} ${localizedTimedPrompt(item, pageLang)}`).join(" / ")}
-                        </p>
-                      )}
-                      {Boolean(shot.microShots?.length) && (
-                        <p className="line-clamp-2 text-xs leading-5 text-fuchsia-100/70">
-                          {copy.microShots}: {shot.microShots?.slice(0, 2).map((item) => `+${item.localTimeSeconds}s ${localizedMicroShotPrompt(item, pageLang)}`).join(" / ")}
-                        </p>
-                      )}
-                      {shot.audioPlan && (
-                        <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
-                          {copy.audioPlan}: {localizedAudioPlanSummary(shot.audioPlan, pageLang)}
-                        </p>
-                      )}
-                      <p className="line-clamp-4 text-xs leading-5 text-slate-500">{localizedShotPrompt(shot, "video", pageLang)}</p>
                       <div className="flex gap-2">
                         <button type="button" onClick={() => regenerateImage(shot.id)} disabled={loading || shot.locked} className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}</button>
                         {shot.clipUrl && (
@@ -1799,9 +1979,42 @@ export default function OnePromptVideoPage() {
             </button>
 
             <aside
-              className="w-full border-l border-white/10 pl-4 xl:w-[var(--detail-panel-width)] xl:shrink-0"
-              style={{ "--detail-panel-width": `${detailPanelWidth}px` } as CSSProperties}
+              className="w-full rounded-md border border-white/10 bg-white/[0.025] p-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:w-[var(--detail-panel-width)] xl:shrink-0 xl:overflow-y-auto"
+              style={{
+                "--detail-panel-width": `${detailPanelWidth}px`,
+                "--detail-preview-height": `${detailPreviewHeight}px`,
+              } as CSSProperties}
             >
+              <div className="mb-4 space-y-3 border-b border-white/10 pb-4">
+                <div className="grid grid-cols-5 gap-1.5">
+                  {STAGES.map((stage) => {
+                    const Icon = stage.icon;
+                    const active = stage.key === project.status;
+                    return (
+                      <div key={stage.key} className={`flex h-14 flex-col items-center justify-center rounded-md border text-[11px] ${active ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-100" : "border-white/10 bg-slate-950/50 text-slate-500"}`}>
+                        <Icon className="mb-1 h-4 w-4" />
+                        {copy.stages[stage.key]}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="space-y-2 rounded-md border border-white/10 bg-slate-950/50 p-3">
+                  <div className="flex items-center justify-between text-xs text-slate-400">
+                    <span>{copy.frames}</span>
+                    <span>{completeImages}/{keyframeTotal}</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-cyan-400" style={{ width: `${keyframeTotal ? (completeImages / keyframeTotal) * 100 : 0}%` }} />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-slate-400">
+                    <span>{copy.shots}</span>
+                    <span>{completeClips}/{segmentTotal}</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-emerald-400" style={{ width: `${segmentTotal ? (completeClips / segmentTotal) * 100 : 0}%` }} />
+                  </div>
+                </div>
+              </div>
               {selectedKeyframe ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
@@ -1809,11 +2022,18 @@ export default function OnePromptVideoPage() {
                     <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedKeyframe.status]}</span>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-500">{copy.keyframePreview}</p>
-                    <div className={`overflow-hidden rounded-md border border-white/10 bg-slate-900 ${aspectClass(project.aspectRatio)}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-medium text-slate-500">{copy.keyframePreview}</p>
+                      <PreviewSizeControl
+                        label={copy.previewSize}
+                        value={detailPreviewHeight}
+                        onChange={setDetailPreviewHeight}
+                      />
+                    </div>
+                    <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
                       {selectedKeyframe.imageUrl ? (
                         <button type="button" onClick={() => setPreviewKeyframeId(selectedKeyframe.id)} className="block h-full w-full">
-                          <img src={selectedKeyframe.imageUrl} alt={safeBoundaryFrameLabel(selectedKeyframe, project.durationSeconds, pageLang)} className="h-full w-full object-cover" />
+                          <img src={selectedKeyframe.imageUrl} alt={safeBoundaryFrameLabel(selectedKeyframe, project.durationSeconds, pageLang)} className="h-full w-full object-contain" />
                         </button>
                       ) : (
                         <div className="flex h-full items-center justify-center text-sm text-slate-600">{safeBoundaryFrameShortLabel(selectedKeyframe, project.durationSeconds, pageLang)}</div>
@@ -1829,17 +2049,55 @@ export default function OnePromptVideoPage() {
                     <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || selectedKeyframe.locked} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-4 w-4" /></button>
                   </div>
                 </div>
-              ) : selectedShot ? (
+              ) : Boolean(selectedShot) ? (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedShot!.shotNo).padStart(2, "0")}</h3>
+                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedShot!.status]}</span>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="h-[220px] overflow-hidden rounded-md border border-white/10 bg-slate-900">
+                      {selectedShot!.clipUrl ? (
+                        <video src={selectedShot!.clipUrl} controls playsInline preload="metadata" poster={selectedShot!.imageUrl || undefined} className="h-full w-full object-contain" />
+                      ) : (
+                        <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
+                          <Clapperboard className="h-5 w-5" />
+                          <span>{copy.clipPreview}</span>
+                        </div>
+                      )}
+                    </div>
+                    {selectedShot!.startKeyframeNo && selectedShot!.endKeyframeNo && (
+                      <p className="text-xs text-slate-500">{safeBoundaryRangeLabel(selectedShot!, keyframeByNo, project.durationSeconds, pageLang)}</p>
+                    )}
+                  </div>
+                  <p className="text-sm leading-6 text-slate-300">{localizedShotPurpose(selectedShot!, pageLang)}</p>
+                  <button
+                    type="button"
+                    onClick={() => setShotEditorOpen(true)}
+                    className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400"
+                  >
+                    <Pencil className="h-4 w-4" />
+                    {copy.editShot}
+                  </button>
+                </div>
+              ) : (false as boolean) && selectedShot ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedShot.shotNo).padStart(2, "0")}</h3>
                     <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedShot.status]}</span>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-slate-500">{selectedShot.clipUrl ? copy.clipPreview : copy.videoPrompt}</p>
-                    <div className={`overflow-hidden rounded-md border border-white/10 bg-slate-900 ${aspectClass(project.aspectRatio)}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-medium text-slate-500">{selectedShot.clipUrl ? copy.clipPreview : copy.videoPrompt}</p>
+                      <PreviewSizeControl
+                        label={copy.previewSize}
+                        value={detailPreviewHeight}
+                        onChange={setDetailPreviewHeight}
+                      />
+                    </div>
+                    <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
                       {selectedShot.clipUrl ? (
-                        <video src={selectedShot.clipUrl} controls playsInline preload="metadata" poster={selectedShot.imageUrl || undefined} className="h-full w-full object-cover" />
+                        <video src={selectedShot.clipUrl} controls playsInline preload="metadata" poster={selectedShot.imageUrl || undefined} className="h-full w-full object-contain" />
                       ) : (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
                           <Clapperboard className="h-5 w-5" />
@@ -2054,6 +2312,256 @@ export default function OnePromptVideoPage() {
         )}
       </div>
 
+      {project && selectedShot && shotEditorOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" role="dialog" aria-modal="true" onClick={() => setShotEditorOpen(false)}>
+          <div className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-md border border-cyan-400/25 bg-slate-950 shadow-2xl shadow-cyan-950/30" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-semibold text-white">{copy.editShot} {String(selectedShot.shotNo).padStart(2, "0")}</h3>
+                  <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedShot.status]}</span>
+                  <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-xs text-slate-400">{selectedShot.durationSeconds}s</span>
+                </div>
+                {selectedShot.startKeyframeNo && selectedShot.endKeyframeNo && (
+                  <p className="mt-1 text-xs text-cyan-200/80">{safeBoundaryRangeLabel(selectedShot, keyframeByNo, project.durationSeconds, pageLang)}</p>
+                )}
+              </div>
+              <button type="button" onClick={() => setShotEditorOpen(false)} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 text-slate-200 hover:bg-white/[0.08]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid min-h-0 flex-1 overflow-hidden lg:grid-cols-[380px_minmax(0,1fr)]">
+              <aside className="min-h-0 overflow-y-auto border-b border-white/10 bg-slate-950/70 p-4 lg:border-b-0 lg:border-r">
+                <div className="space-y-3">
+                  <div className="overflow-hidden rounded-md border border-white/10 bg-slate-900">
+                    <div className={`relative ${aspectClass(project.aspectRatio)}`}>
+                      {selectedShot.clipUrl ? (
+                        <video src={selectedShot.clipUrl} controls playsInline preload="metadata" poster={selectedShot.imageUrl || undefined} className="h-full w-full object-contain" />
+                      ) : (
+                        <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
+                          <Clapperboard className="h-5 w-5" />
+                          <span>{copy.clipPreview}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {selectedShot.clipUrl && (
+                    <a href={shotClipDownloadUrl(project.id, selectedShot.id)} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 text-sm font-medium text-cyan-100 hover:bg-cyan-400/15">
+                      <Download className="h-4 w-4" />
+                      {copy.downloadClip}
+                    </a>
+                  )}
+                  {(selectedStartKeyframe || selectedEndKeyframe) && (
+                    <div className="grid grid-cols-2 gap-2">
+                      {[selectedStartKeyframe, selectedEndKeyframe].map((keyframe) => (
+                        <button
+                          key={keyframe?.id ?? "empty"}
+                          type="button"
+                          onClick={() => keyframe?.imageUrl && setPreviewKeyframeId(keyframe.id)}
+                          className="overflow-hidden rounded-md border border-white/10 bg-slate-900 text-left"
+                        >
+                          <div className={`relative ${aspectClass(project.aspectRatio)}`}>
+                            {keyframe?.imageUrl ? (
+                              <img src={keyframe.imageUrl} alt={safeBoundaryFrameLabel(keyframe, project.durationSeconds, pageLang)} className="h-full w-full object-cover" />
+                            ) : (
+                              <div className="flex h-full items-center justify-center text-xs text-slate-600">KF</div>
+                            )}
+                            {keyframe && (
+                              <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+                                {safeBoundaryFrameShortLabel(keyframe, project.durationSeconds, pageLang)}
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedShot.boundaryMode && (
+                        <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
+                          {copy.boundaryMode}: {selectedShot.boundaryMode}
+                        </span>
+                      )}
+                      {selectedShot.outputMode && (
+                        <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100">
+                          {copy.outputMode}: {selectedShot.outputMode}
+                        </span>
+                      )}
+                      <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
+                        {copy.segmentDurationPolicy}
+                      </span>
+                    </div>
+                    {Boolean(selectedShot.constraints?.length) && (
+                      <div className="space-y-1">
+                        <p className="text-xs font-medium text-slate-500">{copy.constraints}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {selectedShot.constraints?.map((constraint) => (
+                            <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
+                              {constraint}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {selectedShot.audioPlan && (
+                      <div className="space-y-1">
+                        <p className="text-xs font-medium text-slate-500">{copy.audioPlan}</p>
+                        <p className="text-xs leading-5 text-amber-100/75">{localizedAudioPlanSummary(selectedShot.audioPlan, pageLang)}</p>
+                        {audioPlanLines(selectedShot.audioPlan, pageLang).length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-[11px] font-medium text-slate-500">{copy.spokenLines}</p>
+                            {audioPlanLines(selectedShot.audioPlan, pageLang).map((line) => (
+                              <p key={line} className="text-xs leading-5 text-slate-300">{line}</p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </aside>
+
+              <section className="min-h-0 overflow-y-auto p-4">
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <Field label={`${copy.duration} (${copy.segmentDurationPolicy})`}>
+                    <input
+                      type="number"
+                      min={3}
+                      max={15}
+                      step={1}
+                      value={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
+                      onChange={(event) => setDraft((current) => ({ ...current, durationSeconds: Number(event.target.value) }))}
+                      className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
+                    />
+                  </Field>
+                  <Field label={copy.camera}>
+                    <input value={String(draft.camera ?? "")} onChange={(event) => setDraft((current) => ({ ...current, camera: event.target.value }))} className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" />
+                  </Field>
+                  <Field label={copy.purpose}>
+                    <textarea value={String(draft.purpose ?? "")} onChange={(event) => setDraft((current) => ({ ...current, purpose: event.target.value }))} className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" />
+                  </Field>
+                  <Field label={copy.action}>
+                    <textarea value={String(draft.action ?? "")} onChange={(event) => setDraft((current) => ({ ...current, action: event.target.value }))} className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" />
+                  </Field>
+                  <div className="xl:col-span-2">
+                    <Field label={copy.subtitle}>
+                      <textarea
+                        maxLength={subtitleLimitForLang(pageLang)}
+                        value={String(draft.subtitle ?? "")}
+                        onChange={(event) => setDraft((current) => ({ ...current, subtitle: event.target.value }))}
+                        className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
+                      />
+                      <div className="flex items-center justify-between gap-3 text-[11px] leading-5 text-slate-500">
+                        <span>{copy.subtitleHint}</span>
+                        <span className="shrink-0">{String(draft.subtitle ?? "").length}/{subtitleLimitForLang(pageLang)}</span>
+                      </div>
+                    </Field>
+                  </div>
+                  <div className="xl:col-span-2">
+                    <Field label={copy.videoPrompt}>
+                      <textarea value={String(draft.videoPrompt ?? "")} onChange={(event) => setDraft((current) => ({ ...current, videoPrompt: event.target.value }))} className="min-h-40 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" />
+                    </Field>
+                  </div>
+                </div>
+
+                <section className="mt-4 space-y-3 rounded-md border border-fuchsia-300/15 bg-fuchsia-300/[0.04] p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-fuchsia-100">{copy.microShots}</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-500">{copy.microShotHint}</p>
+                    </div>
+                    <button type="button" onClick={addDraftMicroShot} className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-fuchsia-300/20 px-2 text-xs text-fuchsia-100 hover:bg-fuchsia-300/10">
+                      <Plus className="h-3.5 w-3.5" /> {copy.addMicroShot}
+                    </button>
+                  </div>
+                  <div className="grid gap-3 xl:grid-cols-2">
+                    {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => (
+                      <div key={`${item.microShotNo}-${index}`} className="space-y-2 rounded-md border border-white/10 bg-slate-950/60 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-slate-200">{copy.microShot} {String(index + 1).padStart(2, "0")}</p>
+                          <button type="button" onClick={() => removeDraftMicroShot(index)} className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-400 hover:bg-white/[0.06]">
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-[90px_minmax(0,1fr)] gap-2">
+                          <label className="space-y-1">
+                            <span className="text-[11px] text-slate-500">+s</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
+                              step={1}
+                              value={Number(item.localTimeSeconds ?? 0)}
+                              onChange={(event) => updateDraftMicroShot(index, { localTimeSeconds: Number(event.target.value) })}
+                              className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-[11px] text-slate-500">{copy.referenceType}</span>
+                            <select
+                              value={item.referenceType ?? "mixed"}
+                              onChange={(event) => updateDraftMicroShot(index, { referenceType: event.target.value as MicroShot["referenceType"] })}
+                              className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300"
+                            >
+                              <option value="text">text</option>
+                              <option value="image_prompt">image_prompt</option>
+                              <option value="mixed">mixed</option>
+                            </select>
+                          </label>
+                        </div>
+                        {item.referenceType !== "text" && (
+                          <div className="space-y-2 rounded-md border border-cyan-300/15 bg-cyan-300/[0.04] p-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="text-[11px] leading-5 text-slate-500">{copy.microShotImageHint}</p>
+                              <button
+                                type="button"
+                                onClick={() => generateMicroShotImage(index)}
+                                disabled={loading || item.imageStatus === "running" || !localizedMicroShotImagePrompt(item, pageLang).trim()}
+                                className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-cyan-300/20 px-2 text-xs text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-50"
+                              >
+                                {item.imageStatus === "running"
+                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  : item.imageUrl
+                                    ? <RefreshCw className="h-3.5 w-3.5" />
+                                    : <ImageIcon className="h-3.5 w-3.5" />}
+                                {item.imageUrl ? copy.regenerateMicroShotImage : copy.generateMicroShotImage}
+                              </button>
+                            </div>
+                            {item.imageStatus === "running" && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
+                            {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage || copy.microShotImageFailed}</p>}
+                            {item.imageUrl && (
+                              <a href={item.imageUrl} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-white/10 bg-slate-950">
+                                <img src={item.imageUrl} alt={`${copy.microShot} ${index + 1}`} className="max-h-52 w-full object-contain" />
+                              </a>
+                            )}
+                          </div>
+                        )}
+                        <Field label={copy.purpose}><input value={localizedMicroShotPurpose(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { purposeEn: event.target.value, purpose: event.target.value } : { purposeZh: event.target.value, purpose: event.target.value })} className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        <Field label={copy.scene}><textarea value={item.scene ?? ""} onChange={(event) => updateDraftMicroShot(index, { scene: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        <Field label={copy.action}><textarea value={item.action ?? ""} onChange={(event) => updateDraftMicroShot(index, { action: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        <Field label={copy.imagePrompt}><textarea value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        <Field label={copy.prompt}><textarea value={localizedMicroShotPrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { promptEn: event.target.value, prompt: event.target.value } : { promptZh: event.target.value, prompt: event.target.value })} className="min-h-16 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <div className="sticky bottom-0 -mx-4 mt-4 flex justify-end gap-2 border-t border-white/10 bg-slate-950/95 px-4 py-3">
+                  <button type="button" onClick={() => setShotEditorOpen(false)} className="inline-flex h-10 items-center justify-center rounded-md border border-white/10 px-4 text-sm font-medium text-slate-200 hover:bg-white/[0.06]">
+                    {copy.cancel}
+                  </button>
+                  <button type="button" onClick={saveShot} disabled={loading} className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-cyan-500 px-4 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60">
+                    <Save className="h-4 w-4" /> {copy.saveShot}
+                  </button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
+
       {previewKeyframe?.imageUrl && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewKeyframeId("")}>
           <div className="flex max-h-[92vh] w-full max-w-6xl flex-col gap-3" onClick={(event) => event.stopPropagation()}>
@@ -2089,7 +2597,37 @@ export default function OnePromptVideoPage() {
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <label className="block space-y-1.5"><span className="text-xs font-medium text-slate-500">{label}</span>{children}</label>;
+  return (
+    <label className="block space-y-1.5 [&_input]:transition [&_textarea]:transition [&_select]:transition">
+      <span className="text-xs font-medium text-slate-400">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function PreviewSizeControl({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex min-w-[150px] items-center gap-2 text-[11px] text-slate-500">
+      <span className="shrink-0">{label}</span>
+      <input
+        type="range"
+        min={DETAIL_PREVIEW_MIN_HEIGHT}
+        max={DETAIL_PREVIEW_MAX_HEIGHT}
+        step={20}
+        value={value}
+        onChange={(event) => onChange(clampDetailPreviewHeight(Number(event.target.value)))}
+        className="h-1.5 flex-1 accent-cyan-400"
+      />
+    </label>
+  );
 }
 
 function subtitleLimitForLang(lang: PageLang): number {
@@ -2110,6 +2648,12 @@ function aspectClass(aspectRatio: AspectRatio): string {
   if (aspectRatio === "16:9") return "aspect-video";
   if (aspectRatio === "1:1") return "aspect-square";
   return "aspect-[9/16]";
+}
+
+function finalVideoPreviewClass(aspectRatio: AspectRatio): string {
+  if (aspectRatio === "16:9") return "aspect-video w-full max-w-3xl";
+  if (aspectRatio === "1:1") return "aspect-square w-full max-w-[520px]";
+  return "aspect-[9/16] w-full max-w-[360px]";
 }
 
 function shotClipDownloadUrl(projectId: string, shotId: string): string {

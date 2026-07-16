@@ -1,5 +1,6 @@
 import { Prisma, VideoProjectStatus, VideoShotStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { consumeUserBalanceInTransaction } from "@/lib/billing";
 import { normalizePlanInput } from "./planner";
 import { scoreShotImage } from "./quality-judge";
 import {
@@ -36,12 +37,18 @@ function clipTaskConcurrency(): number {
   return Math.max(1, Math.min(MAX_UPSTREAM_TASK_CONCURRENCY, envInt("ONE_PROMPT_VIDEO_CLIP_CONCURRENCY", DEFAULT_CLIP_TASK_CONCURRENCY)));
 }
 
+function isManuallyStopped(project: Pick<VideoProjectWithShots, "status" | "errorMessage">): boolean {
+  return project.status === VideoProjectStatus.FAILED && project.errorMessage === MANUAL_STOP_MESSAGE;
+}
+
 const CHARACTER_CONSISTENCY_KEYFRAME_NO = -2;
 const SCENE_CONSISTENCY_KEYFRAME_NO = -1;
 const DEMO_PROJECT_TITLE = "Tongits King: 欢乐竞技，智取王座";
 const DEMO_PROJECT_SOURCE_IDS = ["cmrlwfpz10001tvu4g80aou8c", "cmrlur1ue0001tvw42u6de3yr"];
 const DEMO_PROJECT_PROMPT = "如图这个游戏，我要做一个30s的广告宣传片，要求引人入胜，画面精良，且整个视频前后人物要一致";
 const DEMO_PROJECT_FINAL_VIDEO_URL = "/demo/tongits/final.mp4";
+const ONE_PROMPT_VIDEO_COST_CREDITS = 5000;
+const MANUAL_STOP_MESSAGE = "Generation stopped by user";
 
 export type VideoProjectWithShots = Prisma.VideoProjectGetPayload<{
   include: typeof PROJECT_INCLUDE;
@@ -1047,6 +1054,70 @@ export async function deleteVideoProject(userId: string, projectId: string): Pro
   await logOnePromptVideo("project.delete.success", { userId, projectId });
 }
 
+export async function cancelVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
+  await requireVideoProject(userId, projectId);
+  await logOnePromptVideo("project.cancel.start", { userId, projectId });
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.videoKeyframe.updateMany({
+      where: {
+        projectId,
+        status: { in: [VideoShotStatus.IMAGE_PENDING, VideoShotStatus.IMAGE_RUNNING] },
+      },
+      data: {
+        status: VideoShotStatus.FAILED,
+        imageTaskId: null,
+        locked: false,
+        errorMessage: MANUAL_STOP_MESSAGE,
+      },
+    });
+    await tx.videoSegment.updateMany({
+      where: {
+        projectId,
+        status: { in: [VideoShotStatus.CLIP_PENDING, VideoShotStatus.CLIP_RUNNING] },
+      },
+      data: {
+        status: VideoShotStatus.FAILED,
+        clipTaskId: null,
+        locked: false,
+        errorMessage: MANUAL_STOP_MESSAGE,
+      },
+    });
+    await tx.videoShot.updateMany({
+      where: {
+        projectId,
+        status: {
+          in: [
+            VideoShotStatus.IMAGE_PENDING,
+            VideoShotStatus.IMAGE_RUNNING,
+            VideoShotStatus.CLIP_PENDING,
+            VideoShotStatus.CLIP_RUNNING,
+          ],
+        },
+      },
+      data: {
+        status: VideoShotStatus.FAILED,
+        imageTaskId: null,
+        clipTaskId: null,
+        locked: false,
+        errorMessage: MANUAL_STOP_MESSAGE,
+      },
+    });
+    return tx.videoProject.update({
+      where: { id: projectId },
+      data: {
+        status: VideoProjectStatus.FAILED,
+        composeTaskId: null,
+        errorMessage: MANUAL_STOP_MESSAGE,
+      },
+      include: PROJECT_INCLUDE,
+    });
+  });
+
+  await logOnePromptVideo("project.cancel.success", { userId, projectId, status: updated.status });
+  return updated;
+}
+
 export async function planVideoProject(
   userId: string,
   projectId: string,
@@ -1071,15 +1142,48 @@ export async function planVideoProject(
     stylePreset: input.stylePreset,
     referenceImageCount: input.referenceImageUrls.length,
   });
+  await prisma.videoProject.update({
+    where: { id: project.id },
+    data: {
+      status: VideoProjectStatus.PLANNING,
+      userPrompt: input.userPrompt,
+      aspectRatio: input.aspectRatio,
+      durationSeconds: input.durationSeconds,
+      stylePreset: input.stylePreset ?? "",
+      referenceImageUrls: input.referenceImageUrls,
+      errorMessage: null,
+    },
+  });
   let plan: OnePromptVideoPlan;
   try {
     plan = await createAliyunStoryboardPlan(input);
   } catch (error) {
+    const current = await prisma.videoProject.findUnique({
+      where: { id: project.id },
+      select: { status: true, errorMessage: true },
+    });
+    if (!current || !isManuallyStopped(current)) {
+      await prisma.videoProject.update({
+        where: { id: project.id },
+        data: {
+          status: VideoProjectStatus.FAILED,
+          errorMessage: error instanceof Error ? error.message : "Plan generation failed",
+        },
+      });
+    }
     await logOnePromptVideo("project.plan.error", { userId, projectId, ...errorForLog(error) }, "error");
     throw error;
   }
 
   return prisma.$transaction(async (tx) => {
+    const current = await tx.videoProject.findUnique({
+      where: { id: project.id },
+      include: PROJECT_INCLUDE,
+    });
+    if (current && isManuallyStopped(current)) {
+      await logOnePromptVideo("project.plan.cancelled.skip_apply", { userId, projectId });
+      return current;
+    }
     await tx.videoProject.update({
       where: { id: project.id },
       data: {
@@ -1154,11 +1258,20 @@ export async function planVideoProject(
       },
       include: PROJECT_INCLUDE,
     });
+    const billing = await consumeUserBalanceInTransaction(
+      tx,
+      userId,
+      ONE_PROMPT_VIDEO_COST_CREDITS,
+      `一句话成片：${updated.title || project.id}`,
+      `one-prompt-video:${project.id}`,
+    );
     await logOnePromptVideo("project.plan.success", {
       userId,
       projectId,
       title: updated.title,
       status: updated.status,
+      chargedCredits: ONE_PROMPT_VIDEO_COST_CREDITS,
+      balanceAfter: billing.balanceAfter,
       keyframeCount: updated.keyframes.length,
       segmentCount: updated.segments.length,
       segments: updated.segments.map((segment) => ({
