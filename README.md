@@ -22,7 +22,7 @@ npm install
 npm run dev
 ```
 
-浏览器访问 [http://localhost:3000](http://localhost:3000)。
+浏览器访问 [http://localhost:3001](http://localhost:3001)。
 
 其他脚本：
 
@@ -45,7 +45,7 @@ docker compose --profile dev up --build web-dev
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://your-backend:8080
-WEB_PORT=3000
+WEB_PORT=3001
 ```
 
 ### 生产（`standalone` 镜像）

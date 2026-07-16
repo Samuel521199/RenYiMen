@@ -19,7 +19,7 @@
 **架构：**
 
 ```
-浏览器 → Next.js (WorkFlow) :3000
+浏览器 → Next.js (WorkFlow) :3001
            ├─ /studio          → RunningHub 网关（Prisma DB）
            └─ /api/workbench/* → FastAPI :8000（Workbench DB + storage/）
 ```
@@ -103,7 +103,7 @@ PostgreSQL  Redis      外部 AI API    阿里云 OSS
 
 | 容器 | 镜像 | 端口 | 说明 |
 |------|------|------|------|
-| `frontend` | 自建 Next.js | 3010:3000 | Web 界面 |
+| `frontend` | 自建 Next.js | 3001:3001 | Web 界面 |
 | `backend` | 自建 FastAPI | 8000:8000 | REST API |
 | `db` | postgres:16 | 内部 | 默认含内置 PG（可改为 RDS） |
 | `redis` | redis:7-alpine | 内部 | 任务/缓存 |

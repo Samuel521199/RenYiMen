@@ -105,12 +105,12 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
     expose:
-      - "3000"
+      - "3001"
     ports:
       # 直连调试端口；生产建议仅通过 nginx 访问
-      - "${WEB_PORT:-3001}:3000"
+      - "${WEB_PORT:-3001}:3001"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/auth/session >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/auth/session >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
