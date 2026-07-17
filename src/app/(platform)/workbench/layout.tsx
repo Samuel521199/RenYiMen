@@ -163,11 +163,11 @@ export default function WorkbenchProviders({ children }: { children: React.React
     <LanguageProvider>
       <PermissionProvider>
         <WorkbenchAuthSync>
-          <div className="relative z-0 flex min-h-[calc(100vh-3.5rem)] w-full bg-[#0a0f1e]">
+          <div className="relative z-0 flex h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-[#0a0f1e]">
             <WorkbenchSidebar />
             <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden bg-[#0a0f1e] text-slate-100">
               <main
-                className={`workbench-content ${isTools ? "flex-1 overflow-hidden" : "flex-1 overflow-y-auto p-6"}`}
+                className={`workbench-content flex-1 overflow-y-auto ${isTools ? "" : "p-6"}`}
               >
                 <WorkbenchPermissionGuard>
                   {children}

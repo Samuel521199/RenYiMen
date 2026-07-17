@@ -51,6 +51,23 @@
     background: transparent;
   }
 
+  .subtle-scrollbar::-webkit-scrollbar-track-piece,
+  .one-prompt-video-workbench::-webkit-scrollbar-track-piece,
+  .one-prompt-video-workbench *::-webkit-scrollbar-track-piece,
+  .subtle-scrollbar::-webkit-scrollbar-corner,
+  .one-prompt-video-workbench::-webkit-scrollbar-corner,
+  .one-prompt-video-workbench *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  .subtle-scrollbar::-webkit-scrollbar-button,
+  .one-prompt-video-workbench::-webkit-scrollbar-button,
+  .one-prompt-video-workbench *::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
   .subtle-scrollbar::-webkit-scrollbar-thumb,
   .one-prompt-video-workbench::-webkit-scrollbar-thumb,
   .one-prompt-video-workbench *::-webkit-scrollbar-thumb {
@@ -111,6 +128,26 @@
     border-radius: 999px;
     background: rgb(103 232 249);
     box-shadow: 0 0 0 3px rgb(34 211 238 / 0.16), 0 6px 16px rgb(0 0 0 / 0.35);
+  }
+
+  .one-prompt-video-workbench video:fullscreen {
+    width: auto !important;
+    height: 100vh !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    margin: auto !important;
+    object-fit: contain !important;
+    background: #000;
+  }
+
+  .one-prompt-video-workbench video:-webkit-full-screen {
+    width: auto !important;
+    height: 100vh !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    margin: auto !important;
+    object-fit: contain !important;
+    background: #000;
   }
 }
 

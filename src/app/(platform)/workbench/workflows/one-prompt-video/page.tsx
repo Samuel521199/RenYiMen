@@ -57,7 +57,7 @@ type AspectRatio = "9:16" | "16:9" | "1:1";
 type PageLang = "zh" | "en";
 type ProjectView = "frames" | "clips" | "final";
 type RollbackTarget = "PLAN_REVIEW" | "IMAGE_REVIEW" | "MICRO_SHOT_REVIEW" | "CLIP_REVIEW";
-type OptimisticProgressPhase = "creating" | "understanding" | "storyboard" | "prompts" | "waiting" | "done" | "failed";
+type OptimisticProgressPhase = "creating" | "understanding" | "storyboard" | "prompts" | "waiting" | "done" | "failed" | "stopped";
 
 interface OptimisticProgress {
   active: boolean;
@@ -178,6 +178,7 @@ interface VideoKeyframe {
   negativePromptZh?: string;
   negativePromptEn?: string;
   imageUrl?: string | null;
+  errorMessage?: string | null;
   locked: boolean;
 }
 
@@ -256,6 +257,8 @@ type Copy = {
   stopGeneration: string;
   stoppingGeneration: string;
   generationStopped: string;
+  resumeGeneration: string;
+  resumeStarted: string;
   approveScript: string;
   approveFrames: string;
   approveMicroShots: string;
@@ -339,6 +342,8 @@ type Copy = {
   emptyServer: string;
   nonJsonServer: string;
   requestFailed: (status: number) => string;
+  customStyle: string;
+  customStylePlaceholder: string;
   styles: Record<string, string>;
   status: Record<ProjectStatus, string>;
   shotStatus: Record<ShotStatus, string>;
@@ -355,7 +360,7 @@ const TEXT: Record<PageLang, Copy> = {
     newProject: "\u65b0\u5efa\u9879\u76ee",
     noProjects: "\u6682\u65e0\u9879\u76ee",
     activeProject: "\u5f53\u524d",
-    setupPanel: "创作入口",
+    setupPanel: "\u521b\u4f5c\u5165\u53e3",
     setupPanelHint: "项目、提示词、参考图和生成设置",
     collapseSetup: "收起",
     expandSetup: "展开",
@@ -374,9 +379,11 @@ const TEXT: Record<PageLang, Copy> = {
     deleteProjectConfirm: "\u786e\u5b9a\u5220\u9664\u8fd9\u4e2a\u9879\u76ee\u5417\uff1f\u5df2\u751f\u6210\u7684\u5206\u955c\u3001\u56fe\u7247\u548c\u7247\u6bb5\u8bb0\u5f55\u4f1a\u4e00\u8d77\u79fb\u9664\u3002",
     generatePlan: "\u751f\u6210\u5206\u955c\u8ba1\u5212",
     generating: "\u751f\u6210\u4e2d",
-    stopGeneration: "停止生成",
+    stopGeneration: "\u505c\u6b62\u751f\u6210",
     stoppingGeneration: "停止中",
     generationStopped: "已停止生成",
+    resumeGeneration: "\u7ee7\u7eed\u751f\u6210",
+    resumeStarted: "\u5df2\u7ee7\u7eed\u5f53\u524d\u9636\u6bb5",
     approveScript: "\u786e\u8ba4\u811a\u672c",
     approveFrames: "\u786e\u8ba4\u8fb9\u754c\u53c2\u8003\u5e27",
     approveMicroShots: "\u786e\u8ba4\u5185\u90e8\u5b50\u5206\u955c",
@@ -460,6 +467,8 @@ const TEXT: Record<PageLang, Copy> = {
     emptyServer: "\u670d\u52a1\u7aef\u8fd4\u56de\u4e3a\u7a7a",
     nonJsonServer: "\u670d\u52a1\u7aef\u8fd4\u56de\u4e86\u975e JSON \u5185\u5bb9",
     requestFailed: (status) => `\u8bf7\u6c42\u5931\u8d25 ${status}`,
+    customStyle: "\u81ea\u5b9a\u4e49\u98ce\u683c",
+    customStylePlaceholder: "\u4f8b\uff1a\u590d\u53e4\u6e2f\u98ce\u3001\u624b\u6301\u7eaa\u5f55\u7247\u3001\u9ad8\u9971\u548c\u6e38\u620f\u5ba3\u4f20\u7247",
     styles: {
       cinematic: "\u7535\u5f71\u5e7f\u544a",
       product: "\u4ea7\u54c1\u5c55\u793a",
@@ -537,6 +546,8 @@ const TEXT: Record<PageLang, Copy> = {
     stopGeneration: "Stop generation",
     stoppingGeneration: "Stopping",
     generationStopped: "Generation stopped",
+    resumeGeneration: "Resume generation",
+    resumeStarted: "Resumed the current stage",
     approveScript: "Approve script",
     approveFrames: "Approve boundary frames",
     approveMicroShots: "Approve internal micro-shots",
@@ -620,6 +631,8 @@ const TEXT: Record<PageLang, Copy> = {
     emptyServer: "Empty server response",
     nonJsonServer: "Server returned a non-JSON response",
     requestFailed: (status) => `Request failed ${status}`,
+    customStyle: "Custom style",
+    customStylePlaceholder: "e.g. retro Hong Kong cinema, handheld documentary, saturated game trailer",
     styles: {
       cinematic: "Cinematic ad",
       product: "Product",
@@ -683,6 +696,9 @@ const SETUP_PANEL_COLLAPSED_STORAGE_KEY = "one-prompt-video-setup-panel-collapse
 const WORKFLOW_PROGRESS_COLLAPSED_STORAGE_KEY = "one-prompt-video-workflow-progress-collapsed";
 const DETAIL_PANEL_WIDTH_STORAGE_KEY = "one-prompt-video-detail-panel-width";
 const DETAIL_PREVIEW_HEIGHT_STORAGE_KEY = "one-prompt-video-detail-preview-height";
+const CUSTOM_STYLE_VALUE = "__custom";
+const KNOWN_STYLE_PRESETS = new Set(["cinematic", "product", "guofeng", "short_drama", "ecommerce"]);
+const MANUAL_STOP_MESSAGE = "Generation stopped by user";
 const DETAIL_PANEL_MIN_WIDTH = 280;
 const DETAIL_PANEL_MAX_WIDTH = 720;
 const DETAIL_PREVIEW_MIN_HEIGHT = 180;
@@ -704,6 +720,18 @@ function clampDetailPreviewHeight(value: number): number {
   return Math.max(DETAIL_PREVIEW_MIN_HEIGHT, Math.min(DETAIL_PREVIEW_MAX_HEIGHT, Math.round(value)));
 }
 
+function isManualStopError(errorMessage?: string | null): boolean {
+  return errorMessage === MANUAL_STOP_MESSAGE;
+}
+
+function isManualStopProject(project?: Pick<VideoProject, "status" | "errorMessage"> | null): boolean {
+  return Boolean(project && project.status === "FAILED" && isManualStopError(project.errorMessage));
+}
+
+function shotStatusLabel(status: ShotStatus, errorMessage: string | null | undefined, copy: Copy): string {
+  return status === "FAILED" && isManualStopError(errorMessage) ? copy.generationStopped : copy.shotStatus[status];
+}
+
 function formatProgressPercent(value: number): string {
   if (!Number.isFinite(value)) return "0";
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
@@ -717,6 +745,7 @@ export default function OnePromptVideoPage() {
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>("9:16");
   const [durationSeconds, setDurationSeconds] = useState(30);
   const [stylePreset, setStylePreset] = useState("guofeng");
+  const [customStylePreset, setCustomStylePreset] = useState("");
   const [referenceImageUrls, setReferenceImageUrls] = useState<string[]>([]);
   const [projects, setProjects] = useState<VideoProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -730,6 +759,8 @@ export default function OnePromptVideoPage() {
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
   const [loading, setLoading] = useState(false);
+  const [creatingPlan, setCreatingPlan] = useState(false);
+  const [planningProjectIds, setPlanningProjectIds] = useState<string[]>([]);
   const [uploadingReferences, setUploadingReferences] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -745,6 +776,7 @@ export default function OnePromptVideoPage() {
   const [detailPreviewHeight, setDetailPreviewHeight] = useState(360);
   const [resizingDetailPanel, setResizingDetailPanel] = useState(false);
   const projectLayoutRef = useRef<HTMLElement | null>(null);
+  const selectedProjectIdRef = useRef("");
 
   const selectedShot = useMemo(
     () => project?.shots.find((shot) => shot.id === selectedShotId) ?? project?.shots[0],
@@ -777,10 +809,13 @@ export default function OnePromptVideoPage() {
   const keyframesApproved = Boolean(project?.keyframes?.length && project.keyframes.every((keyframe) => keyframe.status === "IMAGE_APPROVED" || keyframe.locked));
   const effectiveProjectStatus = project ? effectiveReviewStatus(project.status, keyframesApproved) : null;
   const runningProjectIds = useMemo(
-    () => projects
-      .filter((item) => RUNNING_PROJECT_STATUSES.includes(item.status) || hasRunningMicroShotImage(item))
-      .map((item) => item.id),
-    [projects],
+    () => Array.from(new Set([
+      ...projects
+        .filter((item) => RUNNING_PROJECT_STATUSES.includes(item.status) || hasRunningMicroShotImage(item))
+        .map((item) => item.id),
+      ...planningProjectIds,
+    ])),
+    [planningProjectIds, projects],
   );
   const canApproveScript = Boolean(project && project.shots.length > 0 && project.status === "PLAN_REVIEW");
   const canApproveFrames = Boolean(project && keyframeTotal > 0 && completeImages === keyframeTotal && project.status === "IMAGE_REVIEW" && !keyframesApproved);
@@ -794,12 +829,15 @@ export default function OnePromptVideoPage() {
     (project && RUNNING_PROJECT_STATUSES.includes(project.status)),
   );
   const planGenerationBusy = Boolean(
-    loading ||
-    generationAbortController ||
-    optimisticProgress?.active ||
+    creatingPlan ||
     project?.status === "PLANNING",
   );
-  const canCreateAndPlan = !planGenerationBusy && prompt.trim().length >= 4;
+  const canPlanSelectedDraft = project?.status === "DRAFT";
+  const effectiveStylePreset = useMemo(
+    () => (stylePreset === CUSTOM_STYLE_VALUE ? customStylePreset.trim() : stylePreset),
+    [customStylePreset, stylePreset],
+  );
+  const canCreateAndPlan = !creatingPlan && prompt.trim().length >= 4 && effectiveStylePreset.length > 0 && (!project || canPlanSelectedDraft);
   const workflowProgress = useMemo(() => {
     if (optimisticProgress) return optimisticWorkflowProgressView(optimisticProgress, pageLang);
     if (!project || !effectiveProjectStatus) return null;
@@ -882,6 +920,10 @@ export default function OnePromptVideoPage() {
   useEffect(() => {
     window.localStorage.setItem(DETAIL_PREVIEW_HEIGHT_STORAGE_KEY, String(detailPreviewHeight));
   }, [detailPreviewHeight]);
+
+  useEffect(() => {
+    selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
 
   useEffect(() => {
     if (!optimisticProgress?.active) return;
@@ -991,6 +1033,15 @@ export default function OnePromptVideoPage() {
     return () => window.clearInterval(timer);
   }, [runningProjectIds, selectedProjectId, syncProject]);
 
+  useEffect(() => {
+    if (!optimisticProgress?.active || !generationProjectId || project?.id !== generationProjectId) return;
+    if (project && !RUNNING_PROJECT_STATUSES.includes(project.status) && !hasRunningMicroShotImage(project)) {
+      setGenerationAbortController(null);
+      setGenerationProjectId("");
+      setOptimisticProgress(null);
+    }
+  }, [generationProjectId, optimisticProgress?.active, project]);
+
   async function loadProjects() {
     try {
       const res = await fetchJson("/api/video-projects", copy);
@@ -1016,7 +1067,14 @@ export default function OnePromptVideoPage() {
     setReferenceImageUrls(nextProject.referenceImageUrls ?? []);
     setAspectRatio(nextProject.aspectRatio);
     setDurationSeconds(nextProject.durationSeconds || 30);
-    setStylePreset(nextProject.stylePreset || "cinematic");
+    const projectStylePreset = nextProject.stylePreset || "cinematic";
+    if (KNOWN_STYLE_PRESETS.has(projectStylePreset)) {
+      setStylePreset(projectStylePreset);
+      setCustomStylePreset("");
+    } else {
+      setStylePreset(CUSTOM_STYLE_VALUE);
+      setCustomStylePreset(projectStylePreset);
+    }
     if (typeof window !== "undefined") window.localStorage.setItem(PROJECT_STORAGE_KEY, nextProject.id);
   }
 
@@ -1024,6 +1082,17 @@ export default function OnePromptVideoPage() {
     setProjectView("clips");
     setSelectedShotId(shotId);
     setSelectedKeyframeId("");
+  }
+
+  function selectKeyframe(keyframeId: string) {
+    setProjectView("frames");
+    setSelectedKeyframeId(keyframeId);
+    setSelectedShotId("");
+    setShotEditorOpen(false);
+  }
+
+  function openShotEditor(shotId: string) {
+    selectShot(shotId);
     setShotEditorOpen(true);
   }
 
@@ -1075,6 +1144,7 @@ export default function OnePromptVideoPage() {
           setAspectRatio("9:16");
           setDurationSeconds(30);
           setStylePreset("guofeng");
+          setCustomStylePreset("");
           if (typeof window !== "undefined") window.localStorage.removeItem(PROJECT_STORAGE_KEY);
         }
       }
@@ -1096,6 +1166,7 @@ export default function OnePromptVideoPage() {
     setAspectRatio("9:16");
     setDurationSeconds(30);
     setStylePreset("guofeng");
+    setCustomStylePreset("");
     setError("");
     setMessage("");
     setOptimisticProgress(null);
@@ -1129,72 +1200,77 @@ export default function OnePromptVideoPage() {
 
   async function createAndPlan() {
     if (!canCreateAndPlan) return;
-    let completed = false;
-    const controller = new AbortController();
-    setGenerationAbortController(controller);
-    setGenerationProjectId("");
-    setOptimisticProgress({ active: true, phase: "creating", percent: 3, startedAt: Date.now() });
-    await runAction(async () => {
+    setCreatingPlan(true);
+    setError("");
+    setMessage("");
+    setOptimisticProgress(null);
+    try {
       const totalDurationSeconds = clampProjectDuration(durationSeconds);
-      const created = await fetchJson("/api/video-projects", copy, {
-        method: "POST",
-        signal: controller.signal,
-        body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: totalDurationSeconds, stylePreset, referenceImageUrls }),
-      });
-      if (!created.project) throw new Error(copy.createFailed);
-      setGenerationProjectId(created.project.id);
-      rememberProject(created.project);
-      activateProject(created.project);
-      let planned;
-      try {
-        planned = await fetchJson(`/api/video-projects/${created.project.id}/plan`, copy, {
+      const planPayload = {
+        userPrompt: prompt,
+        aspectRatio,
+        durationSeconds: totalDurationSeconds,
+        stylePreset: effectiveStylePreset,
+        referenceImageUrls,
+      };
+      const created = project?.status === "DRAFT"
+        ? { project }
+        : await fetchJson("/api/video-projects", copy, {
           method: "POST",
-          signal: controller.signal,
-          body: JSON.stringify({ userPrompt: prompt, aspectRatio, durationSeconds: totalDurationSeconds, stylePreset, referenceImageUrls }),
+          body: JSON.stringify(planPayload),
         });
-      } catch (planError) {
-        if (planError instanceof DOMException && planError.name === "AbortError") throw planError;
-        const synced = await fetchJson(`/api/video-projects/${created.project.id}/sync`, copy, { method: "POST" });
-        if (synced.project && (synced.project.status === "PLANNING" || synced.project.status === "PLAN_REVIEW")) {
-          rememberProject(synced.project);
-          activateProject(synced.project);
-          completed = true;
-          setOptimisticProgress(null);
-          setMessage(synced.project.status === "PLAN_REVIEW" ? copy.planned : copy.generating);
-          return;
-        }
-        throw planError;
-      }
+      if (!created.project) throw new Error(copy.createFailed);
+      const planningProject: VideoProject = { ...created.project, status: "PLANNING", errorMessage: null };
+      setPlanningProjectIds((current) => current.includes(planningProject.id) ? current : [...current, planningProject.id]);
+      rememberProject(planningProject);
+      activateProject(planningProject);
+      setMessage(copy.generating);
+      void planProjectInBackground(planningProject.id, planPayload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.createFailed);
+    } finally {
+      setCreatingPlan(false);
+    }
+  }
+
+  async function planProjectInBackground(projectId: string, planPayload: {
+    userPrompt: string;
+    aspectRatio: AspectRatio;
+    durationSeconds: number;
+    stylePreset: string;
+    referenceImageUrls: string[];
+  }) {
+    try {
+      const planned = await fetchJson(`/api/video-projects/${projectId}/plan`, copy, {
+        method: "POST",
+        body: JSON.stringify(planPayload),
+      });
       if (!planned.project) throw new Error(copy.planFailed);
       rememberProject(planned.project);
-      activateProject(planned.project);
-      completed = true;
-      setOptimisticProgress({ active: false, phase: "done", percent: 100, startedAt: Date.now() });
-      window.setTimeout(() => {
-        setOptimisticProgress((current) => (current?.phase === "done" ? null : current));
-      }, 1200);
-      setMessage(copy.planned);
-    });
-    setGenerationAbortController(null);
-    setGenerationProjectId("");
-    if (!completed) {
-      setOptimisticProgress((current) => current && current.phase !== "done"
-        ? { ...current, active: false, phase: "failed", percent: Math.max(current.percent, 8) }
-        : current,
-      );
+      if (selectedProjectIdRef.current === projectId) setMessage(copy.planned);
+    } catch (planError) {
+      try {
+        const synced = await fetchJson(`/api/video-projects/${projectId}/sync`, copy, { method: "POST" });
+        if (synced.project) {
+          rememberProject(synced.project);
+          if (synced.project.status === "PLANNING" || synced.project.status === "PLAN_REVIEW") return;
+        }
+      } catch {
+        // Keep the original planning error visible below.
+      }
+      if (selectedProjectIdRef.current === projectId) setError(planError instanceof Error ? planError.message : copy.planFailed);
+    } finally {
+      setPlanningProjectIds((current) => current.filter((id) => id !== projectId));
     }
   }
 
   async function stopGeneration() {
-    const controller = generationAbortController;
-    const projectId = generationProjectId || project?.id || "";
-    if (!controller && !projectId) return;
+    const projectId = project?.id || generationProjectId || "";
+    if (!projectId) return;
     setStoppingGeneration(true);
-    controller?.abort();
-    setOptimisticProgress((current) => current
-      ? { ...current, active: false, phase: "failed", percent: Math.max(current.percent, 8) }
-      : { active: false, phase: "failed", percent: 8, startedAt: Date.now() },
-    );
+    if (generationProjectId === projectId) generationAbortController?.abort();
+    setOptimisticProgress(null);
+    setPlanningProjectIds((current) => current.filter((id) => id !== projectId));
     try {
       if (projectId) {
         const res = await fetchJson(`/api/video-projects/${projectId}/cancel`, copy, { method: "POST" });
@@ -1209,8 +1285,42 @@ export default function OnePromptVideoPage() {
     } finally {
       setStoppingGeneration(false);
       setLoading(false);
+      if (generationProjectId === projectId) {
+        setGenerationAbortController(null);
+        setGenerationProjectId("");
+      }
+    }
+  }
+
+  async function resumeProject() {
+    if (!project) return;
+    const controller = new AbortController();
+    let resumedRunning = false;
+    setGenerationAbortController(controller);
+    setGenerationProjectId(project.id);
+    setStoppingGeneration(false);
+    setOptimisticProgress({ active: true, phase: "waiting", percent: Math.max(workflowProgress?.percent ?? 8, 10), startedAt: Date.now() - 110000 });
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}/resume`, copy, {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (!res.project) throw new Error(copy.actionFailed);
+      rememberProject(res.project);
+      activateProject(res.project);
+      setProjectView(projectViewForStatus(res.project.status));
+      resumedRunning = RUNNING_PROJECT_STATUSES.includes(res.project.status);
+      if (!resumedRunning) {
+        setOptimisticProgress(null);
+        setGenerationAbortController(null);
+        setGenerationProjectId("");
+      }
+      setMessage(copy.resumeStarted);
+    });
+    if (!resumedRunning && !controller.signal.aborted) {
       setGenerationAbortController(null);
       setGenerationProjectId("");
+      setOptimisticProgress((current) => current?.phase === "stopped" ? current : null);
     }
   }
 
@@ -1428,6 +1538,14 @@ export default function OnePromptVideoPage() {
     className: string;
   } | null = (() => {
     if (!project) return null;
+    if (project.status === "FAILED") {
+      return {
+        label: copy.resumeGeneration,
+        icon: <RefreshCw className="h-4 w-4" />,
+        onClick: resumeProject,
+        className: "border-amber-300/30 bg-amber-300/10 text-amber-100 hover:bg-amber-300/15",
+      };
+    }
     if (canApproveScript) {
       return {
         label: copy.approveScript,
@@ -1591,11 +1709,22 @@ export default function OnePromptVideoPage() {
           )}
         </section>
 
-        <section className="grid gap-3 rounded-md border border-white/10 bg-slate-950/70 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.22)] lg:grid-cols-[minmax(0,1fr)_170px_130px_140px]">
+        <section className="grid gap-3 rounded-md border border-white/10 bg-slate-950/70 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.22)] lg:grid-cols-[minmax(0,1fr)_220px_130px_140px]">
           <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-24 resize-none rounded-md border border-white/10 bg-slate-900/90 px-4 py-3 text-sm leading-6 text-slate-100 outline-none transition focus:border-cyan-400 focus:bg-slate-900" />
-          <select value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400">
-            {Object.entries(copy.styles).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
+          <div className="space-y-2">
+            <select value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} className="h-11 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400">
+              {Object.entries(copy.styles).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              <option value={CUSTOM_STYLE_VALUE}>{copy.customStyle}</option>
+            </select>
+            {stylePreset === CUSTOM_STYLE_VALUE && (
+              <input
+                value={customStylePreset}
+                onChange={(event) => setCustomStylePreset(event.target.value)}
+                placeholder={copy.customStylePlaceholder}
+                className="h-11 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-cyan-400"
+              />
+            )}
+          </div>
           <select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AspectRatio)} className="h-11 rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400">
             <option value="9:16">9:16</option>
             <option value="16:9">16:9</option>
@@ -1708,10 +1837,10 @@ export default function OnePromptVideoPage() {
           </section>
         )}
 
-        {(error || project?.errorMessage) && (
+        {(error || (project?.errorMessage && !isManualStopProject(project))) && (
           <div className="rounded-md border border-white/10 bg-slate-900 px-4 py-3 text-sm">
             {error && <p className="text-red-300">{error}</p>}
-            {project?.errorMessage && <p className="text-amber-300">{project.errorMessage}</p>}
+            {project?.errorMessage && !isManualStopProject(project) && <p className="text-amber-300">{project.errorMessage}</p>}
           </div>
         )}
 
@@ -1799,8 +1928,7 @@ export default function OnePromptVideoPage() {
                         <button
                           type="button"
                           onClick={() => {
-                            setProjectView("frames");
-                            setSelectedKeyframeId(keyframe.id);
+                            selectKeyframe(keyframe.id);
                             if (keyframe.imageUrl) setPreviewKeyframeId(keyframe.id);
                           }}
                           className={`relative block w-full bg-slate-900 text-left ${aspectClass(project.aspectRatio)}`}
@@ -1814,7 +1942,7 @@ export default function OnePromptVideoPage() {
                             {safeBoundaryFrameLabel(keyframe, project.durationSeconds, pageLang)}
                           </span>
                           <span className="absolute right-2 top-2 rounded-md border border-black/30 bg-black/60 px-2 py-1 text-[11px] text-white">
-                            {copy.shotStatus[keyframe.status]}
+                            {shotStatusLabel(keyframe.status, keyframe.errorMessage, copy)}
                           </span>
                           {keyframe.imageUrl && (
                             <span className="absolute bottom-2 right-2 rounded-md border border-black/30 bg-black/60 px-2 py-1 text-[11px] text-white">
@@ -1823,8 +1951,14 @@ export default function OnePromptVideoPage() {
                           )}
                         </button>
                         <div className="space-y-2 px-3 py-3">
-                          <p className="text-sm font-semibold text-white">{localizedKeyframePurpose(keyframe, pageLang)}</p>
-                          <p className="line-clamp-4 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
+                          <button
+                            type="button"
+                            onClick={() => selectKeyframe(keyframe.id)}
+                            className="block w-full space-y-2 rounded-md p-1 text-left outline-none transition hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-cyan-400/70"
+                          >
+                            <p className="text-sm font-semibold text-white">{localizedKeyframePurpose(keyframe, pageLang)}</p>
+                            <p className="line-clamp-2 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
+                          </button>
                           <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || keyframe.locked} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
                             <RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}
                           </button>
@@ -1866,9 +2000,6 @@ export default function OnePromptVideoPage() {
                         <button type="button" onClick={() => selectShot(shot.id)} className="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
                           <Clapperboard className="h-5 w-5" />
                           <span>{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
-                          {shot.startKeyframeNo && shot.endKeyframeNo && (
-                            <span className="text-xs text-cyan-200/80">{safeBoundaryRangeLabel(shot, keyframeByNo, project.durationSeconds, pageLang)}</span>
-                          )}
                         </button>
                       )}
                     </div>
@@ -1877,75 +2008,7 @@ export default function OnePromptVideoPage() {
                         <p className="text-sm font-semibold text-white">{copy.shot} {String(shot.shotNo).padStart(2, "0")}</p>
                         <span className="text-xs text-slate-500">{shot.durationSeconds}s</span>
                       </div>
-                      {shot.startKeyframeNo && shot.endKeyframeNo && (
-                        <p className="text-xs text-cyan-200/80">{safeBoundaryRangeLabel(shot, keyframeByNo, project.durationSeconds, pageLang)}</p>
-                      )}
-                      <div className="flex flex-wrap gap-1.5">
-                        <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
-                          {copy.segmentDurationPolicy}
-                        </span>
-                        {shot.boundaryMode && (
-                          <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
-                            {shot.boundaryMode}
-                          </span>
-                        )}
-                        {Boolean(shot.microShots?.length) && (
-                          <span className="rounded-md border border-fuchsia-300/20 bg-fuchsia-300/10 px-2 py-1 text-[11px] text-fuchsia-100/80">
-                            {copy.microShots} {shot.microShots?.length}
-                          </span>
-                        )}
-                        {shot.audioPlan && (
-                          <span className="rounded-md border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[11px] text-amber-100/80">
-                            {shot.audioPlan.mode}
-                          </span>
-                        )}
-                      </div>
-                      <p className="line-clamp-3 min-h-10 text-sm leading-5 text-slate-300">{localizedShotPurpose(shot, pageLang)}</p>
-                      {(Boolean(shot.constraints?.length) || Boolean(shot.timedPrompts?.length) || Boolean(shot.microShots?.length) || Boolean(shot.audioPlan) || Boolean(shot.videoPrompt)) && (
-                        <details className="group rounded-md border border-white/10 bg-slate-950/45 px-3 py-2">
-                          <summary className="cursor-pointer list-none text-xs font-medium text-slate-400 transition hover:text-slate-200">
-                            {pageLang === "en" ? "Details" : "展开细节"}
-                            <span className="ml-2 text-slate-600 group-open:hidden">+</span>
-                            <span className="ml-2 hidden text-slate-600 group-open:inline">-</span>
-                          </summary>
-                          <div className="mt-3 space-y-2">
-                            {Boolean(shot.constraints?.length) && (
-                              <div className="flex flex-wrap gap-1.5">
-                                {shot.constraints?.slice(0, 3).map((constraint) => (
-                                  <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
-                                    {constraint}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                            {Boolean(shot.timedPrompts?.length) && (
-                              <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
-                                {copy.timedPrompts}: {shot.timedPrompts?.slice(0, 2).map((item) => `${timedPromptRangeLabel(item)} ${localizedTimedPrompt(item, pageLang)}`).join(" / ")}
-                              </p>
-                            )}
-                            {Boolean(shot.microShots?.length) && (
-                              <p className="line-clamp-2 text-xs leading-5 text-fuchsia-100/70">
-                                {copy.microShots}: {shot.microShots?.slice(0, 2).map((item) => `+${item.localTimeSeconds}s ${localizedMicroShotPrompt(item, pageLang)}`).join(" / ")}
-                              </p>
-                            )}
-                            {shot.audioPlan && (
-                              <p className="line-clamp-2 text-xs leading-5 text-amber-100/70">
-                                {copy.audioPlan}: {localizedAudioPlanSummary(shot.audioPlan, pageLang)}
-                              </p>
-                            )}
-                            <p className="line-clamp-4 text-xs leading-5 text-slate-500">{localizedShotPrompt(shot, "video", pageLang)}</p>
-                          </div>
-                        </details>
-                      )}
-                      <div className="flex gap-2">
-                        <button type="button" onClick={() => regenerateImage(shot.id)} disabled={loading || shot.locked} className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}</button>
-                        {shot.clipUrl && (
-                          <a href={shotClipDownloadUrl(project.id, shot.id)} title={copy.downloadClip} className="inline-flex h-8 w-10 items-center justify-center rounded-md border border-cyan-400/30 text-cyan-100 hover:bg-cyan-400/10">
-                            <Download className="h-3.5 w-3.5" />
-                          </a>
-                        )}
-                        <button type="button" onClick={() => toggleLock(shot)} disabled={loading} className="inline-flex h-8 w-10 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06]">{shot.locked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />}</button>
-                      </div>
+                      <p className="line-clamp-2 min-h-10 text-sm leading-5 text-slate-300">{localizedShotPurpose(shot, pageLang)}</p>
                     </div>
                   </div>
                 ))}
@@ -2056,7 +2119,7 @@ export default function OnePromptVideoPage() {
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-base font-semibold text-white">{safeBoundaryFrameLabel(selectedKeyframe, project.durationSeconds, pageLang)}</h3>
-                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedKeyframe.status]}</span>
+                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedKeyframe.status, selectedKeyframe.errorMessage, copy)}</span>
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-3">
@@ -2090,7 +2153,7 @@ export default function OnePromptVideoPage() {
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedShot!.shotNo).padStart(2, "0")}</h3>
-                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedShot!.status]}</span>
+                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot!.status, selectedShot!.errorMessage, copy)}</span>
                   </div>
                   <div className="space-y-2">
                     <div className="h-[220px] overflow-hidden rounded-md border border-white/10 bg-slate-900">
@@ -2110,7 +2173,7 @@ export default function OnePromptVideoPage() {
                   <p className="text-sm leading-6 text-slate-300">{localizedShotPurpose(selectedShot!, pageLang)}</p>
                   <button
                     type="button"
-                    onClick={() => setShotEditorOpen(true)}
+                    onClick={() => openShotEditor(selectedShot!.id)}
                     className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400"
                   >
                     <Pencil className="h-4 w-4" />
@@ -2121,7 +2184,7 @@ export default function OnePromptVideoPage() {
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedShot.shotNo).padStart(2, "0")}</h3>
-                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedShot.status]}</span>
+                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot.status, selectedShot.errorMessage, copy)}</span>
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-3">
@@ -2354,13 +2417,13 @@ export default function OnePromptVideoPage() {
       </div>
 
       {project && selectedShot && shotEditorOpen && typeof document !== "undefined" && createPortal(
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-3 sm:p-4" role="dialog" aria-modal="true" onClick={() => setShotEditorOpen(false)}>
+        <div className="one-prompt-video-workbench fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-3 sm:p-4" role="dialog" aria-modal="true" onClick={() => setShotEditorOpen(false)}>
           <div className="flex h-[calc(100dvh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-md border border-cyan-400/25 bg-slate-950 shadow-2xl shadow-cyan-950/30 sm:h-[calc(100dvh-2rem)]" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-lg font-semibold text-white">{copy.editShot} {String(selectedShot.shotNo).padStart(2, "0")}</h3>
-                  <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{copy.shotStatus[selectedShot.status]}</span>
+                  <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot.status, selectedShot.errorMessage, copy)}</span>
                   <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-xs text-slate-400">{selectedShot.durationSeconds}s</span>
                 </div>
                 {selectedShot.startKeyframeNo && selectedShot.endKeyframeNo && (
@@ -2373,7 +2436,7 @@ export default function OnePromptVideoPage() {
             </div>
 
             <div className="grid min-h-0 flex-1 overflow-hidden lg:grid-cols-[380px_minmax(0,1fr)]">
-              <aside className="min-h-0 overflow-y-auto border-b border-white/10 bg-slate-950/70 p-4 lg:border-b-0 lg:border-r">
+              <aside className="subtle-scrollbar min-h-0 overflow-y-auto border-b border-white/10 bg-slate-950/70 p-4 lg:border-b-0 lg:border-r">
                 <div className="space-y-3">
                   <div className="overflow-hidden rounded-md border border-white/10 bg-slate-900">
                     <div className={`relative ${aspectClass(project.aspectRatio)}`}>
@@ -2464,7 +2527,7 @@ export default function OnePromptVideoPage() {
                 </div>
               </aside>
 
-              <section className="min-h-0 overflow-y-auto p-4 pb-0">
+              <section className="subtle-scrollbar min-h-0 overflow-y-auto p-4 pb-0">
                 <div className="grid gap-4 xl:grid-cols-2">
                   <Field label={`${copy.duration} (${copy.segmentDurationPolicy})`}>
                     <input
@@ -2609,7 +2672,7 @@ export default function OnePromptVideoPage() {
       )}
 
       {previewKeyframe?.imageUrl && typeof document !== "undefined" && createPortal(
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewKeyframeId("")}>
+        <div className="one-prompt-video-workbench fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewKeyframeId("")}>
           <div className="flex max-h-[92vh] w-full max-w-6xl flex-col gap-3" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2">
               <div className="min-w-0">
@@ -2624,7 +2687,7 @@ export default function OnePromptVideoPage() {
               <div className="flex min-h-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black">
                 <img src={previewImageSrc(previewKeyframe.imageUrl)} alt={safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)} className="max-h-[78vh] max-w-full object-contain" />
               </div>
-              <aside className="max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
+              <aside className="subtle-scrollbar max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
                 <p className="text-xs font-medium text-slate-500">{copy.imagePrompt}</p>
                 <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{localizedKeyframeImagePrompt(previewKeyframe, pageLang)}</p>
                 {previewKeyframe.negativePrompt && (
@@ -2723,7 +2786,7 @@ function MicroShotHelpButton({
       <button
         type="button"
         onClick={onToggle}
-        aria-label={lang === "en" ? "Micro-shot help" : "子分镜说明"}
+        aria-label={lang === "en" ? "Micro-shot help" : "\u5b50\u5206\u955c\u8bf4\u660e"}
         className={`inline-flex h-5 w-5 items-center justify-center rounded-full border text-[11px] transition ${open ? "border-fuchsia-300/60 bg-fuchsia-300/15 text-fuchsia-100" : "border-white/15 text-slate-400 hover:border-fuchsia-300/45 hover:text-fuchsia-100"}`}
       >
         <CircleHelp className="h-3.5 w-3.5" />
@@ -2836,13 +2899,12 @@ function localizedNegativePrompt(base: string, lang: PageLang, zh?: string, en?:
 
 function translateNegativePromptToZh(prompt: string): string {
   const dictionary: Record<string, string> = {
-    text: "文字",
-    subtitles: "字幕",
-    captions: "字幕",
-    logos: "标志",
-    logo: "标志",
-    watermarks: "水印",
-    watermark: "水印",
+    text: "??",
+    subtitles: "??",
+    captions: "??",
+    logos: "??",
+    watermarks: "??",
+    watermark: "??",
     ui: "界面元素",
     "modern objects": "现代物件",
     "harsh lighting": "刺眼光线",
@@ -2853,15 +2915,15 @@ function translateNegativePromptToZh(prompt: string): string {
     "logo distortion": "标志变形",
     "deformed face": "脸部变形",
     "low quality": "低质量",
-    blurry: "模糊",
+    blurry: "??",
     "duplicated body": "身体重复",
   };
   return prompt
-    .split(/[,，]/)
+    .split(/[,?]/)
     .map((item) => item.trim())
     .filter(Boolean)
     .map((item) => dictionary[item.toLowerCase()] ?? item)
-    .join("，");
+    .join("?");
 }
 
 function localizedTimedPrompt(prompt: TimedPrompt, lang: PageLang): string {
@@ -2937,9 +2999,9 @@ function boundaryFrameShortLabel(frame: VideoKeyframe | undefined, totalSeconds:
   if (!frame) return lang === "en" ? "Frame" : "参考帧";
   const consistencyLabel = consistencyFrameShortLabel(frame, lang);
   if (consistencyLabel) return consistencyLabel;
-  if (frame.keyframeNo === 1) return lang === "en" ? "First" : "首帧";
-  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End" : "尾帧";
-  return lang === "en" ? `F${String(frame.keyframeNo).padStart(2, "0")}` : `边界${String(frame.keyframeNo).padStart(2, "0")}`;
+  if (frame.keyframeNo === 1) return lang === "en" ? "First" : "??";
+  if (frame.timeSeconds >= totalSeconds) return lang === "en" ? "End" : "??";
+  return lang === "en" ? `F${String(frame.keyframeNo).padStart(2, "0")}` : `??${String(frame.keyframeNo).padStart(2, "0")}`;
 }
 
 function safeBoundaryFrameLabel(frame: VideoKeyframe, totalSeconds: number, lang: PageLang): string {
@@ -2988,37 +3050,42 @@ function estimatePlanningProgress(elapsedMs: number): Pick<OptimisticProgress, "
 function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: PageLang): WorkflowProgressView {
   const text: Record<OptimisticProgressPhase, { zh: [string, string]; en: [string, string]; tone: WorkflowProgressView["tone"] }> = {
     creating: {
-      zh: ["正在创建项目", "已提交创作需求，正在准备进入剧本拆解。"],
+      zh: ["\u6b63\u5728\u521b\u5efa\u9879\u76ee", "\u5df2\u63d0\u4ea4\u521b\u4f5c\u9700\u6c42\uff0c\u6b63\u5728\u51c6\u5907\u8fdb\u5165\u5267\u672c\u62c6\u89e3\u3002"],
       en: ["Creating project", "The request is submitted and the storyboard planner is warming up."],
       tone: "running",
     },
     understanding: {
-      zh: ["大模型正在理解需求", "正在识别主题、人物/场景参考、色调锁和画幅约束。"],
+      zh: ["\u5927\u6a21\u578b\u6b63\u5728\u7406\u89e3\u9700\u6c42", "\u6b63\u5728\u8bc6\u522b\u4e3b\u9898\u3001\u4eba\u7269\u3001\u573a\u666f\u53c2\u8003\u3001\u8272\u8c03\u9501\u548c\u753b\u5e45\u7ea6\u675f\u3002"],
       en: ["Understanding brief", "Reading the theme, references, tone locks, and aspect ratio constraints."],
       tone: "running",
     },
     storyboard: {
-      zh: ["正在拆解剧本与边界关键帧", "规划首尾帧时间线、镜头数量和每段叙事节拍。"],
+      zh: ["\u6b63\u5728\u62c6\u89e3\u5267\u672c\u4e0e\u8fb9\u754c\u5173\u952e\u5e27", "\u89c4\u5212\u9996\u5c3e\u5e27\u65f6\u95f4\u7ebf\u3001\u955c\u5934\u6570\u91cf\u548c\u6bcf\u6bb5\u53d9\u4e8b\u8282\u62cd\u3002"],
       en: ["Splitting script and boundary frames", "Planning the first-last-frame timeline, segment count, and story beats."],
       tone: "running",
     },
     prompts: {
-      zh: ["正在生成结构化提示词", "整理图片 Prompt、视频 Prompt、负向约束和连续性锁定。"],
+      zh: ["\u6b63\u5728\u751f\u6210\u7ed3\u6784\u5316\u63d0\u793a\u8bcd", "\u6574\u7406\u56fe\u7247 Prompt\u3001\u89c6\u9891 Prompt\u3001\u8d1f\u5411\u7ea6\u675f\u548c\u8fde\u7eed\u6027\u9501\u5b9a\u3002"],
       en: ["Building structured prompts", "Preparing image prompts, video prompts, negative constraints, and continuity locks."],
       tone: "running",
     },
     waiting: {
-      zh: ["等待模型返回完整结果", "复杂需求可能会多等一会儿，返回后会自动进入审核。"],
+      zh: ["\u7b49\u5f85\u6a21\u578b\u8fd4\u56de\u5b8c\u6574\u7ed3\u679c", "\u590d\u6742\u9700\u6c42\u53ef\u80fd\u4f1a\u591a\u7b49\u4e00\u4f1a\u513f\uff0c\u8fd4\u56de\u540e\u4f1a\u81ea\u52a8\u8fdb\u5165\u5ba1\u6838\u3002"],
       en: ["Waiting for the model result", "Complex briefs can take longer. The review stage will open automatically when it returns."],
       tone: "running",
     },
     done: {
-      zh: ["分镜计划已完成", "已拿到大模型返回的分镜、关键帧和片段提示词。"],
+      zh: ["\u5206\u955c\u8ba1\u5212\u5df2\u5b8c\u6210", "\u5df2\u62ff\u5230\u5927\u6a21\u578b\u8fd4\u56de\u7684\u5206\u955c\u3001\u5173\u952e\u5e27\u548c\u7247\u6bb5\u63d0\u793a\u8bcd\u3002"],
       en: ["Storyboard plan complete", "The model returned the storyboard, keyframes, and segment prompts."],
       tone: "success",
     },
+    stopped: {
+      zh: ["\u751f\u6210\u5df2\u505c\u6b62", "\u4f60\u5df2\u624b\u52a8\u505c\u6b62\u672c\u6b21\u751f\u6210\uff0c\u53ef\u4ee5\u8c03\u6574\u5185\u5bb9\u540e\u91cd\u65b0\u751f\u6210\u3002"],
+      en: ["Generation stopped", "You stopped this generation. Adjust the brief and generate again when ready."],
+      tone: "idle",
+    },
     failed: {
-      zh: ["分镜计划生成失败", "请查看下方错误信息，修正后可以重新生成。"],
+      zh: ["\u5206\u955c\u8ba1\u5212\u751f\u6210\u5931\u8d25", "\u8bf7\u67e5\u770b\u4e0b\u65b9\u9519\u8bef\u4fe1\u606f\uff0c\u4fee\u6b63\u540e\u53ef\u4ee5\u91cd\u65b0\u751f\u6210\u3002"],
       en: ["Storyboard planning failed", "Check the error below, then adjust and try again."],
       tone: "failed",
     },
@@ -3034,19 +3101,24 @@ function projectWorkflowProgressView(
   lang: PageLang,
   status: ProjectStatus = project.status,
 ): WorkflowProgressView {
+  if (isManualStopProject(project)) {
+    return lang === "en"
+      ? { percent: progress.percent, title: "Generation stopped", detail: "You stopped this generation. Adjust the brief and generate again when ready.", tone: "idle" }
+      : { percent: progress.percent, title: "\u751f\u6210\u5df2\u505c\u6b62", detail: "\u4f60\u5df2\u624b\u52a8\u505c\u6b62\u672c\u6b21\u751f\u6210\uff0c\u53ef\u4ee5\u8c03\u6574\u5185\u5bb9\u540e\u91cd\u65b0\u751f\u6210\u3002", tone: "idle" };
+  }
   const zh: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
-    DRAFT: ["等待开始", "填写一句话需求后即可生成分镜计划。", "idle"],
-    PLANNING: ["正在生成分镜计划", "大模型正在拆解剧本、关键帧和片段提示词。", "running"],
-    PLAN_REVIEW: ["分镜计划待审核", `已生成 ${project.shots.length} 个镜头，请先确认脚本与关键帧规划。`, "idle"],
-    IMAGE_GENERATING: ["正在生成边界参考帧", `已完成 ${progress.images}/${progress.imageTotal} 张关键帧图片。`, "running"],
-    IMAGE_REVIEW: ["关键帧待审核", `已完成 ${progress.images}/${progress.imageTotal} 张关键帧图片，请确认后进入内部子分镜审核。`, "idle"],
-    MICRO_SHOT_REVIEW: ["内部子分镜待审核", "请确认每个片段内部子分镜的文字和参考图，完成后再生成视频片段。", "idle"],
-    CLIP_GENERATING: ["正在生成分镜视频片段", `已完成 ${progress.clips}/${progress.clipTotal} 段视频片段。`, "running"],
-    CLIP_REVIEW: ["片段待审核", `已完成 ${progress.clips}/${progress.clipTotal} 段视频片段，请确认后合成成片。`, "idle"],
-    COMPOSING: ["正在合成最终成片", "正在拼接所有分镜片段并处理转场与声音。", "running"],
-    FINAL_REVIEW: ["最终成片待确认", "成片已生成，请预览确认。", "idle"],
-    DONE: ["成片已完成", "这个项目已经完成，可以下载或继续新建项目。", "success"],
-    FAILED: ["任务失败", "请查看错误信息，修改后重新发起对应步骤。", "failed"],
+    DRAFT: ["\u7b49\u5f85\u5f00\u59cb", "\u586b\u5199\u4e00\u53e5\u8bdd\u9700\u6c42\u540e\u5373\u53ef\u751f\u6210\u5206\u955c\u8ba1\u5212\u3002", "idle"],
+    PLANNING: ["\u6b63\u5728\u751f\u6210\u5206\u955c\u8ba1\u5212", "\u5927\u6a21\u578b\u6b63\u5728\u62c6\u89e3\u5267\u672c\u3001\u5173\u952e\u5e27\u548c\u7247\u6bb5\u63d0\u793a\u8bcd\u3002", "running"],
+    PLAN_REVIEW: ["\u5206\u955c\u8ba1\u5212\u5f85\u5ba1\u6838", `${project.shots.length} \u4e2a\u955c\u5934\u5df2\u5c31\u7eea\uff0c\u8bf7\u5148\u786e\u8ba4\u811a\u672c\u4e0e\u5173\u952e\u5e27\u89c4\u5212\u3002`, "idle"],
+    IMAGE_GENERATING: ["\u6b63\u5728\u751f\u6210\u8fb9\u754c\u53c2\u8003\u5e27", `${progress.images}/${progress.imageTotal} \u5f20\u5173\u952e\u5e27\u56fe\u7247\u5df2\u5b8c\u6210\u3002`, "running"],
+    IMAGE_REVIEW: ["\u5173\u952e\u5e27\u5f85\u5ba1\u6838", `${progress.images}/${progress.imageTotal} \u5f20\u5173\u952e\u5e27\u56fe\u7247\u5df2\u5b8c\u6210\uff0c\u8bf7\u786e\u8ba4\u540e\u8fdb\u5165\u5185\u90e8\u5b50\u5206\u955c\u5ba1\u6838\u3002`, "idle"],
+    MICRO_SHOT_REVIEW: ["\u5185\u90e8\u5b50\u5206\u955c\u5f85\u5ba1\u6838", "\u8bf7\u786e\u8ba4\u6bcf\u4e2a\u7247\u6bb5\u5185\u90e8\u5b50\u5206\u955c\u7684\u6587\u5b57\u548c\u53c2\u8003\u56fe\uff0c\u5b8c\u6210\u540e\u518d\u751f\u6210\u89c6\u9891\u7247\u6bb5\u3002", "idle"],
+    CLIP_GENERATING: ["\u6b63\u5728\u751f\u6210\u5206\u955c\u89c6\u9891\u7247\u6bb5", `${progress.clips}/${progress.clipTotal} \u6bb5\u89c6\u9891\u7247\u6bb5\u5df2\u5b8c\u6210\u3002`, "running"],
+    CLIP_REVIEW: ["\u7247\u6bb5\u5f85\u5ba1\u6838", `${progress.clips}/${progress.clipTotal} \u6bb5\u89c6\u9891\u7247\u6bb5\u5df2\u5b8c\u6210\uff0c\u8bf7\u786e\u8ba4\u540e\u5408\u6210\u6210\u7247\u3002`, "idle"],
+    COMPOSING: ["\u6b63\u5728\u5408\u6210\u6700\u7ec8\u6210\u7247", "\u6b63\u5728\u62fc\u63a5\u6240\u6709\u5206\u955c\u7247\u6bb5\u5e76\u5904\u7406\u8f6c\u573a\u4e0e\u58f0\u97f3\u3002", "running"],
+    FINAL_REVIEW: ["\u6700\u7ec8\u6210\u7247\u5f85\u786e\u8ba4", "\u6210\u7247\u5df2\u751f\u6210\uff0c\u8bf7\u9884\u89c8\u786e\u8ba4\u3002", "idle"],
+    DONE: ["\u6210\u7247\u5df2\u5b8c\u6210", "\u8fd9\u4e2a\u9879\u76ee\u5df2\u7ecf\u5b8c\u6210\uff0c\u53ef\u4ee5\u4e0b\u8f7d\u6216\u7ee7\u7eed\u65b0\u5efa\u9879\u76ee\u3002", "success"],
+    FAILED: ["\u4efb\u52a1\u5931\u8d25", "\u8bf7\u67e5\u770b\u9519\u8bef\u4fe1\u606f\uff0c\u4fee\u6539\u540e\u91cd\u65b0\u53d1\u8d77\u5bf9\u5e94\u6b65\u9aa4\u3002", "failed"],
   };
   const en: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
     DRAFT: ["Ready to start", "Enter a one-line brief to generate the storyboard plan.", "idle"],
@@ -3191,4 +3263,3 @@ async function uploadReferenceImage(file: File): Promise<string> {
   if (!uploadRes.ok) throw new Error(`Upload failed ${uploadRes.status}`);
   return presignJson.publicUrl;
 }
-
