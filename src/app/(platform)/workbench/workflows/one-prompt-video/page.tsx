@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
@@ -1556,22 +1557,22 @@ export default function OnePromptVideoPage() {
                           <p className="block w-full truncate text-sm font-semibold text-white">{item.title || copy.untitled}</p>
                         </button>
                       )}
-                      <div className={`absolute right-2 top-2 flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-slate-950/90 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.28)] backdrop-blur transition ${editing ? "opacity-100" : "opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"}`}>
+                      <div className={`absolute right-2 top-2 z-20 flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-slate-950/90 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.28)] backdrop-blur transition ${editing ? "opacity-100" : "opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"}`}>
                         {editing ? (
                           <>
-                            <button type="button" onClick={() => saveProjectTitle(item.id)} disabled={loading} title={copy.saveProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-emerald-200 hover:bg-emerald-400/10 disabled:opacity-50">
+                            <button type="button" onClick={(event) => { event.stopPropagation(); void saveProjectTitle(item.id); }} disabled={loading} title={copy.saveProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-emerald-200 hover:bg-emerald-400/10 disabled:opacity-50">
                               <Check className="h-3.5 w-3.5" />
                             </button>
-                            <button type="button" onClick={cancelEditProject} disabled={loading} title={copy.cancel} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-white/[0.06] disabled:opacity-50">
+                            <button type="button" onClick={(event) => { event.stopPropagation(); cancelEditProject(); }} disabled={loading} title={copy.cancel} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-white/[0.06] disabled:opacity-50">
                               <X className="h-3.5 w-3.5" />
                             </button>
                           </>
                         ) : (
                           <>
-                            <button type="button" onClick={() => beginEditProject(item)} disabled={loading} title={copy.renameProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/[0.08] disabled:opacity-50">
+                            <button type="button" onClick={(event) => { event.stopPropagation(); beginEditProject(item); }} disabled={loading} title={copy.renameProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/[0.08] disabled:opacity-50">
                               <Pencil className="h-3.5 w-3.5" />
                             </button>
-                            <button type="button" onClick={() => deleteProject(item.id)} disabled={loading} title={copy.deleteProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-red-400/10 hover:text-red-200 disabled:opacity-50">
+                            <button type="button" onClick={(event) => { event.stopPropagation(); void deleteProject(item.id); }} disabled={loading} title={copy.deleteProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-red-400/10 hover:text-red-200 disabled:opacity-50">
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
                           </>
@@ -2352,8 +2353,8 @@ export default function OnePromptVideoPage() {
         )}
       </div>
 
-      {project && selectedShot && shotEditorOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-3 sm:p-4" role="dialog" aria-modal="true" onClick={() => setShotEditorOpen(false)}>
+      {project && selectedShot && shotEditorOpen && typeof document !== "undefined" && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-3 sm:p-4" role="dialog" aria-modal="true" onClick={() => setShotEditorOpen(false)}>
           <div className="flex h-[calc(100dvh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-md border border-cyan-400/25 bg-slate-950 shadow-2xl shadow-cyan-950/30 sm:h-[calc(100dvh-2rem)]" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
               <div className="min-w-0">
@@ -2603,11 +2604,12 @@ export default function OnePromptVideoPage() {
               </section>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {previewKeyframe?.imageUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewKeyframeId("")}>
+      {previewKeyframe?.imageUrl && typeof document !== "undefined" && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewKeyframeId("")}>
           <div className="flex max-h-[92vh] w-full max-w-6xl flex-col gap-3" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2">
               <div className="min-w-0">
@@ -2634,7 +2636,8 @@ export default function OnePromptVideoPage() {
               </aside>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

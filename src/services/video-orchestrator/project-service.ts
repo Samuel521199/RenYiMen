@@ -1061,9 +1061,15 @@ export async function updateVideoProject(
 }
 
 export async function deleteVideoProject(userId: string, projectId: string): Promise<void> {
-  await requireVideoProject(userId, projectId);
-  await prisma.videoProject.delete({ where: { id: projectId } });
-  await logOnePromptVideo("project.delete.success", { userId, projectId });
+  await logOnePromptVideo("project.delete.start", { userId, projectId });
+  try {
+    await requireVideoProject(userId, projectId);
+    await prisma.videoProject.delete({ where: { id: projectId } });
+    await logOnePromptVideo("project.delete.success", { userId, projectId });
+  } catch (error) {
+    await logOnePromptVideo("project.delete.error", { userId, projectId, ...errorForLog(error) }, "error");
+    throw error;
+  }
 }
 
 export async function cancelVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
@@ -1127,6 +1133,131 @@ export async function cancelVideoProject(userId: string, projectId: string): Pro
   });
 
   await logOnePromptVideo("project.cancel.success", { userId, projectId, status: updated.status });
+  return updated;
+}
+
+export async function resumeVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
+  const project = await requireVideoProject(userId, projectId);
+  await logOnePromptVideo("project.resume.start", {
+    userId,
+    projectId,
+    status: project.status,
+    keyframeCount: project.keyframes.length,
+    segmentCount: project.segments.length,
+    hasPlan: Boolean(project.planJson),
+    finalVideoUrl: project.finalVideoUrl,
+  });
+  if (project.status !== VideoProjectStatus.FAILED) {
+    await logOnePromptVideo("project.resume.noop", { userId, projectId, status: project.status });
+    return project;
+  }
+
+  if (!project.keyframes.length && !project.segments.length) {
+    await logOnePromptVideo("project.resume.replan", { userId, projectId });
+    return planVideoProject(userId, projectId);
+  }
+
+  const missingKeyframes = project.keyframes.filter((keyframe) => !keyframe.imageUrl);
+  if (missingKeyframes.length) {
+    await prisma.videoKeyframe.updateMany({
+      where: { projectId, imageUrl: null },
+      data: {
+        status: VideoShotStatus.IMAGE_PENDING,
+        imageTaskId: null,
+        qualityScore: null,
+        errorMessage: null,
+        locked: false,
+      },
+    });
+    const queued = await prisma.videoProject.update({
+      where: { id: projectId },
+      data: { status: VideoProjectStatus.IMAGE_GENERATING, errorMessage: null },
+      include: PROJECT_INCLUDE,
+    });
+    await submitNextImageTask({
+      userId,
+      projectId,
+      keyframes: queued.keyframes,
+      logEventPrefix: "image.resume",
+    });
+    const updated = await requireVideoProject(userId, projectId);
+    await logOnePromptVideo("project.resume.image_generating", {
+      userId,
+      projectId,
+      status: updated.status,
+      missingKeyframeCount: missingKeyframes.length,
+    });
+    return updated;
+  }
+
+  const keyframesApproved = project.keyframes.length > 0 && project.keyframes.every((keyframe) => keyframe.locked || keyframe.status === VideoShotStatus.IMAGE_APPROVED);
+  if (!keyframesApproved) {
+    const updated = await prisma.videoProject.update({
+      where: { id: projectId },
+      data: { status: VideoProjectStatus.IMAGE_REVIEW, errorMessage: null },
+      include: PROJECT_INCLUDE,
+    });
+    await logOnePromptVideo("project.resume.image_review", { userId, projectId, status: updated.status });
+    return updated;
+  }
+
+  const microShotIssues = requiredMicroShotImageIssues(project);
+  if (microShotIssues.length) {
+    await submitRequiredMicroShotImageTasks(userId, projectId);
+    const updated = await prisma.videoProject.update({
+      where: { id: projectId },
+      data: { status: VideoProjectStatus.MICRO_SHOT_REVIEW, errorMessage: null },
+      include: PROJECT_INCLUDE,
+    });
+    await logOnePromptVideo("project.resume.micro_shot_review", {
+      userId,
+      projectId,
+      status: updated.status,
+      issueCount: microShotIssues.length,
+    });
+    return updated;
+  }
+
+  const missingSegments = project.segments.filter((segment) => !segment.clipUrl);
+  if (missingSegments.length) {
+    await prisma.videoSegment.updateMany({
+      where: { projectId, clipUrl: null },
+      data: {
+        status: VideoShotStatus.CLIP_PENDING,
+        clipTaskId: null,
+        qualityScore: null,
+        errorMessage: null,
+        locked: true,
+      },
+    });
+    const queued = await prisma.videoProject.update({
+      where: { id: projectId },
+      data: { status: VideoProjectStatus.CLIP_GENERATING, errorMessage: null },
+      include: PROJECT_INCLUDE,
+    });
+    await submitNextClipTask({
+      userId,
+      projectId,
+      segments: queued.segments,
+      keyframes: queued.keyframes,
+      logEventPrefix: "clip.resume",
+    });
+    const updated = await requireVideoProject(userId, projectId);
+    await logOnePromptVideo("project.resume.clip_generating", {
+      userId,
+      projectId,
+      status: updated.status,
+      missingSegmentCount: missingSegments.length,
+    });
+    return updated;
+  }
+
+  const updated = await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { status: project.finalVideoUrl ? VideoProjectStatus.FINAL_REVIEW : VideoProjectStatus.CLIP_REVIEW, errorMessage: null },
+    include: PROJECT_INCLUDE,
+  });
+  await logOnePromptVideo("project.resume.review_ready", { userId, projectId, status: updated.status });
   return updated;
 }
 
