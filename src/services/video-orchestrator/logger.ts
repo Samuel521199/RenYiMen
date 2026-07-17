@@ -1,7 +1,7 @@
 import { appendFile, mkdir } from "fs/promises";
 import path from "path";
 
-const DEFAULT_LOG_DIR = "D:\\zzz\\v debug";
+const DEFAULT_LOG_DIR = process.platform === "win32" ? "D:\\zzz\\v debug" : "/tmp/one-prompt-video-debug";
 const LOG_FILE_NAME = "one-prompt-video.log";
 
 type LogLevel = "debug" | "info" | "warn" | "error";

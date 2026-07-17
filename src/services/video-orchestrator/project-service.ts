@@ -365,8 +365,14 @@ function readPlanMicroShots(shot: Record<string, unknown> | undefined): VideoMic
     const absoluteTimeSeconds = Number(item.absoluteTimeSeconds ?? item.absolute_time_seconds ?? localTimeSeconds);
     const purpose = readPlanShotString(item, ["purpose"]);
     const scene = readPlanShotString(item, ["scene", "scene_limit"]);
+    const sceneZh = readPlanShotString(item, ["sceneZh", "scene_zh"]);
+    const sceneEn = readPlanShotString(item, ["sceneEn", "scene_en"]);
     const action = readPlanShotString(item, ["action", "action_limit"]);
+    const actionZh = readPlanShotString(item, ["actionZh", "action_zh"]);
+    const actionEn = readPlanShotString(item, ["actionEn", "action_en"]);
     const camera = readPlanShotString(item, ["camera", "camera_limit"]);
+    const cameraZh = readPlanShotString(item, ["cameraZh", "camera_zh"]);
+    const cameraEn = readPlanShotString(item, ["cameraEn", "camera_en"]);
     const imagePromptZh = readPlanShotString(item, ["imagePromptZh", "image_prompt_zh"]);
     const imagePromptEn = readPlanShotString(item, ["imagePromptEn", "image_prompt_en"]);
     const imagePrompt = readPlanShotString(item, ["imagePrompt", "image_prompt"]) || imagePromptZh || imagePromptEn;
@@ -399,8 +405,14 @@ function readPlanMicroShots(shot: Record<string, unknown> | undefined): VideoMic
       absoluteTimeSeconds: Number.isFinite(absoluteTimeSeconds) ? absoluteTimeSeconds : 0,
       purpose,
       scene,
+      sceneZh,
+      sceneEn,
       action,
+      actionZh,
+      actionEn,
       camera,
+      cameraZh,
+      cameraEn,
       referenceType,
       imagePrompt,
       imagePromptZh,
@@ -1124,6 +1136,15 @@ export async function planVideoProject(
   override?: Partial<CreateVideoProjectInput>,
 ): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
+  if (project.status === VideoProjectStatus.PLANNING) {
+    await logOnePromptVideo("project.plan.duplicate_ignored", {
+      userId,
+      projectId,
+      status: project.status,
+      reason: "already_planning",
+    }, "warn");
+    return project;
+  }
   const input = normalizePlanInput({
     userPrompt: override?.userPrompt ?? project.userPrompt,
     aspectRatio: override?.aspectRatio ?? project.aspectRatio,
@@ -1142,8 +1163,8 @@ export async function planVideoProject(
     stylePreset: input.stylePreset,
     referenceImageCount: input.referenceImageUrls.length,
   });
-  await prisma.videoProject.update({
-    where: { id: project.id },
+  const claimed = await prisma.videoProject.updateMany({
+    where: { id: project.id, status: project.status },
     data: {
       status: VideoProjectStatus.PLANNING,
       userPrompt: input.userPrompt,
@@ -1154,6 +1175,17 @@ export async function planVideoProject(
       errorMessage: null,
     },
   });
+  if (!claimed.count) {
+    const latest = await requireVideoProject(userId, projectId);
+    await logOnePromptVideo("project.plan.duplicate_ignored", {
+      userId,
+      projectId,
+      originalStatus: project.status,
+      latestStatus: latest.status,
+      reason: "planning_claim_lost",
+    }, "warn");
+    return latest;
+  }
   let plan: OnePromptVideoPlan;
   try {
     plan = await createAliyunStoryboardPlan(input);
@@ -1643,7 +1675,7 @@ export async function approveShotImages(userId: string, projectId: string): Prom
   const updated = await prisma.videoProject.update({
     where: { id: projectId },
     data: {
-      status: VideoProjectStatus.IMAGE_REVIEW,
+      status: VideoProjectStatus.MICRO_SHOT_REVIEW,
       errorMessage: null,
     },
     include: PROJECT_INCLUDE,
@@ -2826,8 +2858,14 @@ function normalizeMicroShotForSegment(
     purposeZh: value.purposeZh ?? "",
     purposeEn: value.purposeEn ?? "",
     scene: value.scene ?? "",
+    sceneZh: value.sceneZh ?? "",
+    sceneEn: value.sceneEn ?? "",
     action: value.action ?? "",
+    actionZh: value.actionZh ?? "",
+    actionEn: value.actionEn ?? "",
     camera: value.camera ?? "",
+    cameraZh: value.cameraZh ?? "",
+    cameraEn: value.cameraEn ?? "",
     referenceType,
     imagePrompt: value.imagePrompt ?? value.imagePromptZh ?? value.imagePromptEn ?? "",
     imagePromptZh: value.imagePromptZh ?? "",

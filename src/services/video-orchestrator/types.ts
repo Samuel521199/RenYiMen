@@ -261,8 +261,14 @@ export interface VideoMicroShot {
   purposeZh?: string;
   purposeEn?: string;
   scene: string;
+  sceneZh?: string;
+  sceneEn?: string;
   action: string;
+  actionZh?: string;
+  actionEn?: string;
   camera?: string;
+  cameraZh?: string;
+  cameraEn?: string;
   referenceType?: "text" | "image_prompt" | "mixed";
   imagePrompt?: string;
   imagePromptZh?: string;

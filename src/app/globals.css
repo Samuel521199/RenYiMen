@@ -29,6 +29,89 @@
   .wf-shimmer-bar {
     animation: wf-shimmer 2.2s ease-in-out infinite;
   }
+
+  .subtle-scrollbar,
+  .one-prompt-video-workbench,
+  .one-prompt-video-workbench * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(34 211 238 / 0.34) transparent;
+    scrollbar-gutter: stable;
+  }
+
+  .subtle-scrollbar::-webkit-scrollbar,
+  .one-prompt-video-workbench::-webkit-scrollbar,
+  .one-prompt-video-workbench *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .subtle-scrollbar::-webkit-scrollbar-track,
+  .one-prompt-video-workbench::-webkit-scrollbar-track,
+  .one-prompt-video-workbench *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .subtle-scrollbar::-webkit-scrollbar-thumb,
+  .one-prompt-video-workbench::-webkit-scrollbar-thumb,
+  .one-prompt-video-workbench *::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgb(34 211 238 / 0.38), rgb(99 102 241 / 0.24));
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+
+  .subtle-scrollbar::-webkit-scrollbar-thumb:hover,
+  .one-prompt-video-workbench::-webkit-scrollbar-thumb:hover,
+  .one-prompt-video-workbench *::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgb(34 211 238 / 0.62), rgb(99 102 241 / 0.38));
+    background-clip: padding-box;
+  }
+
+  .one-prompt-video-workbench input[type="range"] {
+    height: 18px;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .one-prompt-video-workbench input[type="range"]::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgb(34 211 238 / 0.38), rgb(99 102 241 / 0.26));
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
+  }
+
+  .one-prompt-video-workbench input[type="range"]::-webkit-slider-thumb {
+    width: 16px;
+    height: 16px;
+    margin-top: -5px;
+    appearance: none;
+    border: 2px solid rgb(7 11 22);
+    border-radius: 999px;
+    background: rgb(103 232 249);
+    box-shadow: 0 0 0 3px rgb(34 211 238 / 0.16), 0 6px 16px rgb(0 0 0 / 0.35);
+  }
+
+  .one-prompt-video-workbench input[type="range"]::-moz-range-track {
+    height: 6px;
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.09);
+  }
+
+  .one-prompt-video-workbench input[type="range"]::-moz-range-progress {
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgb(34 211 238 / 0.62), rgb(99 102 241 / 0.42));
+  }
+
+  .one-prompt-video-workbench input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgb(7 11 22);
+    border-radius: 999px;
+    background: rgb(103 232 249);
+    box-shadow: 0 0 0 3px rgb(34 211 238 / 0.16), 0 6px 16px rgb(0 0 0 / 0.35);
+  }
 }
 
 @layer base {

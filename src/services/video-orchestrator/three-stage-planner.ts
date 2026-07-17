@@ -162,6 +162,7 @@ Hard rules:
 - For any segment, the start and end keyframes must look like two reachable moments within the same scene and camera setup family. They may change pose, product handling, camera distance, focus, or framing gradually, but not location, time period, environment, outfit, identity, or layout abruptly.
 - micro_shots are internal same-take motion checkpoints, not extra clips, not extra scenes, and not edit points. Use text, image_prompt, or mixed only to describe reachable intermediate states inside the same continuous shot.
 - All micro_shots in a segment must preserve the same location, camera axis family, lighting direction, color tone, subject identity, product identity, and prop layout. If this is impossible, the segment must be split earlier by planning_manifest, not solved by a hidden transition.
+- Every user-visible micro_shot field must be bilingual. Fill scene_zh/action_zh/camera_zh/prompt_zh in Chinese only, and scene_en/action_en/camera_en/prompt_en in English only. Do not mix Chinese and English inside the same language field.
 
 Return this JSON shape:
 {
@@ -231,9 +232,12 @@ Return this JSON shape:
             "end_seconds": 2,
             "purpose_zh": "",
             "purpose_en": "",
-            "scene": "",
-            "action": "",
-            "camera": "",
+            "scene_zh": "",
+            "scene_en": "",
+            "action_zh": "",
+            "action_en": "",
+            "camera_zh": "",
+            "camera_en": "",
             "reference_type": "mixed",
             "uses_consistency_anchors": [],
             "prompt_zh": "",
@@ -870,6 +874,12 @@ function normalizeMicroShotsForSegment(params: {
     const promptEn = enforceSameTakeMicroShotPrompt(stringOr(item.promptEn ?? item.prompt_en ?? item.visualBeatEn ?? item.visual_beat_en, ""), "en");
     const imagePromptZh = enforceSameTakeMicroShotPrompt(stringOr(detail?.imagePromptZh ?? item.imagePromptZh ?? item.image_prompt_zh, ""), "zh");
     const imagePromptEn = enforceSameTakeMicroShotPrompt(stringOr(detail?.imagePromptEn ?? item.imagePromptEn ?? item.image_prompt_en, ""), "en");
+    const sceneZh = stringOr(item.sceneZh ?? item.scene_zh, "");
+    const sceneEn = stringOr(item.sceneEn ?? item.scene_en, "");
+    const actionZh = stringOr(item.actionZh ?? item.action_zh, "");
+    const actionEn = stringOr(item.actionEn ?? item.action_en, "");
+    const cameraZh = stringOr(item.cameraZh ?? item.camera_zh, "");
+    const cameraEn = stringOr(item.cameraEn ?? item.camera_en, "");
     const anchors = normalizeStringArray(item.usesConsistencyAnchors ?? item.uses_consistency_anchors) ?? params.anchorIds;
     return [{
       microShotNo,
@@ -879,9 +889,15 @@ function normalizeMicroShotsForSegment(params: {
       purpose: stringOr(item.purposeZh ?? item.purpose_zh ?? item.purpose, params.segmentPurpose),
       purposeZh: stringOr(item.purposeZh ?? item.purpose_zh, ""),
       purposeEn: stringOr(item.purposeEn ?? item.purpose_en, ""),
-      scene: stringOr(item.scene, params.segmentPurpose),
-      action: stringOr(item.action ?? item.action_zh ?? item.action_en, promptZh || promptEn || params.segmentPurpose),
-      camera: stringOr(item.camera, params.segmentCamera),
+      scene: sceneZh || sceneEn || stringOr(item.scene, params.segmentPurpose),
+      sceneZh,
+      sceneEn,
+      action: actionZh || actionEn || stringOr(item.action, promptZh || promptEn || params.segmentPurpose),
+      actionZh,
+      actionEn,
+      camera: cameraZh || cameraEn || stringOr(item.camera, params.segmentCamera),
+      cameraZh,
+      cameraEn,
       referenceType: normalizeReferenceType(item.referenceType ?? item.reference_type) ?? (imagePromptZh || imagePromptEn ? "mixed" : "text"),
       imagePrompt: imagePromptZh || imagePromptEn,
       imagePromptZh,

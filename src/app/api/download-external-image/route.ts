@@ -30,6 +30,22 @@ function isBlockedHostname(hostname: string): boolean {
   return false;
 }
 
+export async function GET(req: Request) {
+  const session = await auth();
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const searchParams = new URL(req.url).searchParams;
+  const url = searchParams.get("url")?.trim() ?? "";
+  if (!url) {
+    return NextResponse.json({ error: "MISSING_URL" }, { status: 400 });
+  }
+
+  const mediaKindRaw = searchParams.get("mediaKind")?.trim().toLowerCase() ?? "image";
+  return proxyExternalMedia(url, mediaKindRaw);
+}
+
 /**
  * 登录用户代理拉取公网媒体字节：默认按「图片」校验大小与 Accept；
  * `body.mediaKind === "video"` 时用于 MP4/WebM 等结果下载（同源 Blob + `a.download`）。
@@ -55,6 +71,10 @@ export async function POST(req: Request) {
   }
 
   const mediaKindRaw = typeof rec?.mediaKind === "string" ? rec.mediaKind.trim().toLowerCase() : "image";
+  return proxyExternalMedia(url, mediaKindRaw);
+}
+
+async function proxyExternalMedia(url: string, mediaKindRaw: string) {
   const isVideo = mediaKindRaw === "video";
   const maxBytes = isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
 
