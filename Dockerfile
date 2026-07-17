@@ -2,7 +2,7 @@
 
 FROM node:18-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl
+RUN apk add --no-cache libc6-compat openssl ffmpeg
 
 # --- Stage 1: deps — install dependencies ---
 FROM base AS deps

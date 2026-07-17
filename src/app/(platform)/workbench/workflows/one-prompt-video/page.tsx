@@ -755,6 +755,7 @@ export default function OnePromptVideoPage() {
   const [selectedShotId, setSelectedShotId] = useState("");
   const [selectedKeyframeId, setSelectedKeyframeId] = useState("");
   const [previewKeyframeId, setPreviewKeyframeId] = useState("");
+  const [previewMicroShot, setPreviewMicroShot] = useState<{ title: string; imageUrl: string; imagePrompt: string } | null>(null);
   const [projectView, setProjectView] = useState<ProjectView>("clips");
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
@@ -970,6 +971,15 @@ export default function OnePromptVideoPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [previewKeyframeId]);
+
+  useEffect(() => {
+    if (!previewMicroShot) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setPreviewMicroShot(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewMicroShot]);
 
   useEffect(() => {
     if (!shotEditorOpen) return;
@@ -2368,9 +2378,17 @@ export default function OnePromptVideoPage() {
                                 <p className="text-xs text-rose-200">{item.errorMessage || copy.microShotImageFailed}</p>
                               )}
                               {item.imageUrl && (
-                                <a href={item.imageUrl} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-white/10 bg-slate-950">
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewMicroShot({
+                                    title: `${copy.microShot} ${index + 1}`,
+                                    imageUrl: item.imageUrl!,
+                                    imagePrompt: localizedMicroShotImagePrompt(item, pageLang),
+                                  })}
+                                  className="block w-full overflow-hidden rounded-md border border-white/10 bg-slate-950 outline-none transition hover:border-cyan-300/45 focus-visible:ring-2 focus-visible:ring-cyan-300/60"
+                                >
                                   <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${index + 1}`} className="max-h-52 w-full object-contain" />
-                                </a>
+                                </button>
                               )}
                             </div>
                           )}
@@ -2641,9 +2659,17 @@ export default function OnePromptVideoPage() {
                             {item.imageStatus === "running" && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
                             {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage || copy.microShotImageFailed}</p>}
                             {item.imageUrl && (
-                              <a href={item.imageUrl} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-white/10 bg-slate-950">
+                              <button
+                                type="button"
+                                onClick={() => setPreviewMicroShot({
+                                  title: `${copy.microShot} ${index + 1}`,
+                                  imageUrl: item.imageUrl!,
+                                  imagePrompt: localizedMicroShotImagePrompt(item, pageLang),
+                                })}
+                                className="block w-full overflow-hidden rounded-md border border-white/10 bg-slate-950 outline-none transition hover:border-cyan-300/45 focus-visible:ring-2 focus-visible:ring-cyan-300/60"
+                              >
                                 <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${index + 1}`} className="max-h-52 w-full object-contain" />
-                              </a>
+                              </button>
                             )}
                           </div>
                         )}
@@ -2696,6 +2722,32 @@ export default function OnePromptVideoPage() {
                     <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-400">{localizedKeyframeNegativePrompt(previewKeyframe, pageLang)}</p>
                   </>
                 )}
+              </aside>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {previewMicroShot && typeof document !== "undefined" && createPortal(
+        <div className="one-prompt-video-workbench fixed inset-0 z-[10000] flex items-center justify-center bg-black/85 p-4" role="dialog" aria-modal="true" onClick={() => setPreviewMicroShot(null)}>
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col gap-3" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-white">{previewMicroShot.title}</p>
+                <p className="truncate text-xs text-slate-400">{copy.microShots}</p>
+              </div>
+              <button type="button" onClick={() => setPreviewMicroShot(null)} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 text-slate-200 hover:bg-white/[0.08]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="flex min-h-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black">
+                <img src={previewImageSrc(previewMicroShot.imageUrl)} alt={previewMicroShot.title} className="max-h-[78vh] max-w-full object-contain" />
+              </div>
+              <aside className="subtle-scrollbar max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
+                <p className="text-xs font-medium text-slate-500">{copy.imagePrompt}</p>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{previewMicroShot.imagePrompt}</p>
               </aside>
             </div>
           </div>
