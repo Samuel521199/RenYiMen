@@ -63,6 +63,7 @@ export interface VideoTimelineBlueprintSegment {
   subtitleIntentZh?: string;
   audioIntentZh?: string;
   requiredAnchorIds?: string[];
+  sourceEventIds?: string[];
   boundaryModeHint?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
 }
 
@@ -169,12 +170,22 @@ export interface VideoPlanKeyframe {
   usesConsistencyAnchors?: string[];
 }
 
-export type VideoConsistencyReferenceKind = "character" | "scene";
+export type VideoConsistencyReferenceKind =
+  | "character"
+  | "scene"
+  | "product"
+  | "brand_visual"
+  | "prop"
+  | "vehicle"
+  | "food"
+  | "space_layout"
+  | "custom";
 
 export interface VideoConsistencyReference {
   kind: VideoConsistencyReferenceKind;
   needed: boolean;
   keyframeNo: number;
+  anchorId?: string;
   frameId?: string;
   purpose: string;
   purposeZh?: string;
@@ -353,6 +364,174 @@ export interface VideoPlanShot {
   usesConsistencyAnchors?: string[];
 }
 
+export interface NarrativeEvent {
+  eventId: string;
+  dramaticGoal: string;
+  participants: string[];
+  locationId: string;
+  initialState: string;
+  action: string;
+  resultingState: string;
+  requiredAnchorIds: string[];
+  previousEventIds: string[];
+  mustBecomeSeparateSegment: boolean;
+}
+
+export interface AnchorStateTimelineEntry {
+  eventId?: string;
+  segmentNo: number;
+  startState: string;
+  endState: string;
+  startPosition: string;
+  endPosition: string;
+  holderAtStart?: string;
+  holderAtEnd?: string;
+  visibleTransitionPath: string;
+}
+
+export interface AnchorStateTimeline {
+  anchorId: string;
+  states: AnchorStateTimelineEntry[];
+}
+
+export interface StoryboardBrief {
+  segmentNo: number;
+  eventIds: string[];
+  sourceEventIds?: string[];
+  narrativeFunction: string;
+  cameraId: string;
+  locationId: string;
+  visualDescZh?: string;
+  visualDescEn?: string;
+  beatRole?: VideoTimelineBlueprintSegment["beatRole"];
+  requiredAnchorIds?: string[];
+  separationReason?: string;
+  visibleAnchorIds: string[];
+  purposeZh?: string;
+  purposeEn?: string;
+}
+
+export interface SegmentRenderDescription {
+  segmentNo: number;
+  startFrameContract?: Record<string, unknown>;
+  endFrameContract?: Record<string, unknown>;
+  motionContract?: Record<string, unknown>;
+  singleTakeContract?: Record<string, unknown>;
+  motionCheckpoints?: VideoMicroShot[];
+  visibleAnchorIds: string[];
+  requiresCut?: boolean;
+  riskLevel?: "low" | "medium" | "high";
+  timelineChangeRequest?: Record<string, unknown>;
+  recommendedSplit?: unknown[];
+  warnings?: string[];
+}
+
+export type CameraRelation =
+  | "same_camera_setup"
+  | "same_axis"
+  | "derived_reframe"
+  | "same_spatial_context"
+  | "same_subject_group"
+  | "alternate_view"
+  | "new_camera_setup";
+
+export interface CameraGraphNode {
+  cameraId: string;
+  segmentNos: number[];
+  locationId?: string;
+  description?: string;
+}
+
+export interface CameraGraphEdge {
+  fromCameraId: string;
+  toCameraId: string;
+  relation: CameraRelation;
+  reason?: string;
+}
+
+export interface CameraGraph {
+  cameras: CameraGraphNode[];
+  relations: CameraGraphEdge[];
+}
+
+export interface FinalTransitionPlan {
+  fromSegmentNo: number;
+  toSegmentNo: number;
+  visualMode: "hard_cut" | "match_cut" | "dissolve" | "fade_to_black" | "generated_bridge";
+  audioMode: "none" | "j_cut" | "l_cut" | "crossfade";
+  overlapSeconds: number;
+  matchAnchorId?: string;
+  generatedBridgeRequired: boolean;
+}
+
+export interface ReferenceSelectionCandidate {
+  artifactId: string;
+  url?: string;
+  sourceType?: "hard_anchor" | "user_upload" | "recent_keyframe" | "parent_camera" | "transition_reference" | "style_brand" | "custom";
+  quotaType?: "character" | "product" | "space_layout" | "style_brand";
+  purpose: string;
+  relevanceScore: number;
+  conflictScore: number;
+  recencyScore: number;
+  viewMatchScore: number;
+  finalScore?: number;
+  selected: boolean;
+  rejectionReason?: string;
+  usageNote?: string;
+}
+
+export interface ReferenceSelectionOutput {
+  targetArtifactId: string;
+  targetType: "keyframe" | "segment" | "micro_shot" | "consistency_reference" | "custom";
+  selectedArtifactIds: string[];
+  selectedReferenceUrls?: string[];
+  candidates: ReferenceSelectionCandidate[];
+  usageNotes?: string[];
+  finalTextPrompt?: string;
+  warnings?: string[];
+}
+
+export interface ArtifactMetadata {
+  revision: number;
+  schemaVersion: string;
+  plannerVersion: string;
+  promptVersion: string;
+  modelVersion: string;
+  inputHash: string;
+  dependsOn: string[];
+  status: "draft" | "dirty" | "approved" | "generating" | "ready" | "failed";
+  dirtyReason?: string;
+  retryFromStage?: "stage1" | "stage2a" | "stage2b" | "stage3" | "reference_selector" | "compiler" | "generation" | "composition" | "manual";
+  updatedAt?: string;
+}
+
+export interface GenerationQualityReport {
+  assetId: string;
+  identityScore: number;
+  layoutScore: number;
+  promptAlignmentScore: number;
+  continuityScore: number;
+  singleTakeScore?: number;
+  artifactIssues: string[];
+  passed: boolean;
+  retryInstruction?: string;
+}
+
+export interface PromptDebugArtifact {
+  targetArtifactId: string;
+  targetType: "keyframe" | "segment" | "micro_shot" | "consistency_reference" | "custom";
+  compilerVersion: string;
+  inputs: Record<string, unknown>;
+  selectedReferenceUrls?: string[];
+  referenceUsageNotes?: string[];
+  beforePrompt?: string;
+  finalPrompt: string;
+  finalNegativePrompt?: string;
+  rules: string[];
+  warnings?: string[];
+  createdAt: string;
+}
+
 export interface OnePromptVideoPlan {
   title: string;
   logline: string;
@@ -364,6 +543,21 @@ export interface OnePromptVideoPlan {
   planningManifest?: VideoPlanningManifest;
   consistencyManifest?: VideoPlanningManifest["consistencyManifest"];
   timelineBlueprint?: VideoPlanningManifest["timelineBlueprint"];
+  narrativeEvents?: NarrativeEvent[];
+  anchorStateTimeline?: AnchorStateTimeline[];
+  audioBible?: Record<string, unknown>;
+  candidateTimeline?: VideoTimelineBlueprintSegment[];
+  storyboardBrief?: StoryboardBrief[];
+  segmentRenderDescriptions?: SegmentRenderDescription[];
+  cameraGraph?: CameraGraph;
+  transitionReferencePlan?: unknown[];
+  finalTransitionPlan?: FinalTransitionPlan[];
+  referenceSelectionOutputs?: ReferenceSelectionOutput[];
+  promptDebugArtifacts?: Record<string, PromptDebugArtifact>;
+  artifactMetadata?: Record<string, ArtifactMetadata>;
+  generationQualityReports?: GenerationQualityReport[];
+  plannerShadow?: Record<string, unknown>;
+  plannerWarnings?: string[];
   storyboardPlan?: unknown;
   promptDetailPlan?: VideoPromptDetailPlan;
   consistencyReferences?: VideoConsistencyReference[];

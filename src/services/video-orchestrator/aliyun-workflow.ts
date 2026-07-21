@@ -5,8 +5,7 @@ import { errorForLog, logOnePromptVideo } from "./logger";
 const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
 const VIDEO_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
-const MIN_SEGMENT_SECONDS = 3;
-const MAX_SEGMENT_SECONDS = 15;
+const ONE_PROMPT_VIDEO_MODEL = "happyhorse-1.1-i2v";
 type DashScopeTaskStatus = "pending" | "running" | "succeeded" | "failed";
 
 export interface DashScopeTaskResult {
@@ -51,6 +50,10 @@ function model(name: string, fallback: string): string {
   return process.env[name]?.trim() || fallback;
 }
 
+function onePromptI2vModel(): string {
+  return ONE_PROMPT_VIDEO_MODEL;
+}
+
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, Math.round(value)));
@@ -60,16 +63,6 @@ function imageSizeFromAspectRatio(aspectRatio: VideoAspectRatio): string {
   if (aspectRatio === "16:9") return "1536*864";
   if (aspectRatio === "1:1") return "1024*1024";
   return "864*1536";
-}
-
-function supportsLastFrameMedia(modelName: string): boolean {
-  const model = modelName.trim().toLowerCase();
-  if (model.includes("happyhorse")) return false;
-  return model.includes("wan2.7") || model.includes("wanx");
-}
-
-function supportsOrderedFrameReferences(modelName: string): boolean {
-  return false;
 }
 
 export async function submitAliyunImageTask(params: {
@@ -131,48 +124,46 @@ export async function submitAliyunImageTask(params: {
 }
 export async function submitAliyunImageToVideoTask(params: {
   imageUrl: string;
-  lastFrameUrl?: string;
+  lastFrameUrl: string;
   prompt: string;
   durationSeconds: number;
 }): Promise<string> {
-  const i2vModel = model("ALIYUN_I2V_MODEL", "wan2.7-i2v-2026-04-25");
-  const shouldSendTypedLastFrame = Boolean(params.lastFrameUrl && supportsLastFrameMedia(i2vModel));
-  const shouldSendOrderedFrameReference = Boolean(params.lastFrameUrl && supportsOrderedFrameReferences(i2vModel));
+  const i2vModel = onePromptI2vModel();
+  if (!params.lastFrameUrl?.trim()) {
+    throw new Error("HappyHorse boundary-constrained generation requires an end-frame image URL for deterministic post-processing.");
+  }
   const prompt = params.prompt;
+  const duration = clamp(params.durationSeconds, 3, 15);
+  const resolution = process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P";
+  const generateAudio = process.env.ALIYUN_I2V_AUDIO?.trim().toLowerCase() !== "false";
   const body = {
     model: i2vModel,
     input: {
       prompt: prompt.slice(0, 5000),
-      media: [
-        {
-          type: "first_frame",
-          url: params.imageUrl,
-        },
-        ...(shouldSendTypedLastFrame
-          ? [
-              {
-                type: "last_frame",
-                url: params.lastFrameUrl,
-              },
-            ]
-          : []),
-      ],
+      // HappyHorse 1.1 I2V accepts exactly one first_frame. The approved end
+      // boundary is enforced deterministically after this task succeeds.
+      media: [{ type: "first_frame", url: params.imageUrl }],
     },
     parameters: {
-      resolution: process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P",
-      duration: clamp(params.durationSeconds, MIN_SEGMENT_SECONDS, MAX_SEGMENT_SECONDS),
+      resolution,
+      duration,
+      audio: generateAudio,
       prompt_extend: process.env.ALIYUN_I2V_PROMPT_EXTEND?.trim().toLowerCase() === "true",
       watermark: false,
     },
   };
   await logOnePromptVideo("aliyun.i2v.submit.prepare", {
     model: i2vModel,
+    configuredModel: process.env.ALIYUN_I2V_MODEL?.trim() || null,
+    forcedModel: true,
     imageUrl: params.imageUrl,
     lastFrameUrl: params.lastFrameUrl,
-    lastFrameMode: shouldSendTypedLastFrame ? "last_frame" : shouldSendOrderedFrameReference ? "ordered_reference_disabled" : "none",
+    lastFrameMode: "deterministic_postprocess",
     promptLength: prompt.length,
-    durationSeconds: params.durationSeconds,
-    resolution: process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P",
+    requestedDurationSeconds: params.durationSeconds,
+    durationSeconds: duration,
+    resolution,
+    generateAudio,
   });
   return submitDashScopeAsync(VIDEO_PATH, body, "阿里云万相图生视频");
 }

@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { logOnePromptVideo } from "./logger";
-import type { VideoAspectRatio } from "./types";
+import type { FinalTransitionPlan, VideoAspectRatio } from "./types";
 
 interface LocalComposeParams {
   projectId: string;
@@ -13,11 +13,22 @@ interface LocalComposeParams {
   clipDurations?: number[];
   subtitles?: LocalComposeSubtitle[];
   aspectRatio: VideoAspectRatio;
+  transitionPlan?: FinalTransitionPlan[];
+  audioBible?: Record<string, unknown>;
 }
 
 interface LocalComposeSubtitle {
   text: string;
   durationSeconds?: number;
+}
+
+interface EnforceSegmentEndFrameParams {
+  projectId: string;
+  segmentNo: number;
+  clipUrl: string;
+  endFrameUrl: string;
+  durationSeconds: number;
+  aspectRatio: VideoAspectRatio;
 }
 
 interface OssConfig {
@@ -28,6 +39,106 @@ interface OssConfig {
   bucket: string;
   publicDomain: string;
   forcePathStyle: boolean;
+}
+
+const COMPOSE_FRAME_RATE = 24;
+// xfade becomes unstable when its duration is shorter than (or rounds exactly
+// onto) one output frame. Keep hard cuts just over one 24 fps frame.
+const MIN_XFADE_SECONDS = 0.05;
+
+/**
+ * HappyHorse I2V only accepts a first frame. Make the approved segment boundary
+ * an exact, visible final frame without switching to another video model.
+ */
+export async function enforceSegmentEndFrameLocally(params: EnforceSegmentEndFrameParams): Promise<string> {
+  const cfg = readOssConfig();
+  const ffmpegPath = process.env.FFMPEG_PATH?.trim() || "ffmpeg";
+  const workDir = path.join(os.tmpdir(), `one-prompt-boundary-${params.projectId}-${params.segmentNo}-${Date.now()}`);
+  const inputPath = path.join(workDir, "happyhorse-source.mp4");
+  const endFramePath = path.join(workDir, "approved-end-frame");
+  const outputPath = path.join(workDir, "boundary-enforced.mp4");
+  const duration = Math.max(3, Math.min(15, Number(params.durationSeconds) || 5));
+  const fadeSeconds = Math.min(0.65, Math.max(0.35, duration * 0.08));
+  const holdSeconds = Math.min(0.35, Math.max(0.2, duration * 0.04));
+  const fadeOffset = Math.max(0, duration - fadeSeconds - holdSeconds);
+  const stillDuration = fadeSeconds + holdSeconds;
+  const { width, height } = videoDimensionsForAspectRatio(params.aspectRatio);
+  const normalizeVideo = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+
+  await mkdir(workDir, { recursive: true });
+  await logOnePromptVideo("clip.boundary_enforce.start", {
+    projectId: params.projectId,
+    segmentNo: params.segmentNo,
+    durationSeconds: duration,
+    fadeSeconds,
+    holdSeconds,
+    endFrameUrl: params.endFrameUrl,
+    model: "happyhorse-1.1-i2v",
+  });
+  try {
+    await Promise.all([
+      downloadToFile(params.clipUrl, inputPath),
+      downloadToFile(params.endFrameUrl, endFramePath),
+    ]);
+    await runFfmpeg(ffmpegPath, [
+      "-y",
+      "-i",
+      inputPath,
+      "-loop",
+      "1",
+      "-framerate",
+      "24",
+      "-i",
+      endFramePath,
+      "-filter_complex",
+      `[0:v]fps=24,${normalizeVideo},setpts=PTS-STARTPTS[base];` +
+        `[1:v]fps=24,${normalizeVideo},trim=duration=${stillDuration.toFixed(3)},setpts=PTS-STARTPTS[end];` +
+        `[base][end]xfade=transition=fade:duration=${fadeSeconds.toFixed(3)}:offset=${fadeOffset.toFixed(3)}[outv]`,
+      "-map",
+      "[outv]",
+      "-map",
+      "0:a?",
+      "-t",
+      duration.toFixed(3),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+    const key = `one-prompt-video/segments/${params.projectId}-segment-${params.segmentNo}-bounded-${Date.now()}.mp4`;
+    const publicUrl = await uploadFileToOss(cfg, key, outputPath);
+    await logOnePromptVideo("clip.boundary_enforce.success", {
+      projectId: params.projectId,
+      segmentNo: params.segmentNo,
+      publicUrl,
+      exactEndFrameHoldSeconds: holdSeconds,
+    });
+    return publicUrl;
+  } catch (error) {
+    await logOnePromptVideo("clip.boundary_enforce.error", {
+      projectId: params.projectId,
+      segmentNo: params.segmentNo,
+      error: error instanceof Error ? error.message : String(error),
+    }, "error");
+    throw error;
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+function videoDimensionsForAspectRatio(aspectRatio: VideoAspectRatio): { width: number; height: number } {
+  if (aspectRatio === "16:9") return { width: 1280, height: 720 };
+  if (aspectRatio === "1:1") return { width: 720, height: 720 };
+  return { width: 720, height: 1280 };
 }
 
 export async function composeVideoClipsLocally(params: LocalComposeParams): Promise<string> {
@@ -53,29 +164,69 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       clipPaths.push(clipPath);
     }
 
+    const probedClipDurations = await Promise.all(clipPaths.map((clipPath) => probeClipDurationSeconds(ffmpegPath, clipPath)));
+    const effectiveClipDurations = clipPaths.map((_, index) => {
+      const probed = probedClipDurations[index];
+      if (Number.isFinite(probed) && Number(probed) > 0) return Number(probed);
+      const planned = Number(params.clipDurations?.[index]);
+      return Number.isFinite(planned) && planned > 0 ? planned : 5;
+    });
     const composedPath = path.join(workDir, "composed-raw.mp4");
-    const transitionSeconds = composeTransitionSeconds(params.clipDurations);
+    const transitionPlan = normalizeComposeTransitionPlan(params.transitionPlan ?? [], params.clipUrls.length, effectiveClipDurations);
+    assertNoUnresolvedGeneratedBridge(transitionPlan);
+    const transitionSeconds = maxTransitionSeconds(transitionPlan);
+    const stripSourceAudio = shouldStripSourceAudio(params.audioBible);
     const audioPresence = await Promise.all(clipPaths.map((clipPath) => probeClipHasAudio(ffmpegPath, clipPath)));
     await logOnePromptVideo("compose.local.audio_probe", {
       projectId: params.projectId,
       clipCount: clipPaths.length,
       clipsWithAudio: audioPresence.filter(Boolean).length,
       audioPresence,
+      stripSourceAudio,
+      plannedDurations: params.clipDurations ?? [],
+      probedDurations: probedClipDurations,
+      effectiveDurations: effectiveClipDurations,
     }, audioPresence.every(Boolean) ? "info" : "warn");
     if (clipPaths.length > 1 && transitionSeconds > 0) {
-      await composeWithXfade(ffmpegPath, clipPaths, params.clipDurations ?? [], transitionSeconds, composedPath, audioPresence);
+      await composeWithPlannedXfade(ffmpegPath, clipPaths, effectiveClipDurations, transitionPlan, composedPath, audioPresence, stripSourceAudio);
     } else {
-      await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath);
+      await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath, stripSourceAudio);
+    }
+    const expectedVideoDuration = Math.max(
+      0,
+      effectiveClipDurations.reduce((sum, duration) => sum + duration, 0) -
+        transitionPlan.reduce((sum, transition) => sum + transition.overlapSeconds, 0),
+    );
+    const composedVideoDuration = await probeClipDurationSeconds(ffmpegPath, composedPath);
+    await logOnePromptVideo("compose.local.video_probe", {
+      projectId: params.projectId,
+      expectedVideoDuration,
+      composedVideoDuration,
+    });
+    if (
+      Number.isFinite(composedVideoDuration) &&
+      Number(composedVideoDuration) + Math.max(0.25, MIN_XFADE_SECONDS * 2) < expectedVideoDuration
+    ) {
+      throw new Error(
+        `Composed video stream is truncated: expected about ${expectedVideoDuration.toFixed(3)}s, got ${Number(composedVideoDuration).toFixed(3)}s.`,
+      );
     }
 
-    const outputPath = await burnSubtitlesIfNeeded({
+    const audioMixedPath = await applyUnifiedAudioIfNeeded({
       ffmpegPath,
       inputPath: composedPath,
       workDir,
       projectId: params.projectId,
+      audioBible: params.audioBible,
+    });
+    const outputPath = await burnSubtitlesIfNeeded({
+      ffmpegPath,
+      inputPath: audioMixedPath,
+      workDir,
+      projectId: params.projectId,
       aspectRatio: params.aspectRatio,
       subtitles: params.subtitles ?? [],
-      durations: params.clipDurations ?? [],
+      durations: effectiveClipDurations,
       transitionSeconds,
     });
     const key = `one-prompt-video/final/${params.projectId}-${Date.now()}.mp4`;
@@ -287,7 +438,7 @@ function toFfmpegConcatPath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/'/g, "'\\''");
 }
 
-async function composeWithConcat(ffmpegPath: string, clipPaths: string[], listPath: string, outputPath: string): Promise<void> {
+async function composeWithConcat(ffmpegPath: string, clipPaths: string[], listPath: string, outputPath: string, stripAudio: boolean): Promise<void> {
   await writeFile(listPath, clipPaths.map((clipPath) => `file '${toFfmpegConcatPath(clipPath)}'`).join("\n"), "utf8");
   await runFfmpeg(ffmpegPath, [
     "-y",
@@ -303,43 +454,52 @@ async function composeWithConcat(ffmpegPath: string, clipPaths: string[], listPa
     "veryfast",
     "-pix_fmt",
     "yuv420p",
-    "-c:a",
-    "aac",
+    ...(stripAudio ? ["-an"] : ["-c:a", "aac"]),
     "-movflags",
     "+faststart",
     outputPath,
   ]);
 }
 
-async function composeWithXfade(
+async function composeWithPlannedXfade(
   ffmpegPath: string,
   clipPaths: string[],
   durations: number[],
-  transitionSeconds: number,
+  transitionPlan: ComposeTransition[],
   outputPath: string,
   audioPresence: boolean[],
+  stripAudio: boolean,
 ): Promise<void> {
   const args = ["-y", ...clipPaths.flatMap((clipPath) => ["-i", clipPath])];
-  const canCrossfadeAudio = audioPresence.every(Boolean);
+  const canCrossfadeAudio = !stripAudio && audioPresence.some(Boolean);
   const safeDurations = clipPaths.map((_, index) => {
     const duration = Number(durations[index]);
+    const transitionSeconds = transitionPlan[index]?.overlapSeconds ?? MIN_XFADE_SECONDS;
     return Number.isFinite(duration) && duration > transitionSeconds * 2 ? duration : 5;
   });
-  const filters: string[] = clipPaths.map((_, index) => `[${index}:v]setpts=PTS-STARTPTS,format=yuv420p[v${index}]`);
+  const filters: string[] = clipPaths.map((_, index) =>
+    `[${index}:v]fps=${COMPOSE_FRAME_RATE},settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v${index}]`,
+  );
   let previousLabel = "v0";
   for (let index = 1; index < clipPaths.length; index += 1) {
+    const transition = transitionPlan[index - 1] ?? defaultComposeTransition(index);
+    const transitionSeconds = Math.max(MIN_XFADE_SECONDS, transition.overlapSeconds);
     const outputLabel = index === clipPaths.length - 1 ? "outv" : `x${index}`;
-    const previousDuration = safeDurations.slice(0, index).reduce((sum, value) => sum + value, 0) - transitionSeconds * (index - 1);
+    const previousDuration = safeDurations.slice(0, index).reduce((sum, value) => sum + value, 0) -
+      transitionPlan.slice(0, index - 1).reduce((sum, item) => sum + Math.max(MIN_XFADE_SECONDS, item.overlapSeconds), 0);
     const offset = Math.max(0, previousDuration - transitionSeconds);
-    filters.push(`[${previousLabel}][v${index}]xfade=transition=fade:duration=${transitionSeconds}:offset=${offset.toFixed(3)}[${outputLabel}]`);
+    filters.push(`[${previousLabel}][v${index}]xfade=transition=${transition.ffmpegTransition}:duration=${transitionSeconds.toFixed(3)}:offset=${offset.toFixed(3)}[${outputLabel}]`);
     previousLabel = outputLabel;
   }
   if (canCrossfadeAudio) {
-    filters.push(...clipPaths.map((_, index) => `[${index}:a]asetpts=PTS-STARTPTS,aformat=sample_rates=44100:channel_layouts=stereo[a${index}]`));
+    filters.push(...clipPaths.map((_, index) => audioPresence[index]
+      ? `[${index}:a]asetpts=PTS-STARTPTS,aformat=sample_rates=44100:channel_layouts=stereo[a${index}]`
+      : `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=${safeDurations[index].toFixed(3)},asetpts=PTS-STARTPTS[a${index}]`));
     let previousAudioLabel = "a0";
     for (let index = 1; index < clipPaths.length; index += 1) {
       const outputAudioLabel = index === clipPaths.length - 1 ? "outa" : `ax${index}`;
-      filters.push(`[${previousAudioLabel}][a${index}]acrossfade=d=${transitionSeconds}:c1=tri:c2=tri[${outputAudioLabel}]`);
+      const transitionSeconds = Math.max(MIN_XFADE_SECONDS, transitionPlan[index - 1]?.overlapSeconds ?? MIN_XFADE_SECONDS);
+      filters.push(`[${previousAudioLabel}][a${index}]acrossfade=d=${transitionSeconds.toFixed(3)}:c1=tri:c2=tri[${outputAudioLabel}]`);
       previousAudioLabel = outputAudioLabel;
     }
   }
@@ -361,6 +521,172 @@ async function composeWithXfade(
     "+faststart",
     outputPath,
   ]);
+}
+
+interface ComposeTransition {
+  fromSegmentNo: number;
+  toSegmentNo: number;
+  visualMode: FinalTransitionPlan["visualMode"];
+  audioMode: FinalTransitionPlan["audioMode"];
+  overlapSeconds: number;
+  matchAnchorId?: string;
+  generatedBridgeRequired: boolean;
+  ffmpegTransition: string;
+}
+
+function normalizeComposeTransitionPlan(plan: FinalTransitionPlan[], clipCount: number, durations: number[] | undefined): ComposeTransition[] {
+  const fallbackSeconds = composeTransitionSeconds(durations);
+  const byPair = new Map(plan.map((item) => [`${item.fromSegmentNo}->${item.toSegmentNo}`, item]));
+  return Array.from({ length: Math.max(0, clipCount - 1) }, (_, index) => {
+    const fromSegmentNo = index + 1;
+    const toSegmentNo = index + 2;
+    const item = byPair.get(`${fromSegmentNo}->${toSegmentNo}`);
+    const visualMode = item?.visualMode ?? "dissolve";
+    const overlapSeconds = visualMode === "hard_cut" || visualMode === "match_cut"
+      ? MIN_XFADE_SECONDS
+      : clampTransitionSeconds(Number(item?.overlapSeconds ?? fallbackSeconds), durations);
+    return {
+      fromSegmentNo,
+      toSegmentNo,
+      visualMode,
+      audioMode: item?.audioMode ?? "crossfade",
+      overlapSeconds,
+      matchAnchorId: item?.matchAnchorId,
+      generatedBridgeRequired: Boolean(item?.generatedBridgeRequired || visualMode === "generated_bridge"),
+      ffmpegTransition: ffmpegTransitionForVisualMode(visualMode),
+    };
+  });
+}
+
+function defaultComposeTransition(toSegmentNo: number): ComposeTransition {
+  return {
+    fromSegmentNo: toSegmentNo - 1,
+    toSegmentNo,
+    visualMode: "hard_cut",
+    audioMode: "none",
+    overlapSeconds: MIN_XFADE_SECONDS,
+    generatedBridgeRequired: false,
+    ffmpegTransition: "fade",
+  };
+}
+
+function assertNoUnresolvedGeneratedBridge(plan: ComposeTransition[]): void {
+  const bridge = plan.find((item) => item.generatedBridgeRequired);
+  if (bridge) {
+    throw new Error(`Transition ${bridge.fromSegmentNo}->${bridge.toSegmentNo} requires generated_bridge. Generate and approve the bridge clip before final composition.`);
+  }
+}
+
+function maxTransitionSeconds(plan: ComposeTransition[]): number {
+  return plan.reduce((max, item) => Math.max(max, item.overlapSeconds), 0);
+}
+
+function ffmpegTransitionForVisualMode(mode: FinalTransitionPlan["visualMode"]): string {
+  if (mode === "fade_to_black") return "fadeblack";
+  if (mode === "dissolve") return "fade";
+  return "fade";
+}
+
+function clampTransitionSeconds(value: number, durations: number[] | undefined): number {
+  if (!Number.isFinite(value) || value <= 0) return MIN_XFADE_SECONDS;
+  const shortest = durations
+    ?.filter((duration) => Number.isFinite(duration) && duration > 0)
+    .reduce((min, duration) => Math.min(min, duration), Number.POSITIVE_INFINITY) ?? Number.POSITIVE_INFINITY;
+  const maxSafe = Number.isFinite(shortest) ? Math.max(MIN_XFADE_SECONDS, shortest / 3) : value;
+  return Math.max(MIN_XFADE_SECONDS, Math.min(value, maxSafe, 1.5));
+}
+
+function shouldStripSourceAudio(audioBible: Record<string, unknown> | undefined): boolean {
+  const raw = audioBible?.stripSourceAudio ?? audioBible?.strip_source_audio ?? audioBible?.removeOriginalAudio ?? audioBible?.remove_original_audio;
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "string") return raw.toLowerCase() !== "false";
+  return process.env.ONE_PROMPT_STRIP_SOURCE_AUDIO?.trim().toLowerCase() === "true";
+}
+
+async function applyUnifiedAudioIfNeeded(params: {
+  ffmpegPath: string;
+  inputPath: string;
+  workDir: string;
+  projectId: string;
+  audioBible?: Record<string, unknown>;
+}): Promise<string> {
+  const outputPath = path.join(params.workDir, "final-with-unified-audio.mp4");
+  const bgmSource = audioSourceFromBible(params.audioBible);
+  const loudnorm = shouldApplyLoudnorm(params.audioBible);
+  const volume = audioVolume(params.audioBible);
+  await logOnePromptVideo("compose.local.audio_policy", {
+    projectId: params.projectId,
+    bgmSource: bgmSource ? maskAudioSourceForLog(bgmSource) : null,
+    loudnorm,
+    volume,
+    stripSourceAudio: shouldStripSourceAudio(params.audioBible),
+  });
+
+  if (bgmSource) {
+    const bgmPath = path.join(params.workDir, "bgm-source");
+    await resolveAudioSourceToFile(bgmSource, bgmPath);
+    await runFfmpeg(params.ffmpegPath, [
+      "-y",
+      "-i",
+      params.inputPath,
+      "-stream_loop",
+      "-1",
+      "-i",
+      bgmPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-shortest",
+      "-c:v",
+      "copy",
+      "-af",
+      `${loudnorm ? "loudnorm=I=-16:TP=-1.5:LRA=11," : ""}volume=${volume.toFixed(2)}`,
+      "-c:a",
+      "aac",
+      "-b:a",
+      "160k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+    return outputPath;
+  }
+
+  // With no replacement BGM configured, keep the audio produced by the source
+  // clips. Replacing it with anullsrc here would silently discard native music.
+  return params.inputPath;
+}
+
+function audioSourceFromBible(audioBible: Record<string, unknown> | undefined): string | undefined {
+  const value = audioBible?.bgmUrl ?? audioBible?.bgm_url ?? audioBible?.bgmPath ?? audioBible?.bgm_path ?? process.env.ONE_PROMPT_BGM_URL ?? process.env.ONE_PROMPT_BGM_PATH;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function shouldApplyLoudnorm(audioBible: Record<string, unknown> | undefined): boolean {
+  const value = audioBible?.loudnorm ?? audioBible?.loudNorm ?? audioBible?.loudnessNormalization ?? audioBible?.loudness_normalization;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.toLowerCase() !== "false";
+  return process.env.ONE_PROMPT_AUDIO_LOUDNORM?.trim().toLowerCase() !== "false";
+}
+
+function audioVolume(audioBible: Record<string, unknown> | undefined): number {
+  const value = Number(audioBible?.volume ?? audioBible?.bgmVolume ?? audioBible?.bgm_volume ?? process.env.ONE_PROMPT_BGM_VOLUME ?? 0.35);
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.35;
+}
+
+async function resolveAudioSourceToFile(source: string, outputPath: string): Promise<void> {
+  if (/^https?:\/\//i.test(source)) {
+    await downloadToFile(source, outputPath);
+    return;
+  }
+  const bytes = await readFile(source);
+  await writeFile(outputPath, bytes);
+}
+
+function maskAudioSourceForLog(source: string): string {
+  if (/^https?:\/\//i.test(source)) return source.replace(/([?&](?:token|signature|key|access_key)=)[^&]+/gi, "$1***");
+  return path.basename(source);
 }
 
 function composeTransitionSeconds(durations: number[] | undefined): number {
@@ -422,6 +748,32 @@ function probeClipHasAudio(ffmpegPath: string, clipPath: string): Promise<boolea
     child.on("error", () => resolve(false));
     child.on("close", (code) => {
       resolve(code === 0 && stdout.includes("audio"));
+    });
+  });
+}
+
+function probeClipDurationSeconds(ffmpegPath: string, clipPath: string): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    const ffprobePath = ffprobePathFor(ffmpegPath);
+    const child = spawn(ffprobePath, [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      clipPath,
+    ], { windowsHide: true });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.on("error", () => resolve(undefined));
+    child.on("close", (code) => {
+      const duration = Number(stdout.trim());
+      resolve(code === 0 && Number.isFinite(duration) && duration > 0 ? duration : undefined);
     });
   });
 }

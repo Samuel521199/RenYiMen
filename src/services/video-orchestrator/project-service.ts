@@ -1,8 +1,8 @@
 import { Prisma, VideoProjectStatus, VideoShotStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { consumeUserBalanceInTransaction } from "@/lib/billing";
-import { normalizePlanInput } from "./planner";
-import { scoreShotImage } from "./quality-judge";
+import { createVideoPlan, normalizePlanInput } from "./planner";
+import { buildImageGenerationQualityReport, buildVideoGenerationQualityReport, scoreShotImage } from "./quality-judge";
 import {
   queryDashScopeTask,
   queryImsComposeJob,
@@ -11,8 +11,10 @@ import {
 } from "./aliyun-workflow";
 import { createAliyunStoryboardPlan } from "./three-stage-planner";
 import { errorForLog, logOnePromptVideo } from "./logger";
-import { composeVideoClipsLocally } from "./local-compose";
-import type { CreateVideoProjectInput, OnePromptVideoPlan, UpdateShotInput, VideoConsistencyReference, VideoMicroShot } from "./types";
+import { composeVideoClipsLocally, enforceSegmentEndFrameLocally } from "./local-compose";
+import { isTemporaryDashScopeUrl, persistRemoteMediaToOss } from "./oss-media";
+import { appendProjectStageLog, writeProjectOverviewLog, writeScriptBreakdownLog, writeStageErrorLog } from "./stage-logger";
+import type { ArtifactMetadata, CreateVideoProjectInput, FinalTransitionPlan, GenerationQualityReport, OnePromptVideoPlan, PlanVideoProjectInput, PromptDebugArtifact, ReferenceSelectionOutput, UpdateShotInput, VideoConsistencyReference, VideoMicroShot } from "./types";
 
 const PROJECT_INCLUDE = {
   shots: { orderBy: { shotNo: "asc" as const } },
@@ -23,10 +25,18 @@ const PROJECT_INCLUDE = {
 const DEFAULT_IMAGE_TASK_CONCURRENCY = 3;
 const DEFAULT_CLIP_TASK_CONCURRENCY = 2;
 const MAX_UPSTREAM_TASK_CONCURRENCY = 5;
+type OnePromptPlannerArch = "v1" | "v2_shadow" | "v2";
 
 function envInt(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) ? Math.round(value) : fallback;
+}
+
+function onePromptPlannerArch(): OnePromptPlannerArch {
+  const raw = (process.env.ONE_PROMPT_VIDEO_PLANNER_ARCH || "v2").trim().toLowerCase();
+  if (raw === "v1" || raw === "legacy") return "v1";
+  if (raw === "v2_shadow" || raw === "shadow") return "v2_shadow";
+  return "v2";
 }
 
 function imageTaskConcurrency(): number {
@@ -43,9 +53,9 @@ function isManuallyStopped(project: Pick<VideoProjectWithShots, "status" | "erro
 
 const CHARACTER_CONSISTENCY_KEYFRAME_NO = -2;
 const SCENE_CONSISTENCY_KEYFRAME_NO = -1;
-const DEMO_PROJECT_TITLE = "Tongits King: 欢乐竞技，智取王座";
+const DEMO_PROJECT_TITLE = "Tongits King: Joyful Arena";
 const DEMO_PROJECT_SOURCE_IDS = ["cmrlwfpz10001tvu4g80aou8c", "cmrlur1ue0001tvw42u6de3yr"];
-const DEMO_PROJECT_PROMPT = "如图这个游戏，我要做一个30s的广告宣传片，要求引人入胜，画面精良，且整个视频前后人物要一致";
+const DEMO_PROJECT_PROMPT = "Create a 30s game ad with strong visual polish and consistent characters throughout.";
 const DEMO_PROJECT_FINAL_VIDEO_URL = "/demo/tongits/final.mp4";
 const ONE_PROMPT_VIDEO_COST_CREDITS = 5000;
 const MANUAL_STOP_MESSAGE = "Generation stopped by user";
@@ -53,6 +63,37 @@ const MANUAL_STOP_MESSAGE = "Generation stopped by user";
 export type VideoProjectWithShots = Prisma.VideoProjectGetPayload<{
   include: typeof PROJECT_INCLUDE;
 }>;
+
+type ReferenceQuotaType = NonNullable<ReferenceSelectionOutput["candidates"][number]["quotaType"]>;
+type ReferenceSourceType = NonNullable<ReferenceSelectionOutput["candidates"][number]["sourceType"]>;
+
+type ReferenceCandidateDraft = {
+  artifactId: string;
+  url: string;
+  sourceType: ReferenceSourceType;
+  quotaType: ReferenceQuotaType;
+  purpose: string;
+  relevanceScore: number;
+  conflictScore: number;
+  recencyScore: number;
+  viewMatchScore: number;
+  usageNote: string;
+};
+
+type CompiledPrompt = {
+  prompt: string;
+  negativePrompt?: string;
+  referenceImageUrls?: string[];
+  debugArtifact: PromptDebugArtifact;
+};
+
+type PlanDebugPatch = {
+  narrativeEvents?: unknown;
+  consistencyAnchors?: unknown;
+  anchorStateTimeline?: unknown;
+};
+
+type ArtifactRetryFromStage = NonNullable<ArtifactMetadata["retryFromStage"]>;
 
 export function serializeVideoProject(project: VideoProjectWithShots) {
   const planShots = readPlanShotMap(project.planJson);
@@ -109,6 +150,7 @@ export function serializeVideoProject(project: VideoProjectWithShots) {
       updatedAt: segment.updatedAt.toISOString(),
     })),
     shots: compatShots,
+    planDebug: extractPlanDebug(project.planJson),
   };
 }
 
@@ -158,6 +200,82 @@ function serializeSegmentAsShot(
     endTimeSeconds: segment.endTimeSeconds,
     createdAt: segment.createdAt.toISOString(),
     updatedAt: segment.updatedAt.toISOString(),
+  };
+}
+
+function extractPlanDebug(planJson: Prisma.JsonValue | null): Record<string, unknown> {
+  const plan = isRecord(planJson) ? planJson : {};
+  const planningManifest = isRecord(plan.planningManifest)
+    ? plan.planningManifest
+    : isRecord(plan.planning_manifest)
+      ? plan.planning_manifest
+      : {};
+  const consistencyManifest = isRecord(plan.consistencyManifest)
+    ? plan.consistencyManifest
+    : isRecord(plan.consistency_manifest)
+      ? plan.consistency_manifest
+      : isRecord(planningManifest.consistencyManifest)
+        ? planningManifest.consistencyManifest
+        : isRecord(planningManifest.consistency_manifest)
+          ? planningManifest.consistency_manifest
+          : {};
+  return {
+    narrativeEvents: Array.isArray(plan.narrativeEvents)
+      ? plan.narrativeEvents
+      : Array.isArray(plan.narrative_events)
+        ? plan.narrative_events
+        : [],
+    consistencyAnchors: isRecord(consistencyManifest) && Array.isArray(consistencyManifest.anchors) ? consistencyManifest.anchors : [],
+    anchorStateTimeline: Array.isArray(plan.anchorStateTimeline)
+      ? plan.anchorStateTimeline
+      : Array.isArray(plan.anchor_state_timeline)
+        ? plan.anchor_state_timeline
+        : [],
+    segmentRenderDescriptions: Array.isArray(plan.segmentRenderDescriptions)
+      ? plan.segmentRenderDescriptions
+      : Array.isArray(plan.segment_render_descriptions)
+        ? plan.segment_render_descriptions
+        : [],
+    finalTransitionPlan: Array.isArray(plan.finalTransitionPlan)
+      ? plan.finalTransitionPlan
+      : Array.isArray(plan.final_transition_plan)
+        ? plan.final_transition_plan
+        : [],
+    audioBible: isRecord(plan.audioBible)
+      ? plan.audioBible
+      : isRecord(plan.audio_bible)
+        ? plan.audio_bible
+        : {},
+    referenceSelectionOutputs: Array.isArray(plan.referenceSelectionOutputs)
+      ? plan.referenceSelectionOutputs
+      : Array.isArray(plan.reference_selection_outputs)
+        ? plan.reference_selection_outputs
+        : [],
+    promptDebugArtifacts: isRecord(plan.promptDebugArtifacts)
+      ? plan.promptDebugArtifacts
+      : isRecord(plan.prompt_debug_artifacts)
+        ? plan.prompt_debug_artifacts
+        : {},
+    artifactMetadata: isRecord(plan.artifactMetadata)
+      ? plan.artifactMetadata
+      : isRecord(plan.artifact_metadata)
+        ? plan.artifact_metadata
+        : {},
+    generationQualityReports: Array.isArray(plan.generationQualityReports)
+      ? plan.generationQualityReports
+      : Array.isArray(plan.generation_quality_reports)
+        ? plan.generation_quality_reports
+        : [],
+    plannerShadow: isRecord(plan.plannerShadow)
+      ? plan.plannerShadow
+      : isRecord(plan.planner_shadow)
+        ? plan.planner_shadow
+        : {},
+    plannerWarnings: Array.isArray(plan.plannerWarnings)
+      ? plan.plannerWarnings
+      : Array.isArray(plan.planner_warnings)
+        ? plan.planner_warnings
+        : [],
   };
 }
 
@@ -213,7 +331,7 @@ function readPlanConsistencyReferenceMap(planJson: Prisma.JsonValue | null): Map
         : kind === "scene"
           ? SCENE_CONSISTENCY_KEYFRAME_NO
           : 0;
-    if (n === CHARACTER_CONSISTENCY_KEYFRAME_NO || n === SCENE_CONSISTENCY_KEYFRAME_NO) map.set(n, reference);
+    if (n < 0) map.set(n, reference);
   }
   return map;
 }
@@ -230,6 +348,666 @@ function readPlanSegmentMap(planJson: Prisma.JsonValue | null): Map<number, Reco
   return map;
 }
 
+function readPlanSegmentRenderDescriptionMap(planJson: Prisma.JsonValue | null): Map<number, Record<string, unknown>> {
+  const plan = isRecord(planJson) ? planJson : {};
+  const descriptions = Array.isArray(plan.segmentRenderDescriptions)
+    ? plan.segmentRenderDescriptions
+    : Array.isArray(plan.segment_render_descriptions)
+      ? plan.segment_render_descriptions
+      : [];
+  const map = new Map<number, Record<string, unknown>>();
+  for (const description of descriptions) {
+    if (!isRecord(description)) continue;
+    const n = Number(description.segmentNo ?? description.segment_no ?? description.shotNo ?? description.shot_no ?? description.sequence);
+    if (Number.isInteger(n) && n > 0) map.set(n, description);
+  }
+  return map;
+}
+
+function readFinalTransitionPlan(planJson: Prisma.JsonValue | null): FinalTransitionPlan[] {
+  const plan = isRecord(planJson) ? planJson : {};
+  const raw = Array.isArray(plan.finalTransitionPlan)
+    ? plan.finalTransitionPlan
+    : Array.isArray(plan.final_transition_plan)
+      ? plan.final_transition_plan
+      : [];
+  return raw.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const fromSegmentNo = Number(item.fromSegmentNo ?? item.from_segment_no);
+    const toSegmentNo = Number(item.toSegmentNo ?? item.to_segment_no);
+    if (!Number.isInteger(fromSegmentNo) || !Number.isInteger(toSegmentNo)) return [];
+    return [{
+      fromSegmentNo,
+      toSegmentNo,
+      visualMode: normalizeComposeVisualMode(item.visualMode ?? item.visual_mode),
+      audioMode: normalizeComposeAudioMode(item.audioMode ?? item.audio_mode),
+      overlapSeconds: Math.max(0, Number(item.overlapSeconds ?? item.overlap_seconds) || 0),
+      matchAnchorId: typeof item.matchAnchorId === "string"
+        ? item.matchAnchorId
+        : typeof item.match_anchor_id === "string"
+          ? item.match_anchor_id
+          : undefined,
+      generatedBridgeRequired: Boolean(item.generatedBridgeRequired ?? item.generated_bridge_required),
+    }];
+  });
+}
+
+function readAudioBible(planJson: Prisma.JsonValue | null): Record<string, unknown> | undefined {
+  const plan = isRecord(planJson) ? planJson : {};
+  const audioBible = isRecord(plan.audioBible)
+    ? plan.audioBible
+    : isRecord(plan.audio_bible)
+      ? plan.audio_bible
+      : undefined;
+  if (!audioBible) return undefined;
+  return {
+    ...audioBible,
+    stripSourceAudio: audioBible.stripSourceAudio ?? audioBible.strip_source_audio ?? false,
+    loudnorm: audioBible.loudnorm ?? audioBible.loudNorm ?? audioBible.loudnessNormalization ?? audioBible.loudness_normalization ?? true,
+  };
+}
+
+function normalizeComposeVisualMode(value: unknown): FinalTransitionPlan["visualMode"] {
+  if (value === "hard_cut" || value === "match_cut" || value === "dissolve" || value === "fade_to_black" || value === "generated_bridge") return value;
+  return "dissolve";
+}
+
+function normalizeComposeAudioMode(value: unknown): FinalTransitionPlan["audioMode"] {
+  if (value === "none" || value === "j_cut" || value === "l_cut" || value === "crossfade") return value;
+  return "crossfade";
+}
+
+async function createPlanForPlannerArch(
+  input: PlanVideoProjectInput,
+  context: { userId: string; projectId: string },
+): Promise<OnePromptVideoPlan> {
+  const arch = onePromptPlannerArch();
+  await logOnePromptVideo("project.plan.arch.selected", {
+    ...context,
+    arch,
+  });
+
+  if (arch === "v1") {
+    return withPlannerArchMetadata(
+      createVideoPlan(input),
+      "v1",
+      "ONE_PROMPT_VIDEO_PLANNER_ARCH=v1: local legacy planner drives generation.",
+    );
+  }
+
+  if (arch === "v2_shadow") {
+    const localPlan = createVideoPlan(input);
+    try {
+      const shadowPlan = await createAliyunStoryboardPlan(input);
+      await logOnePromptVideo("project.plan.arch.shadow_success", {
+        ...context,
+        localSegmentCount: localPlan.segmentCount,
+        shadowSegmentCount: shadowPlan.segmentCount,
+        shadowWarningCount: shadowPlan.plannerWarnings?.length ?? 0,
+      });
+      return mergeShadowPlannerPlan(localPlan, shadowPlan);
+    } catch (error) {
+      await logOnePromptVideo("project.plan.arch.shadow_failed_continue_local", {
+        ...context,
+        ...errorForLog(error),
+      }, "warn");
+      return withPlannerArchMetadata(
+        localPlan,
+        "v2_shadow",
+        `ONE_PROMPT_VIDEO_PLANNER_ARCH=v2_shadow: new planner failed, local v1 plan drives generation. ${error instanceof Error ? error.message : "Unknown planner error"}`,
+      );
+    }
+  }
+
+  return withPlannerArchMetadata(await createAliyunStoryboardPlan(input), "v2");
+}
+
+function withPlannerArchMetadata(plan: OnePromptVideoPlan, arch: OnePromptPlannerArch, warning?: string): OnePromptVideoPlan {
+  return {
+    ...plan,
+    plannerWarnings: [
+      ...(warning ? [warning] : []),
+      ...(plan.plannerWarnings ?? []),
+    ],
+    artifactMetadata: {
+      ...(plan.artifactMetadata ?? {}),
+      planning: {
+        revision: 1,
+        schemaVersion: "planJson",
+        plannerVersion: arch,
+        promptVersion: arch,
+        modelVersion: arch === "v2" ? "dashscope" : arch === "v2_shadow" ? "local+dashscope-shadow" : "local",
+        inputHash: "",
+        dependsOn: [],
+        status: "ready",
+        retryFromStage: "stage1",
+      },
+    },
+  };
+}
+
+function mergeShadowPlannerPlan(localPlan: OnePromptVideoPlan, shadowPlan: OnePromptVideoPlan): OnePromptVideoPlan {
+  return withPlannerArchMetadata({
+    ...localPlan,
+    plannerShadow: {
+      planningManifest: shadowPlan.planningManifest,
+      narrativeEvents: shadowPlan.narrativeEvents,
+      anchorStateTimeline: shadowPlan.anchorStateTimeline,
+      consistencyManifest: shadowPlan.consistencyManifest,
+      timelineBlueprint: shadowPlan.timelineBlueprint,
+      candidateTimeline: shadowPlan.candidateTimeline,
+      storyboardBrief: shadowPlan.storyboardBrief,
+      segmentRenderDescriptions: shadowPlan.segmentRenderDescriptions,
+      cameraGraph: shadowPlan.cameraGraph,
+      transitionReferencePlan: shadowPlan.transitionReferencePlan,
+      finalTransitionPlan: shadowPlan.finalTransitionPlan,
+      referenceSelectionOutputs: shadowPlan.referenceSelectionOutputs,
+      promptDebugArtifacts: shadowPlan.promptDebugArtifacts,
+      generationQualityReports: shadowPlan.generationQualityReports,
+      audioBible: shadowPlan.audioBible,
+      keyframeCount: shadowPlan.keyframeCount,
+      segmentCount: shadowPlan.segmentCount,
+      title: shadowPlan.title,
+      logline: shadowPlan.logline,
+    },
+    plannerWarnings: [
+      "ONE_PROMPT_VIDEO_PLANNER_ARCH=v2_shadow: v2 planner output is recorded for debugging; local v1 keyframes, segments, and shots drive generation.",
+      ...(shadowPlan.plannerWarnings ?? []).map((warning) => `shadow: ${warning}`),
+      ...(localPlan.plannerWarnings ?? []),
+    ],
+    artifactMetadata: {
+      ...(localPlan.artifactMetadata ?? {}),
+    },
+  }, "v2_shadow");
+}
+
+function applyPlanDebugPatch(plan: Record<string, unknown>, patch: PlanDebugPatch): void {
+  const dirtyIds: string[] = [];
+  if (Array.isArray(patch.narrativeEvents)) {
+    plan.narrativeEvents = patch.narrativeEvents;
+    delete plan.narrative_events;
+    dirtyIds.push("planning:narrative_events", "planning:timeline");
+  }
+  if (Array.isArray(patch.anchorStateTimeline)) {
+    plan.anchorStateTimeline = patch.anchorStateTimeline;
+    delete plan.anchor_state_timeline;
+    dirtyIds.push("planning:anchor_state_timeline");
+  }
+  if (Array.isArray(patch.consistencyAnchors)) {
+    const nextManifest = consistencyManifestRecordForMutation(plan);
+    nextManifest.anchors = patch.consistencyAnchors;
+    plan.consistencyManifest = nextManifest;
+    delete plan.consistency_manifest;
+    const planningManifest = isRecord(plan.planningManifest)
+      ? plan.planningManifest
+      : isRecord(plan.planning_manifest)
+        ? plan.planning_manifest
+        : undefined;
+    if (isRecord(planningManifest)) {
+      planningManifest.consistencyManifest = nextManifest;
+      delete planningManifest.consistency_manifest;
+      plan.planningManifest = planningManifest;
+      delete plan.planning_manifest;
+    }
+    dirtyIds.push("planning:consistency_manifest", "anchors:hard_locks");
+  }
+  if (dirtyIds.length) markPlanArtifactsDirty(plan, dirtyIds, "User edited planning debug fields; affected assets require local regeneration before reuse.");
+}
+
+function consistencyManifestRecordForMutation(plan: Record<string, unknown>): Record<string, unknown> {
+  if (isRecord(plan.consistencyManifest)) return { ...plan.consistencyManifest };
+  if (isRecord(plan.consistency_manifest)) return { ...plan.consistency_manifest };
+  const planningManifest = isRecord(plan.planningManifest)
+    ? plan.planningManifest
+    : isRecord(plan.planning_manifest)
+      ? plan.planning_manifest
+      : undefined;
+  if (isRecord(planningManifest?.consistencyManifest)) return { ...planningManifest.consistencyManifest };
+  if (isRecord(planningManifest?.consistency_manifest)) return { ...planningManifest.consistency_manifest };
+  return { anchors: [] };
+}
+
+function markPlanArtifactsDirty(plan: Record<string, unknown>, artifactIds: string[], dirtyReason: string): void {
+  const metadata = ensurePlanArtifactMetadata(plan);
+  const dirtyIds = collectDependentArtifactIds(metadata, artifactIds);
+  const now = new Date().toISOString();
+  for (const artifactId of dirtyIds) {
+    const previous = metadata[artifactId] ?? defaultArtifactMetadata(artifactId);
+    metadata[artifactId] = {
+      ...previous,
+      revision: Math.max(1, Number(previous.revision) || 1) + 1,
+      status: "dirty",
+      dirtyReason,
+      retryFromStage: previous.retryFromStage ?? inferRetryFromArtifactId(artifactId),
+      updatedAt: now,
+    };
+  }
+  plan.artifactMetadata = metadata;
+  delete plan.artifact_metadata;
+}
+
+function ensurePlanArtifactMetadata(plan: Record<string, unknown>): Record<string, ArtifactMetadata> {
+  const existing = isRecord(plan.artifactMetadata)
+    ? plan.artifactMetadata
+    : isRecord(plan.artifact_metadata)
+      ? plan.artifact_metadata
+      : {};
+  const metadata: Record<string, ArtifactMetadata> = {};
+  for (const [artifactId, value] of Object.entries(existing)) {
+    if (!isRecord(value)) continue;
+    metadata[artifactId] = normalizeArtifactMetadataEntry(artifactId, value);
+  }
+  for (const [artifactId, seed] of Object.entries(buildArtifactDependencySeed(plan))) {
+    const previous = metadata[artifactId];
+    metadata[artifactId] = {
+      ...(previous ?? defaultArtifactMetadata(artifactId)),
+      dependsOn: uniqueStrings([...(previous?.dependsOn ?? []), ...seed.dependsOn]),
+      retryFromStage: previous?.retryFromStage ?? seed.retryFromStage ?? inferRetryFromArtifactId(artifactId),
+      status: previous?.status ?? seed.status ?? "draft",
+    };
+  }
+  plan.artifactMetadata = metadata;
+  delete plan.artifact_metadata;
+  return metadata;
+}
+
+function normalizeArtifactMetadataEntry(artifactId: string, value: Record<string, unknown>): ArtifactMetadata {
+  const status = value.status === "draft" || value.status === "dirty" || value.status === "approved" || value.status === "generating" || value.status === "ready" || value.status === "failed"
+    ? value.status
+    : "draft";
+  const retryFromStage = normalizeRetryFromStage(value.retryFromStage ?? value.retry_from_stage) ?? inferRetryFromArtifactId(artifactId);
+  return {
+    revision: Math.max(1, Number(value.revision) || 1),
+    schemaVersion: typeof value.schemaVersion === "string" ? value.schemaVersion : typeof value.schema_version === "string" ? value.schema_version : "plan-json",
+    plannerVersion: typeof value.plannerVersion === "string" ? value.plannerVersion : typeof value.planner_version === "string" ? value.planner_version : "unknown",
+    promptVersion: typeof value.promptVersion === "string" ? value.promptVersion : typeof value.prompt_version === "string" ? value.prompt_version : "unknown",
+    modelVersion: typeof value.modelVersion === "string" ? value.modelVersion : typeof value.model_version === "string" ? value.model_version : "unknown",
+    inputHash: typeof value.inputHash === "string" ? value.inputHash : typeof value.input_hash === "string" ? value.input_hash : "",
+    dependsOn: uniqueStrings(Array.isArray(value.dependsOn) ? value.dependsOn : Array.isArray(value.depends_on) ? value.depends_on : []),
+    status,
+    dirtyReason: typeof value.dirtyReason === "string" ? value.dirtyReason : typeof value.dirty_reason === "string" ? value.dirty_reason : undefined,
+    retryFromStage,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : typeof value.updated_at === "string" ? value.updated_at : undefined,
+  };
+}
+
+function defaultArtifactMetadata(artifactId: string): ArtifactMetadata {
+  return {
+    revision: 1,
+    schemaVersion: "plan-json",
+    plannerVersion: "unknown",
+    promptVersion: "unknown",
+    modelVersion: "unknown",
+    inputHash: "",
+    dependsOn: [],
+    status: "draft",
+    retryFromStage: inferRetryFromArtifactId(artifactId),
+  };
+}
+
+function collectDependentArtifactIds(metadata: Record<string, ArtifactMetadata>, artifactIds: string[]): string[] {
+  const selected = new Set(uniqueStrings(artifactIds));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [candidateId, item] of Object.entries(metadata)) {
+      if (selected.has(candidateId)) continue;
+      if ((item.dependsOn ?? []).some((dependency) => selected.has(dependency))) {
+        selected.add(candidateId);
+        changed = true;
+      }
+    }
+  }
+  return [...selected];
+}
+
+function setPlanArtifactStatus(plan: Record<string, unknown>, artifactIds: string[], status: ArtifactMetadata["status"], options?: { dirtyReason?: string; retryFromStage?: ArtifactRetryFromStage }): void {
+  const metadata = ensurePlanArtifactMetadata(plan);
+  const now = new Date().toISOString();
+  for (const artifactId of uniqueStrings(artifactIds)) {
+    const previous = metadata[artifactId] ?? defaultArtifactMetadata(artifactId);
+    metadata[artifactId] = {
+      ...previous,
+      status,
+      dirtyReason: status === "dirty" ? options?.dirtyReason ?? previous.dirtyReason : undefined,
+      retryFromStage: options?.retryFromStage ?? previous.retryFromStage ?? inferRetryFromArtifactId(artifactId),
+      updatedAt: now,
+    };
+  }
+  plan.artifactMetadata = metadata;
+  delete plan.artifact_metadata;
+}
+
+async function updateProjectArtifactStatus(projectId: string, artifactIds: string[], status: ArtifactMetadata["status"], options?: { dirtyReason?: string; retryFromStage?: ArtifactRetryFromStage }): Promise<void> {
+  const project = await prisma.videoProject.findUnique({ where: { id: projectId } });
+  if (!project?.planJson) return;
+  const plan = cloneJsonRecord(project.planJson);
+  setPlanArtifactStatus(plan, artifactIds, status, options);
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: plan as Prisma.InputJsonValue },
+  });
+}
+
+async function saveGenerationQualityReport(projectId: string, report: GenerationQualityReport): Promise<void> {
+  const project = await prisma.videoProject.findUnique({ where: { id: projectId } });
+  if (!project?.planJson) return;
+  const plan = cloneJsonRecord(project.planJson);
+  const existing = Array.isArray(plan.generationQualityReports)
+    ? plan.generationQualityReports
+    : Array.isArray(plan.generation_quality_reports)
+      ? plan.generation_quality_reports
+      : [];
+  plan.generationQualityReports = [
+    ...existing.filter((item) => {
+      if (!isRecord(item)) return true;
+      return (item.assetId ?? item.asset_id) !== report.assetId;
+    }),
+    report,
+  ].slice(-160);
+  delete plan.generation_quality_reports;
+  setPlanArtifactStatus(plan, [report.assetId], report.passed ? "ready" : "failed", {
+    dirtyReason: report.passed ? undefined : report.retryInstruction || report.artifactIssues.join("; "),
+    retryFromStage: inferRetryFromArtifactId(report.assetId),
+  });
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: plan as Prisma.InputJsonValue },
+  });
+  await logOnePromptVideo("generation_quality.report", {
+    projectId,
+    assetId: report.assetId,
+    passed: report.passed,
+    identityScore: report.identityScore,
+    layoutScore: report.layoutScore,
+    promptAlignmentScore: report.promptAlignmentScore,
+    continuityScore: report.continuityScore,
+    singleTakeScore: report.singleTakeScore,
+    artifactIssues: report.artifactIssues,
+    retryInstruction: report.retryInstruction,
+  }, report.passed ? "info" : "warn");
+}
+
+function buildArtifactDependencySeed(plan: Record<string, unknown>): Record<string, { dependsOn: string[]; retryFromStage?: ArtifactRetryFromStage; status?: ArtifactMetadata["status"] }> {
+  const seed: Record<string, { dependsOn: string[]; retryFromStage?: ArtifactRetryFromStage; status?: ArtifactMetadata["status"] }> = {};
+  const add = (artifactId: string, dependsOn: string[] = [], retryFromStage?: ArtifactRetryFromStage, status?: ArtifactMetadata["status"]) => {
+    if (!artifactId) return;
+    const previous = seed[artifactId];
+    seed[artifactId] = {
+      dependsOn: uniqueStrings([...(previous?.dependsOn ?? []), ...dependsOn]),
+      retryFromStage: previous?.retryFromStage ?? retryFromStage ?? inferRetryFromArtifactId(artifactId),
+      status: previous?.status ?? status,
+    };
+  };
+
+  add("planning:narrative_events", [], "stage1");
+  add("planning:timeline", ["planning:narrative_events"], "stage2a");
+  add("planning:consistency_manifest", [], "stage1");
+  add("planning:anchor_state_timeline", ["planning:narrative_events", "planning:consistency_manifest"], "stage1");
+  add("storyboard:brief", ["planning:timeline", "planning:narrative_events"], "stage2a");
+  add("camera_graph", ["storyboard:brief"], "stage2a");
+  add("final_transition_plan", ["storyboard:brief", "camera_graph"], "stage2a");
+  add("prompt_compiler", [], "compiler", "ready");
+
+  for (const anchor of consistencyAnchorsFromPlan(plan)) {
+    add(`anchor:${anchor.id}`, ["planning:consistency_manifest"], "stage1");
+  }
+
+  const consistencyReferences = consistencyReferencesFromPlan(plan);
+  for (const reference of consistencyReferences) {
+    const referenceId = `consistency_reference:${reference.keyframeNo}`;
+    add(referenceId, ["planning:consistency_manifest"], "generation");
+    add(`${referenceId}:reference_selection`, [referenceId], "reference_selector");
+    add(`${referenceId}:prompt`, [referenceId, `${referenceId}:reference_selection`, "prompt_compiler"], "compiler");
+    add(`${referenceId}:image`, [`${referenceId}:prompt`], "generation");
+  }
+
+  const keyframes = keyframesFromPlan(plan);
+  for (const keyframe of keyframes) {
+    const keyframeId = keyframe.keyframeNo < 0 ? `consistency_reference:${keyframe.keyframeNo}` : `keyframe:${keyframe.keyframeNo}`;
+    const anchorDeps = keyframe.anchorIds.map((anchorId) => `anchor:${anchorId}`);
+    add(keyframeId, ["planning:timeline", "planning:anchor_state_timeline", ...anchorDeps], "generation");
+    add(`${keyframeId}:reference_selection`, [keyframeId, "camera_graph", ...anchorDeps], "reference_selector");
+    add(`${keyframeId}:prompt`, [keyframeId, `${keyframeId}:reference_selection`, "prompt_compiler"], "compiler");
+    add(`${keyframeId}:image`, [`${keyframeId}:prompt`], "generation");
+  }
+
+  const segments = segmentsFromPlan(plan);
+  for (const segment of segments) {
+    const segmentId = `segment:${segment.segmentNo}`;
+    const startKeyframeId = segment.startKeyframeNo ? `keyframe:${segment.startKeyframeNo}:image` : "";
+    const endKeyframeId = segment.endKeyframeNo ? `keyframe:${segment.endKeyframeNo}:image` : "";
+    const anchorDeps = segment.anchorIds.map((anchorId) => `anchor:${anchorId}`);
+    add(segmentId, ["storyboard:brief", "planning:anchor_state_timeline", "camera_graph", ...anchorDeps], "stage2b");
+    add(`${segmentId}:subtitle`, [segmentId], "stage3");
+    add(`${segmentId}:micro_shots`, [segmentId, ...anchorDeps], "stage2b");
+
+    for (const microShot of segment.microShots) {
+      const microShotId = `${segmentId}:micro_shot:${microShot.microShotNo}`;
+      const microAnchorDeps = microShot.anchorIds.length ? microShot.anchorIds.map((anchorId) => `anchor:${anchorId}`) : anchorDeps;
+      add(microShotId, [`${segmentId}:micro_shots`, ...microAnchorDeps], "stage2b");
+      add(`${microShotId}:reference_selection`, [microShotId, "camera_graph", ...microAnchorDeps], "reference_selector");
+      add(`${microShotId}:prompt`, [microShotId, `${microShotId}:reference_selection`, "prompt_compiler"], "compiler");
+      add(`${microShotId}:image`, [`${microShotId}:prompt`], "generation");
+    }
+
+    add(`${segmentId}:prompt`, [
+      segmentId,
+      `${segmentId}:micro_shots`,
+      `${segmentId}:subtitle`,
+      "prompt_compiler",
+      ...(startKeyframeId ? [startKeyframeId] : []),
+      ...(endKeyframeId ? [endKeyframeId] : []),
+      ...segment.microShots.map((microShot) => `${segmentId}:micro_shot:${microShot.microShotNo}:image`),
+    ], "compiler");
+    add(`${segmentId}:video`, [`${segmentId}:prompt`, ...(startKeyframeId ? [startKeyframeId] : [])], "generation");
+  }
+
+  if (segments.length) {
+    add("final_video", [
+      "final_transition_plan",
+      ...segments.map((segment) => `segment:${segment.segmentNo}:video`),
+    ], "composition");
+  }
+
+  return seed;
+}
+
+function consistencyAnchorsFromPlan(plan: Record<string, unknown>): Array<{ id: string }> {
+  const directManifest = isRecord(plan.consistencyManifest)
+    ? plan.consistencyManifest
+    : isRecord(plan.consistency_manifest)
+      ? plan.consistency_manifest
+      : undefined;
+  const planningManifest = isRecord(plan.planningManifest)
+    ? plan.planningManifest
+    : isRecord(plan.planning_manifest)
+      ? plan.planning_manifest
+      : undefined;
+  const manifest = directManifest ??
+    (isRecord(planningManifest?.consistencyManifest)
+      ? planningManifest.consistencyManifest
+      : isRecord(planningManifest?.consistency_manifest)
+        ? planningManifest.consistency_manifest
+        : undefined);
+  const anchors = Array.isArray(manifest?.anchors) ? manifest.anchors : [];
+  return anchors.flatMap((anchor, index) => {
+    if (!isRecord(anchor)) return [];
+    const id = typeof anchor.id === "string" && anchor.id.trim() ? anchor.id.trim() : `anchor_${index + 1}`;
+    return [{ id }];
+  });
+}
+
+function consistencyReferencesFromPlan(plan: Record<string, unknown>): Array<{ keyframeNo: number }> {
+  const references = Array.isArray(plan.consistencyReferences)
+    ? plan.consistencyReferences
+    : Array.isArray(plan.consistency_references)
+      ? plan.consistency_references
+      : [];
+  return references.flatMap((reference) => {
+    if (!isRecord(reference)) return [];
+    const keyframeNo = Number(reference.keyframeNo ?? reference.keyframe_no);
+    return Number.isInteger(keyframeNo) ? [{ keyframeNo }] : [];
+  });
+}
+
+function keyframesFromPlan(plan: Record<string, unknown>): Array<{ keyframeNo: number; anchorIds: string[] }> {
+  const keyframes = Array.isArray(plan.keyframes) ? plan.keyframes : [];
+  return keyframes.flatMap((keyframe) => {
+    if (!isRecord(keyframe)) return [];
+    const keyframeNo = Number(keyframe.keyframeNo ?? keyframe.keyframe_no);
+    if (!Number.isInteger(keyframeNo)) return [];
+    return [{
+      keyframeNo,
+      anchorIds: readPlanStringArray(keyframe, ["usesConsistencyAnchors", "uses_consistency_anchors", "requiredAnchorIds", "required_anchor_ids"]),
+    }];
+  });
+}
+
+function segmentsFromPlan(plan: Record<string, unknown>): Array<{ segmentNo: number; startKeyframeNo?: number; endKeyframeNo?: number; anchorIds: string[]; microShots: Array<{ microShotNo: number; anchorIds: string[] }> }> {
+  const segments = Array.isArray(plan.segments) ? plan.segments : [];
+  return segments.flatMap((segment) => {
+    if (!isRecord(segment)) return [];
+    const segmentNo = Number(segment.segmentNo ?? segment.segment_no ?? segment.shotNo ?? segment.shot_no);
+    if (!Number.isInteger(segmentNo) || segmentNo <= 0) return [];
+    const startKeyframeNo = Number(segment.startKeyframeNo ?? segment.start_keyframe_no);
+    const endKeyframeNo = Number(segment.endKeyframeNo ?? segment.end_keyframe_no);
+    const anchorIds = readPlanStringArray(segment, ["usesConsistencyAnchors", "uses_consistency_anchors", "requiredAnchorIds", "required_anchor_ids"]);
+    const microShots = readPlanMicroShots(segment).map((microShot) => ({
+      microShotNo: microShot.microShotNo,
+      anchorIds: microShot.usesConsistencyAnchors ?? [],
+    }));
+    return [{
+      segmentNo,
+      startKeyframeNo: Number.isInteger(startKeyframeNo) ? startKeyframeNo : undefined,
+      endKeyframeNo: Number.isInteger(endKeyframeNo) ? endKeyframeNo : undefined,
+      anchorIds,
+      microShots,
+    }];
+  });
+}
+
+function inferRetryFromArtifactId(artifactId: string): ArtifactRetryFromStage {
+  if (artifactId.startsWith("planning:narrative_events") || artifactId.startsWith("planning:consistency_manifest") || artifactId.startsWith("planning:anchor_state_timeline") || artifactId.startsWith("anchor:")) return "stage1";
+  if (artifactId.startsWith("planning:timeline") || artifactId.startsWith("storyboard:brief") || artifactId === "camera_graph" || artifactId === "final_transition_plan") return "stage2a";
+  if (artifactId.includes(":micro_shots") || /^segment:\d+$/.test(artifactId)) return "stage2b";
+  if (artifactId.includes(":reference_selection")) return "reference_selector";
+  if (artifactId.includes(":prompt") || artifactId === "prompt_compiler" || artifactId.includes(":subtitle")) return "compiler";
+  if (artifactId === "final_video") return "composition";
+  if (artifactId.includes(":image") || artifactId.includes(":video") || artifactId.startsWith("keyframe:") || artifactId.startsWith("consistency_reference:")) return "generation";
+  return "manual";
+}
+
+function referenceSelectionArtifactId(targetArtifactId: string): string {
+  return `${targetArtifactId}:reference_selection`;
+}
+
+function promptArtifactIdForTarget(targetArtifactId: string): string {
+  return `${targetArtifactId}:prompt`;
+}
+
+function keyframeTargetArtifactId(keyframeNo: number): string {
+  return keyframeNo < 0 ? `consistency_reference:${keyframeNo}` : `keyframe:${keyframeNo}`;
+}
+
+function imageArtifactIdForKeyframeNo(keyframeNo: number): string {
+  return `${keyframeTargetArtifactId(keyframeNo)}:image`;
+}
+
+function imageArtifactIdForMicroShot(segmentNo: number, microShotNo: number): string {
+  return `segment:${segmentNo}:micro_shot:${microShotNo}:image`;
+}
+
+function videoArtifactIdForSegmentNo(segmentNo: number): string {
+  return `segment:${segmentNo}:video`;
+}
+
+function approvedMicroShotImageArtifactIds(project: VideoProjectWithShots): string[] {
+  const planSegments = readPlanSegmentMap(project.planJson);
+  return project.segments.flatMap((segment) => {
+    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    return microShots
+      .filter((microShot) => Boolean(microShot.imageUrl))
+      .map((microShot) => imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo));
+  });
+}
+
+function selectedReferenceUrlsForPromptTarget(planJson: Prisma.JsonValue | null, targetArtifactId: string): string[] {
+  const plan = isRecord(planJson) ? planJson : {};
+  const debugArtifacts = isRecord(plan.promptDebugArtifacts)
+    ? plan.promptDebugArtifacts
+    : isRecord(plan.prompt_debug_artifacts)
+      ? plan.prompt_debug_artifacts
+      : {};
+  const artifact = isRecord(debugArtifacts[targetArtifactId]) ? debugArtifacts[targetArtifactId] : undefined;
+  return readPlanStringArray(artifact, ["selectedReferenceUrls", "selected_reference_urls"]);
+}
+
+function normalizeRetryFromStage(value: unknown): ArtifactRetryFromStage | undefined {
+  if (
+    value === "stage1" ||
+    value === "stage2a" ||
+    value === "stage2b" ||
+    value === "stage3" ||
+    value === "reference_selector" ||
+    value === "compiler" ||
+    value === "generation" ||
+    value === "composition" ||
+    value === "manual"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && Boolean(value.trim())).map((value) => value.trim()))];
+}
+
+function markPlanArtifactsDirtyForShotUpdate(
+  plan: Record<string, unknown>,
+  project: VideoProjectWithShots,
+  localizedUpdate?: {
+    shotId: string;
+    locale?: "zh" | "en";
+    microShots?: UpdateShotInput["microShots"];
+    purposeUpdated?: boolean;
+    negativePromptUpdated?: boolean;
+  },
+): void {
+  if (!localizedUpdate?.shotId) return;
+  const artifactIds: string[] = [];
+  const segment = project.segments.find((item) => item.id === localizedUpdate.shotId);
+  const keyframe = project.keyframes.find((item) => item.id === localizedUpdate.shotId);
+  const legacyShot = project.shots.find((item) => item.id === localizedUpdate.shotId);
+
+  if (segment) {
+    artifactIds.push(
+      `segment:${segment.segmentNo}`,
+      `segment:${segment.segmentNo}:prompt`,
+      `segment:${segment.segmentNo}:subtitle`,
+    );
+    if (segment.startKeyframeNo) artifactIds.push(`keyframe:${segment.startKeyframeNo}`);
+    if (segment.endKeyframeNo) artifactIds.push(`keyframe:${segment.endKeyframeNo}`);
+    if (localizedUpdate.microShots) artifactIds.push(`segment:${segment.segmentNo}:micro_shots`);
+  } else if (keyframe) {
+    artifactIds.push(keyframe.keyframeNo < 0 ? `consistency_reference:${keyframe.keyframeNo}` : `keyframe:${keyframe.keyframeNo}`);
+    if (keyframe.keyframeNo < 0) artifactIds.push("anchors:hard_locks");
+    else artifactIds.push(`keyframe:${keyframe.keyframeNo}:prompt`);
+  } else if (legacyShot) {
+    artifactIds.push(`shot:${legacyShot.shotNo}`, `shot:${legacyShot.shotNo}:prompt`);
+    if (localizedUpdate.microShots) artifactIds.push(`shot:${legacyShot.shotNo}:micro_shots`);
+  }
+
+  if (artifactIds.length) {
+    markPlanArtifactsDirty(
+      plan,
+      artifactIds,
+      "User edited this asset in review UI; regenerate only affected downstream artifacts before reuse.",
+    );
+  }
+}
+
 function readPlanShotString(shot: Record<string, unknown> | undefined, keys: string[]): string {
   if (!shot) return "";
   for (const key of keys) {
@@ -242,41 +1020,14 @@ function readPlanShotString(shot: Record<string, unknown> | undefined, keys: str
 function titleFromPrompt(text: string, fallback: string): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return fallback;
-  const purposeMatch = cleaned.match(/\bPurpose:\s*([^.;。]+)/i);
-  const source = purposeMatch?.[1]?.trim() || cleaned.split(/[.;。]/)[0]?.trim() || fallback;
+  const purposeMatch = cleaned.match(/\bPurpose:\s*([^.;]+)/i);
+  const source = purposeMatch?.[1]?.trim() || cleaned.split(/[.;]/)[0]?.trim() || fallback;
   return source.length > 96 ? `${source.slice(0, 93)}...` : source;
 }
 
 function toChineseNegativePrompt(prompt: string): string {
-  const dictionary: Record<string, string> = {
-    text: "文字",
-    subtitles: "字幕",
-    captions: "字幕",
-    logos: "标志",
-    logo: "标志",
-    watermarks: "水印",
-    watermark: "水印",
-    ui: "界面元素",
-    "modern objects": "现代物件",
-    "harsh lighting": "刺眼光线",
-    "oversaturated colors": "颜色过饱和",
-    "deformed hands": "手部变形",
-    "extra fingers": "多余手指",
-    "random text": "随机文字",
-    "logo distortion": "标志变形",
-    "deformed face": "脸部变形",
-    "low quality": "低质量",
-    blurry: "模糊",
-    "duplicated body": "身体重复",
-  };
-  return prompt
-    .split(/[,，]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => dictionary[item.toLowerCase()] ?? item)
-    .join("，");
+  return prompt;
 }
-
 function readPlanStringArray(shot: Record<string, unknown> | undefined, keys: string[]): string[] {
   if (!shot) return [];
   for (const key of keys) {
@@ -318,6 +1069,27 @@ function readPlanOutputMode(shot: Record<string, unknown> | undefined): "text" |
 function readPlanBoundaryMode(shot: Record<string, unknown> | undefined): "continuous" | "hard_cut" | "dissolve" | "match_cut" | undefined {
   const value = readPlanShotString(shot, ["boundaryMode", "boundary_mode"]);
   return value === "continuous" || value === "hard_cut" || value === "dissolve" || value === "match_cut" ? value : undefined;
+}
+
+function consistencyReferenceKindForPlan(
+  reference: Record<string, unknown> | undefined,
+  keyframeNo: number,
+): VideoConsistencyReference["kind"] {
+  const value = readPlanShotString(reference, ["kind"]);
+  if (
+    value === "character" ||
+    value === "scene" ||
+    value === "product" ||
+    value === "brand_visual" ||
+    value === "prop" ||
+    value === "vehicle" ||
+    value === "food" ||
+    value === "space_layout" ||
+    value === "custom"
+  ) return value;
+  if (keyframeNo === CHARACTER_CONSISTENCY_KEYFRAME_NO) return "character";
+  if (keyframeNo === SCENE_CONSISTENCY_KEYFRAME_NO) return "scene";
+  return "custom";
 }
 
 function readPlanAudioPlan(shot: Record<string, unknown> | undefined): {
@@ -706,23 +1478,23 @@ function demoClipAssetUrl(segmentNo: number): string | null {
 
 function fallbackDemoPlan(): OnePromptVideoPlan {
   const negativePrompt = "realistic, dark, gloomy, low resolution, blurry, distorted, extra limbs, deformed face, inconsistent clothing, missing logo elements";
-  const negativePromptZh = "写实风格、昏暗、低清晰度、模糊、畸变、多余肢体、脸部变形、服装不一致、品牌元素缺失";
+  const negativePromptZh = negativePrompt;
   const keyframes = [
-    demoKeyframe(1, 0, "神秘光影中引入主角牛角色，营造期待感", "Introduce the mascot in mysterious spotlight and build anticipation", negativePrompt, negativePromptZh),
-    demoKeyframe(2, 5, "角色完全展现，准备进入明亮游戏世界", "Reveal the mascot and move toward the bright game world", negativePrompt, negativePromptZh),
-    demoKeyframe(3, 9, "展示热带游戏世界全景", "Show the tropical card-game world", negativePrompt, negativePromptZh),
-    demoKeyframe(4, 15, "角色操作卡牌，展示互动性", "Show the mascot playing cards and making a smart move", negativePrompt, negativePromptZh),
-    demoKeyframe(5, 20, "胜利瞬间，角色欢呼", "Celebrate the winning moment", negativePrompt, negativePromptZh),
-    demoKeyframe(6, 25, "品牌LOGO完全展现", "Reveal the Tongits King logo", negativePrompt, negativePromptZh),
-    demoKeyframe(7, 30, "行动号召，引导下载", "End with a download call to action", negativePrompt, negativePromptZh),
+    demoKeyframe(1, 0, "Opening mascot reveal", "Introduce the mascot in a warm spotlight", negativePrompt, negativePromptZh),
+    demoKeyframe(2, 5, "Enter the game world", "Reveal the bright tropical game world", negativePrompt, negativePromptZh),
+    demoKeyframe(3, 9, "Cards and strategy", "Show the tropical card-game world", negativePrompt, negativePromptZh),
+    demoKeyframe(4, 15, "Smart move", "Show the mascot playing cards and making a smart move", negativePrompt, negativePromptZh),
+    demoKeyframe(5, 20, "Winning moment", "Celebrate the winning moment", negativePrompt, negativePromptZh),
+    demoKeyframe(6, 25, "Logo reveal", "Reveal the Tongits King logo", negativePrompt, negativePromptZh),
+    demoKeyframe(7, 30, "Call to action", "End with a download call to action", negativePrompt, negativePromptZh),
   ];
   const segments = [
-    demoSegment(1, 1, 2, 0, 5, "通过神秘光影引入主角牛角色，营造期待感", "A continuous push-in reveals the smiling mascot under warm spotlight.", negativePrompt, negativePromptZh),
-    demoSegment(2, 2, 3, 5, 9, "展示游戏界面与环境，突出热带主题与卡牌元素", "The camera opens into a sunny tropical game world with cards and playful motion.", negativePrompt, negativePromptZh),
-    demoSegment(3, 3, 4, 9, 15, "展示角色操作卡牌，体现游戏互动性", "The mascot picks cards, considers strategy, and makes a confident move.", negativePrompt, negativePromptZh),
-    demoSegment(4, 4, 5, 15, 20, "展示胜利瞬间，角色欢呼，增强情感共鸣", "The mascot wins, jumps in celebration, and the scene fills with festive effects.", negativePrompt, negativePromptZh),
-    demoSegment(5, 5, 6, 20, 25, "品牌LOGO浮现，强化记忆点", "The Tongits King logo emerges clearly with cards and tropical leaves.", negativePrompt, negativePromptZh),
-    demoSegment(6, 6, 7, 25, 30, "行动号召，引导下载", "The logo holds while a clean download call to action appears.", negativePrompt, negativePromptZh),
+    demoSegment(1, 1, 2, 0, 5, "Opening mascot reveal", "A continuous push-in reveals the smiling mascot under warm spotlight.", negativePrompt, negativePromptZh),
+    demoSegment(2, 2, 3, 5, 9, "Enter the game world", "The camera opens into a sunny tropical game world with cards and playful motion.", negativePrompt, negativePromptZh),
+    demoSegment(3, 3, 4, 9, 15, "Cards and strategy", "The mascot picks cards, considers strategy, and makes a confident move.", negativePrompt, negativePromptZh),
+    demoSegment(4, 4, 5, 15, 20, "Winning moment", "The mascot wins, jumps in celebration, and the scene fills with festive effects.", negativePrompt, negativePromptZh),
+    demoSegment(5, 5, 6, 20, 25, "Logo reveal", "The Tongits King logo emerges clearly with cards and tropical leaves.", negativePrompt, negativePromptZh),
+    demoSegment(6, 6, 7, 25, 30, "Call to action", "The logo holds while a clean download call to action appears.", negativePrompt, negativePromptZh),
   ];
   return {
     title: DEMO_PROJECT_TITLE,
@@ -745,11 +1517,11 @@ function fallbackDemoPlan(): OnePromptVideoPlan {
     planningManifest: {
       projectIntent: {
         videoType: "game_ad",
-        primaryGoalZh: "用30秒展示 Tongits King 的欢乐竞技氛围并引导下载",
+        primaryGoalZh: "Show Tongits King in a polished 30s game ad.",
         primaryGoalEn: "Show Tongits King's joyful competitive mood in 30 seconds and drive installs",
       },
       storyStrategy: {
-        narrativeArcZh: "角色登场、进入游戏世界、策略互动、胜利庆祝、品牌露出、行动号召",
+        narrativeArcZh: "Mascot reveal, game world, strategy, victory, logo, call to action",
         narrativeArcEn: "Mascot reveal, game-world entry, strategic interaction, victory, brand reveal, call to action",
       },
       timelineBlueprint: {
@@ -757,7 +1529,7 @@ function fallbackDemoPlan(): OnePromptVideoPlan {
         totalDurationSeconds: 30,
         segmentDurationMinSeconds: 3,
         segmentDurationMaxSeconds: 15,
-        splitStrategyZh: "按广告叙事节拍拆分为6段，每段3-15秒",
+        splitStrategyZh: "Six clear advertising beats, each kept as one continuous shot.",
         segments: segments.map((segment) => ({
           segmentNo: segment.segmentNo,
           startTimeSeconds: segment.startTimeSeconds,
@@ -774,27 +1546,27 @@ function fallbackDemoPlan(): OnePromptVideoPlan {
           {
             id: "mascot-bull",
             type: "person",
-            displayNameZh: "主角牛角色",
+            displayNameZh: "Bull mascot",
             displayNameEn: "Bull mascot",
             mustStayConsistent: true,
             needsReferenceImage: true,
             referenceStrength: "hard",
-            descriptionZh: "草帽、红围巾、蓝外套、金色徽章的卡通牛",
+            descriptionZh: "Cartoon bull with straw hat, red scarf, blue jacket, and gold badge",
             descriptionEn: "Cartoon bull with straw hat, red scarf, blue jacket, and gold badge",
             appliesTo: ["keyframes", "segments", "micro_shots"],
             userEditable: true,
-            imagePromptZh: "卡通牛，草帽，红围巾，蓝外套，金色徽章，微笑，明亮背景",
+            imagePromptZh: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
             imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
           },
           {
             id: "tongits-brand",
             type: "brand_visual",
-            displayNameZh: "Tongits King 品牌视觉",
+            displayNameZh: "Tongits King brand visual",
             displayNameEn: "Tongits King brand visual",
             mustStayConsistent: true,
             needsReferenceImage: false,
             referenceStrength: "medium",
-            descriptionZh: "明亮热带卡牌游戏品牌，绿色叶子、扑克牌和清晰LOGO",
+            descriptionZh: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
             descriptionEn: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
             appliesTo: ["keyframes", "segments", "micro_shots"],
             userEditable: true,
@@ -807,39 +1579,39 @@ function fallbackDemoPlan(): OnePromptVideoPlan {
         {
           id: "mascot-bull",
           type: "person",
-          displayNameZh: "主角牛角色",
+          displayNameZh: "Bull mascot",
           displayNameEn: "Bull mascot",
           mustStayConsistent: true,
           needsReferenceImage: true,
           referenceStrength: "hard",
-          descriptionZh: "草帽、红围巾、蓝外套、金色徽章的卡通牛",
+          descriptionZh: "Cartoon bull with straw hat, red scarf, blue jacket, and gold badge",
           descriptionEn: "Cartoon bull with straw hat, red scarf, blue jacket, and gold badge",
           appliesTo: ["keyframes", "segments", "micro_shots"],
           userEditable: true,
-        imagePromptZh: "卡通牛，草帽，红围巾，蓝外套，金色徽章，微笑，明亮背景",
-        imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
-      },
-      {
-        id: "tongits-brand",
-        type: "brand_visual",
-        displayNameZh: "Tongits King 品牌视觉",
-        displayNameEn: "Tongits King brand visual",
-        mustStayConsistent: true,
-        needsReferenceImage: false,
-        referenceStrength: "medium",
-        descriptionZh: "明亮热带卡牌游戏品牌，绿色叶子、扑克牌和清晰LOGO",
-        descriptionEn: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
-        appliesTo: ["keyframes", "segments", "micro_shots"],
-        userEditable: true,
-      },
-    ],
-  },
+          imagePromptZh: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
+          imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
+        },
+        {
+          id: "tongits-brand",
+          type: "brand_visual",
+          displayNameZh: "Tongits King brand visual",
+          displayNameEn: "Tongits King brand visual",
+          mustStayConsistent: true,
+          needsReferenceImage: false,
+          referenceStrength: "medium",
+          descriptionZh: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
+          descriptionEn: "Bright tropical card-game brand with green leaves, playing cards, and readable logo",
+          appliesTo: ["keyframes", "segments", "micro_shots"],
+          userEditable: true,
+        },
+      ],
+    },
     timelineBlueprint: {
       segmentCount: segments.length,
       totalDurationSeconds: 30,
       segmentDurationMinSeconds: 3,
       segmentDurationMaxSeconds: 15,
-      splitStrategyZh: "按广告叙事节拍拆分为6段，每段3-15秒",
+      splitStrategyZh: "Six clear advertising beats, each kept as one continuous shot.",
       segments: segments.map((segment) => ({
         segmentNo: segment.segmentNo,
         startTimeSeconds: segment.startTimeSeconds,
@@ -856,15 +1628,16 @@ function fallbackDemoPlan(): OnePromptVideoPlan {
         kind: "character",
         needed: true,
         keyframeNo: CHARACTER_CONSISTENCY_KEYFRAME_NO,
+        anchorId: "mascot-bull",
         frameId: "mascot-bull-reference",
-        purpose: "牛角色",
-        purposeZh: "牛角色",
+        purpose: "Bull mascot identity reference",
+        purposeZh: "Bull mascot identity reference",
         purposeEn: "Bull mascot identity reference",
         scene: "clean bright reference background",
         characterState: "same cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge",
         productState: "Tongits King game identity",
         imagePrompt: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
-        imagePromptZh: "卡通牛，草帽，红围巾，蓝外套，金色徽章，微笑，明亮背景",
+        imagePromptZh: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
         imagePromptEn: "Cartoon bull mascot, straw hat, red scarf, blue jacket, gold badge, friendly smile, bright background",
         negativePrompt,
         negativePromptZh,
@@ -889,7 +1662,7 @@ function fallbackDemoPlan(): OnePromptVideoPlan {
       videoPromptZh: segment.videoPromptZh,
       videoPromptEn: segment.videoPromptEn,
       outputMode: "mixed",
-      constraints: ["保持主角牛角色造型一致", "保持品牌色彩明亮清晰", "无水印、无UI、无字幕"],
+      constraints: ["Keep mascot identity consistent", "Keep tropical card-game world coherent", "No subtitles, UI overlays, or random text"],
       subtitle: "",
       negativePrompt,
       negativePromptZh,
@@ -907,7 +1680,7 @@ function demoKeyframe(
   negativePrompt: string,
   negativePromptZh: string,
 ) {
-  const imagePromptZh = `电影级卡通游戏广告，${purposeZh}，同一只草帽红围巾蓝外套金色徽章的卡通牛角色，热带卡牌游戏氛围，9:16竖构图，明亮高饱和商业质感，无水印，无UI，无字幕`;
+  const imagePromptZh = `Cinematic cartoon game ad, ${purposeZh}, same bull mascot with straw hat, red scarf, blue jacket, and gold badge, tropical card-game mood, vertical 9:16 composition, bright saturated commercial quality, no watermark, no UI, no subtitles`;
   const imagePromptEn = `Cinematic cartoon game advertisement, ${purposeEn}, same bull mascot with straw hat, red scarf, blue jacket, and gold badge, tropical card-game mood, vertical 9:16 composition, bright saturated commercial quality, no watermark, no UI, no subtitles`;
   return {
     keyframeNo,
@@ -942,7 +1715,7 @@ function demoSegment(
   negativePromptZh: string,
 ) {
   const durationSeconds = endTimeSeconds - startTimeSeconds;
-  const videoPromptZh = `单段一镜到底连续镜头，${purposeZh}。保持同一只草帽红围巾蓝外套金色徽章的卡通牛角色，保持热带卡牌游戏世界、明亮商业卡通质感和品牌色彩一致。禁止切镜、跳切、淡入淡出、场景替换、角色漂移、文字水印和UI。`;
+  const videoPromptZh = `Single continuous shot: ${purposeZh}. Maintain same mascot identity, same tropical card-game world, coherent lighting, no cuts, no scene jumps, no UI overlays.`;
   return {
     segmentNo,
     startKeyframeNo,
@@ -963,7 +1736,7 @@ function demoSegment(
     videoPromptEn,
     subtitle: "",
     outputMode: "mixed" as const,
-    constraints: ["保持主角牛角色造型一致", "保持品牌色彩明亮清晰", "无水印、无UI、无字幕"],
+    constraints: ["Keep mascot identity consistent", "Keep tropical card-game world coherent", "No subtitles, UI overlays, or random text"],
     negativePrompt,
     negativePromptZh,
     negativePromptEn: negativePrompt,
@@ -998,6 +1771,17 @@ export async function createVideoProject(
     include: PROJECT_INCLUDE,
   });
   await logOnePromptVideo("project.create.success", { userId, projectId: project.id, status: project.status });
+  await writeProjectOverviewLog({
+    userId,
+    projectId: project.id,
+    title: project.title,
+    prompt: project.userPrompt,
+    aspectRatio: project.aspectRatio,
+    durationSeconds: project.durationSeconds,
+    stylePreset: project.stylePreset,
+    referenceImageCount: planInput.referenceImageUrls.length,
+    status: project.status,
+  });
   return project;
 }
 
@@ -1039,11 +1823,16 @@ export async function getVideoShotClipForDownload(
 export async function updateVideoProject(
   userId: string,
   projectId: string,
-  input: { title?: string },
+  input: { title?: string; planDebugPatch?: PlanDebugPatch },
 ): Promise<VideoProjectWithShots> {
-  await requireVideoProject(userId, projectId);
+  const project = await requireVideoProject(userId, projectId);
   const data: Prisma.VideoProjectUpdateInput = {};
   if (typeof input.title === "string") data.title = input.title.trim().slice(0, 80);
+  if (input.planDebugPatch && project.planJson) {
+    const plan = cloneJsonRecord(project.planJson);
+    applyPlanDebugPatch(plan, input.planDebugPatch);
+    data.planJson = plan as Prisma.InputJsonValue;
+  }
 
   if (!Object.keys(data).length) return requireVideoProject(userId, projectId);
 
@@ -1147,6 +1936,43 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
     hasPlan: Boolean(project.planJson),
     finalVideoUrl: project.finalVideoUrl,
   });
+  if (project.status === VideoProjectStatus.IMAGE_REVIEW) {
+    const missingKeyframes = project.keyframes.filter((keyframe) => !keyframe.imageUrl);
+    const consistencyReferences = project.keyframes.filter((keyframe) => isConsistencyKeyframeNo(keyframe.keyframeNo));
+    const consistencyReadyForBoundary = consistencyReferences.every(isApprovedConsistencyReference);
+    if (missingKeyframes.length && consistencyReadyForBoundary) {
+      await prisma.videoKeyframe.updateMany({
+        where: { projectId, imageUrl: null },
+        data: {
+          status: VideoShotStatus.IMAGE_PENDING,
+          imageTaskId: null,
+          qualityScore: null,
+          errorMessage: null,
+          locked: false,
+        },
+      });
+      const queued = await prisma.videoProject.update({
+        where: { id: projectId },
+        data: { status: VideoProjectStatus.IMAGE_GENERATING, errorMessage: null },
+        include: PROJECT_INCLUDE,
+      });
+      await submitNextImageTask({
+        userId,
+        projectId,
+        keyframes: queued.keyframes,
+        logEventPrefix: "image.resume_after_consistency_approval",
+      });
+      const updated = await requireVideoProject(userId, projectId);
+      await logOnePromptVideo("project.resume.boundary_keyframes_after_consistency_approval", {
+        userId,
+        projectId,
+        status: updated.status,
+        missingKeyframeCount: missingKeyframes.length,
+      });
+      return updated;
+    }
+  }
+
   if (project.status !== VideoProjectStatus.FAILED) {
     await logOnePromptVideo("project.resume.noop", { userId, projectId, status: project.status });
     return project;
@@ -1288,11 +2114,36 @@ export async function planVideoProject(
     userId,
     projectId,
     status: project.status,
+    plannerArch: onePromptPlannerArch(),
     fallbackSegmentCount: input.shotCount,
     durationSeconds: input.durationSeconds,
     aspectRatio: input.aspectRatio,
     stylePreset: input.stylePreset,
     referenceImageCount: input.referenceImageUrls.length,
+  });
+  await appendProjectStageLog({
+    projectId,
+    title: project.title,
+    stage: "script",
+    event: "Script planning started",
+    summary: "Collecting project settings and reference images before generating the storyboard.",
+    lines: [
+      `Prompt: ${input.userPrompt}`,
+      `Duration: ${input.durationSeconds}s`,
+      `Aspect ratio: ${input.aspectRatio}`,
+      `Style preset: ${input.stylePreset || "default"}`,
+      `Reference images: ${input.referenceImageUrls.length}`,
+      "The planner will produce script, anchors, keyframes, segments, and prompt metadata.",
+    ],
+    data: {
+      userId,
+      status: project.status,
+      plannerArch: onePromptPlannerArch(),
+      durationSeconds: input.durationSeconds,
+      aspectRatio: input.aspectRatio,
+      stylePreset: input.stylePreset,
+      referenceImageCount: input.referenceImageUrls.length,
+    },
   });
   const claimed = await prisma.videoProject.updateMany({
     where: { id: project.id, status: project.status },
@@ -1319,7 +2170,7 @@ export async function planVideoProject(
   }
   let plan: OnePromptVideoPlan;
   try {
-    plan = await createAliyunStoryboardPlan(input);
+    plan = await createPlanForPlannerArch(input, { userId, projectId });
   } catch (error) {
     const current = await prisma.videoProject.findUnique({
       where: { id: project.id },
@@ -1335,6 +2186,19 @@ export async function planVideoProject(
       });
     }
     await logOnePromptVideo("project.plan.error", { userId, projectId, ...errorForLog(error) }, "error");
+    await writeStageErrorLog({
+      projectId,
+      title: project.title,
+      stage: "script",
+      event: "Script planning failed",
+      error,
+      context: {
+        userId,
+        durationSeconds: input.durationSeconds,
+        aspectRatio: input.aspectRatio,
+        stylePreset: input.stylePreset,
+      },
+    });
     throw error;
   }
 
@@ -1412,6 +2276,7 @@ export async function planVideoProject(
         subtitle: segment.subtitle,
       })),
     });
+    ensurePlanArtifactMetadata(plan as unknown as Record<string, unknown>);
     const updated = await tx.videoProject.update({
       where: { id: project.id },
       data: {
@@ -1425,7 +2290,7 @@ export async function planVideoProject(
       tx,
       userId,
       ONE_PROMPT_VIDEO_COST_CREDITS,
-      `一句话成片：${updated.title || project.id}`,
+      `婵炴垶鎸撮崑鎾绘煕濞嗗秴鍔ラ柣锔跨矙楠炲骞囬纰辨毈闂?{updated.title || project.id}`,
       `one-prompt-video:${project.id}`,
     );
     await logOnePromptVideo("project.plan.success", {
@@ -1444,6 +2309,23 @@ export async function planVideoProject(
         endKeyframeNo: segment.endKeyframeNo,
         durationSeconds: segment.durationSeconds,
       })),
+    });
+    await writeProjectOverviewLog({
+      userId,
+      projectId: project.id,
+      title: updated.title,
+      prompt: input.userPrompt,
+      aspectRatio: input.aspectRatio,
+      durationSeconds: input.durationSeconds,
+      stylePreset: input.stylePreset,
+      referenceImageCount: input.referenceImageUrls.length,
+      status: updated.status,
+    });
+    await writeScriptBreakdownLog({
+      userId,
+      projectId: project.id,
+      input,
+      plan,
     });
     return updated;
   });
@@ -1558,6 +2440,23 @@ export async function approveVideoPlan(userId: string, projectId: string): Promi
     keyframeCount: project.keyframes.length,
     status: project.status,
   });
+  await appendProjectStageLog({
+    projectId,
+    title: project.title,
+    stage: "keyframes",
+    event: "Keyframe review started",
+    summary: "Reviewing boundary keyframes and consistency reference frames before image generation.",
+    lines: project.keyframes.map((keyframe) => {
+      const label = keyframe.keyframeNo < 0 ? "Reference" : "Boundary";
+      return `${label} KF${keyframe.keyframeNo}: ${keyframe.purpose || "untitled"}, time=${keyframe.timeSeconds}s, prompt=${(keyframe.imagePrompt || "").slice(0, 260)}`;
+    }),
+    data: {
+      userId,
+      status: project.status,
+      keyframeCount: project.keyframes.length,
+      consistencyReferenceCount: project.keyframes.filter((keyframe) => keyframe.keyframeNo < 0).length,
+    },
+  });
 
   await prisma.videoKeyframe.updateMany({
     where: {
@@ -1592,6 +2491,28 @@ export async function approveVideoPlan(userId: string, projectId: string): Promi
     runningCount: updated.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_RUNNING).length,
     pendingCount: updated.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_PENDING).length,
   });
+  await appendProjectStageLog({
+    projectId,
+    title: updated.title,
+    stage: "keyframes",
+    event: "Keyframe image tasks submitted",
+    summary: "Boundary and consistency reference image tasks were submitted upstream.",
+    lines: [
+      `Running: ${updated.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_RUNNING).length}`,
+      `Pending: ${updated.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_PENDING).length}`,
+      `Completed images: ${updated.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length}`,
+    ],
+    data: {
+      userId,
+      status: updated.status,
+      keyframes: updated.keyframes.map((keyframe) => ({
+        keyframeNo: keyframe.keyframeNo,
+        status: keyframe.status,
+        imageTaskId: keyframe.imageTaskId,
+        hasImageUrl: Boolean(keyframe.imageUrl),
+      })),
+    },
+  });
   return updated;
 }
 
@@ -1604,14 +2525,26 @@ export async function regenerateShotImage(
   const segment = project.segments.find((item) => item.id === shotId);
   const keyframe = project.keyframes.find((item) => item.id === shotId) ??
     (segment ? project.keyframes.find((item) => item.keyframeNo === segment.startKeyframeNo) : undefined);
-  if (!keyframe) throw new Error("边界参考帧不存在");
-  if (keyframe.locked) throw new Error("边界参考帧已锁定，请先解锁再重生成");
+  if (!keyframe) throw new Error("Keyframe not found");
+  if (keyframe.locked) throw new Error("Locked keyframes cannot be regenerated");
 
   await logOnePromptVideo("image.regenerate.start", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo });
+  const draftPrompt = compileImagePromptForKeyframe(project, keyframe);
+  const referenceSelection = selectReferenceImagesForKeyframe(project, keyframe, draftPrompt.prompt);
+  const compiled = compileImagePromptForKeyframe(project, keyframe, {
+    ...referenceSelection.output,
+    finalTextPrompt: draftPrompt.prompt,
+  });
+  await saveReferenceSelectionOutput(projectId, {
+    ...referenceSelection.output,
+    selectedReferenceUrls: referenceSelection.urls,
+    finalTextPrompt: compiled.prompt,
+  });
+  await savePromptDebugArtifact(projectId, compiled.debugArtifact);
   const taskId = await submitAliyunImageTask({
-    prompt: generationPromptForKeyframe(project, keyframe),
-    negativePrompt: generationNegativePromptForKeyframe(project, keyframe),
-    referenceImageUrls: referenceImageUrlsForKeyframe(project, keyframe),
+    prompt: compiled.prompt,
+    negativePrompt: compiled.negativePrompt,
+    referenceImageUrls: compiled.referenceImageUrls ?? [],
     aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
     seed: Date.now() % 2147483647,
   });
@@ -1625,13 +2558,33 @@ export async function regenerateShotImage(
       errorMessage: null,
     },
   });
+  await updateProjectArtifactStatus(projectId, [imageArtifactIdForKeyframeNo(keyframe.keyframeNo)], "generating", { retryFromStage: "generation" });
 
   const updated = await prisma.videoProject.update({
     where: { id: projectId },
     data: { status: VideoProjectStatus.IMAGE_GENERATING, errorMessage: null },
     include: PROJECT_INCLUDE,
   });
-  await logOnePromptVideo("image.regenerate.success", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo, imageTaskId: taskId });
+      await logOnePromptVideo("image.regenerate.success", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo, imageTaskId: taskId });
+  await appendProjectStageLog({
+    projectId,
+    title: updated.title,
+    stage: "keyframes",
+    event: `Regenerated keyframe KF${keyframe.keyframeNo}`,
+    summary: "A keyframe image task was resubmitted with the latest prompt and references.",
+    lines: [
+      `Purpose: ${keyframe.purpose || "untitled"}`,
+      `Task ID: ${taskId}`,
+      `Prompt: ${compiled.prompt.slice(0, 400)}`,
+    ],
+    data: {
+      userId,
+      keyframeId: keyframe.id,
+      keyframeNo: keyframe.keyframeNo,
+      imageTaskId: taskId,
+      referenceImageCount: (compiled.referenceImageUrls ?? []).length,
+    },
+  });
   return updated;
 }
 
@@ -1678,10 +2631,22 @@ export async function regenerateMicroShotImage(
   });
   const latest = await requireVideoProject(userId, projectId);
   const latestSegment = latest.segments.find((item) => item.id === shotId) ?? segment;
+  const draftPrompt = compileImagePromptForMicroShot(latest, latestSegment, merged);
+  const referenceSelection = selectReferenceImagesForMicroShot(latest, latestSegment, merged, draftPrompt.prompt);
+  const compiled = compileImagePromptForMicroShot(latest, latestSegment, merged, {
+    ...referenceSelection.output,
+    finalTextPrompt: draftPrompt.prompt,
+  });
+  await saveReferenceSelectionOutput(projectId, {
+    ...referenceSelection.output,
+    selectedReferenceUrls: referenceSelection.urls,
+    finalTextPrompt: compiled.prompt,
+  });
+  await savePromptDebugArtifact(projectId, compiled.debugArtifact);
   const taskId = await submitAliyunImageTask({
-    prompt: generationPromptForMicroShot(latest, latestSegment, merged),
-    negativePrompt: generationNegativePromptForSegment(latest, latestSegment),
-    referenceImageUrls: referenceImageUrlsForMicroShot(latest, latestSegment),
+    prompt: compiled.prompt,
+    negativePrompt: compiled.negativePrompt,
+    referenceImageUrls: compiled.referenceImageUrls ?? [],
     aspectRatio: latest.aspectRatio as "9:16" | "16:9" | "1:1",
     seed: Math.abs(segment.segmentNo * 100 + microShotNo + Date.now()) % 2147483647,
   });
@@ -1694,6 +2659,7 @@ export async function regenerateMicroShotImage(
     imageUrl: "",
     errorMessage: "",
   });
+  await updateProjectArtifactStatus(projectId, [imageArtifactIdForMicroShot(segment.segmentNo, microShotNo)], "generating", { retryFromStage: "generation" });
   await logOnePromptVideo("micro_shot.image.regenerate.success", {
     userId,
     projectId,
@@ -1702,6 +2668,92 @@ export async function regenerateMicroShotImage(
     imageTaskId: taskId,
   });
   return requireVideoProject(userId, projectId);
+}
+
+export async function regenerateShotClip(
+  userId: string,
+  projectId: string,
+  shotId: string,
+): Promise<VideoProjectWithShots> {
+  const project = await requireVideoProject(userId, projectId);
+  const segment = project.segments.find((item) => item.id === shotId);
+  if (!segment) throw new Error("Video segment not found");
+  const keyframeMap = new Map(project.keyframes.map((keyframe) => [keyframe.keyframeNo, keyframe]));
+  const startKeyframe = keyframeMap.get(segment.startKeyframeNo);
+  const endKeyframe = keyframeMap.get(segment.endKeyframeNo);
+  if (!startKeyframe?.imageUrl) throw new Error("Segment start keyframe image is missing");
+  if (!endKeyframe?.imageUrl) throw new Error("Segment end keyframe image is missing");
+  const renderDescriptions = readPlanSegmentRenderDescriptionMap(project.planJson);
+  const blockReason = singleTakeBlockReasonForSegment(renderDescriptions.get(segment.segmentNo), segment);
+  if (blockReason) {
+    await logOnePromptVideo("clip.regenerate.single_take_audit_softened", {
+      userId,
+      projectId,
+      segmentNo: segment.segmentNo,
+      blockReason,
+    }, "warn");
+  }
+
+  await logOnePromptVideo("clip.regenerate.start", {
+    userId,
+    projectId,
+    segmentId: segment.id,
+    segmentNo: segment.segmentNo,
+  });
+  const compiled = compileVideoPromptForSegment(project, segment, startKeyframe, endKeyframe);
+  await savePromptDebugArtifact(projectId, compiled.debugArtifact);
+  const taskId = await submitAliyunImageToVideoTask({
+    imageUrl: startKeyframe.imageUrl,
+    lastFrameUrl: endKeyframe.imageUrl,
+    prompt: compiled.prompt,
+    durationSeconds: segment.durationSeconds,
+  });
+  await prisma.videoSegment.update({
+    where: { id: segment.id },
+    data: {
+      clipTaskId: taskId,
+      clipUrl: null,
+      status: VideoShotStatus.CLIP_RUNNING,
+      locked: true,
+      errorMessage: null,
+    },
+  });
+  await updateProjectArtifactStatus(projectId, [videoArtifactIdForSegmentNo(segment.segmentNo)], "generating", { retryFromStage: "generation" });
+  const updated = await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { status: VideoProjectStatus.CLIP_GENERATING, errorMessage: null },
+    include: PROJECT_INCLUDE,
+  });
+  await logOnePromptVideo("clip.regenerate.success", {
+    userId,
+    projectId,
+    segmentId: segment.id,
+    segmentNo: segment.segmentNo,
+    clipTaskId: taskId,
+  });
+  await appendProjectStageLog({
+    projectId,
+    title: updated.title,
+    stage: "clips",
+    event: `Regenerated clip for segment ${segment.segmentNo}`,
+    summary: "A segment video task was resubmitted with the latest prompt and references.",
+    lines: [
+      `Start keyframe: KF${segment.startKeyframeNo}`,
+      `End keyframe: KF${segment.endKeyframeNo}`,
+      `Duration: ${segment.durationSeconds}s`,
+      `Task ID: ${taskId}`,
+      `Prompt: ${compiled.prompt.slice(0, 500)}`,
+    ],
+    data: {
+      userId,
+      segmentId: segment.id,
+      segmentNo: segment.segmentNo,
+      clipTaskId: taskId,
+      startKeyframeUrl: startKeyframe.imageUrl,
+      endKeyframeUrl: endKeyframe.imageUrl,
+    },
+  });
+  return updated;
 }
 
 async function submitRequiredMicroShotImageTasks(userId: string, projectId: string): Promise<void> {
@@ -1724,10 +2776,22 @@ async function submitRequiredMicroShotImageTasks(userId: string, projectId: stri
       try {
         const latest = await requireVideoProject(userId, projectId);
         const latestSegment = latest.segments.find((item) => item.id === segment.id) ?? segment;
+        const draftPrompt = compileImagePromptForMicroShot(latest, latestSegment, microShot);
+        const referenceSelection = selectReferenceImagesForMicroShot(latest, latestSegment, microShot, draftPrompt.prompt);
+        const compiled = compileImagePromptForMicroShot(latest, latestSegment, microShot, {
+          ...referenceSelection.output,
+          finalTextPrompt: draftPrompt.prompt,
+        });
+        await saveReferenceSelectionOutput(projectId, {
+          ...referenceSelection.output,
+          selectedReferenceUrls: referenceSelection.urls,
+          finalTextPrompt: compiled.prompt,
+        });
+        await savePromptDebugArtifact(projectId, compiled.debugArtifact);
         const taskId = await submitAliyunImageTask({
-          prompt: generationPromptForMicroShot(latest, latestSegment, microShot),
-          negativePrompt: generationNegativePromptForSegment(latest, latestSegment),
-          referenceImageUrls: referenceImageUrlsForMicroShot(latest, latestSegment),
+          prompt: compiled.prompt,
+          negativePrompt: compiled.negativePrompt,
+          referenceImageUrls: compiled.referenceImageUrls ?? [],
           aspectRatio: latest.aspectRatio as "9:16" | "16:9" | "1:1",
           seed: Math.abs(segment.segmentNo * 100 + microShot.microShotNo) || 1,
         });
@@ -1738,12 +2802,33 @@ async function submitRequiredMicroShotImageTasks(userId: string, projectId: stri
           imageUrl: "",
           errorMessage: "",
         });
+        await updateProjectArtifactStatus(projectId, [imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo)], "generating", { retryFromStage: "generation" });
         await logOnePromptVideo("micro_shot.image.submit.success", {
           userId,
           projectId,
           segmentNo: segment.segmentNo,
           microShotNo: microShot.microShotNo,
           imageTaskId: taskId,
+        });
+        await appendProjectStageLog({
+          projectId,
+          title: project.title,
+          stage: "micro_shots",
+          event: `Micro-shot image task submitted S${segment.segmentNo}.${microShot.microShotNo}`,
+          summary: "A micro-shot reference image task was submitted upstream.",
+          lines: [
+            `Segment: ${segment.purpose || "untitled"}`,
+            `Micro-shot: ${microShot.purposeZh || microShot.purpose || "untitled"}`,
+            `Task ID: ${taskId}`,
+            `Prompt: ${compiled.prompt.slice(0, 360)}`,
+          ],
+          data: {
+            userId,
+            segmentNo: segment.segmentNo,
+            microShotNo: microShot.microShotNo,
+            imageTaskId: taskId,
+            referenceImageCount: (compiled.referenceImageUrls ?? []).length,
+          },
         });
       } catch (error) {
         const retryable = isAliyunRateLimitError(error);
@@ -1752,6 +2837,19 @@ async function submitRequiredMicroShotImageTasks(userId: string, projectId: stri
           imageStatus: retryable ? "pending" : "failed",
           errorMessage: retryable ? "Aliyun rate limit, please retry later" : error instanceof Error ? error.message : "Micro-shot image submit failed",
         });
+        if (!retryable) {
+          await saveGenerationQualityReport(projectId, buildImageGenerationQualityReport({
+            assetId: imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo),
+            imageUrl: null,
+            prompt: localizedMicroShotImagePromptForGeneration(microShot),
+            targetType: "motion_checkpoint_image",
+            upstreamError: error instanceof Error ? error.message : "Micro-shot image submit failed",
+          }));
+          await updateProjectArtifactStatus(projectId, [imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo)], "failed", {
+            dirtyReason: error instanceof Error ? error.message : "Micro-shot image submit failed",
+            retryFromStage: "generation",
+          });
+        }
         await logOnePromptVideo("micro_shot.image.submit.error", {
           userId,
           projectId,
@@ -1760,6 +2858,19 @@ async function submitRequiredMicroShotImageTasks(userId: string, projectId: stri
           retryable,
           ...errorForLog(error),
         }, retryable ? "warn" : "error");
+        await writeStageErrorLog({
+          projectId,
+          title: project.title,
+          stage: "micro_shots",
+          event: `Micro-shot image task failed S${segment.segmentNo}.${microShot.microShotNo}`,
+          error,
+          context: {
+            userId,
+            segmentNo: segment.segmentNo,
+            microShotNo: microShot.microShotNo,
+            retryable,
+          },
+        });
         if (retryable) return;
       }
     }
@@ -1788,7 +2899,7 @@ function isMicroShotImageRequired(microShot: VideoMicroShot): boolean {
 export async function approveShotImages(userId: string, projectId: string): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
   const missing = project.keyframes.filter((keyframe) => !keyframe.imageUrl);
-  if (missing.length) throw new Error("还有边界参考帧没有生成完成，不能进入视频阶段");
+  if (missing.length) throw new Error("All keyframe images must be generated before approval");
   await logOnePromptVideo("micro_shot.review.start", {
     userId,
     projectId,
@@ -1796,11 +2907,37 @@ export async function approveShotImages(userId: string, projectId: string): Prom
     segmentCount: project.segments.length,
     status: project.status,
   });
+  await appendProjectStageLog({
+    projectId,
+    title: project.title,
+    stage: "micro_shots",
+    event: "Micro-shot review started",
+    summary: "Reviewing micro-shot image requirements before clip generation.",
+    lines: project.segments.flatMap((segment) => {
+      const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
+      const microShots = readPlanMicroShots(planSegment);
+      return microShots.length
+        ? microShots.map((microShot) => `Segment ${segment.segmentNo} / Micro ${microShot.microShotNo}: ${microShot.purposeZh || microShot.purpose}, reference=${microShot.referenceType || "text"}, prompt=${(localizedMicroShotImagePromptForGeneration(microShot) || "").slice(0, 240)}`)
+        : [`Segment ${segment.segmentNo}: no micro-shot image references required`];
+    }),
+    data: {
+      userId,
+      keyframeCount: project.keyframes.length,
+      segmentCount: project.segments.length,
+      requiredMicroShotIssues: requiredMicroShotImageIssues(project),
+    },
+  });
 
   await prisma.videoKeyframe.updateMany({
     where: { projectId, imageUrl: { not: null } },
     data: { status: VideoShotStatus.IMAGE_APPROVED, locked: true, errorMessage: null },
   });
+  await updateProjectArtifactStatus(
+    projectId,
+    project.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).map((keyframe) => imageArtifactIdForKeyframeNo(keyframe.keyframeNo)),
+    "approved",
+    { retryFromStage: "generation" },
+  );
   await submitRequiredMicroShotImageTasks(userId, projectId);
 
   const updated = await prisma.videoProject.update({
@@ -1812,6 +2949,17 @@ export async function approveShotImages(userId: string, projectId: string): Prom
     include: PROJECT_INCLUDE,
   });
   await logOnePromptVideo("micro_shot.review.ready", { userId, projectId, status: updated.status });
+  await appendProjectStageLog({
+    projectId,
+    title: updated.title,
+    stage: "micro_shots",
+    event: "Micro-shot references approved",
+    summary: "All required micro-shot reference images are ready for clip generation.",
+    data: {
+      userId,
+      status: updated.status,
+    },
+  });
   return updated;
 }
 
@@ -1831,10 +2979,25 @@ export async function approveMicroShotReferences(userId: string, projectId: stri
     segmentCount: project.segments.length,
     status: project.status,
   });
+  await appendProjectStageLog({
+    projectId,
+    title: project.title,
+    stage: "clips",
+    event: "Clip submission started",
+    summary: "Submitting approved segment prompts for video generation.",
+    lines: project.segments.map((segment) => `Segment ${segment.segmentNo}: KF${segment.startKeyframeNo} -> KF${segment.endKeyframeNo}, ${segment.durationSeconds}s, ${segment.purpose}, prompt=${(segment.videoPrompt || "").slice(0, 280)}`),
+    data: {
+      userId,
+      keyframeCount: project.keyframes.length,
+      segmentCount: project.segments.length,
+      status: project.status,
+    },
+  });
   await prisma.videoSegment.updateMany({
     where: { projectId },
     data: { status: VideoShotStatus.CLIP_PENDING, locked: true, errorMessage: null },
   });
+  await updateProjectArtifactStatus(projectId, approvedMicroShotImageArtifactIds(project), "approved", { retryFromStage: "generation" });
   await submitNextClipTask({
     userId,
     projectId,
@@ -1852,12 +3015,29 @@ export async function approveMicroShotReferences(userId: string, projectId: stri
     include: PROJECT_INCLUDE,
   });
   await logOnePromptVideo("clip.batch.submit.done", { userId, projectId, status: updated.status });
+  await appendProjectStageLog({
+    projectId,
+    title: updated.title,
+    stage: "clips",
+    event: "Clip tasks submitted",
+    summary: "Segment video generation tasks were submitted upstream.",
+    data: {
+      userId,
+      status: updated.status,
+      runningCount: updated.segments.filter((segment) => segment.status === VideoShotStatus.CLIP_RUNNING).length,
+      pendingCount: updated.segments.filter((segment) => segment.status === VideoShotStatus.CLIP_PENDING).length,
+    },
+  });
   return updated;
 }
 
 export async function composeVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
-  if (project.status !== VideoProjectStatus.CLIP_REVIEW && project.status !== VideoProjectStatus.FINAL_REVIEW) {
+  if (
+    project.status !== VideoProjectStatus.CLIP_REVIEW &&
+    project.status !== VideoProjectStatus.FINAL_REVIEW &&
+    project.status !== VideoProjectStatus.DONE
+  ) {
     throw new Error("Current project is not ready for composition");
   }
 
@@ -1866,6 +3046,12 @@ export async function composeVideoProject(userId: string, projectId: string): Pr
     .map((item) => item.clipUrl)
     .filter((url): url is string => Boolean(url));
   if (!sourceCount || clipUrls.length !== sourceCount) throw new Error("Not all video clips are ready");
+  const composeSources = project.segments.length ? project.segments : project.shots;
+  const clipDurations = composeSources.map((item) => item.durationSeconds);
+  const subtitles = composeSources.map((item) => ({
+    text: item.subtitle || "",
+    durationSeconds: item.durationSeconds,
+  }));
   await logOnePromptVideo("compose.submit.start", {
     userId,
     projectId,
@@ -1873,27 +3059,62 @@ export async function composeVideoProject(userId: string, projectId: string): Pr
     clipCount: clipUrls.length,
     title: project.title,
   });
-
-  const composeSources = project.segments.length ? project.segments : project.shots;
-  const clipDurations = composeSources.map((item) => item.durationSeconds);
-  const subtitles = composeSources.map((item) => ({
-    text: item.subtitle || "",
-    durationSeconds: item.durationSeconds,
-  }));
-  const finalVideoUrl = await composeVideoClipsLocally({
+  await appendProjectStageLog({
     projectId,
     title: project.title,
-    clipUrls,
-    clipDurations,
-    subtitles,
-    aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
+    stage: "final",
+    event: "Final video composition started",
+    summary: "Combining generated clips into the final review video.",
+    lines: [
+      `Clip count: ${clipUrls.length}`,
+      `Clip durations: ${clipDurations.join("s / ")}s`,
+      `Aspect ratio: ${project.aspectRatio}`,
+      `Audio mode: ${String(readAudioBible(project.planJson)?.mode ?? "default")}`,
+      `Transition count: ${readFinalTransitionPlan(project.planJson).length}`,
+    ],
+    data: {
+      userId,
+      status: project.status,
+      clipUrls,
+      transitionPlan: readFinalTransitionPlan(project.planJson),
+      audioBible: readAudioBible(project.planJson),
+    },
   });
+  await updateProjectArtifactStatus(projectId, ["final_video"], "generating", { retryFromStage: "composition" });
+  let finalVideoUrl: string;
+  try {
+    finalVideoUrl = await composeVideoClipsLocally({
+      projectId,
+      title: project.title,
+      clipUrls,
+      clipDurations,
+      subtitles,
+      aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
+      transitionPlan: readFinalTransitionPlan(project.planJson),
+      audioBible: readAudioBible(project.planJson),
+    });
+  } catch (error) {
+    await writeStageErrorLog({
+      projectId,
+      title: project.title,
+      stage: "final",
+      event: "Final video composition failed",
+      error,
+      context: {
+        userId,
+        clipCount: clipUrls.length,
+        aspectRatio: project.aspectRatio,
+      },
+    });
+    throw error;
+  }
 
   if (project.segments.length) {
     await prisma.videoSegment.updateMany({
       where: { projectId },
       data: { status: VideoShotStatus.CLIP_APPROVED, locked: true, errorMessage: null },
     });
+    await updateProjectArtifactStatus(projectId, project.segments.filter((segment) => Boolean(segment.clipUrl)).map((segment) => videoArtifactIdForSegmentNo(segment.segmentNo)), "approved", { retryFromStage: "generation" });
   } else {
     await prisma.videoShot.updateMany({
       where: { projectId },
@@ -1911,6 +3132,7 @@ export async function composeVideoProject(userId: string, projectId: string): Pr
     },
     include: PROJECT_INCLUDE,
   });
+  await updateProjectArtifactStatus(projectId, ["final_video"], "ready", { retryFromStage: "composition" });
   await logOnePromptVideo("compose.submit.success", {
     userId,
     projectId,
@@ -1919,12 +3141,29 @@ export async function composeVideoProject(userId: string, projectId: string): Pr
     finalVideoUrl: updated.finalVideoUrl,
     status: updated.status,
   });
+  await appendProjectStageLog({
+    projectId,
+    title: updated.title,
+    stage: "final",
+    event: "Final video composed",
+    summary: "The local composer produced the final review video.",
+    lines: [
+      `Final video: ${updated.finalVideoUrl}`,
+      `Status: ${updated.status}`,
+      `Clip count: ${clipUrls.length}`,
+    ],
+    data: {
+      userId,
+      finalVideoUrl: updated.finalVideoUrl,
+      status: updated.status,
+    },
+  });
   return updated;
 }
 export async function finishVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
   if (project.status !== VideoProjectStatus.FINAL_REVIEW && project.status !== VideoProjectStatus.DONE) {
-    throw new Error("请先进入成片审核");
+    throw new Error("Project is not ready to finish");
   }
 
   const updated = await prisma.videoProject.update({
@@ -2192,6 +3431,7 @@ export async function syncVideoProject(userId: string, projectId: string): Promi
   if (project.status === VideoProjectStatus.COMPOSING && project.composeTaskId) {
     await syncComposeTask(project.id, project.composeTaskId);
   }
+  await persistExistingTemporaryImageUrls(project.id);
 
   const synced = await requireVideoProject(userId, projectId);
   await logOnePromptVideo("project.sync.done", {
@@ -2202,6 +3442,124 @@ export async function syncVideoProject(userId: string, projectId: string): Promi
     finalVideoUrl: synced.finalVideoUrl,
   });
   return synced;
+}
+
+async function persistGeneratedImageUrl(params: {
+  projectId: string;
+  sourceUrl: string;
+  kind: "keyframe" | "micro-shot";
+  keyframeNo?: number;
+  segmentNo?: number;
+  microShotNo?: number;
+}): Promise<string> {
+  if (!isTemporaryDashScopeUrl(params.sourceUrl)) return params.sourceUrl;
+  const suffix = params.kind === "keyframe"
+    ? `keyframe-${params.keyframeNo ?? "unknown"}`
+    : `segment-${params.segmentNo ?? "unknown"}-micro-${params.microShotNo ?? "unknown"}`;
+  const key = `one-prompt-video/images/${params.projectId}/${suffix}-${Date.now()}.jpg`;
+  try {
+    const publicUrl = await persistRemoteMediaToOss({
+      url: params.sourceUrl,
+      key,
+      fallbackContentType: "image/jpeg",
+    });
+    await logOnePromptVideo("image.persist.success", {
+      projectId: params.projectId,
+      kind: params.kind,
+      key,
+      publicUrl,
+    });
+    return publicUrl;
+  } catch (error) {
+    await logOnePromptVideo("image.persist.error", {
+      projectId: params.projectId,
+      kind: params.kind,
+      keyframeNo: params.keyframeNo,
+      segmentNo: params.segmentNo,
+      microShotNo: params.microShotNo,
+      ...errorForLog(error),
+    }, "error");
+    return params.sourceUrl;
+  }
+}
+
+async function refreshAndPersistTemporaryImage(params: {
+  projectId: string;
+  currentUrl: string;
+  taskId?: string | null;
+  kind: "keyframe" | "micro-shot";
+  keyframeNo?: number;
+  segmentNo?: number;
+  microShotNo?: number;
+}): Promise<string> {
+  let sourceUrl = params.currentUrl;
+  if (params.taskId) {
+    try {
+      const refreshed = await queryDashScopeTask(params.taskId);
+      if (refreshed.status === "succeeded" && refreshed.resultUrl) {
+        sourceUrl = refreshed.resultUrl;
+      }
+    } catch (error) {
+      await logOnePromptVideo("image.persist.refresh_task_error", {
+        projectId: params.projectId,
+        kind: params.kind,
+        taskId: params.taskId,
+        ...errorForLog(error),
+      }, "warn");
+    }
+  }
+  return persistGeneratedImageUrl({
+    projectId: params.projectId,
+    sourceUrl,
+    kind: params.kind,
+    keyframeNo: params.keyframeNo,
+    segmentNo: params.segmentNo,
+    microShotNo: params.microShotNo,
+  });
+}
+
+async function persistExistingTemporaryImageUrls(projectId: string): Promise<void> {
+  const project = await prisma.videoProject.findUnique({ where: { id: projectId }, include: PROJECT_INCLUDE });
+  if (!project) return;
+
+  for (const keyframe of project.keyframes) {
+    if (!isTemporaryDashScopeUrl(keyframe.imageUrl)) continue;
+    const persisted = await refreshAndPersistTemporaryImage({
+      projectId,
+      currentUrl: keyframe.imageUrl as string,
+      taskId: keyframe.imageTaskId,
+      kind: "keyframe",
+      keyframeNo: keyframe.keyframeNo,
+    });
+    if (persisted !== keyframe.imageUrl) {
+      await prisma.videoKeyframe.update({
+        where: { id: keyframe.id },
+        data: { imageUrl: persisted },
+      });
+    }
+  }
+
+  const planSegments = readPlanSegmentMap(project.planJson);
+  for (const segment of project.segments) {
+    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    for (const microShot of microShots) {
+      if (!isTemporaryDashScopeUrl(microShot.imageUrl)) continue;
+      const persisted = await refreshAndPersistTemporaryImage({
+        projectId,
+        currentUrl: microShot.imageUrl as string,
+        taskId: microShot.imageTaskId,
+        kind: "micro-shot",
+        segmentNo: segment.segmentNo,
+        microShotNo: microShot.microShotNo,
+      });
+      if (persisted !== microShot.imageUrl) {
+        await updatePlanMicroShot(projectId, segment.segmentNo, microShot.microShotNo, {
+          ...microShot,
+          imageUrl: persisted,
+        });
+      }
+    }
+  }
 }
 
 async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
@@ -2223,19 +3581,84 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
       errorMessage: result.errorMessage,
     }, result.status === "failed" ? "error" : "info");
     if (result.status === "succeeded" && result.resultUrl) {
+      const persistedImageUrl = await persistGeneratedImageUrl({
+        projectId: project.id,
+        sourceUrl: result.resultUrl,
+        kind: "keyframe",
+        keyframeNo: keyframe.keyframeNo,
+      });
       await prisma.videoKeyframe.update({
         where: { id: keyframe.id },
         data: {
-          imageUrl: result.resultUrl,
+          imageUrl: persistedImageUrl,
           status: VideoShotStatus.IMAGE_READY,
-          qualityScore: scoreShotImage({ imageUrl: result.resultUrl, imagePrompt: keyframe.imagePrompt, locked: keyframe.locked }),
+          qualityScore: scoreShotImage({ imageUrl: persistedImageUrl, imagePrompt: keyframe.imagePrompt, locked: keyframe.locked }),
           errorMessage: null,
         },
       });
+      const report = buildImageGenerationQualityReport({
+        assetId: imageArtifactIdForKeyframeNo(keyframe.keyframeNo),
+        imageUrl: persistedImageUrl,
+        prompt: keyframe.imagePrompt,
+        selectedReferenceUrls: selectedReferenceUrlsForPromptTarget(project.planJson, keyframeTargetArtifactId(keyframe.keyframeNo)),
+        targetType: keyframe.keyframeNo < 0 ? "anchor_reference_image" : "boundary_keyframe",
+      });
+      await saveGenerationQualityReport(project.id, report);
+      await appendProjectStageLog({
+        projectId: project.id,
+        title: project.title,
+        stage: "keyframes",
+        event: "Keyframe image ready KF" + keyframe.keyframeNo,
+        summary: "A keyframe image finished and quality report was recorded.",
+        lines: [
+          "Image URL: " + persistedImageUrl,
+          "Quality: " + (report.passed ? "passed" : "needs retry"),
+          "Scores: identity=" + report.identityScore + ", layout=" + report.layoutScore + ", prompt=" + report.promptAlignmentScore + ", continuity=" + report.continuityScore,
+          report.artifactIssues.length ? "Issues: " + report.artifactIssues.join("; ") : "No quality issues reported",
+        ],
+        data: {
+          keyframeId: keyframe.id,
+          keyframeNo: keyframe.keyframeNo,
+          imageTaskId: keyframe.imageTaskId,
+          imageUrl: persistedImageUrl,
+          qualityReport: report,
+        },
+      });
+      if (!report.passed) {
+        await prisma.videoKeyframe.update({
+          where: { id: keyframe.id },
+          data: { status: VideoShotStatus.FAILED, errorMessage: report.retryInstruction || report.artifactIssues.join("; ") },
+        });
+      }
     } else if (result.status === "failed") {
+      await saveGenerationQualityReport(project.id, buildImageGenerationQualityReport({
+        assetId: imageArtifactIdForKeyframeNo(keyframe.keyframeNo),
+        imageUrl: null,
+        prompt: keyframe.imagePrompt,
+        targetType: keyframe.keyframeNo < 0 ? "anchor_reference_image" : "boundary_keyframe",
+        upstreamError: result.errorMessage || "Boundary keyframe generation failed",
+      }));
       await prisma.videoKeyframe.update({
         where: { id: keyframe.id },
-        data: { status: VideoShotStatus.FAILED, errorMessage: result.errorMessage || "边界参考帧生成失败" },
+        data: { status: VideoShotStatus.FAILED, errorMessage: result.errorMessage || "闁哄鐗嗗﹢閬嶅疾椤愶箑鐭楅柛灞剧妇閸嬫捇宕橀妸锕€顫撻梺姹囧灮閸犳劙宕瑰顓炵窞閺夊牜鍋夎" },
+      });
+      await updateProjectArtifactStatus(project.id, [imageArtifactIdForKeyframeNo(keyframe.keyframeNo)], "failed", {
+        dirtyReason: result.errorMessage || "Boundary keyframe generation failed",
+        retryFromStage: "generation",
+      });
+      await appendProjectStageLog({
+        projectId: project.id,
+        title: project.title,
+        stage: "keyframes",
+        event: `Keyframe KF${keyframe.keyframeNo} image failed`,
+        level: "error",
+        summary: "The image task failed or returned an invalid result. The frame is marked failed for retry.",
+        data: {
+          keyframeId: keyframe.id,
+          keyframeNo: keyframe.keyframeNo,
+          imageTaskId: keyframe.imageTaskId,
+          errorMessage: result.errorMessage,
+        },
       });
     }
   }
@@ -2246,7 +3669,7 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
   if (failed) {
     await prisma.videoProject.update({
       where: { id: project.id },
-      data: { status: VideoProjectStatus.FAILED, errorMessage: failed.errorMessage || "边界参考帧生成失败" },
+      data: { status: VideoProjectStatus.FAILED, errorMessage: failed.errorMessage || "闁哄鐗嗗﹢閬嶅疾椤愶箑鐭楅柛灞剧妇閸嬫捇宕橀妸锕€顫撻梺姹囧灮閸犳劙宕瑰顓炵窞閺夊牜鍋夎" },
     });
     await logOnePromptVideo("image.sync.project.failed", {
       projectId: project.id,
@@ -2264,6 +3687,18 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
       projectId: project.id,
       status: VideoProjectStatus.IMAGE_REVIEW,
       imageCount: latest.keyframes.length,
+    });
+    await appendProjectStageLog({
+      projectId: project.id,
+      title: latest.title,
+      stage: "keyframes",
+      event: "All keyframe images ready",
+      summary: "All keyframe and reference images are ready for review.",
+      lines: latest.keyframes.map((keyframe) => "KF" + keyframe.keyframeNo + ": " + (keyframe.imageUrl ? "ready" : "missing") + ", status=" + keyframe.status),
+      data: {
+        status: VideoProjectStatus.IMAGE_REVIEW,
+        imageCount: latest.keyframes.length,
+      },
     });
   }
   const runningCount = latest.keyframes.filter((keyframe) => keyframe.status === VideoShotStatus.IMAGE_RUNNING && keyframe.imageTaskId).length;
@@ -2309,17 +3744,85 @@ async function syncMicroShotImageTasks(project: VideoProjectWithShots): Promise<
       errorMessage: result.errorMessage,
     }, result.status === "failed" ? "error" : "info");
     if (result.status === "succeeded" && result.resultUrl) {
+      const persistedImageUrl = await persistGeneratedImageUrl({
+        projectId: project.id,
+        sourceUrl: result.resultUrl,
+        kind: "micro-shot",
+        segmentNo: item.segment.segmentNo,
+        microShotNo: item.microShot.microShotNo,
+      });
       await updatePlanMicroShot(project.id, item.segment.segmentNo, item.microShot.microShotNo, {
         ...item.microShot,
-        imageUrl: result.resultUrl,
+        imageUrl: persistedImageUrl,
         imageStatus: "ready",
         errorMessage: "",
       });
+      const targetArtifactId = "segment:" + item.segment.segmentNo + ":micro_shot:" + item.microShot.microShotNo;
+      const report = buildImageGenerationQualityReport({
+        assetId: imageArtifactIdForMicroShot(item.segment.segmentNo, item.microShot.microShotNo),
+        imageUrl: persistedImageUrl,
+        prompt: localizedMicroShotImagePromptForGeneration(item.microShot),
+        selectedReferenceUrls: selectedReferenceUrlsForPromptTarget(project.planJson, targetArtifactId),
+        targetType: "motion_checkpoint_image",
+      });
+      await saveGenerationQualityReport(project.id, report);
+      await appendProjectStageLog({
+        projectId: project.id,
+        title: project.title,
+        stage: "micro_shots",
+        event: "Micro-shot image ready S" + item.segment.segmentNo + "." + item.microShot.microShotNo,
+        summary: "Micro-shot reference image finished and quality report was recorded.",
+        lines: [
+          "Image URL: " + persistedImageUrl,
+          "Quality: " + (report.passed ? "passed" : "needs retry"),
+          "Purpose: " + (item.microShot.purposeZh || item.microShot.purpose || "untitled"),
+          report.artifactIssues.length ? "Issues: " + report.artifactIssues.join("; ") : "No quality issues reported",
+        ],
+        data: {
+          segmentNo: item.segment.segmentNo,
+          microShotNo: item.microShot.microShotNo,
+          imageTaskId: item.microShot.imageTaskId,
+          imageUrl: persistedImageUrl,
+          qualityReport: report,
+        },
+      });
+      if (!report.passed) {
+        await updatePlanMicroShot(project.id, item.segment.segmentNo, item.microShot.microShotNo, {
+          ...item.microShot,
+          imageStatus: "failed",
+          errorMessage: report.retryInstruction || report.artifactIssues.join("; "),
+        });
+      }
     } else if (result.status === "failed") {
+      await saveGenerationQualityReport(project.id, buildImageGenerationQualityReport({
+        assetId: imageArtifactIdForMicroShot(item.segment.segmentNo, item.microShot.microShotNo),
+        imageUrl: null,
+        prompt: localizedMicroShotImagePromptForGeneration(item.microShot),
+        targetType: "motion_checkpoint_image",
+        upstreamError: result.errorMessage || "Micro-shot reference image generation failed",
+      }));
       await updatePlanMicroShot(project.id, item.segment.segmentNo, item.microShot.microShotNo, {
         ...item.microShot,
         imageStatus: "failed",
         errorMessage: result.errorMessage || "Micro-shot reference image generation failed",
+      });
+      await updateProjectArtifactStatus(project.id, [imageArtifactIdForMicroShot(item.segment.segmentNo, item.microShot.microShotNo)], "failed", {
+        dirtyReason: result.errorMessage || "Micro-shot reference image generation failed",
+        retryFromStage: "generation",
+      });
+      await appendProjectStageLog({
+        projectId: project.id,
+        title: project.title,
+        stage: "micro_shots",
+        event: "Micro-shot image failed S" + item.segment.segmentNo + "." + item.microShot.microShotNo,
+        level: "error",
+        summary: "Micro-shot reference image generation failed upstream.",
+        data: {
+          segmentNo: item.segment.segmentNo,
+          microShotNo: item.microShot.microShotNo,
+          imageTaskId: item.microShot.imageTaskId,
+          errorMessage: result.errorMessage,
+        },
       });
     }
   }
@@ -2335,7 +3838,7 @@ async function submitNextImageTask(params: {
   const concurrency = imageTaskConcurrency();
   const availableSlots = Math.max(0, concurrency - running.length);
   if (!availableSlots) {
-    await logOnePromptVideo(`${params.logEventPrefix}.submit.skip_running`, {
+    await logOnePromptVideo(params.logEventPrefix + ".submit.skip_running", {
       userId: params.userId,
       projectId: params.projectId,
       runningCount: running.length,
@@ -2354,12 +3857,16 @@ async function submitNextImageTask(params: {
       return keyframe.status !== VideoShotStatus.IMAGE_READY && keyframe.status !== VideoShotStatus.IMAGE_APPROVED;
     });
   const consistencyReferences = params.keyframes.filter((keyframe) => isConsistencyKeyframeNo(keyframe.keyframeNo));
-  const waitingForConsistencyReferences = consistencyReferences.some((keyframe) => !keyframe.imageUrl);
-  const candidateKeyframes = waitingForConsistencyReferences
+  const missingConsistencyReferences = consistencyReferences.filter((keyframe) => !keyframe.imageUrl);
+  const unapprovedConsistencyReferences = consistencyReferences.filter((keyframe) => keyframe.imageUrl && !isApprovedConsistencyReference(keyframe));
+  const waitingForConsistencyReferences = missingConsistencyReferences.length > 0 || unapprovedConsistencyReferences.length > 0;
+  const candidateKeyframes = missingConsistencyReferences.length
     ? nextKeyframes.filter((keyframe) => isConsistencyKeyframeNo(keyframe.keyframeNo))
-    : nextKeyframes;
-  if (waitingForConsistencyReferences && !candidateKeyframes.length) {
-    await logOnePromptVideo(`${params.logEventPrefix}.submit.wait_consistency_references`, {
+    : waitingForConsistencyReferences
+      ? []
+      : nextKeyframes.filter((keyframe) => !isConsistencyKeyframeNo(keyframe.keyframeNo));
+  if (missingConsistencyReferences.length && !candidateKeyframes.length) {
+    await logOnePromptVideo(params.logEventPrefix + ".submit.wait_consistency_references", {
       userId: params.userId,
       projectId: params.projectId,
       runningCount: running.length,
@@ -2369,13 +3876,34 @@ async function submitNextImageTask(params: {
         status: keyframe.status,
         imageTaskId: keyframe.imageTaskId,
         hasImageUrl: Boolean(keyframe.imageUrl),
+        locked: keyframe.locked,
+      })),
+    });
+    return;
+  }
+  if (!missingConsistencyReferences.length && unapprovedConsistencyReferences.length) {
+    await prisma.videoProject.update({
+      where: { id: params.projectId },
+      data: {
+        status: VideoProjectStatus.IMAGE_REVIEW,
+        errorMessage: "Hard consistency reference images are ready. Lock or approve them before generating boundary keyframes.",
+      },
+    });
+    await logOnePromptVideo(params.logEventPrefix + ".submit.wait_consistency_approval", {
+      userId: params.userId,
+      projectId: params.projectId,
+      consistencyReferences: unapprovedConsistencyReferences.map((keyframe) => ({
+        keyframeNo: keyframe.keyframeNo,
+        status: keyframe.status,
+        hasImageUrl: Boolean(keyframe.imageUrl),
+        locked: keyframe.locked,
       })),
     });
     return;
   }
   const nextKeyframesToSubmit = candidateKeyframes.slice(0, availableSlots);
   if (!nextKeyframesToSubmit.length) {
-    await logOnePromptVideo(`${params.logEventPrefix}.submit.no_pending`, {
+    await logOnePromptVideo(params.logEventPrefix + ".submit.no_pending", {
       userId: params.userId,
       projectId: params.projectId,
       runningCount: running.length,
@@ -2390,7 +3918,7 @@ async function submitNextImageTask(params: {
   });
   if (!project) return;
 
-  await logOnePromptVideo(`${params.logEventPrefix}.submit.batch`, {
+  await logOnePromptVideo(params.logEventPrefix + ".submit.batch", {
     userId: params.userId,
     projectId: params.projectId,
     runningCount: running.length,
@@ -2402,10 +3930,22 @@ async function submitNextImageTask(params: {
 
   for (const nextKeyframe of nextKeyframesToSubmit) {
     try {
+      const draftPrompt = compileImagePromptForKeyframe(project, nextKeyframe);
+      const referenceSelection = selectReferenceImagesForKeyframe(project, nextKeyframe, draftPrompt.prompt);
+      const compiled = compileImagePromptForKeyframe(project, nextKeyframe, {
+        ...referenceSelection.output,
+        finalTextPrompt: draftPrompt.prompt,
+      });
+      await saveReferenceSelectionOutput(params.projectId, {
+        ...referenceSelection.output,
+        selectedReferenceUrls: referenceSelection.urls,
+        finalTextPrompt: compiled.prompt,
+      });
+      await savePromptDebugArtifact(params.projectId, compiled.debugArtifact);
       const taskId = await submitAliyunImageTask({
-        prompt: generationPromptForKeyframe(project, nextKeyframe),
-        negativePrompt: generationNegativePromptForKeyframe(project, nextKeyframe),
-        referenceImageUrls: referenceImageUrlsForKeyframe(project, nextKeyframe),
+        prompt: compiled.prompt,
+        negativePrompt: compiled.negativePrompt,
+        referenceImageUrls: compiled.referenceImageUrls ?? [],
         aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
         seed: Math.abs(nextKeyframe.keyframeNo) || 1,
       });
@@ -2419,12 +3959,34 @@ async function submitNextImageTask(params: {
           errorMessage: null,
         },
       });
-      await logOnePromptVideo(`${params.logEventPrefix}.submit.success`, {
+      await updateProjectArtifactStatus(params.projectId, [imageArtifactIdForKeyframeNo(nextKeyframe.keyframeNo)], "generating", { retryFromStage: "generation" });
+      await logOnePromptVideo(params.logEventPrefix + ".submit.success", {
         userId: params.userId,
         projectId: params.projectId,
         keyframeId: nextKeyframe.id,
         keyframeNo: nextKeyframe.keyframeNo,
         imageTaskId: taskId,
+      });
+      await appendProjectStageLog({
+        projectId: params.projectId,
+        title: project.title,
+        stage: "keyframes",
+        event: "Keyframe image task submitted KF" + nextKeyframe.keyframeNo,
+        summary: nextKeyframe.keyframeNo < 0 ? "Submitted a consistency reference image task." : "Submitted a boundary keyframe image task.",
+        lines: [
+          "Purpose: " + (nextKeyframe.purpose || "untitled"),
+          "Task ID: " + taskId,
+          "Reference images: " + ((compiled.referenceImageUrls ?? []).length),
+          "Prompt: " + compiled.prompt.slice(0, 400),
+        ],
+        data: {
+          userId: params.userId,
+          keyframeId: nextKeyframe.id,
+          keyframeNo: nextKeyframe.keyframeNo,
+          imageTaskId: taskId,
+          referenceImageUrls: compiled.referenceImageUrls ?? [],
+          negativePrompt: compiled.negativePrompt,
+        },
       });
     } catch (error) {
       const retryable = isAliyunRateLimitError(error);
@@ -2435,7 +3997,20 @@ async function submitNextImageTask(params: {
           errorMessage: retryable ? "Aliyun rate limit, will retry later" : error instanceof Error ? error.message : "Image submit failed",
         },
       });
-      await logOnePromptVideo(`${params.logEventPrefix}.submit.error`, {
+      if (!retryable) {
+        await saveGenerationQualityReport(params.projectId, buildImageGenerationQualityReport({
+          assetId: imageArtifactIdForKeyframeNo(nextKeyframe.keyframeNo),
+          imageUrl: null,
+          prompt: nextKeyframe.imagePrompt,
+          targetType: nextKeyframe.keyframeNo < 0 ? "anchor_reference_image" : "boundary_keyframe",
+          upstreamError: error instanceof Error ? error.message : "Image submit failed",
+        }));
+        await updateProjectArtifactStatus(params.projectId, [imageArtifactIdForKeyframeNo(nextKeyframe.keyframeNo)], "failed", {
+          dirtyReason: error instanceof Error ? error.message : "Image submit failed",
+          retryFromStage: "generation",
+        });
+      }
+      await logOnePromptVideo(params.logEventPrefix + ".submit.error", {
         userId: params.userId,
         projectId: params.projectId,
         keyframeId: nextKeyframe.id,
@@ -2443,6 +4018,19 @@ async function submitNextImageTask(params: {
         retryable,
         ...errorForLog(error),
       }, retryable ? "warn" : "error");
+      await writeStageErrorLog({
+        projectId: params.projectId,
+        title: project.title,
+        stage: "keyframes",
+        event: "Keyframe image submit failed KF" + nextKeyframe.keyframeNo,
+        error,
+        context: {
+          userId: params.userId,
+          keyframeId: nextKeyframe.id,
+          keyframeNo: nextKeyframe.keyframeNo,
+          retryable,
+        },
+      });
       if (!retryable) throw error;
       break;
     }
@@ -2450,13 +4038,42 @@ async function submitNextImageTask(params: {
 }
 
 async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
-  const running = project.segments.filter((segment) => segment.status === VideoShotStatus.CLIP_RUNNING && segment.clipTaskId);
+  const clipBackedUnreadySegments = project.segments.filter(
+    (segment) =>
+      Boolean(segment.clipUrl) &&
+      (segment.status === VideoShotStatus.CLIP_PENDING || segment.status === VideoShotStatus.CLIP_RUNNING),
+  );
+  if (clipBackedUnreadySegments.length) {
+    await prisma.videoSegment.updateMany({
+      where: {
+        projectId: project.id,
+        clipUrl: { not: null },
+        status: { in: [VideoShotStatus.CLIP_PENDING, VideoShotStatus.CLIP_RUNNING] },
+      },
+      data: { status: VideoShotStatus.CLIP_READY, clipTaskId: null, errorMessage: null },
+    });
+    await logOnePromptVideo("clip.sync.recover_ready_status", {
+      projectId: project.id,
+      segments: clipBackedUnreadySegments.map((segment) => ({
+        segmentNo: segment.segmentNo,
+        previousStatus: segment.status,
+        hasClipUrl: Boolean(segment.clipUrl),
+      })),
+    }, "warn");
+  }
+
+  const running = project.segments.filter((segment) => segment.status === VideoShotStatus.CLIP_RUNNING && segment.clipTaskId && !segment.clipUrl);
   await logOnePromptVideo("clip.sync.start", {
     projectId: project.id,
     runningCount: running.length,
     taskIds: running.map((segment) => ({ segmentNo: segment.segmentNo, clipTaskId: segment.clipTaskId })),
   });
   for (const segment of running) {
+    const startKeyframe = project.keyframes.find((keyframe) => keyframe.keyframeNo === segment.startKeyframeNo);
+    const endKeyframe = project.keyframes.find((keyframe) => keyframe.keyframeNo === segment.endKeyframeNo);
+    const qualityPrompt = startKeyframe && endKeyframe
+      ? compileVideoPromptForSegment(project, segment, startKeyframe, endKeyframe).prompt
+      : segment.videoPrompt;
     const result = await queryDashScopeTask(segment.clipTaskId as string);
     await logOnePromptVideo("clip.sync.shot.result", {
       projectId: project.id,
@@ -2468,18 +4085,118 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
       errorMessage: result.errorMessage,
     }, result.status === "failed" ? "error" : "info");
     if (result.status === "succeeded" && result.resultUrl) {
+      let clipUrl: string;
+      try {
+        if (!endKeyframe?.imageUrl) throw new Error("Approved segment end-frame image is missing");
+        clipUrl = await enforceSegmentEndFrameLocally({
+          projectId: project.id,
+          segmentNo: segment.segmentNo,
+          clipUrl: result.resultUrl,
+          endFrameUrl: endKeyframe.imageUrl,
+          durationSeconds: segment.durationSeconds,
+          aspectRatio: project.aspectRatio as "9:16" | "16:9" | "1:1",
+        });
+      } catch (error) {
+        const message = `Failed to enforce approved end frame: ${error instanceof Error ? error.message : String(error)}`;
+        await prisma.videoSegment.update({
+          where: { id: segment.id },
+          data: { status: VideoShotStatus.FAILED, errorMessage: message },
+        });
+        await updateProjectArtifactStatus(project.id, [videoArtifactIdForSegmentNo(segment.segmentNo)], "failed", {
+          dirtyReason: message,
+          retryFromStage: "generation",
+        });
+        await appendProjectStageLog({
+          projectId: project.id,
+          title: project.title,
+          stage: "clips",
+          event: "End-frame enforcement failed segment " + segment.segmentNo,
+          level: "error",
+          summary: "HappyHorse completed, but the approved boundary frame could not be attached deterministically.",
+          data: {
+            segmentId: segment.id,
+            segmentNo: segment.segmentNo,
+            clipTaskId: segment.clipTaskId,
+            endKeyframeNo: segment.endKeyframeNo,
+            errorMessage: message,
+          },
+        });
+        continue;
+      }
       await prisma.videoSegment.update({
         where: { id: segment.id },
         data: {
-          clipUrl: result.resultUrl,
+          clipUrl,
           status: VideoShotStatus.CLIP_READY,
           errorMessage: null,
         },
       });
+      const report = buildVideoGenerationQualityReport({
+        assetId: videoArtifactIdForSegmentNo(segment.segmentNo),
+        clipUrl,
+        prompt: qualityPrompt,
+        durationSeconds: segment.durationSeconds,
+      });
+      await saveGenerationQualityReport(project.id, report);
+      await appendProjectStageLog({
+        projectId: project.id,
+        title: project.title,
+        stage: "clips",
+        event: "Clip ready segment " + segment.segmentNo,
+        summary: "Segment clip finished and quality report was recorded.",
+        lines: [
+          "Clip URL: " + clipUrl,
+          "End boundary: exact KF" + segment.endKeyframeNo + " frame enforced",
+          "Duration: " + segment.durationSeconds + "s",
+          "Quality: " + (report.passed ? "passed" : "needs retry"),
+          report.artifactIssues.length ? "Issues: " + report.artifactIssues.join("; ") : "No quality issues reported",
+        ],
+        data: {
+          segmentId: segment.id,
+          segmentNo: segment.segmentNo,
+          clipTaskId: segment.clipTaskId,
+          upstreamClipUrl: result.resultUrl,
+          clipUrl,
+          endKeyframeNo: segment.endKeyframeNo,
+          endFrameEnforced: true,
+          qualityReport: report,
+        },
+      });
+      if (!report.passed) {
+        await prisma.videoSegment.update({
+          where: { id: segment.id },
+          data: { status: VideoShotStatus.FAILED, errorMessage: report.retryInstruction || report.artifactIssues.join("; ") },
+        });
+      }
     } else if (result.status === "failed") {
+      await saveGenerationQualityReport(project.id, buildVideoGenerationQualityReport({
+        assetId: videoArtifactIdForSegmentNo(segment.segmentNo),
+        clipUrl: null,
+        prompt: qualityPrompt,
+        durationSeconds: segment.durationSeconds,
+        upstreamError: result.errorMessage || "Video segment generation failed",
+      }));
       await prisma.videoSegment.update({
         where: { id: segment.id },
-        data: { status: VideoShotStatus.FAILED, errorMessage: result.errorMessage || "视频片段生成失败" },
+        data: { status: VideoShotStatus.FAILED, errorMessage: result.errorMessage || "Video segment generation failed" },
+      });
+      await updateProjectArtifactStatus(project.id, [videoArtifactIdForSegmentNo(segment.segmentNo)], "failed", {
+        dirtyReason: result.errorMessage || "Video segment generation failed",
+        retryFromStage: "generation",
+      });
+      await appendProjectStageLog({
+        projectId: project.id,
+        title: project.title,
+        stage: "clips",
+        event: "Clip failed segment " + segment.segmentNo,
+        level: "error",
+        summary: "The segment video task failed. The segment is marked failed and can be retried after checking the upstream error.",
+        data: {
+          segmentId: segment.id,
+          segmentNo: segment.segmentNo,
+          clipTaskId: segment.clipTaskId,
+          errorMessage: result.errorMessage,
+        },
       });
     }
   }
@@ -2490,7 +4207,7 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
   if (failed) {
     await prisma.videoProject.update({
       where: { id: project.id },
-      data: { status: VideoProjectStatus.FAILED, errorMessage: failed.errorMessage || "视频片段生成失败" },
+      data: { status: VideoProjectStatus.FAILED, errorMessage: failed.errorMessage || "Video segment generation failed" },
     });
     await logOnePromptVideo("clip.sync.project.failed", {
       projectId: project.id,
@@ -2500,16 +4217,6 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
     return;
   }
   const runningCount = latest.segments.filter((segment) => segment.status === VideoShotStatus.CLIP_RUNNING && segment.clipTaskId).length;
-  const pending = latest.segments.some((segment) => segment.status === VideoShotStatus.CLIP_PENDING);
-  if (runningCount < clipTaskConcurrency() && pending) {
-    await submitNextClipTask({
-      projectId: project.id,
-      segments: latest.segments,
-      keyframes: latest.keyframes,
-      logEventPrefix: "clip.sync",
-    });
-    return;
-  }
   if (latest.segments.length > 0 && latest.segments.every((segment) => Boolean(segment.clipUrl))) {
     await prisma.videoProject.update({
       where: { id: project.id },
@@ -2519,6 +4226,28 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
       projectId: project.id,
       status: VideoProjectStatus.CLIP_REVIEW,
       clipCount: latest.segments.length,
+    });
+    await appendProjectStageLog({
+      projectId: project.id,
+      title: latest.title,
+      stage: "clips",
+      event: "All clips ready",
+      summary: "All segment clips are ready for review.",
+      lines: latest.segments.map((segment) => "Segment " + segment.segmentNo + ": " + (segment.clipUrl ? "ready" : "missing") + ", status=" + segment.status),
+      data: {
+        status: VideoProjectStatus.CLIP_REVIEW,
+        clipCount: latest.segments.length,
+      },
+    });
+    return;
+  }
+  const pending = latest.segments.some((segment) => segment.status === VideoShotStatus.CLIP_PENDING && !segment.clipUrl);
+  if (runningCount < clipTaskConcurrency() && pending) {
+    await submitNextClipTask({
+      projectId: project.id,
+      segments: latest.segments,
+      keyframes: latest.keyframes,
+      logEventPrefix: "clip.sync",
     });
   }
 }
@@ -2534,7 +4263,7 @@ async function submitNextClipTask(params: {
   const concurrency = clipTaskConcurrency();
   const availableSlots = Math.max(0, concurrency - running.length);
   if (!availableSlots) {
-    await logOnePromptVideo(`${params.logEventPrefix}.submit.skip_running`, {
+    await logOnePromptVideo(params.logEventPrefix + ".submit.skip_running", {
       userId: params.userId,
       projectId: params.projectId,
       runningCount: running.length,
@@ -2562,7 +4291,7 @@ async function submitNextClipTask(params: {
     .slice(0, availableSlots);
 
   if (!nextSegments.length) {
-    await logOnePromptVideo(`${params.logEventPrefix}.submit.no_pending`, {
+    await logOnePromptVideo(params.logEventPrefix + ".submit.no_pending", {
       userId: params.userId,
       projectId: params.projectId,
       runningCount: running.length,
@@ -2577,8 +4306,40 @@ async function submitNextClipTask(params: {
   });
   if (!project) return;
 
-  const consistencyReferences = consistencyReferenceImageUrls(project);
-  await logOnePromptVideo(`${params.logEventPrefix}.submit.batch`, {
+  const renderDescriptions = readPlanSegmentRenderDescriptionMap(project.planJson);
+  const blockedSegments = nextSegments.flatMap((segment) => {
+    const reason = singleTakeBlockReasonForSegment(renderDescriptions.get(segment.segmentNo), segment);
+    return reason ? [{ segment, reason }] : [];
+  });
+  if (blockedSegments.length) {
+    await logOnePromptVideo(params.logEventPrefix + ".submit.blocked_single_take_audit", {
+      userId: params.userId,
+      projectId: params.projectId,
+      blocked: blockedSegments.map((item) => ({
+        segmentNo: item.segment.segmentNo,
+        reason: item.reason,
+      })),
+      action: "softened_and_continued",
+    }, "warn");
+    await appendProjectStageLog({
+      projectId: params.projectId,
+      title: project.title,
+      stage: "clips",
+      event: "Single-take audit warning",
+      level: "warn",
+      summary: "Some plan fields still contain old cut/transition wording. The video prompt compiler will sanitize them and continue submitting the clip task.",
+      lines: blockedSegments.map((item) => "Segment " + item.segment.segmentNo + ": " + item.reason),
+      data: {
+        userId: params.userId,
+        blocked: blockedSegments.map((item) => ({
+          segmentNo: item.segment.segmentNo,
+          reason: item.reason,
+        })),
+      },
+    });
+  }
+
+  await logOnePromptVideo(params.logEventPrefix + ".submit.batch", {
     userId: params.userId,
     projectId: params.projectId,
     runningCount: running.length,
@@ -2592,19 +4353,12 @@ async function submitNextClipTask(params: {
     const endKeyframe = keyframeMap.get(nextSegment.endKeyframeNo);
     if (!startKeyframe?.imageUrl || !endKeyframe?.imageUrl) continue;
     try {
+      const compiled = compileVideoPromptForSegment(project, nextSegment, startKeyframe, endKeyframe);
+      await savePromptDebugArtifact(params.projectId, compiled.debugArtifact);
       const taskId = await submitAliyunImageToVideoTask({
         imageUrl: startKeyframe.imageUrl,
         lastFrameUrl: endKeyframe.imageUrl,
-        prompt: [
-          generationPromptForSegment(project, nextSegment),
-          consistencyReferences.length
-            ? `Project-level consistency reference images for identity and scene continuity: ${consistencyReferences.join(" ; ")}`
-            : "",
-          `Start boundary reference frame ${nextSegment.startKeyframeNo}: ${startKeyframe.purpose}. ${startKeyframe.scene}`,
-          `End boundary reference frame ${nextSegment.endKeyframeNo}: ${endKeyframe.purpose}. ${endKeyframe.scene}`,
-          nextSegment.camera,
-          nextSegment.motion,
-        ].filter(Boolean).join("\n"),
+        prompt: compiled.prompt,
         durationSeconds: nextSegment.durationSeconds,
       });
       await prisma.videoSegment.update({
@@ -2617,7 +4371,8 @@ async function submitNextClipTask(params: {
           errorMessage: null,
         },
       });
-      await logOnePromptVideo(`${params.logEventPrefix}.submit.success`, {
+      await updateProjectArtifactStatus(params.projectId, [videoArtifactIdForSegmentNo(nextSegment.segmentNo)], "generating", { retryFromStage: "generation" });
+      await logOnePromptVideo(params.logEventPrefix + ".submit.success", {
         userId: params.userId,
         projectId: params.projectId,
         segmentId: nextSegment.id,
@@ -2626,6 +4381,30 @@ async function submitNextClipTask(params: {
         endKeyframeNo: nextSegment.endKeyframeNo,
         clipTaskId: taskId,
         durationSeconds: nextSegment.durationSeconds,
+      });
+      await appendProjectStageLog({
+        projectId: params.projectId,
+        title: project.title,
+        stage: "clips",
+        event: "Clip task submitted segment " + nextSegment.segmentNo,
+        summary: "Submitted a segment video task with approved boundary frames and references.",
+        lines: [
+          "Start keyframe: KF" + nextSegment.startKeyframeNo,
+          "End keyframe: KF" + nextSegment.endKeyframeNo,
+          "Duration: " + nextSegment.durationSeconds + "s",
+          "Task ID: " + taskId,
+          "Prompt: " + compiled.prompt.slice(0, 520),
+        ],
+        data: {
+          userId: params.userId,
+          segmentId: nextSegment.id,
+          segmentNo: nextSegment.segmentNo,
+          startKeyframeNo: nextSegment.startKeyframeNo,
+          endKeyframeNo: nextSegment.endKeyframeNo,
+          clipTaskId: taskId,
+          durationSeconds: nextSegment.durationSeconds,
+          negativePrompt: compiled.negativePrompt,
+        },
       });
     } catch (error) {
       const isThrottle = isAliyunRateLimitError(error);
@@ -2636,7 +4415,20 @@ async function submitNextClipTask(params: {
           errorMessage: isThrottle ? "Aliyun rate limit, will retry later" : error instanceof Error ? error.message : "Video segment submit failed",
         },
       });
-      await logOnePromptVideo(`${params.logEventPrefix}.submit.error`, {
+      if (!isThrottle) {
+        await saveGenerationQualityReport(params.projectId, buildVideoGenerationQualityReport({
+          assetId: videoArtifactIdForSegmentNo(nextSegment.segmentNo),
+          clipUrl: null,
+          prompt: nextSegment.videoPrompt,
+          durationSeconds: nextSegment.durationSeconds,
+          upstreamError: error instanceof Error ? error.message : "Video segment submit failed",
+        }));
+        await updateProjectArtifactStatus(params.projectId, [videoArtifactIdForSegmentNo(nextSegment.segmentNo)], "failed", {
+          dirtyReason: error instanceof Error ? error.message : "Video segment submit failed",
+          retryFromStage: "generation",
+        });
+      }
+      await logOnePromptVideo(params.logEventPrefix + ".submit.error", {
         userId: params.userId,
         projectId: params.projectId,
         segmentId: nextSegment.id,
@@ -2644,10 +4436,89 @@ async function submitNextClipTask(params: {
         retryable: isThrottle,
         ...errorForLog(error),
       }, isThrottle ? "warn" : "error");
+      await writeStageErrorLog({
+        projectId: params.projectId,
+        title: project.title,
+        stage: "clips",
+        event: "Clip submit failed segment " + nextSegment.segmentNo,
+        error,
+        context: {
+          userId: params.userId,
+          segmentId: nextSegment.id,
+          segmentNo: nextSegment.segmentNo,
+          retryable: isThrottle,
+        },
+      });
       if (!isThrottle) throw error;
       break;
     }
   }
+}
+
+function singleTakeBlockReasonForSegment(
+  description: Record<string, unknown> | undefined,
+  segment: VideoProjectWithShots["segments"][number],
+): string | undefined {
+  if (!description) return undefined;
+  const singleTake = readLooseRecord(description, ["singleTakeContract", "single_take_contract"]);
+  const motion = readLooseRecord(description, ["motionContract", "motion_contract"]);
+  const startFrame = readLooseRecord(description, ["startFrameContract", "start_frame_contract"]);
+  const endFrame = readLooseRecord(description, ["endFrameContract", "end_frame_contract"]);
+  const checkpoints = readLooseArray(description, ["motionCheckpoints", "motion_checkpoints"]);
+  const reasons: string[] = [];
+
+  if (truthyPlanFlag(description.requiresCut ?? description.requires_cut)) reasons.push("description requires a cut");
+  if (riskLevelIsHigh(description.riskLevel ?? description.risk_level)) reasons.push("description risk level is high");
+  if (hasPlanPayload(description.timelineChangeRequest ?? description.timeline_change_request)) reasons.push("description requests timeline changes");
+  if (singleTake) {
+    if (truthyPlanFlag(singleTake.requiresCut ?? singleTake.requires_cut)) reasons.push("single take requires a cut");
+    if (riskLevelIsHigh(singleTake.riskLevel ?? singleTake.risk_level)) reasons.push("single take risk level is high");
+    if (singleTake.physicallyReachable === false || singleTake.physically_reachable === false) reasons.push("single take is not physically reachable");
+  }
+  if (containsInternalCutLanguage([description, singleTake, motion, startFrame, endFrame, checkpoints])) reasons.push("internal cut language was detected");
+
+  if (!reasons.length) return undefined;
+  const uniqueReasons = [...new Set(reasons)];
+  return "Segment " + segment.segmentNo + " should be decomposed into micro-shots: " + uniqueReasons.join("; ");
+}
+
+function readLooseRecord(source: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (isRecord(value)) return value;
+  }
+  return undefined;
+}
+
+function readLooseArray(source: Record<string, unknown>, keys: string[]): unknown[] {
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function truthyPlanFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") return /^(true|yes|1|requires_cut|high)$/i.test(value.trim());
+  return false;
+}
+
+function riskLevelIsHigh(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "high";
+}
+
+function hasPlanPayload(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (isRecord(value)) return Object.keys(value).length > 0;
+  if (typeof value === "string") return Boolean(value.trim());
+  return false;
+}
+
+function containsInternalCutLanguage(value: unknown): boolean {
+  const text = JSON.stringify(value ?? "").toLowerCase();
+  return /\b(cut to|jump cut|hard cut|dissolve|fade out|fade in|crossfade|montage|switch to|scene transition|new shot|another shot|shot change)\b/.test(text);
 }
 
 function isAliyunRateLimitError(error: unknown): boolean {
@@ -2672,20 +4543,25 @@ async function syncComposeTask(projectId: string, jobId: string): Promise<void> 
         errorMessage: null,
       },
     });
+    await updateProjectArtifactStatus(projectId, ["final_video"], "ready", { retryFromStage: "composition" });
   } else if (result.status === "failed") {
     await prisma.videoProject.update({
       where: { id: projectId },
       data: {
         status: VideoProjectStatus.FAILED,
-        errorMessage: result.errorMessage || "IMS 合成失败",
+        errorMessage: result.errorMessage || "Final video composition failed",
       },
+    });
+    await updateProjectArtifactStatus(projectId, ["final_video"], "failed", {
+      dirtyReason: result.errorMessage || "Final video composition failed",
+      retryFromStage: "composition",
     });
   }
 }
 
 async function requireVideoProject(userId: string, projectId: string): Promise<VideoProjectWithShots> {
   const project = await getVideoProject(userId, projectId);
-  if (!project) throw new Error("项目不存在或无权访问");
+  if (!project) throw new Error("Video project not found");
   return project;
 }
 
@@ -2705,7 +4581,7 @@ function generationPromptForShot(
   );
   const fallback = kind === "image" ? shot.imagePrompt : shot.videoPrompt;
   if (en && zh && zh !== en) {
-    return `${en}\nUser-facing Chinese revision to respect: ${zh}`;
+    return en + "\nUser-facing Chinese revision to respect: " + zh;
   }
   return en || zh || fallback;
 }
@@ -2725,10 +4601,9 @@ function generationPromptForKeyframe(
     project.planJson,
     readPlanStringArray(planKeyframe, ["usesConsistencyAnchors", "uses_consistency_anchors"]),
   );
-  const consistencyUrls = consistencyReferenceImageUrls(project, keyframe.keyframeNo);
   const isConsistencyReference = isConsistencyKeyframeNo(keyframe.keyframeNo);
   const base = en && zh && zh !== en
-    ? `${en}\nUser-facing Chinese revision to respect: ${zh}`
+    ? en + "\nUser-facing Chinese revision to respect: " + zh
     : en || zh || fallback;
   return [
     base,
@@ -2738,12 +4613,12 @@ function generationPromptForKeyframe(
     isConsistencyReference && keyframe.keyframeNo === SCENE_CONSISTENCY_KEYFRAME_NO
       ? "This is the fixed scene consistency reference image for the whole project. Make the environment layout, architecture, materials, product placement, lighting, and color palette clear and stable."
       : "",
-    identityLock ? `Hard character identity lock, must be preserved exactly in this still image: ${identityLock}` : "",
-    toneLock ? `Hard color tone lock, must be preserved exactly in this still image: ${toneLock}` : "",
-    anchorLock ? `Hard project consistency anchors for this still image:\n${anchorLock}` : "",
-    consistencyUrls.length && !isConsistencyReference
-      ? `Use these generated consistency reference image URLs as visual anchors for this boundary frame: ${consistencyUrls.join(" ; ")}`
+    isConsistencyReference && keyframe.keyframeNo !== CHARACTER_CONSISTENCY_KEYFRAME_NO && keyframe.keyframeNo !== SCENE_CONSISTENCY_KEYFRAME_NO
+      ? "This is a fixed hard consistency reference image for a project anchor such as product, logo, prop, vehicle, food, style, or spatial layout. Make the anchor visually stable, reusable, and faithful to its lock details."
       : "",
+    identityLock ? "Hard character identity lock, must be preserved exactly in this still image: " + identityLock : "",
+    toneLock ? "Hard color tone lock, must be preserved exactly in this still image: " + toneLock : "",
+    anchorLock ? "Hard project consistency anchors for this still image:\n" + anchorLock : "",
     "If the main person appears, keep the exact same face, age, hairstyle, hair color, outfit, body type, skin tone, and distinctive accessories as in all other boundary reference frames. Do not generate a different-looking person.",
     isConsistencyReference
       ? "Generate exactly one static consistency reference image only. No storyboard timeline labels, no split-screen, no collage, no before/after comparison."
@@ -2768,15 +4643,308 @@ function generationNegativePromptForSegment(
   return bilingualNegativePromptForGeneration(planSegment, segment.negativePrompt);
 }
 
+function compileVideoPromptForSegment(
+  project: Pick<VideoProjectWithShots, "planJson">,
+  segment: VideoProjectWithShots["segments"][number],
+  startKeyframe: VideoProjectWithShots["keyframes"][number],
+  endKeyframe: VideoProjectWithShots["keyframes"][number],
+): CompiledPrompt {
+  const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
+  const renderDescription = readPlanSegmentRenderDescriptionMap(project.planJson).get(segment.segmentNo);
+  const motionContract = readLooseRecord(renderDescription ?? {}, ["motionContract", "motion_contract"]);
+  const singleTakeContract = readLooseRecord(renderDescription ?? {}, ["singleTakeContract", "single_take_contract"]);
+  const startFrameContract = readLooseRecord(renderDescription ?? {}, ["startFrameContract", "start_frame_contract"]);
+  const endFrameContract = readLooseRecord(renderDescription ?? {}, ["endFrameContract", "end_frame_contract"]);
+  const checkpointRecords = readLooseArray(renderDescription ?? {}, ["motionCheckpoints", "motion_checkpoints"])
+    .filter(hasMeaningfulMotionCheckpoint);
+  const microShots = readPlanMicroShots(planSegment);
+  const visibleAnchorIds = readPlanStringArray(renderDescription, ["visibleAnchorIds", "visible_anchor_ids"]);
+  const segmentAnchorIds = visibleAnchorIds.length
+    ? visibleAnchorIds
+    : readPlanStringArray(planSegment, ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+  const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, segmentAnchorIds);
+  const beforePrompt = generationPromptForSegment(project, segment);
+  const startVisualBlueprint = clipText([
+    startKeyframe.imagePrompt,
+    startKeyframe.purpose,
+    startKeyframe.scene,
+    startKeyframe.characterState,
+    startKeyframe.productState,
+  ].filter(Boolean).join("; "), 760);
+  const endVisualBlueprint = clipText([
+    endKeyframe.imagePrompt,
+    endKeyframe.purpose,
+    endKeyframe.scene,
+    endKeyframe.characterState,
+    endKeyframe.productState,
+  ].filter(Boolean).join("; "), 1100);
+  const intent = clipText(
+    readPlanShotString(planSegment, ["purposeEn", "purpose_en", "purposeZh", "purpose_zh", "purpose"]) ||
+      segment.purpose ||
+      readPlanShotString(planSegment, ["videoPromptEn", "video_prompt_en", "videoPromptZh", "video_prompt_zh"]) ||
+      segment.videoPrompt,
+    420,
+  );
+  const checkpointLines = checkpointRecords.length
+    ? checkpointRecords.slice(0, 4).map((checkpoint, index) => "- " + (index + 1) + ". " + stripVideoForbiddenTerms(compactJsonLine("state", checkpoint).replace(/^state: /, "")))
+    : microShots.slice(0, 4).map((checkpoint, index) => {
+        const parts = [
+          "t=+" + checkpoint.localTimeSeconds + "s",
+          checkpoint.purposeEn || checkpoint.purposeZh || checkpoint.purpose,
+          checkpoint.sceneEn || checkpoint.sceneZh || checkpoint.scene,
+          checkpoint.actionEn || checkpoint.actionZh || checkpoint.action,
+          checkpoint.cameraEn || checkpoint.cameraZh || checkpoint.camera,
+        ].filter(Boolean).join("; ");
+        return "- " + (index + 1) + ". " + stripVideoForbiddenTerms(parts);
+      });
+  const finalPrompt = [
+    "HAPPYHORSE FIRST-FRAME I2V PROMPT COMPILED FROM STRUCTURED MOTION CONTRACT",
+    "Duration: " + segment.durationSeconds + "s.",
+    "Hard model input: begin from the supplied first-frame image and preserve its composition, identity, objects, environment, and visible state.",
+    startVisualBlueprint ? "Approved first-boundary visual blueprint: " + startVisualBlueprint : "",
+    "The approved end-boundary reference image is represented by the complete visual blueprint below. Treat every listed composition, pose, object, environment, lighting, and state attribute as mandatory visual evidence from that approved reference, not as an optional creative suggestion.",
+    endVisualBlueprint ? "APPROVED END-BOUNDARY VISUAL BLUEPRINT — reconstruct this exact destination at the final moment: " + endVisualBlueprint : "",
+    "Move continuously and naturally toward that exact ending composition. Complete the required pose, camera framing, object placement, title state, lighting, and environment state before the final moment; do not invent a different ending.",
+    "Brief intent: " + stripVideoForbiddenTerms(intent),
+    "Detailed same-take motion direction: " + stripVideoForbiddenTerms(clipText(beforePrompt, 1100)),
+    "Start state:",
+    "- " + stripVideoForbiddenTerms(compactJsonLine("contract", startFrameContract) || (startKeyframe.purpose + ". " + startKeyframe.scene)),
+    "Required ending state:",
+    "- " + stripVideoForbiddenTerms(compactJsonLine("contract", endFrameContract) || (endKeyframe.purpose + ". " + endKeyframe.scene)),
+    "Continuous motion path:",
+    "- " + stripVideoForbiddenTerms(compactJsonLine("motion", motionContract) || segment.motion),
+    "Single-take execution contract:",
+    "- " + stripVideoForbiddenTerms(compactJsonLine("single_take", singleTakeContract) || segment.camera),
+    checkpointLines.length ? "Motion checkpoints as reachable states along the same path:" : "",
+    ...checkpointLines,
+    anchorLock ? "Visible anchor locks:\n" + stripVideoForbiddenTerms(clipText(anchorLock, 900)) : "",
+    "Video rules:",
+    "- One uninterrupted camera take from first frame through the final moment.",
+    "- Keep the same location logic, camera axis family, lighting direction, color grade, identity, clothing, product instance, and prop layout.",
+    "- Every checkpoint is a reachable body/prop/camera state along one physical path, not a separate scene.",
+    "- Use gradual camera movement, subject movement, hand/prop movement, focus change, parallax, and ambient motion only.",
+    "- Do not render subtitles, captions, UI overlays, watermarks, timecodes, random letters, or lyrics.",
+    "- Generate coherent ambient sound, sound effects, and music matching the continuous action; do not create speech or singing unless the brief explicitly requests it.",
+  ].filter(Boolean).join("\n");
+  const negativePrompt = compileVideoNegativePrompt(generationNegativePromptForSegment(project, segment));
+  return {
+    prompt: finalPrompt,
+    negativePrompt,
+    referenceImageUrls: [startKeyframe.imageUrl, endKeyframe.imageUrl].filter((url): url is string => Boolean(url)),
+    debugArtifact: {
+      targetArtifactId: "segment:" + segment.segmentNo,
+      targetType: "segment",
+      compilerVersion: "prompt-compiler-v1",
+      inputs: {
+        firstFrameUrl: startKeyframe.imageUrl,
+        lastFrameUrl: endKeyframe.imageUrl,
+        motionContract,
+        singleTakeContract,
+        motionCheckpointCount: checkpointRecords.length || microShots.length,
+        visibleAnchorIds: segmentAnchorIds,
+      },
+      selectedReferenceUrls: [startKeyframe.imageUrl, endKeyframe.imageUrl].filter((url): url is string => Boolean(url)),
+      referenceUsageNotes: [
+        "The first boundary frame is the sole hard image input accepted by happyhorse-1.1-i2v.",
+        "The approved end boundary is a semantic motion target during generation and an exact deterministic frame during post-processing.",
+      ],
+      beforePrompt,
+      finalPrompt,
+      finalNegativePrompt: negativePrompt,
+      rules: [
+        "happyhorse_first_frame_hard_input",
+        "deterministic_exact_end_frame_postprocess",
+        "no_segment_boundary_mode_terms",
+        "checkpoints_as_motion_states",
+        "no_embedded_subtitles_or_audio",
+      ],
+      warnings: [],
+      createdAt: new Date().toISOString(),
+    },
+  };
+}
+
+function compileVideoNegativePrompt(baseNegativePrompt: string): string {
+  return [
+    baseNegativePrompt,
+    "embedded subtitles, captions, UI overlays, watermarks, timecodes, random letters, lyrics, speech balloons, duplicated product, duplicated person, identity drift, clothing drift, product morphing, scene replacement, teleporting subject, ghost overlays, melted frames",
+  ].filter(Boolean).join(", ");
+}
+
+function stripVideoForbiddenTerms(value: string): string {
+  return value
+    .replace(/\b(hard_cut|match_cut|dissolve|cut to|jump cut|hard cut|fade out|fade in|crossfade|montage|switch to|scene transition|new shot|another shot|shot change)\b/gi, "continuous movement")
+    .replace(/硬切|跳切|切换到|切到|转场到|镜头切换|新镜头|另一个镜头|淡入|淡出|叠化|交叉溶解|蒙太奇/g, "连续运动");
+}
+
+function hasMeaningfulMotionCheckpoint(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.values(value).some((item) => typeof item === "string" && item.trim().length > 0);
+}
+
 function bilingualNegativePromptForGeneration(source: Record<string, unknown> | undefined, fallback: string): string {
   const en = readPlanShotString(source, ["negativePromptEn", "negative_prompt_en"]);
   const zh = readPlanShotString(source, ["negativePromptZh", "negative_prompt_zh"]);
-  if (en && zh && zh !== en) return `${en}\nAlso avoid the user-facing Chinese exclusions: ${zh}`;
+  if (en && zh && zh !== en) return en + "\nAlso avoid the user-facing Chinese exclusions: " + zh;
   return en || zh || fallback;
 }
 
+function compileImagePromptForKeyframe(
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes">,
+  keyframe: VideoProjectWithShots["keyframes"][number],
+  referenceSelection?: ReferenceSelectionOutput,
+): CompiledPrompt {
+  const planKeyframe = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo) ??
+    readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
+  const isConsistencyReference = isConsistencyKeyframeNo(keyframe.keyframeNo);
+  const targetArtifactId = isConsistencyReference ? "consistency_reference:" + keyframe.keyframeNo : "keyframe:" + keyframe.keyframeNo;
+  const visibleAnchorIds = readPlanStringArray(planKeyframe, ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+  const frameContract = [
+    "target: " + targetArtifactId,
+    "purpose: " + (readPlanShotString(planKeyframe, ["purposeEn", "purpose_en", "purposeZh", "purpose_zh", "purpose"]) || keyframe.purpose),
+    "scene: " + (readPlanShotString(planKeyframe, ["scene"]) || keyframe.scene),
+    "character_state: " + (readPlanShotString(planKeyframe, ["characterState", "character_state"]) || keyframe.characterState),
+    "product_state: " + (readPlanShotString(planKeyframe, ["productState", "product_state"]) || keyframe.productState),
+    visibleAnchorIds.length ? "visible_anchors: " + visibleAnchorIds.join(", ") : "",
+    compactJsonLine("frame_design", planKeyframe?.frameDesign ?? planKeyframe?.frame_design),
+  ].filter(Boolean);
+  const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, visibleAnchorIds);
+  const referenceNotes = referenceSelection?.usageNotes ?? [];
+  const beforePrompt = generationPromptForKeyframe(project, keyframe);
+  const finalPrompt = [
+    "IMAGE PROMPT COMPILED FROM STRUCTURED CONTRACT",
+    isConsistencyReference
+      ? "Create one reusable still consistency reference image."
+      : "Create one still boundary keyframe image.",
+    "Frame contract:",
+    ...frameContract.map((line) => "- " + line),
+    anchorLock ? "Visible anchor locks:\n" + anchorLock : "",
+    referenceNotes.length ? "Selected reference usage:" : "",
+    ...referenceNotes.map((note) => "- " + note + " Inherit only the stated identity, layout, product, or style signal; ignore unrelated pose, crop, artifacts, and accidental text."),
+    "Image rules:",
+    "- One clean still image only; no storyboard panels, before/after layout, or timeline labels.",
+    "- Do not render subtitles, captions, UI overlays, watermarks, timecodes, random letters, or misspelled text.",
+    "- Brand or product text is allowed only when it is part of a locked product/package/logo anchor.",
+    "- Preserve identity, clothing details, product geometry, scene layout, lighting direction, and color tone from the relevant contracts.",
+  ].filter(Boolean).join("\n");
+  const negativePrompt = compileImageNegativePrompt(generationNegativePromptForKeyframe(project, keyframe));
+  return {
+    prompt: finalPrompt,
+    negativePrompt,
+    referenceImageUrls: referenceSelection?.selectedReferenceUrls ?? [],
+    debugArtifact: {
+      targetArtifactId,
+      targetType: isConsistencyReference ? "consistency_reference" : "keyframe",
+      compilerVersion: "prompt-compiler-v1",
+      inputs: {
+        frameContract,
+        visibleAnchorIds,
+        referenceCandidateCount: referenceSelection?.candidates.length ?? 0,
+      },
+      selectedReferenceUrls: referenceSelection?.selectedReferenceUrls ?? [],
+      referenceUsageNotes: referenceNotes,
+      beforePrompt,
+      finalPrompt,
+      finalNegativePrompt: negativePrompt,
+      rules: [
+        "image_no_subtitles",
+        "image_no_ui_watermark_random_text",
+        "reference_usage_explicit_inherit_ignore",
+      ],
+      warnings: referenceSelection?.warnings ?? [],
+      createdAt: new Date().toISOString(),
+    },
+  };
+}
+
+function compileImagePromptForMicroShot(
+  project: Pick<VideoProjectWithShots, "planJson">,
+  segment: VideoProjectWithShots["segments"][number],
+  microShot: VideoMicroShot,
+  referenceSelection?: ReferenceSelectionOutput,
+): CompiledPrompt {
+  const targetArtifactId = "segment:" + segment.segmentNo + ":micro_shot:" + microShot.microShotNo;
+  const visibleAnchorIds = microShot.usesConsistencyAnchors ?? [];
+  const frameContract = [
+    "target: " + targetArtifactId,
+    "segment: " + segment.segmentNo,
+    "local_time_seconds: " + microShot.localTimeSeconds,
+    "purpose: " + (microShot.purposeEn || microShot.purposeZh || microShot.purpose),
+    "scene_state: " + (microShot.sceneEn || microShot.sceneZh || microShot.scene),
+    "action_state: " + (microShot.actionEn || microShot.actionZh || microShot.action),
+    "camera_state: " + (microShot.cameraEn || microShot.cameraZh || microShot.camera || segment.camera),
+    visibleAnchorIds.length ? "visible_anchors: " + visibleAnchorIds.join(", ") : "",
+  ].filter(Boolean);
+  const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, visibleAnchorIds);
+  const referenceNotes = referenceSelection?.usageNotes ?? [];
+  const beforePrompt = generationPromptForMicroShot(project, segment, microShot);
+  const finalPrompt = [
+    "IMAGE PROMPT COMPILED FROM STRUCTURED CONTRACT",
+    "Create one static internal motion-checkpoint reference image inside the same segment.",
+    "Frame contract:",
+    ...frameContract.map((line) => "- " + line),
+    anchorLock ? "Visible anchor locks:\n" + anchorLock : "",
+    referenceNotes.length ? "Selected reference usage:" : "",
+    ...referenceNotes.map((note) => "- " + note + " Inherit only the stated identity, layout, product, or style signal; ignore unrelated pose, crop, artifacts, and accidental text."),
+    "Image rules:",
+    "- One clean still image only; no storyboard panels, before/after layout, timeline labels, or video-frame sequence.",
+    "- Do not render subtitles, captions, UI overlays, watermarks, timecodes, random letters, or misspelled text.",
+    "- Preserve same scene, camera-axis family, lighting direction, color tone, identity, clothing, product instance, and prop layout.",
+  ].filter(Boolean).join("\n");
+  const negativePrompt = compileImageNegativePrompt(generationNegativePromptForSegment(project, segment));
+  return {
+    prompt: finalPrompt,
+    negativePrompt,
+    referenceImageUrls: referenceSelection?.selectedReferenceUrls ?? [],
+    debugArtifact: {
+      targetArtifactId,
+      targetType: "micro_shot",
+      compilerVersion: "prompt-compiler-v1",
+      inputs: {
+        frameContract,
+        visibleAnchorIds,
+        referenceCandidateCount: referenceSelection?.candidates.length ?? 0,
+      },
+      selectedReferenceUrls: referenceSelection?.selectedReferenceUrls ?? [],
+      referenceUsageNotes: referenceNotes,
+      beforePrompt,
+      finalPrompt,
+      finalNegativePrompt: negativePrompt,
+      rules: [
+        "image_no_subtitles",
+        "image_no_ui_watermark_random_text",
+        "micro_shot_is_static_checkpoint",
+      ],
+      warnings: referenceSelection?.warnings ?? [],
+      createdAt: new Date().toISOString(),
+    },
+  };
+}
+
+function compileImageNegativePrompt(baseNegativePrompt: string): string {
+  return [
+    baseNegativePrompt,
+    "subtitles, captions, UI overlays, watermarks, timecodes, random letters, misspelled text, storyboard panels, split screen, before-after comparison, duplicated product, identity drift, distorted hands, distorted face, malformed logo",
+  ].filter(Boolean).join(", ");
+}
+
+function compactJsonLine(label: string, value: unknown): string {
+  if (!isRecord(value) && !Array.isArray(value)) return "";
+  const text = JSON.stringify(value);
+  return text && text !== "{}" && text !== "[]" ? `${label}: ${clipText(text, 480)}` : "";
+}
+
+function clipText(value: string, maxLength: number): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
 function isConsistencyKeyframeNo(keyframeNo: number): boolean {
-  return keyframeNo === CHARACTER_CONSISTENCY_KEYFRAME_NO || keyframeNo === SCENE_CONSISTENCY_KEYFRAME_NO;
+  return keyframeNo < 0;
+}
+
+function isApprovedConsistencyReference(keyframe: Pick<VideoProjectWithShots["keyframes"][number], "imageUrl" | "locked" | "status">): boolean {
+  return Boolean(keyframe.imageUrl) && (keyframe.locked || keyframe.status === VideoShotStatus.IMAGE_APPROVED);
 }
 
 function consistencyReferenceImageUrls(
@@ -2786,18 +4954,306 @@ function consistencyReferenceImageUrls(
   return project.keyframes
     .filter((keyframe) => isConsistencyKeyframeNo(keyframe.keyframeNo))
     .filter((keyframe) => keyframe.keyframeNo !== excludeKeyframeNo)
+    .filter(isApprovedConsistencyReference)
     .map((keyframe) => keyframe.imageUrl)
     .filter((url): url is string => Boolean(url));
 }
 
-function referenceImageUrlsForKeyframe(
-  project: Pick<VideoProjectWithShots, "keyframes" | "referenceImageUrls">,
+function selectReferenceImagesForKeyframe(
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes" | "referenceImageUrls">,
   keyframe: VideoProjectWithShots["keyframes"][number],
-): string[] {
+  finalTextPrompt: string,
+): { urls: string[]; output: ReferenceSelectionOutput } {
+  const targetArtifactId = isConsistencyKeyframeNo(keyframe.keyframeNo)
+    ? `consistency_reference:${keyframe.keyframeNo}`
+    : `keyframe:${keyframe.keyframeNo}`;
+  const planKeyframe = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo) ??
+    readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
+  const requiredAnchorIds = readPlanStringArray(planKeyframe, ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+  const candidates = collectReferenceCandidates({
+    project,
+    targetKeyframeNo: keyframe.keyframeNo,
+    requiredAnchorIds,
+    includeBoundaryFrames: false,
+  });
   if (isConsistencyKeyframeNo(keyframe.keyframeNo)) {
-    return jsonStringArray(project.referenceImageUrls).slice(0, 4);
+    return buildReferenceSelectionOutput({
+      targetArtifactId,
+      targetType: "consistency_reference",
+      candidates: candidates.filter((candidate) => candidate.sourceType === "user_upload" || candidate.sourceType === "style_brand"),
+      finalTextPrompt,
+      missingHardAnchorWarnings: [],
+    });
   }
-  return consistencyReferenceImageUrls(project, keyframe.keyframeNo).slice(0, 4);
+  const missingHardAnchorWarnings = requiredAnchorIds.length
+    ? missingHardAnchorWarningsForTarget(project, requiredAnchorIds, keyframe.keyframeNo)
+    : [];
+  if (missingHardAnchorWarnings.length) {
+    throw new Error("Reference image selection failed: " + missingHardAnchorWarnings.join("; "));
+  }
+  return buildReferenceSelectionOutput({
+    targetArtifactId,
+    targetType: "keyframe",
+    candidates,
+    finalTextPrompt,
+    missingHardAnchorWarnings,
+  });
+}
+
+function collectReferenceCandidates(params: {
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes" | "referenceImageUrls">;
+  targetKeyframeNo?: number;
+  segment?: VideoProjectWithShots["segments"][number];
+  microShot?: VideoMicroShot;
+  requiredAnchorIds: string[];
+  includeBoundaryFrames: boolean;
+}): ReferenceCandidateDraft[] {
+  const candidates: ReferenceCandidateDraft[] = [];
+  const requiredAnchorIds = new Set(params.requiredAnchorIds);
+  const referenceMap = readPlanConsistencyReferenceMap(params.project.planJson);
+  for (const keyframe of params.project.keyframes) {
+    if (!keyframe.imageUrl || keyframe.keyframeNo === params.targetKeyframeNo) continue;
+    if (isConsistencyKeyframeNo(keyframe.keyframeNo)) {
+      if (!isApprovedConsistencyReference(keyframe)) continue;
+      const reference = referenceMap.get(keyframe.keyframeNo);
+      const anchorId = anchorIdForConsistencyReference(reference);
+      const kind = consistencyReferenceKindForPlan(reference, keyframe.keyframeNo);
+      const required = Boolean(anchorId && requiredAnchorIds.has(anchorId));
+      const sourceType: ReferenceSourceType = kind === "brand_visual" ? "style_brand" : "hard_anchor";
+      const quotaType = quotaTypeForReferenceKind(kind);
+      candidates.push({
+        artifactId: `consistency_reference:${keyframe.keyframeNo}`,
+        url: keyframe.imageUrl,
+        sourceType,
+        quotaType,
+        purpose: referencePurpose(reference, keyframe.purpose || `consistency ${keyframe.keyframeNo}`),
+        relevanceScore: required ? 1 : sourceType === "style_brand" ? 0.65 : 0.8,
+        conflictScore: required ? 0 : 0.1,
+        recencyScore: 0,
+        viewMatchScore: kind === "character" ? 0.15 : 0.05,
+        usageNote: required
+          ? `Required hard anchor ${anchorId || keyframe.keyframeNo}.`
+          : `Available hard ${kind} anchor.`,
+      });
+      continue;
+    }
+    if (!params.includeBoundaryFrames && params.targetKeyframeNo !== undefined) {
+      const distance = Math.abs(keyframe.keyframeNo - params.targetKeyframeNo);
+      if (distance > 2) continue;
+      candidates.push({
+        artifactId: `keyframe:${keyframe.keyframeNo}`,
+        url: keyframe.imageUrl,
+        sourceType: "recent_keyframe",
+        quotaType: "space_layout",
+        purpose: keyframe.purpose || `nearby keyframe ${keyframe.keyframeNo}`,
+        relevanceScore: distance <= 1 ? 0.65 : 0.45,
+        conflictScore: 0.2,
+        recencyScore: Math.min(1, distance / 4),
+        viewMatchScore: distance <= 1 ? 0.15 : 0.35,
+        usageNote: `Nearby boundary frame for spatial continuity, distance=${distance}.`,
+      });
+    }
+  }
+  for (const [index, url] of jsonStringArray(params.project.referenceImageUrls).entries()) {
+    candidates.push({
+      artifactId: `user_upload:${index + 1}`,
+      url,
+      sourceType: "user_upload",
+      quotaType: "style_brand",
+      purpose: `User uploaded reference ${index + 1}`,
+      relevanceScore: params.targetKeyframeNo !== undefined && isConsistencyKeyframeNo(params.targetKeyframeNo) ? 0.75 : 0.45,
+      conflictScore: 0.25,
+      recencyScore: 0,
+      viewMatchScore: 0.25,
+      usageNote: "User supplied visual reference.",
+    });
+  }
+  if (params.includeBoundaryFrames && params.segment) {
+    const boundaryNos = [params.segment.startKeyframeNo, params.segment.endKeyframeNo];
+    for (const keyframeNo of boundaryNos) {
+      const keyframe = params.project.keyframes.find((item) => item.keyframeNo === keyframeNo);
+      if (!keyframe?.imageUrl) continue;
+      const distance = params.microShot
+        ? Math.min(
+            Math.abs(params.microShot.absoluteTimeSeconds - keyframe.timeSeconds),
+            Math.abs(params.microShot.localTimeSeconds - (keyframeNo === params.segment.startKeyframeNo ? 0 : params.segment.durationSeconds)),
+          )
+        : 0;
+      candidates.push({
+        artifactId: `keyframe:${keyframe.keyframeNo}`,
+        url: keyframe.imageUrl,
+        sourceType: "parent_camera",
+        quotaType: "space_layout",
+        purpose: keyframe.purpose || `segment boundary ${keyframe.keyframeNo}`,
+        relevanceScore: keyframeNo === params.segment.startKeyframeNo ? 0.82 : 0.7,
+        conflictScore: 0.05,
+        recencyScore: Math.min(1, distance / Math.max(1, params.segment.durationSeconds)),
+        viewMatchScore: keyframeNo === params.segment.startKeyframeNo ? 0.05 : 0.18,
+        usageNote: `Parent segment boundary frame ${keyframe.keyframeNo}.`,
+      });
+    }
+  }
+  for (const candidate of collectTransitionReferenceCandidates(params.project, params.segment?.segmentNo)) {
+    candidates.push(candidate);
+  }
+  return dedupeReferenceCandidates(candidates);
+}
+
+function buildReferenceSelectionOutput(params: {
+  targetArtifactId: string;
+  targetType: ReferenceSelectionOutput["targetType"];
+  candidates: ReferenceCandidateDraft[];
+  finalTextPrompt: string;
+  missingHardAnchorWarnings: string[];
+}): { urls: string[]; output: ReferenceSelectionOutput } {
+  const scored = params.candidates
+    .map((candidate) => ({
+      ...candidate,
+      finalScore: referenceFinalScore(candidate),
+    }))
+    .sort((a, b) => b.finalScore - a.finalScore);
+  const selected = new Set<string>();
+  const quotaUsed = new Set<ReferenceQuotaType>();
+  for (const candidate of scored) {
+    if (selected.size >= 4) break;
+    if (quotaUsed.has(candidate.quotaType)) continue;
+    selected.add(candidate.artifactId);
+    quotaUsed.add(candidate.quotaType);
+  }
+  const outputCandidates: ReferenceSelectionOutput["candidates"] = scored.map((candidate) => {
+    const isSelected = selected.has(candidate.artifactId);
+    const rejectionReason = isSelected
+      ? undefined
+      : selected.size >= 4
+        ? "quota_full"
+        : quotaUsed.has(candidate.quotaType)
+          ? `quota_${candidate.quotaType}_already_selected`
+          : "lower_score";
+    return {
+      artifactId: candidate.artifactId,
+      url: candidate.url,
+      sourceType: candidate.sourceType,
+      quotaType: candidate.quotaType,
+      purpose: candidate.purpose,
+      relevanceScore: roundScore(candidate.relevanceScore),
+      conflictScore: roundScore(candidate.conflictScore),
+      recencyScore: roundScore(candidate.recencyScore),
+      viewMatchScore: roundScore(candidate.viewMatchScore),
+      finalScore: roundScore(candidate.finalScore),
+      selected: isSelected,
+      rejectionReason,
+      usageNote: candidate.usageNote,
+    };
+  });
+  const selectedCandidates = outputCandidates.filter((candidate) => candidate.selected);
+  const urls = selectedCandidates.map((candidate) => candidate.url).filter((url): url is string => Boolean(url));
+  return {
+    urls,
+    output: {
+      targetArtifactId: params.targetArtifactId,
+      targetType: params.targetType,
+      selectedArtifactIds: selectedCandidates.map((candidate) => candidate.artifactId),
+      selectedReferenceUrls: urls,
+      candidates: outputCandidates,
+      usageNotes: selectedCandidates.map((candidate) => candidate.usageNote).filter((note): note is string => Boolean(note)),
+      finalTextPrompt: params.finalTextPrompt,
+      warnings: params.missingHardAnchorWarnings,
+    },
+  };
+}
+
+function referenceFinalScore(candidate: ReferenceCandidateDraft): number {
+  return candidate.relevanceScore * 0.45 -
+    candidate.viewMatchScore * 0.25 -
+    candidate.recencyScore * 0.2 -
+    candidate.conflictScore * 0.35;
+}
+
+function roundScore(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function dedupeReferenceCandidates(candidates: ReferenceCandidateDraft[]): ReferenceCandidateDraft[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = candidate.url || candidate.artifactId;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function quotaTypeForReferenceKind(kind: VideoConsistencyReference["kind"]): ReferenceQuotaType {
+  if (kind === "character") return "character";
+  if (kind === "scene" || kind === "space_layout") return "space_layout";
+  if (kind === "brand_visual" || kind === "custom") return "style_brand";
+  return "product";
+}
+
+function anchorIdForConsistencyReference(reference: Record<string, unknown> | undefined): string {
+  const explicit = readPlanShotString(reference, ["anchorId", "anchor_id"]);
+  if (explicit) return explicit;
+  const frameId = readPlanShotString(reference, ["frameId", "frame_id"]);
+  return frameId.startsWith("consistency_") ? frameId.slice("consistency_".length) : "";
+}
+
+function referencePurpose(reference: Record<string, unknown> | undefined, fallback: string): string {
+  return readPlanShotString(reference, ["purposeZh", "purpose_zh", "purposeEn", "purpose_en", "purpose"]) || fallback;
+}
+
+function missingHardAnchorWarningsForTarget(
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes">,
+  requiredAnchorIds: string[],
+  excludeKeyframeNo?: number,
+): string[] {
+  const references = readPlanConsistencyReferenceMap(project.planJson);
+  const referenceAnchorIds = new Set<string>();
+  for (const reference of references.values()) {
+    const anchorId = anchorIdForConsistencyReference(reference);
+    if (anchorId) referenceAnchorIds.add(anchorId);
+  }
+  const readyAnchorIds = new Set<string>();
+  for (const keyframe of project.keyframes) {
+    if (keyframe.keyframeNo === excludeKeyframeNo || !isConsistencyKeyframeNo(keyframe.keyframeNo)) continue;
+    if (!isApprovedConsistencyReference(keyframe)) continue;
+    const anchorId = anchorIdForConsistencyReference(references.get(keyframe.keyframeNo));
+    if (anchorId) readyAnchorIds.add(anchorId);
+  }
+  return requiredAnchorIds
+    .filter((anchorId) => referenceAnchorIds.has(anchorId))
+    .filter((anchorId) => !readyAnchorIds.has(anchorId))
+    .map((anchorId) => "hard anchor " + anchorId + " missing locked consistency reference image");
+}
+
+function collectTransitionReferenceCandidates(
+  project: Pick<VideoProjectWithShots, "planJson">,
+  segmentNo?: number,
+): ReferenceCandidateDraft[] {
+  const plan = isRecord(project.planJson) ? project.planJson : {};
+  const raw = Array.isArray(plan.transitionReferencePlan)
+    ? plan.transitionReferencePlan
+    : Array.isArray(plan.transition_reference_plan)
+      ? plan.transition_reference_plan
+      : [];
+  return raw.flatMap((item, index) => {
+    if (!isRecord(item)) return [];
+    const url = readPlanShotString(item, ["imageUrl", "image_url", "referenceUrl", "reference_url", "url"]);
+    if (!url) return [];
+    const relatedSegment = Number(item.segmentNo ?? item.segment_no ?? item.toSegmentNo ?? item.to_segment_no);
+    const distance = Number.isFinite(relatedSegment) && segmentNo ? Math.abs(relatedSegment - segmentNo) : 1;
+    return [{
+      artifactId: `transition_reference:${index + 1}`,
+      url,
+      sourceType: "transition_reference" as const,
+      quotaType: "space_layout" as const,
+      purpose: readPlanShotString(item, ["purpose", "reason"]) || "transition reference",
+      relevanceScore: distance <= 1 ? 0.68 : 0.42,
+      conflictScore: 0.12,
+      recencyScore: Math.min(1, distance / 4),
+      viewMatchScore: 0.18,
+      usageNote: "Transition reference for spatial continuity.",
+    }];
+  });
 }
 
 function characterIdentityLockForPrompt(planJson: Prisma.JsonValue | null): string {
@@ -3036,24 +5492,106 @@ function generationPromptForMicroShot(
     microShot.camera ? `Composition/camera: ${microShot.camera}` : "",
     imagePrompt ? `Reference image prompt: ${imagePrompt}` : "",
     microShot.promptEn || microShot.promptZh || microShot.prompt ? `Text control prompt: ${microShot.promptEn || microShot.promptZh || microShot.prompt}` : "",
-    identityLock ? `Hard character identity lock: ${identityLock}` : "",
-    toneLock ? `Hard color tone lock: ${toneLock}` : "",
-    anchorLock ? `Hard project consistency anchors for this micro-shot:\n${anchorLock}` : "",
+    identityLock ? "Hard character identity lock: " + identityLock : "",
+    toneLock ? "Hard color tone lock: " + toneLock : "",
+    anchorLock ? "Hard project consistency anchors for this micro-shot:\n" + anchorLock : "",
     "Describe and render a still moment only. Avoid motion trails, before/after panels, subtitles, labels, watermarks, UI, or added typography.",
   ].filter(Boolean).join("\n");
 }
 
-function referenceImageUrlsForMicroShot(
-  project: Pick<VideoProjectWithShots, "keyframes" | "referenceImageUrls">,
+function selectReferenceImagesForMicroShot(
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes" | "referenceImageUrls">,
   segment: VideoProjectWithShots["segments"][number],
-): string[] {
-  const keyframeMap = new Map(project.keyframes.map((keyframe) => [keyframe.keyframeNo, keyframe.imageUrl]));
-  return [
-    ...consistencyReferenceImageUrls(project),
-    keyframeMap.get(segment.startKeyframeNo),
-    keyframeMap.get(segment.endKeyframeNo),
-    ...jsonStringArray(project.referenceImageUrls),
-  ].filter((url): url is string => Boolean(url)).slice(0, 4);
+  microShot: VideoMicroShot,
+  finalTextPrompt: string,
+): { urls: string[]; output: ReferenceSelectionOutput } {
+  const requiredAnchorIds = microShot.usesConsistencyAnchors?.length
+    ? microShot.usesConsistencyAnchors
+    : readPlanStringArray(readPlanSegmentMap(project.planJson).get(segment.segmentNo), ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+  const missingHardAnchorWarnings = requiredAnchorIds.length
+    ? missingHardAnchorWarningsForTarget(project, requiredAnchorIds)
+    : [];
+  if (missingHardAnchorWarnings.length) {
+    throw new Error("Reference image selection failed: " + missingHardAnchorWarnings.join("; "));
+  }
+  return buildReferenceSelectionOutput({
+    targetArtifactId: "segment:" + segment.segmentNo + ":micro_shot:" + microShot.microShotNo,
+    targetType: "micro_shot",
+    candidates: collectReferenceCandidates({
+      project,
+      segment,
+      microShot,
+      requiredAnchorIds,
+      includeBoundaryFrames: true,
+    }),
+    finalTextPrompt,
+    missingHardAnchorWarnings,
+  });
+}
+
+async function saveReferenceSelectionOutput(projectId: string, output: ReferenceSelectionOutput): Promise<void> {
+  const project = await prisma.videoProject.findUnique({ where: { id: projectId } });
+  if (!project?.planJson) return;
+  const plan = cloneJsonRecord(project.planJson);
+  const existing = Array.isArray(plan.referenceSelectionOutputs)
+    ? plan.referenceSelectionOutputs
+    : Array.isArray(plan.reference_selection_outputs)
+      ? plan.reference_selection_outputs
+      : [];
+  plan.referenceSelectionOutputs = [
+    ...existing.filter((item) => {
+      if (!isRecord(item)) return true;
+      return (item.targetArtifactId ?? item.target_artifact_id) !== output.targetArtifactId;
+    }),
+    output,
+  ].slice(-120);
+  setPlanArtifactStatus(plan, [referenceSelectionArtifactId(output.targetArtifactId)], "ready", { retryFromStage: "reference_selector" });
+  delete plan.reference_selection_outputs;
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: plan as Prisma.InputJsonValue },
+  });
+  await logOnePromptVideo("reference_selector.output", {
+    projectId,
+    targetArtifactId: output.targetArtifactId,
+    targetType: output.targetType,
+    selectedArtifactIds: output.selectedArtifactIds,
+    candidateCount: output.candidates.length,
+    warnings: output.warnings,
+  });
+}
+
+async function savePromptDebugArtifact(projectId: string, artifact: PromptDebugArtifact): Promise<void> {
+  const project = await prisma.videoProject.findUnique({ where: { id: projectId } });
+  if (!project?.planJson) return;
+  const plan = cloneJsonRecord(project.planJson);
+  const existing = isRecord(plan.promptDebugArtifacts)
+    ? plan.promptDebugArtifacts
+    : isRecord(plan.prompt_debug_artifacts)
+      ? plan.prompt_debug_artifacts
+      : {};
+  plan.promptDebugArtifacts = {
+    ...existing,
+    [artifact.targetArtifactId]: artifact,
+  };
+  setPlanArtifactStatus(plan, [promptArtifactIdForTarget(artifact.targetArtifactId)], "ready", { retryFromStage: "compiler" });
+  delete plan.prompt_debug_artifacts;
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: plan as Prisma.InputJsonValue },
+  });
+  await logOnePromptVideo("prompt_compiler.output", {
+    projectId,
+    targetArtifactId: artifact.targetArtifactId,
+    targetType: artifact.targetType,
+    compilerVersion: artifact.compilerVersion,
+    beforePromptLength: artifact.beforePrompt?.length ?? 0,
+    finalPromptLength: artifact.finalPrompt.length,
+    negativePromptLength: artifact.finalNegativePrompt?.length ?? 0,
+    selectedReferenceCount: artifact.selectedReferenceUrls?.length ?? 0,
+    rules: artifact.rules,
+    warnings: artifact.warnings,
+  });
 }
 
 async function updatePlanMicroShot(
@@ -3163,10 +5701,10 @@ async function syncPlanJsonFromShots(
         : readPlanShotString(previous, ["purposeZh", "purpose_zh"]) || keyframe.purpose;
       const purposeEn = localizedPurposeUpdate && localizedUpdate?.locale === "en"
         ? keyframe.purpose
-        : readPlanShotString(previous, ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previous, ["imagePromptEn", "image_prompt_en"]) || keyframe.imagePrompt, `Reference frame ${Math.abs(keyframe.keyframeNo)}`);
+        : readPlanShotString(previous, ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previous, ["imagePromptEn", "image_prompt_en"]) || keyframe.imagePrompt, "Reference frame " + Math.abs(keyframe.keyframeNo));
       return {
         ...previous,
-        kind: keyframe.keyframeNo === CHARACTER_CONSISTENCY_KEYFRAME_NO ? "character" as const : "scene" as const,
+        kind: consistencyReferenceKindForPlan(previous, keyframe.keyframeNo),
         needed: true,
         keyframeNo: keyframe.keyframeNo,
         purpose: keyframe.purpose,
@@ -3206,7 +5744,7 @@ async function syncPlanJsonFromShots(
         : readPlanShotString(previous, ["purposeZh", "purpose_zh"]) || keyframe.purpose;
       const purposeEn = localizedPurposeUpdate && localizedUpdate?.locale === "en"
         ? keyframe.purpose
-        : readPlanShotString(previous, ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previous, ["imagePromptEn", "image_prompt_en"]) || keyframe.imagePrompt, `Boundary frame ${keyframe.keyframeNo}`);
+        : readPlanShotString(previous, ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previous, ["imagePromptEn", "image_prompt_en"]) || keyframe.imagePrompt, "Boundary frame " + keyframe.keyframeNo);
       return {
         ...previous,
         keyframeNo: keyframe.keyframeNo,
@@ -3248,7 +5786,7 @@ async function syncPlanJsonFromShots(
         : readPlanShotString(previous, ["purposeZh", "purpose_zh"]) || segment.purpose;
       const purposeEn = localizedPurposeUpdate && localizedUpdate?.locale === "en"
         ? segment.purpose
-        : readPlanShotString(previous, ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previous, ["videoPromptEn", "video_prompt_en"]) || segment.videoPrompt, `Segment ${segment.segmentNo}`);
+        : readPlanShotString(previous, ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previous, ["videoPromptEn", "video_prompt_en"]) || segment.videoPrompt, "Segment " + segment.segmentNo);
       const microShots = localizedVideoUpdate && Array.isArray(localizedUpdate?.microShots)
         ? localizedUpdate.microShots.map((item, index) => ({
             ...item,
@@ -3329,6 +5867,7 @@ async function syncPlanJsonFromShots(
       segments: nextSegments,
       shots: nextShots,
     };
+    markPlanArtifactsDirtyForShotUpdate(nextPlan as unknown as Record<string, unknown>, project, localizedUpdate);
     await prisma.videoProject.update({
       where: { id: projectId },
       data: { planJson: nextPlan as unknown as Prisma.InputJsonValue },
@@ -3352,7 +5891,7 @@ async function syncPlanJsonFromShots(
       purposeEn:
         localizedUpdate?.purposeUpdated && localizedUpdate?.shotId === shot.id && localizedUpdate.locale === "en"
           ? shot.purpose
-          : readPlanShotString(previousShots.get(shot.shotNo), ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previousShots.get(shot.shotNo), ["videoPromptEn", "video_prompt_en"]) || shot.videoPrompt, `Shot ${shot.shotNo}`),
+          : readPlanShotString(previousShots.get(shot.shotNo), ["purposeEn", "purpose_en"]) || titleFromPrompt(readPlanShotString(previousShots.get(shot.shotNo), ["videoPromptEn", "video_prompt_en"]) || shot.videoPrompt, "Shot " + shot.shotNo),
       camera: shot.camera,
       action: shot.action,
       imagePrompt: shot.imagePrompt,
@@ -3385,8 +5924,10 @@ async function syncPlanJsonFromShots(
           : readPlanShotString(previousShots.get(shot.shotNo), ["negativePromptEn", "negative_prompt_en"]) || shot.negativePrompt,
     })),
   };
+  markPlanArtifactsDirtyForShotUpdate(nextPlan as unknown as Record<string, unknown>, project, localizedUpdate);
   await prisma.videoProject.update({
     where: { id: projectId },
     data: { planJson: nextPlan as unknown as Prisma.InputJsonValue },
   });
 }
+

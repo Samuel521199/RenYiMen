@@ -44,7 +44,12 @@ export async function PATCH(req: Request, ctx: RouteContext) {
     }
 
     const { projectId } = await ctx.params;
-    const input = isRecord(body) && typeof body.title === "string" ? { title: body.title } : {};
+    const input = isRecord(body)
+      ? {
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(isRecord(body.planDebugPatch) ? { planDebugPatch: body.planDebugPatch } : {}),
+        }
+      : {};
     const project = await updateVideoProject(session.user.id, projectId, input);
     return NextResponse.json({ ok: true, project: serializeVideoProject(project) });
   } catch (error) {

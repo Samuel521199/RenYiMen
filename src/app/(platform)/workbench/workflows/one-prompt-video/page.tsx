@@ -218,7 +218,73 @@ interface VideoProject {
   keyframes?: VideoKeyframe[];
   segments?: VideoSegment[];
   shots: VideoShot[];
+  planDebug?: PlanDebugData;
 }
+
+interface PlanDebugData {
+  narrativeEvents?: unknown[];
+  consistencyAnchors?: unknown[];
+  anchorStateTimeline?: unknown[];
+  segmentRenderDescriptions?: unknown[];
+  finalTransitionPlan?: unknown[];
+  audioBible?: Record<string, unknown>;
+  referenceSelectionOutputs?: ReferenceSelectionOutput[];
+  promptDebugArtifacts?: Record<string, PromptDebugArtifact>;
+  artifactMetadata?: Record<string, ArtifactMetadata>;
+  generationQualityReports?: GenerationQualityReport[];
+  plannerShadow?: Record<string, unknown>;
+  plannerWarnings?: unknown[];
+}
+
+interface ReferenceSelectionOutput {
+  targetArtifactId?: string;
+  targetType?: string;
+  selectedArtifactIds?: string[];
+  selectedReferenceUrls?: string[];
+  candidates?: Array<Record<string, unknown>>;
+  usageNotes?: string[];
+  finalTextPrompt?: string;
+  warnings?: string[];
+}
+
+interface PromptDebugArtifact {
+  targetArtifactId?: string;
+  targetType?: string;
+  beforePrompt?: string;
+  finalPrompt?: string;
+  finalNegativePrompt?: string;
+  selectedReferenceUrls?: string[];
+  referenceUsageNotes?: string[];
+  rules?: string[];
+  warnings?: string[];
+  inputs?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+interface ArtifactMetadata {
+  revision?: number;
+  status?: string;
+  dirtyReason?: string;
+  retryFromStage?: string;
+  updatedAt?: string;
+  dependsOn?: string[];
+  [key: string]: unknown;
+}
+
+interface GenerationQualityReport {
+  assetId: string;
+  identityScore: number;
+  layoutScore: number;
+  promptAlignmentScore: number;
+  continuityScore: number;
+  singleTakeScore?: number;
+  artifactIssues: string[];
+  passed: boolean;
+  retryInstruction?: string;
+}
+
+type DebugTab = "events" | "anchors" | "states" | "references" | "prompts" | "audit";
+type EditableDebugSection = "events" | "anchors" | "states";
 
 interface ApiResponse {
   ok: boolean;
@@ -258,12 +324,15 @@ type Copy = {
   stoppingGeneration: string;
   generationStopped: string;
   resumeGeneration: string;
+  continueBoundaryFrames: string;
   resumeStarted: string;
   approveScript: string;
   approveFrames: string;
+  approveReference: string;
   approveMicroShots: string;
   approveClips: string;
   confirmFinal: string;
+  recomposeFinal: string;
   rollback: string;
   rollbackTo: string;
   rollbackConfirm: string;
@@ -325,6 +394,7 @@ type Copy = {
   saved: (shotNo: number) => string;
   keyframesReady: string;
   keyframeRegenerated: string;
+  referenceApproved: string;
   framesApproved: string;
   microShotsApproved: string;
   clipsComposed: string;
@@ -383,12 +453,15 @@ const TEXT: Record<PageLang, Copy> = {
     stoppingGeneration: "停止中",
     generationStopped: "已停止生成",
     resumeGeneration: "\u7ee7\u7eed\u751f\u6210",
+    continueBoundaryFrames: "\u7ee7\u7eed\u751f\u6210\u5173\u952e\u5e27",
     resumeStarted: "\u5df2\u7ee7\u7eed\u5f53\u524d\u9636\u6bb5",
     approveScript: "\u786e\u8ba4\u811a\u672c",
     approveFrames: "\u786e\u8ba4\u8fb9\u754c\u53c2\u8003\u5e27",
+    approveReference: "\u786e\u8ba4\u53c2\u8003\u56fe",
     approveMicroShots: "\u786e\u8ba4\u5185\u90e8\u5b50\u5206\u955c",
     approveClips: "\u786e\u8ba4\u7247\u6bb5\u5e76\u5408\u6210",
     confirmFinal: "\u786e\u8ba4\u6210\u7247",
+    recomposeFinal: "\u91cd\u65b0\u5408\u6210\u6210\u7247",
     rollback: "\u56de\u9000",
     rollbackTo: "\u56de\u9000\u5230",
     rollbackConfirm: "\u786e\u5b9a\u8981\u56de\u9000\u5230\u9009\u4e2d\u9636\u6bb5\u5417\uff1f\u9009\u4e2d\u9636\u6bb5\u4e4b\u540e\u7684\u751f\u6210\u7ed3\u679c\u53ef\u80fd\u4f1a\u88ab\u6e05\u7a7a\u6216\u89e3\u9501\u3002",
@@ -450,6 +523,7 @@ const TEXT: Record<PageLang, Copy> = {
     saved: (shotNo) => `\u955c\u5934 ${shotNo} \u5df2\u4fdd\u5b58`,
     keyframesReady: "\u8fb9\u754c\u53c2\u8003\u5e27\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4\uff0c\u6b63\u5728\u8f6e\u8be2\u7ed3\u679c",
     keyframeRegenerated: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u91cd\u751f\u6210",
+    referenceApproved: "\u53c2\u8003\u56fe\u5df2\u786e\u8ba4",
     framesApproved: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u786e\u8ba4\uff0c\u8bf7\u5ba1\u6838\u5185\u90e8\u5b50\u5206\u955c\u6587\u5b57\u548c\u53c2\u8003\u56fe",
     microShotsApproved: "\u5185\u90e8\u5b50\u5206\u955c\u5df2\u786e\u8ba4\uff0c\u89c6\u9891\u7247\u6bb5\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4",
     clipsComposed: "\u7247\u6bb5\u5df2\u786e\u8ba4\uff0c\u6210\u7247\u5df2\u5408\u6210",
@@ -547,12 +621,15 @@ const TEXT: Record<PageLang, Copy> = {
     stoppingGeneration: "Stopping",
     generationStopped: "Generation stopped",
     resumeGeneration: "Resume generation",
+    continueBoundaryFrames: "Continue keyframes",
     resumeStarted: "Resumed the current stage",
     approveScript: "Approve script",
     approveFrames: "Approve boundary frames",
+    approveReference: "Approve reference",
     approveMicroShots: "Approve internal micro-shots",
     approveClips: "Approve clips and compose",
     confirmFinal: "Approve final",
+    recomposeFinal: "Recompose final",
     rollback: "Rollback",
     rollbackTo: "Rollback to",
     rollbackConfirm: "Rollback to the selected stage? Outputs after that stage may be cleared or unlocked.",
@@ -614,6 +691,7 @@ const TEXT: Record<PageLang, Copy> = {
     saved: (shotNo) => `Shot ${shotNo} saved`,
     keyframesReady: "Boundary reference frame generation tasks submitted. Polling results.",
     keyframeRegenerated: "Boundary reference frame regenerated",
+    referenceApproved: "Reference approved",
     framesApproved: "Boundary reference frames approved. Review internal micro-shot text and reference images next.",
     microShotsApproved: "Internal micro-shots approved. Clip generation tasks submitted.",
     clipsComposed: "Clips approved. Final video composed.",
@@ -750,6 +828,7 @@ export default function OnePromptVideoPage() {
   const [projects, setProjects] = useState<VideoProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [editingProjectId, setEditingProjectId] = useState("");
+  const [deletingProjectId, setDeletingProjectId] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
   const [project, setProject] = useState<VideoProject | null>(null);
   const [selectedShotId, setSelectedShotId] = useState("");
@@ -766,6 +845,7 @@ export default function OnePromptVideoPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [optimisticProgress, setOptimisticProgress] = useState<OptimisticProgress | null>(null);
+  const [progressNow, setProgressNow] = useState(() => Date.now());
   const [generationAbortController, setGenerationAbortController] = useState<AbortController | null>(null);
   const [generationProjectId, setGenerationProjectId] = useState("");
   const [stoppingGeneration, setStoppingGeneration] = useState(false);
@@ -773,10 +853,18 @@ export default function OnePromptVideoPage() {
   const [workflowProgressCollapsed, setWorkflowProgressCollapsed] = useState(false);
   const [shotEditorOpen, setShotEditorOpen] = useState(false);
   const [microShotHelpOpen, setMicroShotHelpOpen] = useState<"detail" | "modal" | null>(null);
+  const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const [debugTab, setDebugTab] = useState<DebugTab>("events");
+  const [debugDraft, setDebugDraft] = useState<Record<EditableDebugSection, string>>({
+    events: "[]",
+    anchors: "[]",
+    states: "[]",
+  });
   const [detailPanelWidth, setDetailPanelWidth] = useState(360);
   const [detailPreviewHeight, setDetailPreviewHeight] = useState(360);
   const [resizingDetailPanel, setResizingDetailPanel] = useState(false);
   const projectLayoutRef = useRef<HTMLElement | null>(null);
+  const detailPanelRef = useRef<HTMLElement | null>(null);
   const selectedProjectIdRef = useRef("");
 
   const selectedShot = useMemo(
@@ -797,6 +885,27 @@ export default function OnePromptVideoPage() {
   );
   const selectedStartKeyframe = selectedShot?.startKeyframeNo ? keyframeByNo.get(selectedShot.startKeyframeNo) : undefined;
   const selectedEndKeyframe = selectedShot?.endKeyframeNo ? keyframeByNo.get(selectedShot.endKeyframeNo) : undefined;
+  const debugCopy = DEBUG_COPY[pageLang];
+  const debugContext = useMemo(
+    () => buildDebugContext(project, selectedShot, selectedKeyframe),
+    [project, selectedKeyframe, selectedShot],
+  );
+  const currentReferenceSelections = useMemo(
+    () => currentReferenceDebugItems(project?.planDebug, debugContext.targetIds),
+    [debugContext.targetIds, project?.planDebug],
+  );
+  const currentPromptDebugArtifacts = useMemo(
+    () => currentPromptDebugItems(project?.planDebug, debugContext.targetIds),
+    [debugContext.targetIds, project?.planDebug],
+  );
+  const currentDirtyArtifacts = useMemo(
+    () => currentArtifactMetadata(project?.planDebug, debugContext.targetIds),
+    [debugContext.targetIds, project?.planDebug],
+  );
+  const currentQualityReports = useMemo(
+    () => currentGenerationQualityReports(project?.planDebug, debugContext.targetIds),
+    [debugContext.targetIds, project?.planDebug],
+  );
   const keyframeTotal = project?.keyframes?.length || project?.shots.length || 0;
   const previewTotalDuration = project?.durationSeconds ?? previewKeyframe?.timeSeconds ?? 30;
   const segmentTotal = project?.segments?.length || project?.shots.length || 0;
@@ -807,6 +916,10 @@ export default function OnePromptVideoPage() {
     ? project.segments.filter((segment) => Boolean(segment.clipUrl) || segment.status === "CLIP_READY" || segment.status === "CLIP_APPROVED").length
     : project?.shots.filter((shot) => Boolean(shot.clipUrl) || shot.status === "CLIP_READY" || shot.status === "CLIP_APPROVED").length ?? 0;
   const microShotImageStats = project ? microShotImageProgress(project) : { required: 0, ready: 0, running: 0, failed: 0, missing: 0 };
+  const consistencyKeyframes = project?.keyframes?.filter((keyframe) => keyframe.keyframeNo < 0) ?? [];
+  const boundaryKeyframes = project?.keyframes?.filter((keyframe) => keyframe.keyframeNo > 0) ?? [];
+  const consistencyKeyframesApproved = consistencyKeyframes.every((keyframe) => Boolean(keyframe.imageUrl) && (keyframe.locked || keyframe.status === "IMAGE_APPROVED"));
+  const hasPendingBoundaryKeyframes = boundaryKeyframes.some((keyframe) => !keyframe.imageUrl);
   const keyframesApproved = Boolean(project?.keyframes?.length && project.keyframes.every((keyframe) => keyframe.status === "IMAGE_APPROVED" || keyframe.locked));
   const effectiveProjectStatus = project ? effectiveReviewStatus(project.status, keyframesApproved) : null;
   const runningProjectIds = useMemo(
@@ -819,6 +932,7 @@ export default function OnePromptVideoPage() {
     [planningProjectIds, projects],
   );
   const canApproveScript = Boolean(project && project.shots.length > 0 && project.status === "PLAN_REVIEW");
+  const canContinueBoundaryFrames = Boolean(project && project.status === "IMAGE_REVIEW" && hasPendingBoundaryKeyframes && consistencyKeyframesApproved);
   const canApproveFrames = Boolean(project && keyframeTotal > 0 && completeImages === keyframeTotal && project.status === "IMAGE_REVIEW" && !keyframesApproved);
   const canApproveMicroShots = Boolean(project && effectiveProjectStatus === "MICRO_SHOT_REVIEW" && microShotImageStats.running === 0 && microShotImageStats.failed === 0 && microShotImageStats.missing === 0);
   const canApproveClips = Boolean(project && segmentTotal > 0 && completeClips === segmentTotal && project.status === "CLIP_REVIEW");
@@ -840,10 +954,28 @@ export default function OnePromptVideoPage() {
   );
   const canCreateAndPlan = !creatingPlan && prompt.trim().length >= 4 && effectiveStylePreset.length > 0 && (!project || canPlanSelectedDraft);
   const workflowProgress = useMemo(() => {
-    if (optimisticProgress) return optimisticWorkflowProgressView(optimisticProgress, pageLang);
+    if (optimisticProgress) {
+      const next = estimatePlanningProgress(progressNow - optimisticProgress.startedAt);
+      return optimisticWorkflowProgressView({
+        ...optimisticProgress,
+        phase: next.phase,
+        percent: Math.max(optimisticProgress.percent, next.percent),
+      }, pageLang);
+    }
     if (!project || !effectiveProjectStatus) return null;
+    if (effectiveProjectStatus === "PLANNING") {
+      const updatedAtMs = Date.parse(project.updatedAt);
+      const startedAt = Number.isFinite(updatedAtMs) ? updatedAtMs : progressNow;
+      const next = estimatePlanningProgress(progressNow - startedAt);
+      return optimisticWorkflowProgressView({
+        active: true,
+        phase: next.phase,
+        percent: next.percent,
+        startedAt,
+      }, pageLang);
+    }
     return projectWorkflowProgressView(project, projectProgress(project, effectiveProjectStatus), pageLang, effectiveProjectStatus);
-  }, [effectiveProjectStatus, optimisticProgress, pageLang, project]);
+  }, [effectiveProjectStatus, optimisticProgress, pageLang, progressNow, project]);
   const workflowProgressBarClass =
     workflowProgress?.tone === "failed"
       ? "bg-red-400"
@@ -860,6 +992,14 @@ export default function OnePromptVideoPage() {
   useEffect(() => {
     setPrompt((current) => (DEFAULT_PROMPTS.includes(current) ? copy.defaultPrompt : current));
   }, [copy.defaultPrompt]);
+
+  useEffect(() => {
+    setDebugDraft({
+      events: prettyDebugJson(project?.planDebug?.narrativeEvents ?? []),
+      anchors: prettyDebugJson(project?.planDebug?.consistencyAnchors ?? []),
+      states: prettyDebugJson(project?.planDebug?.anchorStateTimeline ?? []),
+    });
+  }, [project?.planDebug]);
 
   useEffect(() => {
     void loadProjects();
@@ -919,16 +1059,13 @@ export default function OnePromptVideoPage() {
   }, [detailPanelWidth]);
 
   useEffect(() => {
-    window.localStorage.setItem(DETAIL_PREVIEW_HEIGHT_STORAGE_KEY, String(detailPreviewHeight));
-  }, [detailPreviewHeight]);
-
-  useEffect(() => {
     selectedProjectIdRef.current = selectedProjectId;
   }, [selectedProjectId]);
 
   useEffect(() => {
-    if (!optimisticProgress?.active) return;
+    if (!optimisticProgress?.active && effectiveProjectStatus !== "PLANNING") return;
     const timer = window.setInterval(() => {
+      setProgressNow(Date.now());
       setOptimisticProgress((current) => {
         if (!current?.active) return current;
         const next = estimatePlanningProgress(Date.now() - current.startedAt);
@@ -940,7 +1077,7 @@ export default function OnePromptVideoPage() {
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [optimisticProgress?.active]);
+  }, [effectiveProjectStatus, optimisticProgress?.active]);
 
   useEffect(() => {
     if (!project?.shots.length) return;
@@ -1086,6 +1223,7 @@ export default function OnePromptVideoPage() {
       setCustomStylePreset(projectStylePreset);
     }
     if (typeof window !== "undefined") window.localStorage.setItem(PROJECT_STORAGE_KEY, nextProject.id);
+    void syncProject(nextProject.id, { silent: true });
   }
 
   function selectShot(shotId: string) {
@@ -1099,6 +1237,20 @@ export default function OnePromptVideoPage() {
     setSelectedKeyframeId(keyframeId);
     setSelectedShotId("");
     setShotEditorOpen(false);
+  }
+
+  function previewDetailHeight(height: number) {
+    const next = clampDetailPreviewHeight(height);
+    detailPanelRef.current?.style.setProperty("--detail-preview-height", `${next}px`);
+  }
+
+  function commitDetailHeight(height: number) {
+    const next = clampDetailPreviewHeight(height);
+    detailPanelRef.current?.style.setProperty("--detail-preview-height", `${next}px`);
+    setDetailPreviewHeight(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(DETAIL_PREVIEW_HEIGHT_STORAGE_KEY, String(next));
+    }
   }
 
   function openShotEditor(shotId: string) {
@@ -1131,8 +1283,12 @@ export default function OnePromptVideoPage() {
   }
 
   async function deleteProject(projectId: string) {
+    if (deletingProjectId) return;
     if (typeof window !== "undefined" && !window.confirm(copy.deleteProjectConfirm)) return;
-    await runAction(async () => {
+    setDeletingProjectId(projectId);
+    setError("");
+    setMessage("");
+    try {
       await fetchJson(`/api/video-projects/${projectId}`, copy, { method: "DELETE" });
       const remainingProjects = sortProjects(projects.filter((item) => item.id !== projectId));
       setProjects(remainingProjects);
@@ -1159,7 +1315,11 @@ export default function OnePromptVideoPage() {
         }
       }
       setMessage(copy.projectDeleted);
-    });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.actionFailed);
+    } finally {
+      setDeletingProjectId("");
+    }
   }
 
   function startNewProject() {
@@ -1213,7 +1373,9 @@ export default function OnePromptVideoPage() {
     setCreatingPlan(true);
     setError("");
     setMessage("");
-    setOptimisticProgress(null);
+    const startedAt = Date.now();
+    setProgressNow(startedAt);
+    setOptimisticProgress({ active: true, phase: "creating", percent: 3, startedAt });
     try {
       const totalDurationSeconds = clampProjectDuration(durationSeconds);
       const planPayload = {
@@ -1237,6 +1399,7 @@ export default function OnePromptVideoPage() {
       setMessage(copy.generating);
       void planProjectInBackground(planningProject.id, planPayload);
     } catch (err) {
+      setOptimisticProgress(null);
       setError(err instanceof Error ? err.message : copy.createFailed);
     } finally {
       setCreatingPlan(false);
@@ -1257,6 +1420,7 @@ export default function OnePromptVideoPage() {
       });
       if (!planned.project) throw new Error(copy.planFailed);
       rememberProject(planned.project);
+      if (planned.project.status !== "PLANNING") setOptimisticProgress(null);
       if (selectedProjectIdRef.current === projectId) setMessage(copy.planned);
     } catch (planError) {
       try {
@@ -1268,6 +1432,7 @@ export default function OnePromptVideoPage() {
       } catch {
         // Keep the original planning error visible below.
       }
+      setOptimisticProgress(null);
       if (selectedProjectIdRef.current === projectId) setError(planError instanceof Error ? planError.message : copy.planFailed);
     } finally {
       setPlanningProjectIds((current) => current.filter((id) => id !== projectId));
@@ -1435,6 +1600,37 @@ export default function OnePromptVideoPage() {
     });
   }
 
+  async function saveDebugSection(section: EditableDebugSection) {
+    if (!project) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(debugDraft[section]);
+    } catch {
+      setError(debugCopy.invalidJson);
+      return;
+    }
+    if (!Array.isArray(parsed)) {
+      setError(debugCopy.arrayRequired);
+      return;
+    }
+    const planDebugPatch =
+      section === "events"
+        ? { narrativeEvents: parsed }
+        : section === "anchors"
+          ? { consistencyAnchors: parsed }
+          : { anchorStateTimeline: parsed };
+
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}`, copy, {
+        method: "PATCH",
+        body: JSON.stringify({ planDebugPatch }),
+      });
+      if (!res.project) throw new Error(copy.saveFailed);
+      rememberProject(res.project);
+      setMessage(debugCopy.saved);
+    });
+  }
+
   async function approvePlan() {
     if (!project) return;
     await runAction(async () => {
@@ -1455,7 +1651,18 @@ export default function OnePromptVideoPage() {
     });
   }
 
-  async function toggleLock(shot: VideoShot) {
+  async function regenerateClip(shotId: string) {
+    if (!project) return;
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}/clip`, copy, { method: "POST" });
+      if (!res.project) throw new Error(copy.regenerateFailed);
+      rememberProject(res.project);
+      setProjectView("clips");
+      setMessage(copy.resumeStarted);
+    });
+  }
+
+  async function toggleLock(shot: Pick<VideoShot | VideoKeyframe, "id" | "locked">) {
     if (!project) return;
     await runAction(async () => {
       const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shot.id}`, copy, {
@@ -1464,6 +1671,7 @@ export default function OnePromptVideoPage() {
       });
       if (!res.project) throw new Error(copy.lockFailed);
       rememberProject(res.project);
+      setMessage(shot.locked ? copy.updated : copy.referenceApproved);
     });
   }
 
@@ -1493,6 +1701,17 @@ export default function OnePromptVideoPage() {
       const res = await fetchJson(`/api/video-projects/${project.id}/compose`, copy, { method: "POST" });
       if (!res.project) throw new Error(copy.approveFailed);
       rememberProject(res.project);
+      setMessage(copy.clipsComposed);
+    });
+  }
+
+  async function recomposeFinalVideo() {
+    if (!project) return;
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}/compose`, copy, { method: "POST" });
+      if (!res.project) throw new Error(copy.approveFailed);
+      rememberProject(res.project);
+      setProjectView("final");
       setMessage(copy.clipsComposed);
     });
   }
@@ -1562,6 +1781,14 @@ export default function OnePromptVideoPage() {
         icon: <ImageIcon className="h-4 w-4" />,
         onClick: approvePlan,
         className: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/15",
+      };
+    }
+    if (canContinueBoundaryFrames) {
+      return {
+        label: copy.continueBoundaryFrames,
+        icon: <RefreshCw className="h-4 w-4" />,
+        onClick: resumeProject,
+        className: "border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15",
       };
     }
     if (canApproveFrames) {
@@ -1668,7 +1895,7 @@ export default function OnePromptVideoPage() {
                     key={item.id}
                     className={`group relative min-w-0 rounded-md border px-3 py-3 transition ${active ? "border-cyan-400/60 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]" : "border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]"}`}
                   >
-                    <div className="min-w-0">
+                    <div className="flex min-w-0 items-start gap-2">
                       {editing ? (
                         <input
                           value={editingTitle}
@@ -1677,15 +1904,19 @@ export default function OnePromptVideoPage() {
                             if (event.key === "Enter") void saveProjectTitle(item.id);
                             if (event.key === "Escape") cancelEditProject();
                           }}
-                          className="w-full rounded-md border border-cyan-400/40 bg-slate-950 px-2 py-1.5 text-sm font-semibold text-white outline-none"
+                          className="min-w-0 flex-1 rounded-md border border-cyan-400/40 bg-slate-950 px-2 py-1.5 text-sm font-semibold text-white outline-none"
                           autoFocus
                         />
                       ) : (
-                        <button type="button" onClick={() => activateProject(item)} className="block w-full min-w-0 overflow-hidden pr-16 text-left">
+                        <button type="button" onClick={() => activateProject(item)} className="block min-w-0 flex-1 overflow-hidden text-left">
                           <p className="block w-full truncate text-sm font-semibold text-white">{item.title || copy.untitled}</p>
                         </button>
                       )}
-                      <div className={`absolute right-2 top-2 z-20 flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-slate-950/90 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.28)] backdrop-blur transition ${editing ? "opacity-100" : "opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"}`}>
+                      <div
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => event.stopPropagation()}
+                        className={`relative z-30 -mt-1 flex shrink-0 items-center gap-1 rounded-md border border-white/10 bg-slate-950/90 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.28)] backdrop-blur transition ${editing ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}
+                      >
                         {editing ? (
                           <>
                             <button type="button" onClick={(event) => { event.stopPropagation(); void saveProjectTitle(item.id); }} disabled={loading} title={copy.saveProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-emerald-200 hover:bg-emerald-400/10 disabled:opacity-50">
@@ -1697,11 +1928,11 @@ export default function OnePromptVideoPage() {
                           </>
                         ) : (
                           <>
-                            <button type="button" onClick={(event) => { event.stopPropagation(); beginEditProject(item); }} disabled={loading} title={copy.renameProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/[0.08] disabled:opacity-50">
+                            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); beginEditProject(item); }} disabled={loading || Boolean(deletingProjectId)} title={copy.renameProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/[0.08] disabled:opacity-50">
                               <Pencil className="h-3.5 w-3.5" />
                             </button>
-                            <button type="button" onClick={(event) => { event.stopPropagation(); void deleteProject(item.id); }} disabled={loading} title={copy.deleteProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-red-400/10 hover:text-red-200 disabled:opacity-50">
-                              <Trash2 className="h-3.5 w-3.5" />
+                            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void deleteProject(item.id); }} disabled={Boolean(deletingProjectId)} title={copy.deleteProject} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-red-400/10 hover:text-red-200 disabled:opacity-50">
+                              {deletingProjectId === item.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                             </button>
                           </>
                         )}
@@ -1864,6 +2095,18 @@ export default function OnePromptVideoPage() {
                   <p className="mt-1 text-sm text-slate-500">{project.durationSeconds}s / {project.aspectRatio} / {keyframeTotal} {copy.frames} / {segmentTotal} {copy.shots}</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDebugPanelOpen((current) => !current)}
+                    className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium transition ${
+                      debugPanelOpen
+                        ? "border-fuchsia-300/45 bg-fuchsia-300/10 text-fuchsia-100"
+                        : "border-white/10 bg-slate-950/50 text-slate-300 hover:border-fuchsia-300/35 hover:bg-white/[0.06]"
+                    }`}
+                  >
+                    <CircleHelp className="h-4 w-4" />
+                    {debugCopy.debug}
+                  </button>
                   {primaryStageAction && (
                     <button
                       type="button"
@@ -1908,6 +2151,27 @@ export default function OnePromptVideoPage() {
               </div>
               </div>
 
+              {debugPanelOpen && (
+                <PlanDebugPanel
+                  lang={pageLang}
+                  labels={debugCopy}
+                  project={project}
+                  activeTab={debugTab}
+                  onTabChange={setDebugTab}
+                  draft={debugDraft}
+                  onDraftChange={(section, value) => setDebugDraft((current) => ({ ...current, [section]: value }))}
+                  onSaveSection={saveDebugSection}
+                  contextTitle={debugContext.title}
+                  referenceSelections={currentReferenceSelections}
+                  promptArtifacts={currentPromptDebugArtifacts}
+                  dirtyArtifacts={currentDirtyArtifacts}
+                  qualityReports={currentQualityReports}
+                  selectedSegmentDescription={debugContext.segmentDescription}
+                  projectError={project.errorMessage}
+                  loading={loading}
+                />
+              )}
+
               {projectView === "final" && project.finalVideoUrl && (
                 <section className="space-y-3 rounded-md border border-emerald-400/20 bg-emerald-400/5 p-4">
                   <div className="flex items-center gap-2 text-sm font-medium text-emerald-100">
@@ -1916,6 +2180,17 @@ export default function OnePromptVideoPage() {
                   </div>
                   <div className={`mx-auto overflow-hidden rounded-md border border-white/10 bg-black ${finalVideoPreviewClass(project.aspectRatio)}`}>
                     <video src={project.finalVideoUrl} controls playsInline preload="metadata" className="h-full w-full object-contain" />
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={recomposeFinalVideo}
+                      disabled={loading}
+                      className="inline-flex h-9 items-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 px-3 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/15 disabled:opacity-50"
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                      {copy.recomposeFinal}
+                    </button>
                   </div>
                 </section>
               )}
@@ -1969,6 +2244,11 @@ export default function OnePromptVideoPage() {
                             <p className="text-sm font-semibold text-white">{localizedKeyframePurpose(keyframe, pageLang)}</p>
                             <p className="line-clamp-2 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
                           </button>
+                          {keyframe.keyframeNo < 0 && keyframe.imageUrl && !keyframe.locked && keyframe.status !== "IMAGE_APPROVED" && (
+                            <button type="button" onClick={() => toggleLock(keyframe)} disabled={loading} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-xs font-medium text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
+                              <Check className="h-3.5 w-3.5" /> {copy.approveReference}
+                            </button>
+                          )}
                           <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || keyframe.locked} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
                             <RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}
                           </button>
@@ -2056,6 +2336,7 @@ export default function OnePromptVideoPage() {
             </button>
 
             <aside
+              ref={detailPanelRef}
               className="w-full rounded-md border border-white/10 bg-white/[0.025] p-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:w-[var(--detail-panel-width)] xl:shrink-0 xl:overflow-y-auto"
               style={{
                 "--detail-panel-width": `${detailPanelWidth}px`,
@@ -2137,7 +2418,8 @@ export default function OnePromptVideoPage() {
                       <PreviewSizeControl
                         label={copy.previewSize}
                         value={detailPreviewHeight}
-                        onChange={setDetailPreviewHeight}
+                        onPreview={previewDetailHeight}
+                        onCommit={commitDetailHeight}
                       />
                     </div>
                     <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
@@ -2154,6 +2436,11 @@ export default function OnePromptVideoPage() {
                   <Field label={copy.purpose}><textarea value={String(keyframeDraft.purpose ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, purpose: event.target.value }))} className="min-h-20 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.imagePrompt}><textarea value={String(keyframeDraft.imagePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, imagePrompt: event.target.value }))} className="min-h-40 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.negativePrompt}><textarea value={String(keyframeDraft.negativePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, negativePrompt: event.target.value }))} className="min-h-24 w-full resize-y rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
+                  {selectedKeyframe.keyframeNo < 0 && selectedKeyframe.imageUrl && !selectedKeyframe.locked && selectedKeyframe.status !== "IMAGE_APPROVED" && (
+                    <button type="button" onClick={() => toggleLock(selectedKeyframe)} disabled={loading} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-sm font-semibold text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
+                      <Check className="h-4 w-4" /> {copy.approveReference}
+                    </button>
+                  )}
                   <div className="flex gap-2">
                     <button type="button" onClick={saveKeyframe} disabled={loading} className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60"><Save className="h-4 w-4" /> {copy.saveKeyframe}</button>
                     <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || selectedKeyframe.locked} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-4 w-4" /></button>
@@ -2189,6 +2476,15 @@ export default function OnePromptVideoPage() {
                     <Pencil className="h-4 w-4" />
                     {copy.editShot}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => regenerateClip(selectedShot!.id)}
+                    disabled={loading || !selectedShot!.startKeyframeNo || !selectedShot!.endKeyframeNo}
+                    className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-white/[0.03] text-sm font-medium text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                    {copy.regenerate}
+                  </button>
                 </div>
               ) : (false as boolean) && selectedShot ? (
                 <div className="space-y-4">
@@ -2202,7 +2498,8 @@ export default function OnePromptVideoPage() {
                       <PreviewSizeControl
                         label={copy.previewSize}
                         value={detailPreviewHeight}
-                        onChange={setDetailPreviewHeight}
+                        onPreview={previewDetailHeight}
+                        onCommit={commitDetailHeight}
                       />
                     </div>
                     <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
@@ -2770,12 +3067,50 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function PreviewSizeControl({
   label,
   value,
-  onChange,
+  onPreview,
+  onCommit,
 }: {
   label: string;
   value: number;
-  onChange: (value: number) => void;
+  onPreview: (value: number) => void;
+  onCommit: (value: number) => void;
 }) {
+  const [draftValue, setDraftValue] = useState(value);
+  const frameRef = useRef<number | null>(null);
+  const latestValueRef = useRef(value);
+
+  useEffect(() => {
+    setDraftValue(value);
+    latestValueRef.current = value;
+  }, [value]);
+
+  useEffect(() => {
+    return () => {
+      if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+    };
+  }, []);
+
+  function preview(nextValue: number) {
+    const next = clampDetailPreviewHeight(nextValue);
+    latestValueRef.current = next;
+    setDraftValue(next);
+    if (frameRef.current !== null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      onPreview(latestValueRef.current);
+    });
+  }
+
+  function commit(nextValue: number) {
+    const next = clampDetailPreviewHeight(nextValue);
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    setDraftValue(next);
+    onCommit(next);
+  }
+
   return (
     <label className="flex min-w-[150px] items-center gap-2 text-[11px] text-slate-500">
       <span className="shrink-0">{label}</span>
@@ -2784,8 +3119,12 @@ function PreviewSizeControl({
         min={DETAIL_PREVIEW_MIN_HEIGHT}
         max={DETAIL_PREVIEW_MAX_HEIGHT}
         step={20}
-        value={value}
-        onChange={(event) => onChange(clampDetailPreviewHeight(Number(event.target.value)))}
+        value={draftValue}
+        onInput={(event) => preview(Number(event.currentTarget.value))}
+        onPointerUp={(event) => commit(Number(event.currentTarget.value))}
+        onPointerCancel={(event) => commit(Number(event.currentTarget.value))}
+        onBlur={(event) => commit(Number(event.currentTarget.value))}
+        onKeyUp={(event) => commit(Number(event.currentTarget.value))}
         className="flex-1"
       />
     </label>
@@ -2860,6 +3199,366 @@ function MicroShotHelpButton({
   );
 }
 
+const DEBUG_COPY = {
+  zh: {
+    debug: "调试",
+    context: "当前对象",
+    events: "事件层",
+    anchors: "一致性",
+    states: "动态状态",
+    references: "参考图选择",
+    prompts: "Prompt 编译",
+    audit: "一镜到底审计",
+    save: "保存",
+    saved: "调试信息已保存，相关局部产物已标记为需要重跑。",
+    invalidJson: "JSON 格式不正确，请检查逗号、括号和引号。",
+    arrayRequired: "这里必须保存为数组 JSON。",
+    empty: "暂无记录",
+    selectedRefs: "已选参考图",
+    candidates: "候选参考图",
+    usageNotes: "使用说明",
+    finalPrompt: "最终 Prompt",
+    beforePrompt: "编译前",
+    negativePrompt: "负向 Prompt",
+    rules: "规则",
+    warnings: "警告",
+    dirty: "局部变更追踪",
+    blockReason: "阻止生成原因",
+    segmentContract: "镜头执行合同",
+    jsonTip: "短期版本使用 JSON 编辑；保存后只标记相关链路 dirty，不会覆盖已锁定资产。",
+  },
+  en: {
+    debug: "Debug",
+    context: "Current target",
+    events: "Events",
+    anchors: "Consistency",
+    states: "State Timeline",
+    references: "References",
+    prompts: "Prompt Compiler",
+    audit: "Single-take Audit",
+    save: "Save",
+    saved: "Debug data saved. Affected local artifacts were marked dirty.",
+    invalidJson: "Invalid JSON. Check commas, brackets, and quotes.",
+    arrayRequired: "This section must be saved as a JSON array.",
+    empty: "No records yet",
+    selectedRefs: "Selected references",
+    candidates: "Reference candidates",
+    usageNotes: "Usage notes",
+    finalPrompt: "Final prompt",
+    beforePrompt: "Before compile",
+    negativePrompt: "Negative prompt",
+    rules: "Rules",
+    warnings: "Warnings",
+    dirty: "Local dirty tracking",
+    blockReason: "Generation block reason",
+    segmentContract: "Segment execution contract",
+    jsonTip: "Short-term editor uses JSON. Saving marks only affected downstream artifacts dirty and does not overwrite locked assets.",
+  },
+} as const;
+
+type DebugLabels = Record<keyof typeof DEBUG_COPY.zh, string>;
+
+interface DebugContext {
+  title: string;
+  targetIds: string[];
+  segmentDescription?: Record<string, unknown>;
+}
+
+function PlanDebugPanel({
+  lang,
+  labels,
+  project,
+  activeTab,
+  onTabChange,
+  draft,
+  onDraftChange,
+  onSaveSection,
+  contextTitle,
+  referenceSelections,
+  promptArtifacts,
+  dirtyArtifacts,
+  selectedSegmentDescription,
+  projectError,
+  loading,
+  qualityReports,
+}: {
+  lang: PageLang;
+  labels: DebugLabels;
+  project: VideoProject;
+  activeTab: DebugTab;
+  onTabChange: (tab: DebugTab) => void;
+  draft: Record<EditableDebugSection, string>;
+  onDraftChange: (section: EditableDebugSection, value: string) => void;
+  onSaveSection: (section: EditableDebugSection) => void;
+  contextTitle: string;
+  referenceSelections: ReferenceSelectionOutput[];
+  promptArtifacts: PromptDebugArtifact[];
+  dirtyArtifacts: Array<{ id: string; metadata: ArtifactMetadata }>;
+  qualityReports: GenerationQualityReport[];
+  selectedSegmentDescription?: Record<string, unknown>;
+  projectError?: string | null;
+  loading: boolean;
+}) {
+  const tabs: Array<{ key: DebugTab; label: string }> = [
+    { key: "events", label: labels.events },
+    { key: "anchors", label: labels.anchors },
+    { key: "states", label: labels.states },
+    { key: "references", label: labels.references },
+    { key: "prompts", label: labels.prompts },
+    { key: "audit", label: labels.audit },
+  ];
+  return (
+    <section className="rounded-md border border-fuchsia-300/20 bg-fuchsia-300/[0.035] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-fuchsia-100">{labels.debug}</p>
+          <p className="mt-1 text-xs text-slate-400">{labels.context}: {contextTitle}</p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => onTabChange(tab.key)}
+              className={`h-8 rounded-md border px-2.5 text-xs font-medium transition ${
+                activeTab === tab.key
+                  ? "border-fuchsia-300/45 bg-fuchsia-300/15 text-fuchsia-100"
+                  : "border-white/10 bg-slate-950/50 text-slate-400 hover:border-white/20 hover:bg-white/[0.06]"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {(activeTab === "events" || activeTab === "anchors" || activeTab === "states") && (
+        <DebugJsonEditor
+          section={activeTab}
+          labels={labels}
+          value={draft[activeTab]}
+          onChange={(value) => onDraftChange(activeTab, value)}
+          onSave={() => onSaveSection(activeTab)}
+          loading={loading}
+        />
+      )}
+
+      {activeTab === "references" && (
+        <div className="mt-4 space-y-3">
+          {referenceSelections.length ? referenceSelections.map((item, index) => (
+            <div key={`${item.targetArtifactId ?? index}`} className="rounded-md border border-white/10 bg-slate-950/60 p-3">
+              <DebugMetaHeader title={String(item.targetArtifactId ?? item.targetType ?? `reference-${index + 1}`)} subtitle={item.targetType} />
+              <DebugImageStrip title={labels.selectedRefs} urls={item.selectedReferenceUrls ?? []} />
+              <DebugTextList title={labels.usageNotes} items={item.usageNotes ?? []} />
+              <DebugObjectList title={labels.candidates} items={item.candidates ?? []} />
+              {item.finalTextPrompt && <DebugPromptBlock title={labels.finalPrompt} value={item.finalTextPrompt} />}
+              <DebugTextList title={labels.warnings} items={item.warnings ?? []} tone="warning" />
+            </div>
+          )) : <DebugEmpty labels={labels} />}
+        </div>
+      )}
+
+      {activeTab === "prompts" && (
+        <div className="mt-4 space-y-3">
+          {promptArtifacts.length ? promptArtifacts.map((artifact, index) => (
+            <div key={`${artifact.targetArtifactId ?? index}`} className="rounded-md border border-white/10 bg-slate-950/60 p-3">
+              <DebugMetaHeader title={String(artifact.targetArtifactId ?? `prompt-${index + 1}`)} subtitle={artifact.targetType} />
+              <DebugImageStrip title={labels.selectedRefs} urls={artifact.selectedReferenceUrls ?? []} />
+              <DebugTextList title={labels.usageNotes} items={artifact.referenceUsageNotes ?? []} />
+              <DebugPromptBlock title={labels.beforePrompt} value={artifact.beforePrompt} />
+              <DebugPromptBlock title={labels.finalPrompt} value={artifact.finalPrompt} />
+              <DebugPromptBlock title={labels.negativePrompt} value={artifact.finalNegativePrompt} />
+              <DebugTextList title={labels.rules} items={artifact.rules ?? []} />
+              <DebugTextList title={labels.warnings} items={artifact.warnings ?? []} tone="warning" />
+            </div>
+          )) : <DebugEmpty labels={labels} />}
+        </div>
+      )}
+
+      {activeTab === "audit" && (
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          <div className="rounded-md border border-white/10 bg-slate-950/60 p-3">
+            <p className="text-sm font-semibold text-white">{labels.segmentContract}</p>
+            {selectedSegmentDescription ? (
+              <pre className="mt-3 max-h-80 overflow-auto rounded-md border border-white/10 bg-black/20 p-3 text-xs leading-5 text-slate-300">{prettyDebugJson(pickAuditFields(selectedSegmentDescription))}</pre>
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">{labels.empty}</p>
+            )}
+            {Boolean(project.planDebug?.finalTransitionPlan?.length) && (
+              <DebugPromptBlock title={lang === "en" ? "Final transition plan" : "最终转场计划"} value={prettyDebugJson(project.planDebug?.finalTransitionPlan)} />
+            )}
+            {project.planDebug?.audioBible && Object.keys(project.planDebug.audioBible).length > 0 && (
+              <DebugPromptBlock title="Audio Bible" value={prettyDebugJson(project.planDebug.audioBible)} />
+            )}
+            {project.planDebug?.plannerShadow && Object.keys(project.planDebug.plannerShadow).length > 0 && (
+              <DebugPromptBlock title={lang === "en" ? "Planner shadow output" : "Planner shadow 输出"} value={prettyDebugJson(project.planDebug.plannerShadow)} />
+            )}
+          </div>
+          <div className="space-y-3">
+            <div className="rounded-md border border-white/10 bg-slate-950/60 p-3">
+              <p className="text-sm font-semibold text-white">{lang === "en" ? "Quality reports" : "质量报告"}</p>
+              {qualityReports.length ? (
+                <div className="mt-3 space-y-2">
+                  {qualityReports.map((report) => (
+                    <div key={report.assetId} className={`rounded-md border p-2 text-xs ${report.passed ? "border-emerald-300/20 bg-emerald-300/5" : "border-amber-300/25 bg-amber-300/10"}`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium text-cyan-100">{report.assetId}</span>
+                        <span className={`rounded px-1.5 py-0.5 ${report.passed ? "bg-emerald-300/10 text-emerald-100" : "bg-amber-300/10 text-amber-100"}`}>{report.passed ? "passed" : "failed"}</span>
+                      </div>
+                      <p className="mt-1 text-slate-400">
+                        identity {report.identityScore} / layout {report.layoutScore} / prompt {report.promptAlignmentScore} / continuity {report.continuityScore}
+                        {typeof report.singleTakeScore === "number" ? ` / single-take ${report.singleTakeScore}` : ""}
+                      </p>
+                      {report.artifactIssues.length > 0 && <p className="mt-1 leading-5 text-slate-300">{report.artifactIssues.join("; ")}</p>}
+                      {report.retryInstruction && <p className="mt-1 leading-5 text-amber-100/80">{report.retryInstruction}</p>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-slate-500">{labels.empty}</p>
+              )}
+            </div>
+            {(projectError || project.status === "FAILED") && (
+              <div className="rounded-md border border-amber-300/25 bg-amber-300/10 p-3">
+                <p className="text-sm font-semibold text-amber-100">{labels.blockReason}</p>
+                <p className="mt-2 text-sm leading-6 text-amber-100/80">{projectError || project.status}</p>
+              </div>
+            )}
+            <div className="rounded-md border border-white/10 bg-slate-950/60 p-3">
+              <p className="text-sm font-semibold text-white">{labels.dirty}</p>
+              {dirtyArtifacts.length ? (
+                <div className="mt-3 space-y-2">
+                  {dirtyArtifacts.map(({ id, metadata }) => (
+                    <div key={id} className="rounded-md border border-white/10 bg-white/[0.03] p-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium text-cyan-100">{id}</span>
+                        <span className="rounded bg-black/20 px-1.5 py-0.5 text-slate-400">{metadata.status ?? "unknown"} r{metadata.revision ?? 1}</span>
+                      </div>
+                      {metadata.retryFromStage && <p className="mt-1 text-slate-500">retry: {metadata.retryFromStage}</p>}
+                      {metadata.dirtyReason && <p className="mt-1 leading-5 text-slate-400">{metadata.dirtyReason}</p>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-slate-500">{labels.empty}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DebugJsonEditor({
+  section,
+  labels,
+  value,
+  onChange,
+  onSave,
+  loading,
+}: {
+  section: EditableDebugSection;
+  labels: DebugLabels;
+  value: string;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  loading: boolean;
+}) {
+  const title = section === "events" ? labels.events : section === "anchors" ? labels.anchors : labels.states;
+  return (
+    <div className="mt-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-white">{title}</p>
+          <p className="mt-1 text-xs text-slate-500">{labels.jsonTip}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={loading}
+          className="inline-flex h-8 items-center gap-2 rounded-md border border-cyan-300/30 bg-cyan-300/10 px-3 text-xs font-semibold text-cyan-100 hover:bg-cyan-300/15 disabled:opacity-50"
+        >
+          <Save className="h-3.5 w-3.5" />
+          {labels.save}
+        </button>
+      </div>
+      <textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+        className="min-h-72 w-full rounded-md border border-white/10 bg-slate-950/70 p-3 font-mono text-xs leading-5 text-slate-200 outline-none transition focus:border-fuchsia-300/50"
+      />
+    </div>
+  );
+}
+
+function DebugMetaHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <p className="text-sm font-semibold text-cyan-100">{title}</p>
+      {subtitle && <span className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[11px] text-slate-400">{subtitle}</span>}
+    </div>
+  );
+}
+
+function DebugImageStrip({ title, urls }: { title: string; urls: string[] }) {
+  if (!urls.length) return null;
+  return (
+    <div className="mt-3">
+      <p className="mb-2 text-xs font-medium text-slate-400">{title}</p>
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {urls.map((url) => (
+          <img key={url} src={previewImageSrc(url)} alt={title} className="h-20 w-16 shrink-0 rounded-md border border-white/10 object-cover" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DebugTextList({ title, items, tone }: { title: string; items: string[]; tone?: "warning" }) {
+  const safeItems = items.filter(Boolean);
+  if (!safeItems.length) return null;
+  return (
+    <div className="mt-3">
+      <p className={`mb-1 text-xs font-medium ${tone === "warning" ? "text-amber-200" : "text-slate-400"}`}>{title}</p>
+      <div className="space-y-1">
+        {safeItems.map((item, index) => (
+          <p key={`${item}-${index}`} className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1.5 text-xs leading-5 text-slate-300">{item}</p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DebugObjectList({ title, items }: { title: string; items: Array<Record<string, unknown>> }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-3">
+      <p className="mb-1 text-xs font-medium text-slate-400">{title}</p>
+      <div className="grid gap-2 lg:grid-cols-2">
+        {items.slice(0, 8).map((item, index) => (
+          <pre key={index} className="max-h-40 overflow-auto rounded-md border border-white/10 bg-black/20 p-2 text-[11px] leading-4 text-slate-400">{prettyDebugJson(item)}</pre>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DebugPromptBlock({ title, value }: { title: string; value?: string }) {
+  if (!value) return null;
+  return (
+    <div className="mt-3">
+      <p className="mb-1 text-xs font-medium text-slate-400">{title}</p>
+      <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/20 p-3 text-xs leading-5 text-slate-300">{value}</pre>
+    </div>
+  );
+}
+
+function DebugEmpty({ labels }: { labels: DebugLabels }) {
+  return <p className="mt-4 rounded-md border border-white/10 bg-slate-950/50 px-3 py-8 text-center text-sm text-slate-500">{labels.empty}</p>;
+}
+
 function sortProjects(items: VideoProject[]): VideoProject[] {
   return [...items].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 }
@@ -2868,6 +3567,123 @@ function upsertProject(items: VideoProject[], nextProject: VideoProject): VideoP
   const exists = items.some((item) => item.id === nextProject.id);
   if (!exists) return [nextProject, ...items];
   return items.map((item) => (item.id === nextProject.id ? nextProject : item));
+}
+
+function prettyDebugJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null, null, 2);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function buildDebugContext(
+  project: VideoProject | null,
+  selectedShot?: VideoShot,
+  selectedKeyframe?: VideoKeyframe,
+): DebugContext {
+  if (!project) return { title: "", targetIds: [] };
+  if (selectedKeyframe) {
+    const id = selectedKeyframe.keyframeNo < 0
+      ? `consistency_reference:${selectedKeyframe.keyframeNo}`
+      : `keyframe:${selectedKeyframe.keyframeNo}`;
+    return {
+      title: selectedKeyframe.keyframeNo < 0 ? `consistency ${selectedKeyframe.keyframeNo}` : `keyframe ${selectedKeyframe.keyframeNo}`,
+      targetIds: [id, `keyframe:${selectedKeyframe.keyframeNo}`, `${id}:prompt`, `${id}:image`],
+    };
+  }
+  if (selectedShot) {
+    const ids = [
+      `segment:${selectedShot.shotNo}`,
+      `segment:${selectedShot.shotNo}:prompt`,
+      `segment:${selectedShot.shotNo}:video`,
+      `segment:${selectedShot.shotNo}:subtitle`,
+      `segment:${selectedShot.shotNo}:micro_shots`,
+      ...(selectedShot.startKeyframeNo ? [`keyframe:${selectedShot.startKeyframeNo}`] : []),
+      ...(selectedShot.endKeyframeNo ? [`keyframe:${selectedShot.endKeyframeNo}`] : []),
+      ...((selectedShot.microShots ?? []).flatMap((item) => [
+        `segment:${selectedShot.shotNo}:micro_shot:${item.microShotNo}`,
+        `segment:${selectedShot.shotNo}:micro_shot:${item.microShotNo}:image`,
+      ])),
+    ];
+    return {
+      title: `segment ${selectedShot.shotNo}`,
+      targetIds: ids,
+      segmentDescription: segmentRenderDescriptionByNo(project.planDebug, selectedShot.shotNo),
+    };
+  }
+  return { title: project.title, targetIds: [] };
+}
+
+function segmentRenderDescriptionByNo(planDebug: PlanDebugData | undefined, segmentNo: number): Record<string, unknown> | undefined {
+  for (const item of planDebug?.segmentRenderDescriptions ?? []) {
+    if (!isPlainRecord(item)) continue;
+    const n = Number(item.segmentNo ?? item.segment_no ?? item.shotNo ?? item.shot_no ?? item.sequence);
+    if (n === segmentNo) return item;
+  }
+  return undefined;
+}
+
+function currentReferenceDebugItems(planDebug: PlanDebugData | undefined, targetIds: string[]): ReferenceSelectionOutput[] {
+  const targetSet = new Set(targetIds);
+  return (planDebug?.referenceSelectionOutputs ?? []).filter((item) => {
+    const target = item.targetArtifactId ?? (item as Record<string, unknown>).target_artifact_id;
+    return typeof target === "string" && targetSet.has(target);
+  });
+}
+
+function currentPromptDebugItems(planDebug: PlanDebugData | undefined, targetIds: string[]): PromptDebugArtifact[] {
+  const targetSet = new Set(targetIds);
+  return Object.values(planDebug?.promptDebugArtifacts ?? {}).filter((item) => {
+    const target = item.targetArtifactId ?? (item as Record<string, unknown>).target_artifact_id;
+    return typeof target === "string" && targetSet.has(target);
+  });
+}
+
+function currentArtifactMetadata(planDebug: PlanDebugData | undefined, targetIds: string[]): Array<{ id: string; metadata: ArtifactMetadata }> {
+  const targetSet = new Set(targetIds);
+  return Object.entries(planDebug?.artifactMetadata ?? {})
+    .filter(([id]) => targetSet.has(id))
+    .map(([id, metadata]) => ({ id, metadata }));
+}
+
+function currentGenerationQualityReports(planDebug: PlanDebugData | undefined, targetIds: string[]): GenerationQualityReport[] {
+  const targetSet = new Set(targetIds);
+  return (planDebug?.generationQualityReports ?? []).filter((report) => targetSet.has(report.assetId));
+}
+
+function pickAuditFields(description: Record<string, unknown>): Record<string, unknown> {
+  const keys = [
+    "segmentNo",
+    "segment_no",
+    "riskLevel",
+    "risk_level",
+    "requiresCut",
+    "requires_cut",
+    "timelineChangeRequest",
+    "timeline_change_request",
+    "recommendedSplit",
+    "recommended_split",
+    "startFrameContract",
+    "start_frame_contract",
+    "endFrameContract",
+    "end_frame_contract",
+    "motionContract",
+    "motion_contract",
+    "singleTakeContract",
+    "single_take_contract",
+    "motionCheckpoints",
+    "motion_checkpoints",
+  ];
+  const picked: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (description[key] !== undefined) picked[key] = description[key];
+  }
+  return Object.keys(picked).length ? picked : description;
 }
 
 function aspectClass(aspectRatio: AspectRatio): string {

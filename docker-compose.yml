@@ -84,7 +84,7 @@ services:
       - "8000"
     # 本地开发端口映射已移至 docker-compose.dev.yml，生产环境走 Docker 内网即可
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/api/system/disk-usage >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/disk-usage', timeout=5).read()\" >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

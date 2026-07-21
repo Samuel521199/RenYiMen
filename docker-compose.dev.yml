@@ -5,6 +5,14 @@
 # uvicorn --reload 自动检测并重启，无需 docker compose build。
 
 services:
+  db:
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+
+  workbench-db:
+    ports:
+      - "127.0.0.1:${WORKBENCH_POSTGRES_HOST_PORT:-5434}:5432"
+
   workbench-backend:
     ports:
       - "127.0.0.1:8000:8000"   # 只本地开发时暴露，供 npm run dev 连接

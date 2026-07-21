@@ -12,6 +12,10 @@ function logDir(): string {
   return process.env.ONE_PROMPT_VIDEO_LOG_DIR?.trim() || DEFAULT_LOG_DIR;
 }
 
+export function onePromptVideoLogDir(): string {
+  return logDir();
+}
+
 export function onePromptVideoLogPath(): string {
   return path.join(logDir(), LOG_FILE_NAME);
 }
