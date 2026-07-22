@@ -1,0 +1,68 @@
+{
+  "fixtureVersion": 1,
+  "storyBaseline": {
+    "videoCategory": "game",
+    "legacyPlannerBehavior": "pre-story-gate",
+    "capturedForStep": "16.1-phase0-freeze-current-baseline",
+    "knownCurrentFailurePoints": [
+      "challenge victory can appear without a visible setup or trigger",
+      "reference character may be animated without a strong hook",
+      "celebration can happen before the viewer understands the win condition"
+    ],
+    "comparisonGoal": "Future planner output should show pressure -> decision/action -> visible trigger -> payoff -> CTA."
+  },
+  "project": {
+    "id": "fixture-game-ad",
+    "title": "合成样例：单人物游戏广告",
+    "status": "FINAL_REVIEW",
+    "input": {
+      "userPrompt": "制作一条竖屏卡通游戏广告，主角完成挑战并展示胜利结果。",
+      "durationSeconds": 12,
+      "aspectRatio": "9:16",
+      "referenceImageUrls": []
+    },
+    "planJson": {
+      "schemaVersion": "plan-json",
+      "plannerVersion": "v2",
+      "promptVersion": "v2",
+      "assetLibrary": {
+        "items": [
+          { "assetId": "hero-front", "anchorId": "hero", "category": "person", "view": "front", "imagePrompt": "一个卡通游戏主角，严格正面全身设定图", "imageUrl": "fixture://game/hero-front.png", "status": "approved" },
+          { "assetId": "hero-side", "anchorId": "hero", "category": "person", "view": "side", "imagePrompt": "同一名卡通游戏主角，严格侧面全身设定图", "imageUrl": "fixture://game/hero-side.png", "status": "approved" },
+          { "assetId": "hero-back", "anchorId": "hero", "category": "person", "view": "back", "imagePrompt": "同一名卡通游戏主角，严格背面全身设定图", "imageUrl": "fixture://game/hero-back.png", "status": "approved" }
+        ]
+      },
+      "narrativeEvents": [
+        { "eventId": "event-hook", "action": "主角发现挑战", "resultingState": "主角决定行动" },
+        { "eventId": "event-win", "action": "主角完成挑战", "resultingState": "胜利结果出现" }
+      ],
+      "anchorStateTimeline": [
+        { "anchorId": "hero", "states": [{ "segmentNo": 1, "startState": "观察", "endState": "行动", "visibleTransitionPath": "主角自然转身并开始操作" }, { "segmentNo": 2, "startState": "行动", "endState": "庆祝", "visibleTransitionPath": "动作完成后举手庆祝" }] }
+      ],
+      "keyframes": [
+        { "keyframeNo": 1, "timeSeconds": 0, "imagePrompt": "主角正面发现挑战", "imageUrl": "fixture://game/kf-1.png", "usesConsistencyAnchors": ["hero"] },
+        { "keyframeNo": 2, "timeSeconds": 6, "imagePrompt": "主角侧身完成最后一步操作", "imageUrl": "fixture://game/kf-2.png", "usesConsistencyAnchors": ["hero"] },
+        { "keyframeNo": 3, "timeSeconds": 12, "imagePrompt": "主角正面庆祝胜利", "imageUrl": "fixture://game/kf-3.png", "usesConsistencyAnchors": ["hero"] }
+      ],
+      "segments": [
+        { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "durationSeconds": 6, "videoPrompt": "同一连续镜头中主角靠近挑战区域并完成操作", "clipUrl": "fixture://game/segment-1.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "主角伸手操作的静态中间状态", "imageUrl": "fixture://game/segment-1-checkpoint-1.png" }] },
+        { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "durationSeconds": 6, "videoPrompt": "同一连续镜头中结果出现，主角自然转身庆祝", "clipUrl": "fixture://game/segment-2.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "主角转身面向观众的静态中间状态", "imageUrl": "fixture://game/segment-2-checkpoint-1.png" }] }
+      ],
+      "referenceSelectionOutputs": [
+        { "targetArtifactId": "keyframe:2", "selectedArtifactIds": ["consistency_reference:hero-side"], "selectedReferenceUrls": ["fixture://game/hero-side.png"], "candidates": [{ "artifactId": "consistency_reference:hero-side", "selected": true, "purpose": "人物侧面身份参考" }] }
+      ],
+      "promptDebugArtifacts": {
+        "keyframe:2": { "targetArtifactId": "keyframe:2", "compilerVersion": "prompt-compiler-v1", "finalPrompt": "用户修改后的中文提示词为权威输入；使用人物侧面身份参考。" }
+      },
+      "generationQualityReports": [
+        { "assetId": "keyframe:2:image", "identityScore": 90, "layoutScore": 86, "promptAlignmentScore": 91, "continuityScore": 88, "artifactIssues": [], "passed": true }
+      ],
+      "mediaRevisionHistory": {
+        "keyframe_image:keyframe-2": [{ "id": "game-kf2-r1", "url": "fixture://game/history/kf-2-r1.png", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "segment_clip:segment-2": [{ "id": "game-s2-r1", "url": "fixture://game/history/segment-2-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "final_video:final": [{ "id": "game-final-r1", "url": "fixture://game/history/final-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }]
+      }
+    },
+    "finalVideoUrl": "fixture://game/final.mp4"
+  }
+}

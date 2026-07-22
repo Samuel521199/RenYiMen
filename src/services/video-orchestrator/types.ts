@@ -181,12 +181,57 @@ export type VideoConsistencyReferenceKind =
   | "space_layout"
   | "custom";
 
+export type VideoAssetCategory =
+  | "person"
+  | "scene"
+  | "product"
+  | "prop"
+  | "brand_visual"
+  | "style"
+  | "custom";
+
+export type VideoAssetView =
+  | "front"
+  | "side"
+  | "back"
+  | "face_closeup"
+  | "overview"
+  | "single";
+
+export interface VideoAssetLibraryItem {
+  assetId: string;
+  category: VideoAssetCategory;
+  view: VideoAssetView;
+  keyframeNo: number;
+  anchorId?: string;
+  displayNameZh?: string;
+  displayNameEn?: string;
+  descriptionZh?: string;
+  descriptionEn?: string;
+  required: boolean;
+  sourceView?: "front";
+  sourceArtifactId?: string;
+  orientation?: "front" | "side" | "back" | "unknown";
+  viewGenerationMode?: "primary" | "derived_from_front";
+}
+
+export interface VideoAssetLibrary {
+  items: VideoAssetLibraryItem[];
+}
+
 export interface VideoConsistencyReference {
   kind: VideoConsistencyReferenceKind;
   needed: boolean;
   keyframeNo: number;
   anchorId?: string;
   frameId?: string;
+  assetId?: string;
+  assetCategory?: VideoAssetCategory;
+  assetView?: VideoAssetView;
+  sourceView?: "front";
+  sourceArtifactId?: string;
+  orientation?: "front" | "side" | "back" | "unknown";
+  viewGenerationMode?: "primary" | "derived_from_front";
   purpose: string;
   purposeZh?: string;
   purposeEn?: string;
@@ -327,6 +372,18 @@ export interface VideoPlanSegment {
   videoPromptEn?: string;
   subtitle: string;
   outputMode?: "text" | "image" | "mixed";
+  linkedBeatIds?: string[];
+  storyFunction?: VideoStoryFunction;
+  emotionalBeat?: string;
+  emotionalBeatZh?: string;
+  emotionalBeatEn?: string;
+  cause?: string;
+  effect?: string;
+  informationUnit?: string;
+  keyEvidenceIds?: string[];
+  actionContinuity?: VideoStoryTraceFields["actionContinuity"];
+  reactionBeat?: string;
+  powerShift?: string;
   constraints?: string[];
   timedPrompts?: VideoTimedPrompt[];
   microShots?: VideoMicroShot[];
@@ -353,6 +410,18 @@ export interface VideoPlanShot {
   videoPromptZh?: string;
   videoPromptEn?: string;
   outputMode?: "text" | "image" | "mixed";
+  linkedBeatIds?: string[];
+  storyFunction?: VideoStoryFunction;
+  emotionalBeat?: string;
+  emotionalBeatZh?: string;
+  emotionalBeatEn?: string;
+  cause?: string;
+  effect?: string;
+  informationUnit?: string;
+  keyEvidenceIds?: string[];
+  actionContinuity?: VideoStoryTraceFields["actionContinuity"];
+  reactionBeat?: string;
+  powerShift?: string;
   constraints?: string[];
   timedPrompts?: VideoTimedPrompt[];
   microShots?: VideoMicroShot[];
@@ -377,6 +446,201 @@ export interface NarrativeEvent {
   mustBecomeSeparateSegment: boolean;
 }
 
+export type VideoCreativeCategory =
+  | "game"
+  | "product"
+  | "ecommerce"
+  | "food"
+  | "auto"
+  | "short_drama"
+  | "brand"
+  | "tutorial"
+  | "custom";
+
+export type VideoCreativeTemplateId =
+  | "game_reversal"
+  | "game_bonus_payoff"
+  | "product_problem_solution"
+  | "ecommerce_offer_conversion"
+  | "food_sensory_reaction"
+  | "auto_performance_hero"
+  | "short_drama_conflict_twist"
+  | "generic_brand_story";
+
+export interface VideoCreativeStrategy {
+  videoType?: "game_ad" | "product_ad" | "ecommerce_ad" | "food_ad" | "short_drama" | "brand_film" | "tutorial" | "custom";
+  videoCategory?: VideoCreativeCategory;
+  templateId?: VideoCreativeTemplateId;
+  templateReason?: string;
+  templateReasonZh?: string;
+  conversionGoal?: string;
+  conversionGoalZh?: string;
+  fallbackReason?: string;
+  fallbackReasonZh?: string;
+  audience?: string;
+  audienceZh?: string;
+  audienceEn?: string;
+  corePromise?: string;
+  corePromiseZh?: string;
+  corePromiseEn?: string;
+  hook?: string;
+  hookZh?: string;
+  hookEn?: string;
+  conflict?: string;
+  conflictZh?: string;
+  conflictEn?: string;
+  turningPoint?: string;
+  turningPointZh?: string;
+  turningPointEn?: string;
+  payoff?: string;
+  payoffZh?: string;
+  payoffEn?: string;
+  cta?: string;
+  ctaZh?: string;
+  ctaEn?: string;
+  emotionalArc?: string[];
+  sellingPointIds?: string[];
+  referenceUsageStrategy?: string;
+  referenceUsageStrategyZh?: string;
+  risks?: string[];
+  notes?: string[];
+}
+
+export type VideoStoryFunction =
+  | "hook"
+  | "setup"
+  | "conflict"
+  | "escalation"
+  | "turning_point"
+  | "proof"
+  | "payoff"
+  | "reaction"
+  | "cta"
+  | "cliffhanger"
+  | "ending"
+  | "transition"
+  | "custom";
+
+export interface VideoStoryTraceFields {
+  linkedBeatIds?: string[];
+  storyFunction?: VideoStoryFunction;
+  emotionalBeat?: string;
+  emotionalBeatZh?: string;
+  emotionalBeatEn?: string;
+  cause?: string;
+  effect?: string;
+  informationUnit?: string;
+  keyEvidenceIds?: string[];
+  actionContinuity?: {
+    motivationOrPreparation?: string;
+    execution?: string;
+    resultOrReaction?: string;
+  };
+  reactionBeat?: string;
+  powerShift?: string;
+}
+
+export interface VideoStoryBeat {
+  beatId: string;
+  order: number;
+  title?: string;
+  titleZh?: string;
+  titleEn?: string;
+  storyFunction: VideoStoryFunction;
+  emotionalBeat?: string;
+  emotionalBeatZh?: string;
+  emotionalBeatEn?: string;
+  cause?: string;
+  effect?: string;
+  informationUnit?: string;
+  keyEvidenceIds?: string[];
+  requiredAnchorIds?: string[];
+  sourceEventIds?: string[];
+  targetSegmentNos?: number[];
+  mustBeVisibleBeforeBeatIds?: string[];
+  actionContinuity?: {
+    motivationOrPreparation?: string;
+    execution?: string;
+    resultOrReaction?: string;
+  };
+  reactionBeat?: string;
+  powerShift?: string;
+  notes?: string[];
+}
+
+export interface VideoNarrativeMicroRules {
+  causalChainRequired?: boolean;
+  forbidSuddenOutcome?: boolean;
+  forbidReferenceOnlyAnimation?: boolean;
+  requireHookBeforeAssetShowcase?: boolean;
+  requirePayoffBeforeCta?: boolean;
+  requireReactionAfterTurningPoint?: boolean;
+  requireVisibleTriggerBeforeStateChange?: boolean;
+  requiredBeatFunctions?: VideoStoryFunction[];
+  forbiddenPatterns?: string[];
+  continuityRules?: string[];
+  ctaRules?: string[];
+  notes?: string[];
+}
+
+export interface VideoShotGroupingPass {
+  strategy?: string;
+  strategyZh?: string;
+  sourceBeatIds?: string[];
+  groups?: Array<{
+    groupId: string;
+    beatIds: string[];
+    segmentNos: number[];
+    storyFunction?: VideoStoryFunction;
+    reason?: string;
+    reasonZh?: string;
+    continuousTakeRisk?: "low" | "medium" | "high";
+    splitRequired?: boolean;
+  }>;
+  splitReasons?: Array<{
+    afterSegmentNo: number;
+    beforeSegmentNo: number;
+    reasonCode:
+      | "space_change"
+      | "time_jump"
+      | "new_conflict_relation"
+      | "payoff_state_change"
+      | "cta_enter"
+      | "duration_limit"
+      | "camera_mismatch"
+      | "narrative_focus_change"
+      | "model_continuity_risk";
+    reasonZh?: string;
+    mergeRejected?: boolean;
+  }>;
+  warnings?: string[];
+}
+
+export interface VideoStoryQualityReport {
+  passed?: boolean;
+  score?: number;
+  hookScore?: number;
+  causalityScore?: number;
+  payoffScore?: number;
+  ctaScore?: number;
+  continuityScore?: number;
+  riskScores?: Record<string, number>;
+  issueCodes?: string[];
+  issues?: Array<{
+    code: string;
+    severity: "warning" | "error";
+    beatId?: string;
+    segmentNo?: number;
+    messageZh?: string;
+    recommendationZh?: string;
+  }>;
+  rewriteRequired?: boolean;
+  autoRewriteAttempts?: number;
+  rewriteReasons?: string[];
+  rewriteFromStage?: "creative_strategy" | "beat_sheet" | "storyboard" | "shot_grouping" | "none";
+  summaryZh?: string;
+}
+
 export interface AnchorStateTimelineEntry {
   eventId?: string;
   segmentNo: number;
@@ -398,6 +662,8 @@ export interface StoryboardBrief {
   segmentNo: number;
   eventIds: string[];
   sourceEventIds?: string[];
+  linkedBeatIds?: string[];
+  storyFunction?: VideoStoryFunction;
   narrativeFunction: string;
   cameraId: string;
   locationId: string;
@@ -440,6 +706,15 @@ export interface CameraGraphNode {
   segmentNos: number[];
   locationId?: string;
   description?: string;
+  parentCameraId?: string;
+  parentSegmentNo?: number;
+  axisDescription?: string;
+  framingRange?: string;
+  movementStyle?: string;
+  spatialLayoutLock?: string;
+  relationToParent?: CameraRelation;
+  missingInfo?: string[];
+  inheritanceReasonZh?: string;
 }
 
 export interface CameraGraphEdge {
@@ -454,6 +729,14 @@ export interface CameraGraph {
   relations: CameraGraphEdge[];
 }
 
+export interface PlanValidationIssue {
+  code: string;
+  severity: "warning" | "error";
+  artifactId?: string;
+  messageZh: string;
+  retryFromStage?: string;
+}
+
 export interface FinalTransitionPlan {
   fromSegmentNo: number;
   toSegmentNo: number;
@@ -462,6 +745,51 @@ export interface FinalTransitionPlan {
   overlapSeconds: number;
   matchAnchorId?: string;
   generatedBridgeRequired: boolean;
+}
+
+export interface TransitionReferenceFrameCandidate {
+  id: string;
+  url: string;
+  timestampFraction: number;
+  compositeScore: number;
+  passed: boolean;
+  selected?: boolean;
+  qualityReport: GenerationQualityReport;
+}
+
+export interface TransitionReferenceArtifact {
+  id: string;
+  fromCameraId?: string;
+  toCameraId: string;
+  fromSegmentNo?: number;
+  toSegmentNo: number;
+  relation: CameraRelation;
+  mode: "short" | "full";
+  inheritanceScope: string[];
+  reasonZh: string;
+  status: "planned" | "waiting_parent" | "video_running" | "evaluating_frames" | "ready_for_review" | "approved" | "failed";
+  parentKeyframeNo?: number;
+  parentKeyframeUrl?: string;
+  videoTaskId?: string;
+  videoUrl?: string;
+  frameCandidates?: TransitionReferenceFrameCandidate[];
+  selectedFrameUrl?: string;
+  locked?: boolean;
+  errorMessage?: string;
+  updatedAt: string;
+}
+
+export interface GeneratedBridgeArtifact {
+  id: string;
+  fromSegmentNo: number;
+  toSegmentNo: number;
+  status: "planned" | "running" | "ready_for_review" | "approved" | "failed";
+  prompt?: string;
+  durationSeconds: number;
+  selectedVideoUrl?: string;
+  locked?: boolean;
+  errorMessage?: string;
+  updatedAt: string;
 }
 
 export interface ReferenceSelectionCandidate {
@@ -475,6 +803,11 @@ export interface ReferenceSelectionCandidate {
   recencyScore: number;
   viewMatchScore: number;
   finalScore?: number;
+  anchorId?: string;
+  assetView?: VideoAssetView;
+  hardRequired?: boolean;
+  conflictReasons?: string[];
+  detectedOrientation?: "front" | "side" | "back" | "unknown";
   selected: boolean;
   rejectionReason?: string;
   usageNote?: string;
@@ -488,10 +821,17 @@ export interface ReferenceSelectionOutput {
   candidates: ReferenceSelectionCandidate[];
   usageNotes?: string[];
   finalTextPrompt?: string;
+  targetOrientation?: "front" | "side" | "back" | "unknown";
+  selectedView?: VideoAssetView;
+  orientationFallbackReason?: string;
+  selectionPolicyVersion?: string;
   warnings?: string[];
 }
 
 export interface ArtifactMetadata {
+  artifactId: string;
+  artifactType: string;
+  producedByStage: string;
   revision: number;
   schemaVersion: string;
   plannerVersion: string;
@@ -499,14 +839,38 @@ export interface ArtifactMetadata {
   modelVersion: string;
   inputHash: string;
   dependsOn: string[];
+  invalidatedByArtifactIds?: string[];
+  parentRevisionIds?: string[];
+  userAccepted?: boolean;
   status: "draft" | "dirty" | "approved" | "generating" | "ready" | "failed";
   dirtyReason?: string;
   retryFromStage?: "stage1" | "stage2a" | "stage2b" | "stage3" | "reference_selector" | "compiler" | "generation" | "composition" | "manual";
   updatedAt?: string;
 }
 
+export type VideoMediaRevisionKind = "keyframe_image" | "micro_shot_image" | "segment_clip" | "transition_reference" | "generated_bridge" | "final_video";
+
+export interface VideoMediaRevision {
+  id: string;
+  kind: VideoMediaRevisionKind;
+  targetId: string;
+  url: string;
+  createdAt: string;
+  segmentNo?: number;
+  microShotNo?: number;
+}
+
+export interface RollbackVideoMediaInput {
+  kind: VideoMediaRevisionKind;
+  targetId: string;
+  microShotNo?: number;
+}
+
 export interface GenerationQualityReport {
   assetId: string;
+  candidateId?: string;
+  candidateNo?: number;
+  mediaUrl?: string;
   identityScore: number;
   layoutScore: number;
   promptAlignmentScore: number;
@@ -515,6 +879,20 @@ export interface GenerationQualityReport {
   artifactIssues: string[];
   passed: boolean;
   retryInstruction?: string;
+  endFrameSimilarityScore?: number;
+  endFrameDecision?: "pass" | "retry_generation" | "return_stage_2b" | "evaluation_failed";
+  endFrameReasons?: string[];
+  continuityRetryCount?: number;
+  contentBased?: boolean;
+  productInstanceCount?: number;
+  personInstanceCount?: number;
+  wrongTextDetected?: boolean;
+  firstFrameConsistencyScore?: number;
+  checkpointOrderScore?: number;
+  metadataIssues?: string[];
+  userAccepted?: boolean;
+  originalPassed?: boolean;
+  retryFromStage?: "stage2b" | "stage3" | "generation" | "manual";
 }
 
 export interface PromptDebugArtifact {
@@ -544,17 +922,26 @@ export interface OnePromptVideoPlan {
   consistencyManifest?: VideoPlanningManifest["consistencyManifest"];
   timelineBlueprint?: VideoPlanningManifest["timelineBlueprint"];
   narrativeEvents?: NarrativeEvent[];
+  creativeStrategy?: VideoCreativeStrategy;
+  storyBeats?: VideoStoryBeat[];
+  narrativeMicroRules?: VideoNarrativeMicroRules;
+  shotGroupingPass?: VideoShotGroupingPass;
+  storyQualityReport?: VideoStoryQualityReport;
   anchorStateTimeline?: AnchorStateTimeline[];
   audioBible?: Record<string, unknown>;
+  assetLibrary?: VideoAssetLibrary;
   candidateTimeline?: VideoTimelineBlueprintSegment[];
   storyboardBrief?: StoryboardBrief[];
   segmentRenderDescriptions?: SegmentRenderDescription[];
   cameraGraph?: CameraGraph;
   transitionReferencePlan?: unknown[];
+  transitionReferenceArtifacts?: TransitionReferenceArtifact[];
   finalTransitionPlan?: FinalTransitionPlan[];
+  generatedBridgeArtifacts?: GeneratedBridgeArtifact[];
   referenceSelectionOutputs?: ReferenceSelectionOutput[];
   promptDebugArtifacts?: Record<string, PromptDebugArtifact>;
   artifactMetadata?: Record<string, ArtifactMetadata>;
+  mediaRevisionHistory?: Record<string, VideoMediaRevision[]>;
   generationQualityReports?: GenerationQualityReport[];
   plannerShadow?: Record<string, unknown>;
   plannerWarnings?: string[];

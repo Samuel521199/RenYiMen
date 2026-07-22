@@ -1,5 +1,6 @@
 import type { VideoShot } from "@prisma/client";
 import type { GenerationQualityReport } from "./types";
+import type { EndFrameContinuityResult } from "./end-frame-continuity";
 
 export function scoreShotImage(shot: Pick<VideoShot, "imageUrl" | "imagePrompt" | "locked">): number {
   let score = 45;
@@ -26,22 +27,18 @@ export function buildImageGenerationQualityReport(params: {
     issues.push("image prompt may allow visible text artifacts");
   }
 
-  const promptAlignmentScore = clampScore(40 + Math.min(35, prompt.length / 6) + (params.imageUrl ? 20 : 0));
-  const identityScore = clampScore(60 + Math.min(25, (params.selectedReferenceUrls?.length ?? 0) * 8) - (params.imageUrl ? 0 : 55));
-  const layoutScore = clampScore(62 + Math.min(20, prompt.length / 18) - (params.imageUrl ? 0 : 50));
-  const continuityScore = clampScore(60 + Math.min(25, (params.selectedReferenceUrls?.length ?? 0) * 7) - (params.imageUrl ? 0 : 55));
-  const passed = Boolean(params.imageUrl) && issues.every((issue) => !isHardFailureIssue(issue)) && Math.min(identityScore, layoutScore, promptAlignmentScore, continuityScore) >= 50;
-
   return {
     assetId: params.assetId,
-    identityScore,
-    layoutScore,
-    promptAlignmentScore,
-    continuityScore,
+    identityScore: 0,
+    layoutScore: 0,
+    promptAlignmentScore: 0,
+    continuityScore: 0,
     singleTakeScore: undefined,
     artifactIssues: issues,
-    passed,
-    retryInstruction: passed ? undefined : retryInstructionForIssues(issues, params.targetType),
+    passed: false,
+    contentBased: false,
+    retryFromStage: "generation",
+    retryInstruction: retryInstructionForIssues(issues, params.targetType),
   };
 }
 
@@ -51,44 +48,38 @@ export function buildVideoGenerationQualityReport(params: {
   prompt?: string | null;
   durationSeconds?: number | null;
   upstreamError?: string | null;
+  endFrameContinuity?: EndFrameContinuityResult;
+  continuityRetryCount?: number;
 }): GenerationQualityReport {
   const issues: string[] = [];
   const prompt = params.prompt?.trim() ?? "";
   if (!params.clipUrl) issues.push("missing generated video url");
   if (params.upstreamError) issues.push(`upstream error: ${params.upstreamError}`);
   if (prompt.length < 120) issues.push("video prompt is too short to describe a continuous motion path");
-  if (containsCutLanguage(prompt)) issues.push("video prompt contains cut or transition language");
   if (params.durationSeconds && (params.durationSeconds < 3 || params.durationSeconds > 15)) {
     issues.push("video duration is outside HappyHorse recommended 3-15s range");
   }
-
-  const promptAlignmentScore = clampScore(45 + Math.min(35, prompt.length / 10) + (params.clipUrl ? 15 : 0));
-  const identityScore = clampScore(68 - (params.clipUrl ? 0 : 55));
-  const layoutScore = clampScore(66 - (params.clipUrl ? 0 : 55));
-  const singleTakeScore = clampScore(containsCutLanguage(prompt) ? 35 : 82);
-  const continuityScore = clampScore(Math.min(layoutScore, singleTakeScore) + (params.clipUrl ? 5 : -20));
-  const passed = Boolean(params.clipUrl) && issues.every((issue) => !isHardFailureIssue(issue)) && singleTakeScore >= 60;
+  if (params.endFrameContinuity && params.endFrameContinuity.decision !== "pass") {
+    issues.push(...params.endFrameContinuity.reasons.map((reason) => `end-frame continuity: ${reason}`));
+  }
 
   return {
     assetId: params.assetId,
-    identityScore,
-    layoutScore,
-    promptAlignmentScore,
-    continuityScore,
-    singleTakeScore,
+    identityScore: 0,
+    layoutScore: 0,
+    promptAlignmentScore: 0,
+    continuityScore: 0,
+    singleTakeScore: 0,
     artifactIssues: issues,
-    passed,
-    retryInstruction: passed ? undefined : retryInstructionForIssues(issues, "video_segment"),
+    passed: false,
+    contentBased: false,
+    retryFromStage: params.endFrameContinuity?.decision === "return_stage_2b" ? "stage2b" : "generation",
+    retryInstruction: params.endFrameContinuity?.retryInstruction || retryInstructionForIssues(issues, "video_segment"),
+    endFrameSimilarityScore: params.endFrameContinuity?.similarityScore,
+    endFrameDecision: params.endFrameContinuity?.decision,
+    endFrameReasons: params.endFrameContinuity?.reasons,
+    continuityRetryCount: params.continuityRetryCount,
   };
-}
-
-function containsCutLanguage(value: string): boolean {
-  return /\b(cut to|jump cut|hard cut|dissolve|fade out|fade in|crossfade|montage|switch to|scene transition|new shot|another shot|shot change)\b/i.test(value) ||
-    /切到|切镜|跳切|转场|叠化|淡入|淡出|蒙太奇|换镜头|镜头切换|场景切换/.test(value);
-}
-
-function isHardFailureIssue(issue: string): boolean {
-  return issue.includes("missing generated") || issue.includes("upstream error") || issue.includes("cut or transition");
 }
 
 function retryInstructionForIssues(issues: string[], targetType: string): string {
@@ -112,10 +103,6 @@ function retryInstructionForIssues(issues: string[], targetType: string): string
     return "Regenerate this video segment from the same approved first frame after simplifying prompt and single-take contract.";
   }
   return "Regenerate this asset with stronger reference usage and a clearer prompt contract.";
-}
-
-function clampScore(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
 export function buildPlaceholderKeyframeUrl(params: {

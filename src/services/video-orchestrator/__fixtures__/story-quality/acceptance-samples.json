@@ -1,0 +1,332 @@
+{
+  "fixtureVersion": 1,
+  "purpose": "Post-story-gate acceptance fixtures for one-prompt video narrative coherence.",
+  "capturedForStep": "16.10-phase9-story-regression",
+  "qualityGate": {
+    "minimumScore": 90,
+    "mustPass": true,
+    "forbiddenIssueCodes": [
+      "missingHook",
+      "missingConflict",
+      "missingTurningPointOrPayoff",
+      "missingCta",
+      "suddenOutcomeRisk",
+      "referenceOveruseRisk",
+      "ctaTraceMissing",
+      "payoffReactionMissing",
+      "complexActionContinuityMissing",
+      "keyEvidenceMissing",
+      "productPainPointMissingRisk",
+      "productProofMissingRisk"
+    ]
+  },
+  "samples": [
+    {
+      "sampleId": "game-reversal-bull-card",
+      "videoCategory": "game",
+      "templateId": "game_reversal",
+      "requiredCoverage": ["underdog", "choice", "mechanism_trigger", "payoff", "reaction", "cta"],
+      "planJson": {
+        "title": "Bull Card Comeback",
+        "logline": "A cartoon bull is down to one coin, chooses double up, triggers the bonus, and turns the table before the download CTA.",
+        "durationSeconds": 30,
+        "aspectRatio": "9:16",
+        "keyframeCount": 6,
+        "segmentCount": 5,
+        "styleBible": {
+          "visualStyle": "high energy cartoon game ad",
+          "characterLock": "same bull host, same cap and scarf",
+          "colorPalette": "neon table, gold coins, red-blue UI",
+          "negativePrompt": "real human, inconsistent bull, random text, unreadable UI"
+        },
+        "creativeStrategy": {
+          "videoCategory": "game",
+          "templateId": "game_reversal",
+          "templateReason": "The prompt is a game ad built around an underdog reversal and a visible bonus trigger.",
+          "conversionGoal": "download the game",
+          "hook": "Bull has only one coin left while the opponent laughs.",
+          "conflict": "The table shows the bull is behind and must choose whether to risk the last coin.",
+          "turningPoint": "Bull taps the DOUBLE UP BONUS button after the player choice is shown.",
+          "payoff": "Bonus activates, coins burst, score flips, and the opponent reacts.",
+          "cta": "Download now to try the double-up comeback."
+        },
+        "storyBeats": [
+          { "beatId": "game_hook", "order": 1, "storyFunction": "hook", "title": "Last coin pressure", "informationUnit": "underdog pressure", "targetSegmentNos": [1], "requiredAnchorIds": ["bull", "game_table"] },
+          { "beatId": "game_conflict", "order": 2, "storyFunction": "conflict", "title": "Opponent mocks the risky choice", "cause": "bull is behind", "effect": "viewer understands the stakes", "informationUnit": "choice stakes", "targetSegmentNos": [1], "requiredAnchorIds": ["bull", "opponent", "game_table"] },
+          { "beatId": "game_turn", "order": 3, "storyFunction": "turning_point", "title": "Double up choice", "cause": "bull chooses to risk the last coin", "effect": "bonus mechanism is visibly armed", "informationUnit": "mechanism trigger", "keyEvidenceIds": ["double_up_button", "last_coin"], "requiredAnchorIds": ["game_ui"], "targetSegmentNos": [2], "actionContinuity": { "motivationOrPreparation": "bull looks from last coin to double-up button", "execution": "bull taps the DOUBLE UP BONUS button", "resultOrReaction": "button lights and countdown starts" } },
+          { "beatId": "game_payoff", "order": 4, "storyFunction": "payoff", "title": "Score reversal and coin burst", "cause": "the lit bonus button resolves the double-up choice", "effect": "coins burst and the bull moves from losing to winning", "informationUnit": "visible payoff", "keyEvidenceIds": ["bonus_flash", "score_flip", "coin_burst"], "requiredAnchorIds": ["game_ui"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "bonus countdown reaches zero", "execution": "bonus flash crosses the score panel", "resultOrReaction": "score flips and coins explode outward" }, "reactionBeat": "opponent gasps while friends cheer", "powerShift": "bull becomes the winner" },
+          { "beatId": "game_reaction", "order": 5, "storyFunction": "reaction", "title": "Friends cheer the comeback", "cause": "score reversal is visible", "effect": "payoff feels earned and social", "informationUnit": "reaction proof", "keyEvidenceIds": ["opponent_gasp", "friends_cheer"], "targetSegmentNos": [4] },
+          { "beatId": "game_cta", "order": 6, "storyFunction": "cta", "title": "Download to play", "cause": "viewer has seen the double-up comeback", "effect": "viewer is invited to download", "informationUnit": "download CTA", "keyEvidenceIds": ["app_icon", "download_button"], "targetSegmentNos": [5], "actionContinuity": { "motivationOrPreparation": "celebration settles after the score flip", "execution": "app icon and download button enter", "resultOrReaction": "bull points to the button" } }
+        ],
+        "narrativeMicroRules": {
+          "causalChainRequired": true,
+          "forbidSuddenOutcome": true,
+          "forbidReferenceOnlyAnimation": true,
+          "requirePayoffBeforeCta": true,
+          "requireReactionAfterTurningPoint": true
+        },
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 6, "durationSeconds": 6, "purpose": "Show the losing state and the mocked last coin.", "motion": "slow push from last coin to opponent laugh", "camera": "front table view", "subjectMotion": "bull hesitates", "environmentMotion": "UI warning pulses", "videoPrompt": "Bull sees the last coin and opponent mockery in one continuous table shot.", "subtitle": "One coin left.", "negativePrompt": "instant win", "linkedBeatIds": ["game_hook", "game_conflict"], "storyFunction": "conflict", "cause": "bull is behind", "effect": "stakes become clear", "informationUnit": "underdog pressure and choice stakes", "keyEvidenceIds": ["last_coin", "opponent_laugh"], "usesConsistencyAnchors": ["bull", "game_table"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 6, "endTimeSeconds": 12, "durationSeconds": 6, "purpose": "Bull makes the double-up choice.", "motion": "hand moves from coin to bonus button", "camera": "tight UI insert", "subjectMotion": "bull taps button", "environmentMotion": "button lights up", "videoPrompt": "Only animate the visible choice: bull taps DOUBLE UP BONUS and the button lights.", "subtitle": "Double up?", "negativePrompt": "payoff before button", "linkedBeatIds": ["game_turn"], "storyFunction": "turning_point", "cause": "bull chooses to risk the last coin", "effect": "bonus mechanism is visibly armed", "informationUnit": "mechanism trigger", "keyEvidenceIds": ["double_up_button", "last_coin"], "actionContinuity": { "motivationOrPreparation": "bull looks from last coin to button", "execution": "bull taps button", "resultOrReaction": "button lights and countdown starts" }, "usesConsistencyAnchors": ["bull", "game_ui"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 12, "endTimeSeconds": 18, "durationSeconds": 6, "purpose": "Bonus resolves into a visible score reversal.", "motion": "bonus flash crosses score panel and coins burst", "camera": "hero UI shot", "subjectMotion": "bull leans forward as score flips", "environmentMotion": "coins burst and score changes", "videoPrompt": "Animate only the bonus resolution from lit button to score flip and coin burst.", "subtitle": "Bonus hit!", "negativePrompt": "new mechanism", "linkedBeatIds": ["game_payoff"], "storyFunction": "payoff", "cause": "the lit bonus button resolves the double-up choice", "effect": "score flips and coins burst", "informationUnit": "visible payoff", "keyEvidenceIds": ["bonus_flash", "score_flip", "coin_burst"], "actionContinuity": { "motivationOrPreparation": "bonus countdown reaches zero", "execution": "bonus flash crosses score panel", "resultOrReaction": "score flips and coins explode" }, "reactionBeat": "opponent gasps while friends cheer", "powerShift": "bull becomes winner", "usesConsistencyAnchors": ["bull", "game_ui"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 18, "endTimeSeconds": 24, "durationSeconds": 6, "purpose": "Show social reaction to the comeback.", "motion": "opponent gasp to friends cheer", "camera": "wide social table", "subjectMotion": "bull celebrates after seeing score", "environmentMotion": "confetti and coins settle", "videoPrompt": "Friends cheer and opponent reacts to the already visible score reversal.", "subtitle": "Comeback!", "negativePrompt": "new win without score", "linkedBeatIds": ["game_reaction"], "storyFunction": "reaction", "cause": "score reversal is visible", "effect": "the payoff feels earned", "informationUnit": "reaction proof", "keyEvidenceIds": ["opponent_gasp", "friends_cheer"], "usesConsistencyAnchors": ["bull", "opponent"] },
+          { "segmentNo": 5, "startKeyframeNo": 5, "endKeyframeNo": 6, "startTimeSeconds": 24, "endTimeSeconds": 30, "durationSeconds": 6, "purpose": "CTA follows the proven comeback.", "motion": "game logo and download button enter after celebration", "camera": "clean end card", "subjectMotion": "bull points to app icon", "environmentMotion": "download button glow", "videoPrompt": "End card appears after the comeback: app icon, download button, and bull pointing.", "subtitle": "Play now.", "negativePrompt": "no payoff evidence", "linkedBeatIds": ["game_cta"], "storyFunction": "cta", "cause": "viewer saw the double-up comeback payoff", "effect": "viewer is invited to download", "informationUnit": "download CTA", "keyEvidenceIds": ["app_icon", "download_button"], "actionContinuity": { "motivationOrPreparation": "celebration settles after the score flip", "execution": "app icon and download button enter", "resultOrReaction": "bull points to the button" }, "usesConsistencyAnchors": ["bull", "game_ui"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": {
+          "strategy": "Keep choice, payoff, reaction, and CTA as separate i2v segments.",
+          "sourceBeatIds": ["game_hook", "game_conflict", "game_turn", "game_payoff", "game_reaction", "game_cta"],
+          "groups": [
+            { "groupId": "game_g1", "beatIds": ["game_hook", "game_conflict"], "segmentNos": [1], "storyFunction": "conflict", "reason": "same table pressure setup" },
+            { "groupId": "game_g2", "beatIds": ["game_turn"], "segmentNos": [2], "storyFunction": "turning_point", "reason": "mechanism trigger must be visible" },
+            { "groupId": "game_g3", "beatIds": ["game_payoff"], "segmentNos": [3], "storyFunction": "payoff", "reason": "payoff state changes" },
+            { "groupId": "game_g4", "beatIds": ["game_reaction"], "segmentNos": [4], "storyFunction": "reaction", "reason": "reaction proof" },
+            { "groupId": "game_g5", "beatIds": ["game_cta"], "segmentNos": [5], "storyFunction": "cta", "reason": "CTA enters after payoff" }
+          ],
+          "splitReasons": [
+            { "afterSegmentNo": 2, "beforeSegmentNo": 3, "reasonCode": "payoff_state_change", "reason": "trigger resolves into reward" },
+            { "afterSegmentNo": 4, "beforeSegmentNo": 5, "reasonCode": "cta_enter", "reason": "CTA starts after reaction" }
+          ]
+        },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    },
+    {
+      "sampleId": "product-skincare-proof",
+      "videoCategory": "product",
+      "templateId": "product_problem_solution",
+      "requiredCoverage": ["pain_point", "use", "proof", "brand_memory", "cta"],
+      "planJson": {
+        "title": "Hydrating Serum Proof",
+        "logline": "A dry-skin morning problem is solved by serum application, visible hydration proof, brand memory, and purchase CTA.",
+        "durationSeconds": 25,
+        "aspectRatio": "9:16",
+        "keyframeCount": 5,
+        "segmentCount": 5,
+        "styleBible": { "visualStyle": "premium skincare ad", "characterLock": "same presenter", "colorPalette": "soft ivory and gold", "negativePrompt": "fake text, duplicate bottle" },
+        "creativeStrategy": {
+          "videoCategory": "product",
+          "templateId": "product_problem_solution",
+          "templateReason": "Product ad must prove a before/after benefit instead of only showing the bottle.",
+          "conversionGoal": "purchase serum",
+          "hook": "Close morning shot shows tight, dry skin before makeup.",
+          "conflict": "The presenter needs quick hydration without greasy residue.",
+          "turningPoint": "She applies two drops of the serum.",
+          "payoff": "Skin looks dewy and comfortable with a visible moisture meter lift.",
+          "cta": "Try the serum today."
+        },
+        "storyBeats": [
+          { "beatId": "product_hook", "order": 1, "storyFunction": "hook", "title": "Dry morning close-up", "informationUnit": "pain point", "targetSegmentNos": [1], "requiredAnchorIds": ["presenter"] },
+          { "beatId": "product_conflict", "order": 2, "storyFunction": "conflict", "title": "Need fast non-greasy hydration", "cause": "skin feels tight", "effect": "product promise becomes relevant", "informationUnit": "use motivation", "targetSegmentNos": [1], "requiredAnchorIds": ["presenter"] },
+          { "beatId": "product_use", "order": 3, "storyFunction": "turning_point", "title": "Two drops applied", "cause": "presenter chooses serum for the tight-skin problem", "effect": "active use begins", "informationUnit": "use action", "keyEvidenceIds": ["two_drops", "serum_bottle"], "requiredAnchorIds": ["serum"], "targetSegmentNos": [2], "actionContinuity": { "motivationOrPreparation": "presenter checks dry cheek", "execution": "two drops are applied", "resultOrReaction": "serum spreads into skin" } },
+          { "beatId": "product_proof", "order": 4, "storyFunction": "proof", "title": "Moisture proof", "cause": "serum is absorbed after application", "effect": "hydration meter rises and cheek reflects soft light", "informationUnit": "effect proof", "keyEvidenceIds": ["moisture_meter", "dewy_cheek"], "requiredAnchorIds": ["serum"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "serum finish is visible", "execution": "meter graphic rises beside cheek", "resultOrReaction": "presenter relaxes and smiles" } },
+          { "beatId": "product_payoff", "order": 5, "storyFunction": "payoff", "title": "Brand memory hero", "cause": "hydration proof has been shown", "effect": "the bottle becomes the remembered solution", "informationUnit": "brand memory", "keyEvidenceIds": ["hero_bottle", "gold_cap"], "requiredAnchorIds": ["serum"], "targetSegmentNos": [4], "actionContinuity": { "motivationOrPreparation": "proof result settles", "execution": "bottle rotates into hero position", "resultOrReaction": "presenter holds bottle beside dewy skin" }, "reactionBeat": "presenter smiles with relieved confidence" },
+          { "beatId": "product_cta", "order": 6, "storyFunction": "cta", "title": "Try today", "cause": "viewer saw the dry-to-dewy proof", "effect": "viewer is invited to purchase", "informationUnit": "purchase CTA", "keyEvidenceIds": ["shop_now_button"], "targetSegmentNos": [5], "actionContinuity": { "motivationOrPreparation": "hero bottle and dewy proof remain on screen", "execution": "shop button fades in beside the bottle", "resultOrReaction": "presenter points to the purchase action" } }
+        ],
+        "narrativeMicroRules": { "causalChainRequired": true, "forbidReferenceOnlyAnimation": true, "requirePayoffBeforeCta": true },
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 5, "durationSeconds": 5, "purpose": "Expose dry-skin pain point.", "motion": "mirror close-up to cheek touch", "camera": "soft close-up", "subjectMotion": "presenter touches cheek", "environmentMotion": "morning light", "videoPrompt": "Show dry morning skin and the need for hydration.", "subtitle": "Morning tightness?", "negativePrompt": "instant result", "linkedBeatIds": ["product_hook", "product_conflict"], "storyFunction": "conflict", "cause": "skin feels tight", "effect": "product promise becomes relevant", "informationUnit": "pain point and use motivation", "keyEvidenceIds": ["dry_cheek"], "usesConsistencyAnchors": ["presenter"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 5, "endTimeSeconds": 10, "durationSeconds": 5, "purpose": "Show real product use.", "motion": "dropper to cheek", "camera": "macro product use", "subjectMotion": "two drops applied", "environmentMotion": "serum glints", "videoPrompt": "Two drops are applied from the same bottle.", "subtitle": "Two drops.", "negativePrompt": "different bottle", "linkedBeatIds": ["product_use"], "storyFunction": "turning_point", "cause": "presenter chooses serum", "effect": "active use begins", "informationUnit": "use action", "keyEvidenceIds": ["two_drops", "serum_bottle"], "actionContinuity": { "motivationOrPreparation": "presenter checks dry cheek", "execution": "two drops are applied", "resultOrReaction": "serum spreads into skin" }, "usesConsistencyAnchors": ["presenter", "serum"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 10, "endTimeSeconds": 15, "durationSeconds": 5, "purpose": "Prove hydration effect.", "motion": "meter rises and skin glow appears", "camera": "proof close-up", "subjectMotion": "presenter relaxes", "environmentMotion": "soft glow", "videoPrompt": "Moisture meter rises after the serum absorbs.", "subtitle": "Hydration visible.", "negativePrompt": "unproven claim", "linkedBeatIds": ["product_proof"], "storyFunction": "proof", "cause": "serum is absorbed", "effect": "meter rises and cheek glows", "informationUnit": "effect proof", "keyEvidenceIds": ["moisture_meter", "dewy_cheek"], "actionContinuity": { "motivationOrPreparation": "serum finish is visible", "execution": "meter graphic rises", "resultOrReaction": "presenter relaxes" }, "usesConsistencyAnchors": ["presenter", "serum"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 15, "endTimeSeconds": 20, "durationSeconds": 5, "purpose": "Lock brand memory.", "motion": "bottle rotates into hero pose", "camera": "hero product shot", "subjectMotion": "presenter holds bottle", "environmentMotion": "gold rim light", "videoPrompt": "Hero bottle appears after the proof result.", "subtitle": "Dewy comfort.", "negativePrompt": "extra products", "linkedBeatIds": ["product_payoff"], "storyFunction": "payoff", "cause": "hydration proof has been shown", "effect": "bottle becomes remembered solution", "informationUnit": "brand memory", "keyEvidenceIds": ["hero_bottle", "gold_cap"], "actionContinuity": { "motivationOrPreparation": "proof result settles", "execution": "bottle rotates into hero position", "resultOrReaction": "presenter holds bottle beside skin" }, "reactionBeat": "presenter smiles with relieved confidence", "usesConsistencyAnchors": ["presenter", "serum"] },
+          { "segmentNo": 5, "startKeyframeNo": 5, "endKeyframeNo": 6, "startTimeSeconds": 20, "endTimeSeconds": 25, "durationSeconds": 5, "purpose": "CTA from proven benefit.", "motion": "shop button fades in", "camera": "clean end card", "subjectMotion": "presenter points to bottle", "environmentMotion": "CTA glow", "videoPrompt": "Shop CTA appears after the hydration proof and hero bottle.", "subtitle": "Try it today.", "negativePrompt": "no proof", "linkedBeatIds": ["product_cta"], "storyFunction": "cta", "cause": "viewer saw dry-to-dewy proof", "effect": "viewer is invited to purchase", "informationUnit": "purchase CTA", "keyEvidenceIds": ["shop_now_button"], "actionContinuity": { "motivationOrPreparation": "hero bottle and dewy proof remain on screen", "execution": "shop button fades in beside the bottle", "resultOrReaction": "presenter points to the purchase action" }, "usesConsistencyAnchors": ["serum"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": {
+          "strategy": "Keep pain, use, proof, brand memory, and CTA separate.",
+          "sourceBeatIds": ["product_hook", "product_conflict", "product_use", "product_proof", "product_payoff", "product_cta"],
+          "groups": [
+            { "groupId": "product_g1", "beatIds": ["product_hook", "product_conflict"], "segmentNos": [1], "storyFunction": "conflict", "reason": "same pain-point setup" },
+            { "groupId": "product_g2", "beatIds": ["product_use"], "segmentNos": [2], "storyFunction": "turning_point", "reason": "visible use action" },
+            { "groupId": "product_g3", "beatIds": ["product_proof"], "segmentNos": [3], "storyFunction": "proof", "reason": "effect proof" },
+            { "groupId": "product_g4", "beatIds": ["product_payoff"], "segmentNos": [4], "storyFunction": "payoff", "reason": "brand memory payoff" },
+            { "groupId": "product_g5", "beatIds": ["product_cta"], "segmentNos": [5], "storyFunction": "cta", "reason": "purchase CTA" }
+          ],
+          "splitReasons": [
+            { "afterSegmentNo": 3, "beforeSegmentNo": 4, "reasonCode": "payoff_state_change", "reason": "proof moves to brand memory" },
+            { "afterSegmentNo": 4, "beforeSegmentNo": 5, "reasonCode": "cta_enter", "reason": "CTA after payoff" }
+          ]
+        },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    },
+    {
+      "sampleId": "ecommerce-offer-conversion",
+      "videoCategory": "ecommerce",
+      "templateId": "ecommerce_offer_conversion",
+      "requiredCoverage": ["pain_point", "offer_value", "proof", "payoff", "cta"],
+      "planJson": {
+        "title": "Portable Blender Offer",
+        "logline": "A rushed commuter solves breakfast with a portable blender, sees proof, then gets a limited offer CTA.",
+        "durationSeconds": 20,
+        "aspectRatio": "9:16",
+        "keyframeCount": 5,
+        "segmentCount": 4,
+        "styleBible": { "visualStyle": "clean ecommerce ad", "characterLock": "same shopper", "colorPalette": "fresh fruit colors", "negativePrompt": "fake discount text" },
+        "creativeStrategy": {
+          "videoCategory": "ecommerce",
+          "templateId": "ecommerce_offer_conversion",
+          "templateReason": "Ecommerce ad needs pain, solution proof, offer value, and CTA.",
+          "conversionGoal": "order blender",
+          "hook": "Commuter has no time for breakfast.",
+          "conflict": "Skipping breakfast creates a clear daily pain.",
+          "turningPoint": "Portable blender blends fruit in seconds.",
+          "payoff": "Smoothie is ready and the offer badge makes buying feel timely.",
+          "cta": "Order now before the limited offer ends."
+        },
+        "storyBeats": [
+          { "beatId": "ecom_hook", "order": 1, "storyFunction": "hook", "title": "No breakfast time", "informationUnit": "shopper pain", "targetSegmentNos": [1], "requiredAnchorIds": ["shopper"] },
+          { "beatId": "ecom_conflict", "order": 2, "storyFunction": "conflict", "title": "Late commute pressure", "cause": "alarm is late", "effect": "fast solution is needed", "informationUnit": "time pressure", "targetSegmentNos": [1], "requiredAnchorIds": ["shopper"] },
+          { "beatId": "ecom_proof", "order": 3, "storyFunction": "proof", "title": "Portable blending proof", "cause": "shopper adds fruit and starts blender", "effect": "smoothie forms visibly", "informationUnit": "function proof", "keyEvidenceIds": ["fruit_blend", "portable_blender"], "requiredAnchorIds": ["blender"], "targetSegmentNos": [2], "actionContinuity": { "motivationOrPreparation": "shopper adds fruit", "execution": "button starts blending", "resultOrReaction": "smoothie forms" } },
+          { "beatId": "ecom_payoff", "order": 4, "storyFunction": "payoff", "title": "Breakfast solved plus offer", "cause": "smoothie proof is complete", "effect": "shopper leaves with breakfast and offer appears", "informationUnit": "offer payoff", "keyEvidenceIds": ["smoothie_ready", "offer_badge"], "requiredAnchorIds": ["blender", "offer"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "smoothie is ready", "execution": "offer badge enters beside blender", "resultOrReaction": "shopper smiles and grabs bottle" }, "reactionBeat": "shopper looks relieved and confident" },
+          { "beatId": "ecom_cta", "order": 5, "storyFunction": "cta", "title": "Order now", "cause": "viewer saw time saved and offer value", "effect": "viewer is invited to order", "informationUnit": "order CTA", "keyEvidenceIds": ["order_button"], "targetSegmentNos": [4], "actionContinuity": { "motivationOrPreparation": "offer badge remains visible after solved breakfast", "execution": "order button appears beside the product", "resultOrReaction": "shopper exits with smoothie" } }
+        ],
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 5, "durationSeconds": 5, "purpose": "Show rushed breakfast pain.", "motion": "alarm to empty counter", "camera": "kitchen handheld", "subjectMotion": "shopper rushes", "environmentMotion": "clock blinks", "videoPrompt": "Rushed commuter shows no breakfast time.", "subtitle": "Late again?", "negativePrompt": "no product payoff yet", "linkedBeatIds": ["ecom_hook", "ecom_conflict"], "storyFunction": "conflict", "cause": "alarm is late", "effect": "fast solution is needed", "informationUnit": "shopper pain and time pressure", "keyEvidenceIds": ["alarm_clock"], "usesConsistencyAnchors": ["shopper"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 5, "endTimeSeconds": 10, "durationSeconds": 5, "purpose": "Prove the blender solves the problem.", "motion": "fruit drops and blends", "camera": "product close-up", "subjectMotion": "shopper presses button", "environmentMotion": "fruit spins", "videoPrompt": "Portable blender visibly turns fruit into smoothie.", "subtitle": "Blend in seconds.", "negativePrompt": "static product only", "linkedBeatIds": ["ecom_proof"], "storyFunction": "proof", "cause": "shopper adds fruit and starts blender", "effect": "smoothie forms visibly", "informationUnit": "function proof", "keyEvidenceIds": ["fruit_blend", "portable_blender"], "actionContinuity": { "motivationOrPreparation": "shopper adds fruit", "execution": "button starts blending", "resultOrReaction": "smoothie forms" }, "usesConsistencyAnchors": ["shopper", "blender"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 10, "endTimeSeconds": 15, "durationSeconds": 5, "purpose": "Show payoff and offer value.", "motion": "smoothie ready to offer badge", "camera": "hero product shot", "subjectMotion": "shopper smiles", "environmentMotion": "offer badge pops", "videoPrompt": "Smoothie ready, shopper relieved, limited offer badge appears.", "subtitle": "Breakfast solved.", "negativePrompt": "unearned offer", "linkedBeatIds": ["ecom_payoff"], "storyFunction": "payoff", "cause": "smoothie proof is complete", "effect": "offer appears beside solved breakfast", "informationUnit": "offer payoff", "keyEvidenceIds": ["smoothie_ready", "offer_badge"], "actionContinuity": { "motivationOrPreparation": "smoothie is ready", "execution": "offer badge enters", "resultOrReaction": "shopper smiles" }, "reactionBeat": "shopper looks relieved and confident", "usesConsistencyAnchors": ["shopper", "blender", "offer"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 15, "endTimeSeconds": 20, "durationSeconds": 5, "purpose": "Order CTA from solved problem.", "motion": "order button and product lockup", "camera": "end card", "subjectMotion": "product remains centered", "environmentMotion": "button glow", "videoPrompt": "Order CTA appears after the breakfast solution and offer payoff.", "subtitle": "Order now.", "negativePrompt": "no pain proof", "linkedBeatIds": ["ecom_cta"], "storyFunction": "cta", "cause": "viewer saw time saved and offer value", "effect": "viewer is invited to order", "informationUnit": "order CTA", "keyEvidenceIds": ["order_button"], "actionContinuity": { "motivationOrPreparation": "offer badge remains visible after solved breakfast", "execution": "order button appears beside the product", "resultOrReaction": "shopper exits with smoothie" }, "usesConsistencyAnchors": ["blender", "offer"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": { "strategy": "Separate pain, proof, payoff, and CTA.", "sourceBeatIds": ["ecom_hook", "ecom_conflict", "ecom_proof", "ecom_payoff", "ecom_cta"], "groups": [{ "groupId": "ecom_g1", "beatIds": ["ecom_hook", "ecom_conflict"], "segmentNos": [1], "storyFunction": "conflict" }, { "groupId": "ecom_g2", "beatIds": ["ecom_proof"], "segmentNos": [2], "storyFunction": "proof" }, { "groupId": "ecom_g3", "beatIds": ["ecom_payoff"], "segmentNos": [3], "storyFunction": "payoff" }, { "groupId": "ecom_g4", "beatIds": ["ecom_cta"], "segmentNos": [4], "storyFunction": "cta" }], "splitReasons": [{ "afterSegmentNo": 3, "beforeSegmentNo": 4, "reasonCode": "cta_enter", "reason": "CTA after offer payoff" }] },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    },
+    {
+      "sampleId": "food-sensory-noodle",
+      "videoCategory": "food",
+      "templateId": "food_sensory_reaction",
+      "requiredCoverage": ["ingredient", "cooking", "sensory_proof", "customer_reaction", "store_cta"],
+      "planJson": {
+        "title": "Beef Noodle Sensory Reaction",
+        "logline": "Ingredients cook into a steaming bowl, customer reaction proves the taste, then store CTA appears.",
+        "durationSeconds": 20,
+        "aspectRatio": "9:16",
+        "keyframeCount": 5,
+        "segmentCount": 4,
+        "styleBible": { "visualStyle": "warm appetizing food ad", "characterLock": "same chef and customer", "colorPalette": "red broth, warm steam", "negativePrompt": "cold food, duplicate bowl" },
+        "creativeStrategy": { "videoCategory": "food", "templateId": "food_sensory_reaction", "templateReason": "Food ad should move from food preparation to sensory proof and customer reaction.", "conversionGoal": "visit store", "hook": "Steam rises from red broth and fresh beef slices.", "conflict": "Viewer needs proof the food tastes as good as it looks.", "turningPoint": "Chef finishes the bowl with hot broth and scallions.", "payoff": "Customer takes first bite and reacts happily.", "cta": "Visit the store for the lunch combo." },
+        "storyBeats": [
+          { "beatId": "food_hook", "order": 1, "storyFunction": "hook", "title": "Steam and ingredients", "informationUnit": "sensory hook", "targetSegmentNos": [1], "requiredAnchorIds": ["bowl"] },
+          { "beatId": "food_conflict", "order": 2, "storyFunction": "conflict", "title": "Taste needs proof", "cause": "food looks good but taste is unproven", "effect": "cooking and reaction proof are needed", "informationUnit": "proof need", "targetSegmentNos": [1] },
+          { "beatId": "food_proof", "order": 3, "storyFunction": "proof", "title": "Chef finishes the bowl", "cause": "fresh ingredients enter hot broth", "effect": "aroma and finished bowl are visible", "informationUnit": "cooking proof", "keyEvidenceIds": ["steam", "beef_slices", "scallions"], "requiredAnchorIds": ["chef", "bowl"], "targetSegmentNos": [2], "actionContinuity": { "motivationOrPreparation": "chef lifts noodles", "execution": "broth and toppings are added", "resultOrReaction": "steam blooms from finished bowl" } },
+          { "beatId": "food_payoff", "order": 4, "storyFunction": "payoff", "title": "First bite reaction", "cause": "finished bowl reaches customer", "effect": "customer smiles after first bite", "informationUnit": "customer reaction proof", "keyEvidenceIds": ["first_bite", "customer_smile"], "requiredAnchorIds": ["customer", "bowl"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "bowl is placed at table", "execution": "customer takes first bite", "resultOrReaction": "customer smiles and nods" }, "reactionBeat": "customer smiles and nods after tasting" },
+          { "beatId": "food_cta", "order": 5, "storyFunction": "cta", "title": "Store combo CTA", "cause": "viewer saw cooking proof and customer reaction", "effect": "viewer is invited to visit store", "informationUnit": "store CTA", "keyEvidenceIds": ["store_sign", "combo_badge"], "targetSegmentNos": [4], "actionContinuity": { "motivationOrPreparation": "customer smile and steaming bowl remain visible", "execution": "store sign and combo badge enter", "resultOrReaction": "bowl stays as the hero reason to visit" } }
+        ],
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 5, "durationSeconds": 5, "purpose": "Food sensory hook and proof need.", "motion": "steam rising from ingredients", "camera": "macro food push-in", "subjectMotion": "beef slices move in broth", "environmentMotion": "steam curls", "videoPrompt": "Steam and ingredients hook the viewer while taste still needs proof.", "subtitle": "Smell this.", "negativePrompt": "cold food", "linkedBeatIds": ["food_hook", "food_conflict"], "storyFunction": "conflict", "cause": "food looks good but taste is unproven", "effect": "cooking and reaction proof are needed", "informationUnit": "sensory hook and proof need", "keyEvidenceIds": ["steam", "beef_slices"], "usesConsistencyAnchors": ["bowl"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 5, "endTimeSeconds": 10, "durationSeconds": 5, "purpose": "Chef completes the bowl.", "motion": "broth and toppings added", "camera": "kitchen close-up", "subjectMotion": "chef finishes bowl", "environmentMotion": "steam blooms", "videoPrompt": "Chef adds broth and scallions; steam blooms from the finished bowl.", "subtitle": "Fresh out.", "negativePrompt": "different bowl", "linkedBeatIds": ["food_proof"], "storyFunction": "proof", "cause": "fresh ingredients enter hot broth", "effect": "aroma and finished bowl visible", "informationUnit": "cooking proof", "keyEvidenceIds": ["steam", "beef_slices", "scallions"], "actionContinuity": { "motivationOrPreparation": "chef lifts noodles", "execution": "broth and toppings are added", "resultOrReaction": "steam blooms" }, "usesConsistencyAnchors": ["chef", "bowl"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 10, "endTimeSeconds": 15, "durationSeconds": 5, "purpose": "Customer reaction proves the payoff.", "motion": "bowl served to first bite", "camera": "table reaction shot", "subjectMotion": "customer tastes and smiles", "environmentMotion": "steam stays visible", "videoPrompt": "Customer takes first bite and smiles after the finished bowl is served.", "subtitle": "That first bite.", "negativePrompt": "reaction before food", "linkedBeatIds": ["food_payoff"], "storyFunction": "payoff", "cause": "finished bowl reaches customer", "effect": "customer smiles after first bite", "informationUnit": "customer reaction proof", "keyEvidenceIds": ["first_bite", "customer_smile"], "actionContinuity": { "motivationOrPreparation": "bowl is placed at table", "execution": "customer takes first bite", "resultOrReaction": "customer smiles and nods" }, "reactionBeat": "customer smiles and nods after tasting", "usesConsistencyAnchors": ["customer", "bowl"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 15, "endTimeSeconds": 20, "durationSeconds": 5, "purpose": "Store CTA after proof.", "motion": "store sign and combo badge enter", "camera": "end card", "subjectMotion": "bowl remains hero", "environmentMotion": "warm sign glow", "videoPrompt": "Store combo CTA appears after the customer reaction.", "subtitle": "Lunch combo today.", "negativePrompt": "no reaction proof", "linkedBeatIds": ["food_cta"], "storyFunction": "cta", "cause": "viewer saw cooking proof and customer reaction", "effect": "viewer is invited to visit store", "informationUnit": "store CTA", "keyEvidenceIds": ["store_sign", "combo_badge"], "actionContinuity": { "motivationOrPreparation": "customer smile and steaming bowl remain visible", "execution": "store sign and combo badge enter", "resultOrReaction": "bowl stays as the hero reason to visit" }, "usesConsistencyAnchors": ["bowl"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": { "strategy": "Separate cooking proof, reaction payoff, and CTA.", "sourceBeatIds": ["food_hook", "food_conflict", "food_proof", "food_payoff", "food_cta"], "groups": [{ "groupId": "food_g1", "beatIds": ["food_hook", "food_conflict"], "segmentNos": [1], "storyFunction": "conflict" }, { "groupId": "food_g2", "beatIds": ["food_proof"], "segmentNos": [2], "storyFunction": "proof" }, { "groupId": "food_g3", "beatIds": ["food_payoff"], "segmentNos": [3], "storyFunction": "payoff" }, { "groupId": "food_g4", "beatIds": ["food_cta"], "segmentNos": [4], "storyFunction": "cta" }], "splitReasons": [{ "afterSegmentNo": 3, "beforeSegmentNo": 4, "reasonCode": "cta_enter", "reason": "CTA after customer reaction" }] },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    },
+    {
+      "sampleId": "auto-performance-hero",
+      "videoCategory": "auto",
+      "templateId": "auto_performance_hero",
+      "requiredCoverage": ["hook", "performance_proof", "hero_payoff", "cta"],
+      "planJson": {
+        "title": "Blue Coupe Performance Hero",
+        "logline": "A blue coupe leaves city traffic, proves handling on a coastal curve, and ends with a hero reservation CTA.",
+        "durationSeconds": 20,
+        "aspectRatio": "16:9",
+        "keyframeCount": 5,
+        "segmentCount": 4,
+        "styleBible": { "visualStyle": "cinematic automotive", "characterLock": "same blue coupe", "colorPalette": "deep blue sunrise", "negativePrompt": "wrong car model, unsafe driving" },
+        "creativeStrategy": { "videoCategory": "auto", "templateId": "auto_performance_hero", "templateReason": "Auto ad should prove performance before hero CTA.", "conversionGoal": "book a test drive", "hook": "Headlights cut through city sunrise traffic.", "conflict": "Driver needs escape from stop-and-go city pressure.", "turningPoint": "The coupe enters a clear coastal curve.", "payoff": "Stable handling and quiet cabin create the hero moment.", "cta": "Book a test drive." },
+        "storyBeats": [
+          { "beatId": "auto_hook", "order": 1, "storyFunction": "hook", "title": "City pressure", "informationUnit": "city hook", "targetSegmentNos": [1], "requiredAnchorIds": ["car"] },
+          { "beatId": "auto_conflict", "order": 2, "storyFunction": "conflict", "title": "Need open-road control", "cause": "traffic feels constrained", "effect": "performance promise becomes relevant", "informationUnit": "driving desire", "targetSegmentNos": [1] },
+          { "beatId": "auto_proof", "order": 3, "storyFunction": "proof", "title": "Coastal handling proof", "cause": "road opens into a curve", "effect": "coupe holds the line cleanly", "informationUnit": "performance proof", "keyEvidenceIds": ["stable_curve", "wheel_grip"], "requiredAnchorIds": ["car"], "targetSegmentNos": [2], "actionContinuity": { "motivationOrPreparation": "car exits city lane", "execution": "car enters coastal curve", "resultOrReaction": "body stays stable through turn" } },
+          { "beatId": "auto_payoff", "order": 4, "storyFunction": "payoff", "title": "Hero calm after control", "cause": "handling proof is visible", "effect": "car earns the hero sunrise shot", "informationUnit": "hero payoff", "keyEvidenceIds": ["hero_car", "sunrise_road"], "requiredAnchorIds": ["car"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "car exits curve smoothly", "execution": "camera reveals ocean road", "resultOrReaction": "driver relaxes in quiet cabin" }, "reactionBeat": "driver relaxes and smiles subtly" },
+          { "beatId": "auto_cta", "order": 5, "storyFunction": "cta", "title": "Book test drive", "cause": "viewer saw control and hero design", "effect": "viewer is invited to book", "informationUnit": "test drive CTA", "keyEvidenceIds": ["book_button"], "targetSegmentNos": [4] }
+        ],
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 5, "durationSeconds": 5, "purpose": "City pressure setup.", "motion": "headlights through traffic", "camera": "low tracking", "subjectMotion": "car rolls forward", "environmentMotion": "city lights pass", "videoPrompt": "Blue coupe moves through tight city traffic at sunrise.", "subtitle": "Leave the grid behind.", "negativePrompt": "new car", "linkedBeatIds": ["auto_hook", "auto_conflict"], "storyFunction": "conflict", "cause": "traffic feels constrained", "effect": "performance promise becomes relevant", "informationUnit": "city hook and driving desire", "keyEvidenceIds": ["city_traffic"], "usesConsistencyAnchors": ["car"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 5, "endTimeSeconds": 10, "durationSeconds": 5, "purpose": "Handling proof.", "motion": "car enters coastal curve", "camera": "side tracking", "subjectMotion": "car holds curve", "environmentMotion": "coastline passes", "videoPrompt": "The same blue coupe holds a clean coastal curve.", "subtitle": "Control you feel.", "negativePrompt": "unsafe drift", "linkedBeatIds": ["auto_proof"], "storyFunction": "proof", "cause": "road opens into curve", "effect": "coupe holds the line", "informationUnit": "performance proof", "keyEvidenceIds": ["stable_curve", "wheel_grip"], "actionContinuity": { "motivationOrPreparation": "car exits city lane", "execution": "car enters coastal curve", "resultOrReaction": "body stays stable through turn" }, "usesConsistencyAnchors": ["car"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 10, "endTimeSeconds": 15, "durationSeconds": 5, "purpose": "Hero payoff.", "motion": "curve exit to ocean hero shot", "camera": "wide reveal", "subjectMotion": "car glides", "environmentMotion": "sunrise flare", "videoPrompt": "After the stable curve, the coupe glides into a calm ocean hero shot.", "subtitle": "Power, composed.", "negativePrompt": "random location", "linkedBeatIds": ["auto_payoff"], "storyFunction": "payoff", "cause": "handling proof is visible", "effect": "car earns hero sunrise shot", "informationUnit": "hero payoff", "keyEvidenceIds": ["hero_car", "sunrise_road"], "actionContinuity": { "motivationOrPreparation": "car exits curve smoothly", "execution": "camera reveals ocean road", "resultOrReaction": "driver relaxes in quiet cabin" }, "reactionBeat": "driver relaxes and smiles subtly", "usesConsistencyAnchors": ["car"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 15, "endTimeSeconds": 20, "durationSeconds": 5, "purpose": "Book CTA.", "motion": "hero car to booking end card", "camera": "end card", "subjectMotion": "car remains centered", "environmentMotion": "button glow", "videoPrompt": "Book a test drive CTA follows the proven handling and hero shot.", "subtitle": "Book a test drive.", "negativePrompt": "no proof", "linkedBeatIds": ["auto_cta"], "storyFunction": "cta", "cause": "viewer saw control and hero design", "effect": "viewer is invited to book", "informationUnit": "test drive CTA", "keyEvidenceIds": ["book_button"], "usesConsistencyAnchors": ["car"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": { "strategy": "Separate city pressure, performance proof, hero payoff, CTA.", "sourceBeatIds": ["auto_hook", "auto_conflict", "auto_proof", "auto_payoff", "auto_cta"], "groups": [{ "groupId": "auto_g1", "beatIds": ["auto_hook", "auto_conflict"], "segmentNos": [1], "storyFunction": "conflict" }, { "groupId": "auto_g2", "beatIds": ["auto_proof"], "segmentNos": [2], "storyFunction": "proof" }, { "groupId": "auto_g3", "beatIds": ["auto_payoff"], "segmentNos": [3], "storyFunction": "payoff" }, { "groupId": "auto_g4", "beatIds": ["auto_cta"], "segmentNos": [4], "storyFunction": "cta" }], "splitReasons": [{ "afterSegmentNo": 3, "beforeSegmentNo": 4, "reasonCode": "cta_enter", "reason": "CTA after hero payoff" }] },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    },
+    {
+      "sampleId": "short-drama-conflict-twist",
+      "videoCategory": "short_drama",
+      "templateId": "short_drama_conflict_twist",
+      "requiredCoverage": ["relationship", "conflict", "twist", "emotional_payoff", "follow_cta"],
+      "planJson": {
+        "title": "Rain Library Reunion",
+        "logline": "Two former friends clash over a yellow umbrella, recognize an old note, reconcile, and invite viewers to continue.",
+        "durationSeconds": 30,
+        "aspectRatio": "9:16",
+        "keyframeCount": 5,
+        "segmentCount": 5,
+        "styleBible": { "visualStyle": "rainy short drama", "characterLock": "same two leads and yellow umbrella", "colorPalette": "blue rain, warm library light", "negativePrompt": "extra faces, duplicated umbrella" },
+        "creativeStrategy": { "videoCategory": "short_drama", "templateId": "short_drama_conflict_twist", "templateReason": "Short drama needs relationship tension, twist, emotional payoff, and continuation CTA.", "conversionGoal": "continue watching", "hook": "A yellow umbrella blocks the library door in heavy rain.", "conflict": "The two leads blame each other for an old misunderstanding.", "turningPoint": "A handwritten note inside the umbrella reveals the truth.", "payoff": "They realize both waited for each other years ago.", "cta": "Continue watching the reunion story." },
+        "storyBeats": [
+          { "beatId": "drama_hook", "order": 1, "storyFunction": "hook", "title": "Umbrella collision", "informationUnit": "relationship hook", "targetSegmentNos": [1], "requiredAnchorIds": ["lead_a", "lead_b", "umbrella"] },
+          { "beatId": "drama_conflict", "order": 2, "storyFunction": "conflict", "title": "Old blame returns", "cause": "both recognize the umbrella", "effect": "old misunderstanding resurfaces", "informationUnit": "relationship conflict", "targetSegmentNos": [2], "requiredAnchorIds": ["lead_a", "lead_b"] },
+          { "beatId": "drama_twist", "order": 3, "storyFunction": "turning_point", "title": "Hidden note", "cause": "umbrella opens and reveals folded note", "effect": "truth appears before both leads", "informationUnit": "twist evidence", "keyEvidenceIds": ["hidden_note", "umbrella_mark"], "requiredAnchorIds": ["umbrella"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "lead opens the umbrella to leave", "execution": "folded note slips out", "resultOrReaction": "both freeze and read it" } },
+          { "beatId": "drama_payoff", "order": 4, "storyFunction": "payoff", "title": "Mutual waiting revealed", "cause": "the note proves both waited years ago", "effect": "anger softens into recognition", "informationUnit": "emotional payoff", "keyEvidenceIds": ["old_note_text", "soft_eye_contact"], "targetSegmentNos": [4], "actionContinuity": { "motivationOrPreparation": "both read the note", "execution": "they look at each other under umbrella", "resultOrReaction": "their expressions soften" }, "reactionBeat": "both leads pause, tearful but smiling", "powerShift": "conflict shifts to reconciliation" },
+          { "beatId": "drama_cta", "order": 5, "storyFunction": "cta", "title": "Continue watching", "cause": "viewer saw the emotional twist", "effect": "viewer is invited to continue", "informationUnit": "continue CTA", "keyEvidenceIds": ["next_episode_button"], "targetSegmentNos": [5] }
+        ],
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 6, "durationSeconds": 6, "purpose": "Hook with umbrella collision.", "motion": "umbrella blocks doorway", "camera": "rainy doorway", "subjectMotion": "leads stop abruptly", "environmentMotion": "rain streaks", "videoPrompt": "Yellow umbrella collision creates the hook at the library door.", "subtitle": "You again?", "negativePrompt": "extra characters", "linkedBeatIds": ["drama_hook"], "storyFunction": "hook", "cause": "heavy rain pushes both to the door", "effect": "they recognize each other", "informationUnit": "relationship hook", "keyEvidenceIds": ["yellow_umbrella"], "usesConsistencyAnchors": ["lead_a", "lead_b", "umbrella"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 6, "endTimeSeconds": 12, "durationSeconds": 6, "purpose": "Conflict resurfaces.", "motion": "argument under awning", "camera": "shot-reverse-shot", "subjectMotion": "leads accuse each other", "environmentMotion": "rain continues", "videoPrompt": "The two leads blame each other for the old missed meeting.", "subtitle": "You never came.", "negativePrompt": "reconciliation too early", "linkedBeatIds": ["drama_conflict"], "storyFunction": "conflict", "cause": "both recognize the umbrella", "effect": "old misunderstanding resurfaces", "informationUnit": "relationship conflict", "keyEvidenceIds": ["shared_umbrella"], "usesConsistencyAnchors": ["lead_a", "lead_b", "umbrella"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 12, "endTimeSeconds": 18, "durationSeconds": 6, "purpose": "Twist evidence appears.", "motion": "note slips from umbrella", "camera": "insert to faces", "subjectMotion": "both freeze", "environmentMotion": "rain sound softens", "videoPrompt": "A folded note slips from the umbrella and both leads freeze.", "subtitle": "What is this?", "negativePrompt": "no visible note", "linkedBeatIds": ["drama_twist"], "storyFunction": "turning_point", "cause": "umbrella opens and reveals folded note", "effect": "truth appears before both leads", "informationUnit": "twist evidence", "keyEvidenceIds": ["hidden_note", "umbrella_mark"], "actionContinuity": { "motivationOrPreparation": "lead opens umbrella", "execution": "folded note slips out", "resultOrReaction": "both freeze and read it" }, "usesConsistencyAnchors": ["lead_a", "lead_b", "umbrella"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 18, "endTimeSeconds": 24, "durationSeconds": 6, "purpose": "Emotional payoff.", "motion": "accusation softens into eye contact", "camera": "close two-shot", "subjectMotion": "faces soften", "environmentMotion": "warm library light", "videoPrompt": "After reading the note, anger softens into tearful recognition.", "subtitle": "You waited too?", "negativePrompt": "no note cause", "linkedBeatIds": ["drama_payoff"], "storyFunction": "payoff", "cause": "the note proves both waited years ago", "effect": "anger softens into recognition", "informationUnit": "emotional payoff", "keyEvidenceIds": ["old_note_text", "soft_eye_contact"], "actionContinuity": { "motivationOrPreparation": "both read the note", "execution": "they look at each other", "resultOrReaction": "expressions soften" }, "reactionBeat": "both leads pause, tearful but smiling", "powerShift": "conflict shifts to reconciliation", "usesConsistencyAnchors": ["lead_a", "lead_b", "umbrella"] },
+          { "segmentNo": 5, "startKeyframeNo": 5, "endKeyframeNo": 6, "startTimeSeconds": 24, "endTimeSeconds": 30, "durationSeconds": 6, "purpose": "Continue watching CTA.", "motion": "they leave under umbrella to next episode button", "camera": "back view end card", "subjectMotion": "two leads leave together", "environmentMotion": "rain glows", "videoPrompt": "They leave together under the yellow umbrella and the continue CTA appears.", "subtitle": "Continue watching.", "negativePrompt": "unearned CTA", "linkedBeatIds": ["drama_cta"], "storyFunction": "cta", "cause": "viewer saw the emotional twist", "effect": "viewer is invited to continue", "informationUnit": "continue CTA", "keyEvidenceIds": ["next_episode_button"], "usesConsistencyAnchors": ["lead_a", "lead_b", "umbrella"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": { "strategy": "Separate conflict, twist, payoff, and continuation CTA.", "sourceBeatIds": ["drama_hook", "drama_conflict", "drama_twist", "drama_payoff", "drama_cta"], "groups": [{ "groupId": "drama_g1", "beatIds": ["drama_hook"], "segmentNos": [1], "storyFunction": "hook" }, { "groupId": "drama_g2", "beatIds": ["drama_conflict"], "segmentNos": [2], "storyFunction": "conflict" }, { "groupId": "drama_g3", "beatIds": ["drama_twist"], "segmentNos": [3], "storyFunction": "turning_point" }, { "groupId": "drama_g4", "beatIds": ["drama_payoff"], "segmentNos": [4], "storyFunction": "payoff" }, { "groupId": "drama_g5", "beatIds": ["drama_cta"], "segmentNos": [5], "storyFunction": "cta" }], "splitReasons": [{ "afterSegmentNo": 2, "beforeSegmentNo": 3, "reasonCode": "new_conflict_relation", "reason": "twist changes relationship information" }, { "afterSegmentNo": 4, "beforeSegmentNo": 5, "reasonCode": "cta_enter", "reason": "CTA after emotional payoff" }] },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    },
+    {
+      "sampleId": "generic-brand-story",
+      "videoCategory": "brand",
+      "templateId": "generic_brand_story",
+      "requiredCoverage": ["hook", "conflict", "proof", "payoff", "cta"],
+      "planJson": {
+        "title": "Community Studio Brand Story",
+        "logline": "A quiet empty studio becomes a collaborative space, proves the brand promise, and ends with a learn-more CTA.",
+        "durationSeconds": 20,
+        "aspectRatio": "9:16",
+        "keyframeCount": 5,
+        "segmentCount": 4,
+        "styleBible": { "visualStyle": "warm brand film", "characterLock": "same studio team", "colorPalette": "teal and amber", "negativePrompt": "generic stock footage" },
+        "creativeStrategy": { "videoCategory": "brand", "templateId": "generic_brand_story", "templateReason": "Fallback brand story still needs hook, conflict, proof, payoff, and CTA.", "conversionGoal": "learn more", "hook": "An empty studio waits before sunrise.", "conflict": "Creators have ideas but lack a shared place to build.", "turningPoint": "The brand opens the studio and tools light up.", "payoff": "Creators collaborate and a finished prototype works.", "cta": "Learn more about the studio." },
+        "storyBeats": [
+          { "beatId": "brand_hook", "order": 1, "storyFunction": "hook", "title": "Empty studio", "informationUnit": "curiosity hook", "targetSegmentNos": [1], "requiredAnchorIds": ["studio"] },
+          { "beatId": "brand_conflict", "order": 2, "storyFunction": "conflict", "title": "Ideas without shared space", "cause": "creators work separately", "effect": "collaboration need is clear", "informationUnit": "brand problem", "targetSegmentNos": [1] },
+          { "beatId": "brand_proof", "order": 3, "storyFunction": "proof", "title": "Tools and team activate", "cause": "studio opens to creators", "effect": "shared tools create visible progress", "informationUnit": "promise proof", "keyEvidenceIds": ["lit_tools", "team_board"], "requiredAnchorIds": ["studio"], "targetSegmentNos": [2], "actionContinuity": { "motivationOrPreparation": "doors open and creators enter", "execution": "tools light and team gathers", "resultOrReaction": "prototype parts come together" } },
+          { "beatId": "brand_payoff", "order": 4, "storyFunction": "payoff", "title": "Prototype works", "cause": "shared tools and team progress are visible", "effect": "prototype lights up and team celebrates", "informationUnit": "brand payoff", "keyEvidenceIds": ["working_prototype", "team_reaction"], "targetSegmentNos": [3], "actionContinuity": { "motivationOrPreparation": "prototype parts are assembled", "execution": "team powers it on", "resultOrReaction": "prototype lights and team celebrates" }, "reactionBeat": "team cheers around the working prototype" },
+          { "beatId": "brand_cta", "order": 5, "storyFunction": "cta", "title": "Learn more", "cause": "viewer saw collaboration create a working result", "effect": "viewer is invited to learn more", "informationUnit": "learn more CTA", "keyEvidenceIds": ["learn_more_button"], "targetSegmentNos": [4] }
+        ],
+        "segments": [
+          { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "startTimeSeconds": 0, "endTimeSeconds": 5, "durationSeconds": 5, "purpose": "Hook and conflict.", "motion": "empty studio to separated creators", "camera": "slow dolly", "subjectMotion": "creators look at separate notes", "environmentMotion": "sunrise enters", "videoPrompt": "Empty studio and separated creators establish the collaboration need.", "subtitle": "Ideas need a place.", "negativePrompt": "random logo", "linkedBeatIds": ["brand_hook", "brand_conflict"], "storyFunction": "conflict", "cause": "creators work separately", "effect": "collaboration need is clear", "informationUnit": "curiosity hook and brand problem", "keyEvidenceIds": ["empty_studio"], "usesConsistencyAnchors": ["studio"] },
+          { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "startTimeSeconds": 5, "endTimeSeconds": 10, "durationSeconds": 5, "purpose": "Brand promise proof.", "motion": "tools light and team gathers", "camera": "workspace tracking", "subjectMotion": "team builds together", "environmentMotion": "screens light up", "videoPrompt": "Studio opens; tools light and creators begin building together.", "subtitle": "Build together.", "negativePrompt": "static room only", "linkedBeatIds": ["brand_proof"], "storyFunction": "proof", "cause": "studio opens to creators", "effect": "shared tools create progress", "informationUnit": "promise proof", "keyEvidenceIds": ["lit_tools", "team_board"], "actionContinuity": { "motivationOrPreparation": "doors open and creators enter", "execution": "tools light and team gathers", "resultOrReaction": "prototype parts come together" }, "usesConsistencyAnchors": ["studio"] },
+          { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "startTimeSeconds": 10, "endTimeSeconds": 15, "durationSeconds": 5, "purpose": "Working prototype payoff.", "motion": "prototype powers on and team cheers", "camera": "hero team shot", "subjectMotion": "team celebrates", "environmentMotion": "prototype glows", "videoPrompt": "Prototype powers on after visible collaboration and team cheers.", "subtitle": "Ideas become real.", "negativePrompt": "unearned result", "linkedBeatIds": ["brand_payoff"], "storyFunction": "payoff", "cause": "shared tools and team progress are visible", "effect": "prototype lights up and team celebrates", "informationUnit": "brand payoff", "keyEvidenceIds": ["working_prototype", "team_reaction"], "actionContinuity": { "motivationOrPreparation": "prototype parts are assembled", "execution": "team powers it on", "resultOrReaction": "prototype lights and team celebrates" }, "reactionBeat": "team cheers around the working prototype", "usesConsistencyAnchors": ["studio"] },
+          { "segmentNo": 4, "startKeyframeNo": 4, "endKeyframeNo": 5, "startTimeSeconds": 15, "endTimeSeconds": 20, "durationSeconds": 5, "purpose": "Learn more CTA.", "motion": "team result to brand end card", "camera": "end card", "subjectMotion": "team remains around prototype", "environmentMotion": "button glow", "videoPrompt": "Learn more CTA follows the working prototype payoff.", "subtitle": "Learn more.", "negativePrompt": "no proof", "linkedBeatIds": ["brand_cta"], "storyFunction": "cta", "cause": "viewer saw collaboration create a working result", "effect": "viewer is invited to learn more", "informationUnit": "learn more CTA", "keyEvidenceIds": ["learn_more_button"], "usesConsistencyAnchors": ["studio"] }
+        ],
+        "keyframes": [],
+        "shots": [],
+        "shotGroupingPass": { "strategy": "Generic brand story keeps proof, payoff, and CTA readable.", "sourceBeatIds": ["brand_hook", "brand_conflict", "brand_proof", "brand_payoff", "brand_cta"], "groups": [{ "groupId": "brand_g1", "beatIds": ["brand_hook", "brand_conflict"], "segmentNos": [1], "storyFunction": "conflict" }, { "groupId": "brand_g2", "beatIds": ["brand_proof"], "segmentNos": [2], "storyFunction": "proof" }, { "groupId": "brand_g3", "beatIds": ["brand_payoff"], "segmentNos": [3], "storyFunction": "payoff" }, { "groupId": "brand_g4", "beatIds": ["brand_cta"], "segmentNos": [4], "storyFunction": "cta" }], "splitReasons": [{ "afterSegmentNo": 3, "beforeSegmentNo": 4, "reasonCode": "cta_enter", "reason": "CTA after prototype payoff" }] },
+        "storyQualityReport": { "passed": true, "score": 100, "issueCodes": [], "issues": [], "riskScores": { "suddenOutcomeRisk": 0, "referenceOveruseRisk": 0 } }
+      }
+    }
+  ]
+}

@@ -1,79 +1,71 @@
-# 架构说明：动态参数表单与 RunningHub 解耦
+# 系统架构
 
-本文描述前端如何落地「Schema 驱动表单」，以及如何通过分层与适配器与 **RunningHub / ComfyUI** 的原始数据结构解耦。
+本文只描述当前仓库已经落地的结构。历史方案和阶段性执行记录不作为实现依据。
 
-## 1. 问题边界
+## 1. 系统边界
 
-- **RunningHub / ComfyUI** 侧数据通常是「节点图」：大量嵌套 JSON、节点 ID、端口、内部字段名与业务语义不一致。
-- **产品 UI** 需要的是「人类可读的输入项」：图、滑杆、文案、选项等，且随工作流版本演进。
-
-直接在 React 组件里读写 RunningHub 原始 JSON 会导致：表单与某一 API 版本强耦合、难以测试、难以复用同一套 UI 到不同提供商。
-
-## 2. 核心思路：三层数据模型
+RenYiMen 由一个统一的 Next.js 前端入口和两套后端能力组成：
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│  UI Schema（前端 / BFF 下发的 canonical 模型）               │
-│  WorkflowInputSchema：字段 id、类型、约束、默认值、展示文案   │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ 用户编辑 → 扁平或树形「逻辑参数」
-┌───────────────────────────▼─────────────────────────────────┐
-│  Domain Values（Zustand / 表单状态）                        │
-│  Record<fieldId, unknown> 或强类型子结构                      │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ 提交前映射
-┌───────────────────────────▼─────────────────────────────────┐
-│  Provider Payload（RunningHub 请求体 / Comfy prompt 等）     │
-│  仅存在于 services + adapters，UI 不 import 具体形状          │
-└─────────────────────────────────────────────────────────────┘
+浏览器
+  -> Next.js :3001
+       -> /studio 与 /api/gateway/*
+            -> Provider Adapter
+            -> RunningHub / 阿里云百炼 / Kling / GPT Image
+            -> workflow PostgreSQL（Prisma）
+       -> /workbench/* 与 /api/workbench/*
+            -> FastAPI :8000
+            -> ai_workbench PostgreSQL + Redis + storage
 ```
 
-### 2.1 UI Schema（与供应商无关）
+- 主站页面、认证和 API Route 位于 `src/app/`。
+- Workbench 页面已迁入 `src/app/(platform)/workbench/`，共用 NextAuth 会话；FastAPI 后端仍位于 `ai-workflow-code/backend/`。
+- 主站数据库模型位于 `prisma/schema.prisma`；Workbench 使用自己的 SQLAlchemy 模型和数据库。
 
-- 定义位置建议：`src/types/workflow-schema.ts`（已提供基础类型）及后续由后端或 BFF 下发的 JSON。
-- 字段类型枚举（`text` / `slider` / `image` 等）描述 **如何渲染与校验**，不描述 **图里哪个 node.input**。
+## 2. 工作流与上游适配
 
-### 2.2 Domain Values
+前端工作流 Schema 位于 `src/mocks/`。表单只描述业务字段、校验和节点映射，不直接发起厂商 HTTP 请求。
 
-- 由 **Zustand**（如 `useWorkflowParameterStore`）或表单库维护，键为 Schema 的 `id`。
-- 组件层只读写「逻辑 id」，不知道 RunningHub 的 node id。
+网关统一通过 `src/services/providers/ProviderFactory.ts` 的 `getProviderAdapter()` 获取适配器。适配器均实现 `src/services/providers/types.ts` 中的 `IProviderAdapter`，厂商差异保留在 `src/services/providers/` 内。
 
-### 2.3 Provider Payload（适配器出口）
+新增 provider 或 SKU 时应同步完成：
 
-- 在 `src/services/` 下增加 **适配模块**（例如 `runninghub/map-to-payload.ts`），输入为 `WorkflowInputSchema + values`，输出为官方 SDK / REST 所需的结构。
-- **复杂映射**（多节点、常量注入、条件分支）必须写 JSDoc 与单元测试，避免「魔法字符串」散落在组件里。
+1. 实现或复用 provider adapter。
+2. 在 `ProviderFactory.ts` 注册 `skuId -> providerCode` 和工厂分支。
+3. 在 `src/app/api/skus/route.ts` 注册面向用户的 SKU。
+4. 增加对应的前端 Schema；RunningHub 工作流还需保存完整 Comfy JSON。
+5. 补充预计耗时以及必要的单元或集成测试。
 
-## 3. 动态表单（Dynamic Form）渲染管线
+RunningHub 的具体约束以 [runninghub-api.md](runninghub-api.md) 为准。
 
-1. **加载 Schema**：`services` 请求 `GET /workflows/:id/input-schema`（示例）；超时与错误统一在客户端封装（见 `api-client.ts`）。
-2. **注册渲染器**：按 `WorkflowFieldType` 映射到具体展示组件（`src/components/forms/fields/` 后续补充），类似小型「表单引擎」。
-3. **校验**：根据 `constraints`（min/max、正则、文件类型）在提交前校验；必要时与服务端二次校验对齐。
-4. **提交**：`values` → `mapToRunningHubPayload()` → `POST` 创建任务；长任务配合 **轮询/WebSocket** 与较长 `timeoutMs` 策略（在 `apiRequest` 或专用 job client 中配置）。
+## 3. 异步生成任务
 
-**展示与逻辑分离**：
+`src/app/api/gateway/` 负责创建和查询通用生成任务。适配器把不同厂商的响应归一化为统一任务状态，页面不应依赖厂商原始错误码或响应结构。
 
-- **容器**（page 或 `workflow/*-container.tsx`）：拉取 Schema、连接 store、处理 loading/error。
-- **纯展示**（`forms/fields/*`）：只接收 `value` / `onChange` / `schema` 片段。
+长任务使用“短请求 + 客户端轮询”模式：创建任务、查询状态和获取结果彼此独立；单次上游请求有超时限制，任务总耗时由页面轮询控制。
 
-## 4. 与 RunningHub API 的解耦要点
+## 4. 一句话成片
 
-| 维度 | 做法 |
-|------|------|
-| 类型 | 供应商专用类型放在 `src/types/runninghub/`（后续新增），不要混进 Schema 类型文件。 |
-| HTTP | 所有请求经 `services/api-client.ts` 或同类封装，统一 baseUrl、超时、错误模型。 |
-| 配置 | `NEXT_PUBLIC_API_BASE_URL` 指向 **BFF 或网关**，由网关转发 RunningHub，便于换供应商或 mock。 |
-| 版本 | Schema 带 `version`；适配器按版本分支，避免单函数无限 if-else。 |
+一句话成片是独立的领域编排，核心代码位于 `src/services/video-orchestrator/`，数据模型为 `VideoProject`、`VideoKeyframe`、`VideoSegment` 和兼容用的 `VideoShot`。
 
-## 5. 长耗时 AI 任务
+它通过 `/api/video-projects/*` 暴露项目级接口，包含规划、资产审核、边界帧审核、子分镜审核、片段生成、合成、回退、恢复和同步。详细状态机见 [one-prompt-video-script-planner.md](one-prompt-video-script-planner.md)。
 
-- 创建任务与查询状态使用 **不同超时**：创建可较短，轮询单次可较短但总时长由 UI 控制。
-- 对 `AbortController` 与用户取消操作在 store 中集中处理，避免泄漏请求。
+## 5. 认证与用户体系
 
-## 6. 后续落地顺序（建议）
+- 主站使用 NextAuth。
+- Next.js 服务端使用 `WORKBENCH_SSO_SECRET` 调用 Workbench 的 `/api/auth/sso-bridge`，换取 Workbench JWT。
+- Workbench 用户通过 `platform_user_id` 与主站用户关联；邮箱和历史用户名仅用于受控兼容匹配。
+- 身份回填、冲突工单、旧密码灰度和发布前检查见 [AI-WORKBENCH-INTEGRATION.md](AI-WORKBENCH-INTEGRATION.md)。
 
-1. 与后端约定 **WorkflowInputSchema** JSON 与版本策略。  
-2. 实现 `DynamicForm` 容器 + 各 `field` 展示组件。  
-3. 实现 RunningHub `adapter` 与最小 E2E（mock 服务器）。  
-4. 再接入 Shadcn 表单控件与无障碍细节。
+## 6. 部署拓扑
 
-以上与 `.cursorrules` 中的 Schema 驱动 UI、分层、服务层与整洁代码原则一致。
+根目录 `docker-compose.yml` 定义 `db`、`workbench-db`、`workbench-redis`、`workbench-backend`、`web` 和 `nginx`。生产流量由 Nginx 进入，数据库和 Redis 默认只暴露在 Docker 内网。
+
+镜像的本地构建与人工传输流程见 [docker-image-transfer-workflow.md](docker-image-transfer-workflow.md)。
+
+## 7. 维护原则
+
+- 页面和 API Route 不直接调用具体厂商客户端。
+- 凭据只放在本地环境文件或部署 Secret 中，不提交仓库。
+- 文档中的路径、变量、命令必须能在仓库中找到对应实现。
+- 已完成的阶段计划不保留为长期规范；仍有价值的操作步骤应合并到主题文档。

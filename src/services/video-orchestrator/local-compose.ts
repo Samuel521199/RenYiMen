@@ -22,15 +22,6 @@ interface LocalComposeSubtitle {
   durationSeconds?: number;
 }
 
-interface EnforceSegmentEndFrameParams {
-  projectId: string;
-  segmentNo: number;
-  clipUrl: string;
-  endFrameUrl: string;
-  durationSeconds: number;
-  aspectRatio: VideoAspectRatio;
-}
-
 interface OssConfig {
   region: string;
   endpoint?: string;
@@ -42,104 +33,8 @@ interface OssConfig {
 }
 
 const COMPOSE_FRAME_RATE = 24;
-// xfade becomes unstable when its duration is shorter than (or rounds exactly
-// onto) one output frame. Keep hard cuts just over one 24 fps frame.
+// xfade is reserved for transitions explicitly requested by finalTransitionPlan.
 const MIN_XFADE_SECONDS = 0.05;
-
-/**
- * HappyHorse I2V only accepts a first frame. Make the approved segment boundary
- * an exact, visible final frame without switching to another video model.
- */
-export async function enforceSegmentEndFrameLocally(params: EnforceSegmentEndFrameParams): Promise<string> {
-  const cfg = readOssConfig();
-  const ffmpegPath = process.env.FFMPEG_PATH?.trim() || "ffmpeg";
-  const workDir = path.join(os.tmpdir(), `one-prompt-boundary-${params.projectId}-${params.segmentNo}-${Date.now()}`);
-  const inputPath = path.join(workDir, "happyhorse-source.mp4");
-  const endFramePath = path.join(workDir, "approved-end-frame");
-  const outputPath = path.join(workDir, "boundary-enforced.mp4");
-  const duration = Math.max(3, Math.min(15, Number(params.durationSeconds) || 5));
-  const fadeSeconds = Math.min(0.65, Math.max(0.35, duration * 0.08));
-  const holdSeconds = Math.min(0.35, Math.max(0.2, duration * 0.04));
-  const fadeOffset = Math.max(0, duration - fadeSeconds - holdSeconds);
-  const stillDuration = fadeSeconds + holdSeconds;
-  const { width, height } = videoDimensionsForAspectRatio(params.aspectRatio);
-  const normalizeVideo = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
-
-  await mkdir(workDir, { recursive: true });
-  await logOnePromptVideo("clip.boundary_enforce.start", {
-    projectId: params.projectId,
-    segmentNo: params.segmentNo,
-    durationSeconds: duration,
-    fadeSeconds,
-    holdSeconds,
-    endFrameUrl: params.endFrameUrl,
-    model: "happyhorse-1.1-i2v",
-  });
-  try {
-    await Promise.all([
-      downloadToFile(params.clipUrl, inputPath),
-      downloadToFile(params.endFrameUrl, endFramePath),
-    ]);
-    await runFfmpeg(ffmpegPath, [
-      "-y",
-      "-i",
-      inputPath,
-      "-loop",
-      "1",
-      "-framerate",
-      "24",
-      "-i",
-      endFramePath,
-      "-filter_complex",
-      `[0:v]fps=24,${normalizeVideo},setpts=PTS-STARTPTS[base];` +
-        `[1:v]fps=24,${normalizeVideo},trim=duration=${stillDuration.toFixed(3)},setpts=PTS-STARTPTS[end];` +
-        `[base][end]xfade=transition=fade:duration=${fadeSeconds.toFixed(3)}:offset=${fadeOffset.toFixed(3)}[outv]`,
-      "-map",
-      "[outv]",
-      "-map",
-      "0:a?",
-      "-t",
-      duration.toFixed(3),
-      "-c:v",
-      "libx264",
-      "-preset",
-      "veryfast",
-      "-pix_fmt",
-      "yuv420p",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "192k",
-      "-movflags",
-      "+faststart",
-      outputPath,
-    ]);
-    const key = `one-prompt-video/segments/${params.projectId}-segment-${params.segmentNo}-bounded-${Date.now()}.mp4`;
-    const publicUrl = await uploadFileToOss(cfg, key, outputPath);
-    await logOnePromptVideo("clip.boundary_enforce.success", {
-      projectId: params.projectId,
-      segmentNo: params.segmentNo,
-      publicUrl,
-      exactEndFrameHoldSeconds: holdSeconds,
-    });
-    return publicUrl;
-  } catch (error) {
-    await logOnePromptVideo("clip.boundary_enforce.error", {
-      projectId: params.projectId,
-      segmentNo: params.segmentNo,
-      error: error instanceof Error ? error.message : String(error),
-    }, "error");
-    throw error;
-  } finally {
-    await rm(workDir, { recursive: true, force: true });
-  }
-}
-
-function videoDimensionsForAspectRatio(aspectRatio: VideoAspectRatio): { width: number; height: number } {
-  if (aspectRatio === "16:9") return { width: 1280, height: 720 };
-  if (aspectRatio === "1:1") return { width: 720, height: 720 };
-  return { width: 720, height: 1280 };
-}
 
 export async function composeVideoClipsLocally(params: LocalComposeParams): Promise<string> {
   const cfg = readOssConfig();
@@ -187,7 +82,8 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       probedDurations: probedClipDurations,
       effectiveDurations: effectiveClipDurations,
     }, audioPresence.every(Boolean) ? "info" : "warn");
-    if (clipPaths.length > 1 && transitionSeconds > 0) {
+    const hasExplicitVisualBlend = transitionPlan.some((item) => item.visualMode === "dissolve" || item.visualMode === "fade_to_black");
+    if (clipPaths.length > 1 && hasExplicitVisualBlend && transitionSeconds > 0) {
       await composeWithPlannedXfade(ffmpegPath, clipPaths, effectiveClipDurations, transitionPlan, composedPath, audioPresence, stripSourceAudio);
     } else {
       await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath, stripSourceAudio);
@@ -541,7 +437,7 @@ function normalizeComposeTransitionPlan(plan: FinalTransitionPlan[], clipCount: 
     const fromSegmentNo = index + 1;
     const toSegmentNo = index + 2;
     const item = byPair.get(`${fromSegmentNo}->${toSegmentNo}`);
-    const visualMode = item?.visualMode ?? "dissolve";
+    const visualMode = item?.visualMode ?? "hard_cut";
     const overlapSeconds = visualMode === "hard_cut" || visualMode === "match_cut"
       ? MIN_XFADE_SECONDS
       : clampTransitionSeconds(Number(item?.overlapSeconds ?? fallbackSeconds), durations);
@@ -549,7 +445,7 @@ function normalizeComposeTransitionPlan(plan: FinalTransitionPlan[], clipCount: 
       fromSegmentNo,
       toSegmentNo,
       visualMode,
-      audioMode: item?.audioMode ?? "crossfade",
+      audioMode: item?.audioMode ?? "none",
       overlapSeconds,
       matchAnchorId: item?.matchAnchorId,
       generatedBridgeRequired: Boolean(item?.generatedBridgeRequired || visualMode === "generated_bridge"),

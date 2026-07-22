@@ -122,6 +122,20 @@ export async function submitAliyunImageTask(params: {
     return submitDashScopeAsync(IMAGE_PATH, buildBody(false), "阿里云万相图片生成");
   }
 }
+export interface ImageToVideoProviderCapabilities {
+  acceptsFirstFrameImage: true;
+  acceptsLastFrameImage: boolean;
+  endFrameSemanticMode: "soft_prompt_target" | "native_last_frame";
+}
+
+export function aliyunImageToVideoCapabilities(): ImageToVideoProviderCapabilities {
+  return {
+    acceptsFirstFrameImage: true,
+    acceptsLastFrameImage: false,
+    endFrameSemanticMode: "soft_prompt_target",
+  };
+}
+
 export async function submitAliyunImageToVideoTask(params: {
   imageUrl: string;
   lastFrameUrl: string;
@@ -130,8 +144,9 @@ export async function submitAliyunImageToVideoTask(params: {
 }): Promise<string> {
   const i2vModel = onePromptI2vModel();
   if (!params.lastFrameUrl?.trim()) {
-    throw new Error("HappyHorse boundary-constrained generation requires an end-frame image URL for deterministic post-processing.");
+    throw new Error("HappyHorse generation requires an approved end-frame reference for the semantic target and continuity evaluation.");
   }
+  const capabilities = aliyunImageToVideoCapabilities();
   const prompt = params.prompt;
   const duration = clamp(params.durationSeconds, 3, 15);
   const resolution = process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P";
@@ -141,7 +156,7 @@ export async function submitAliyunImageToVideoTask(params: {
     input: {
       prompt: prompt.slice(0, 5000),
       // HappyHorse 1.1 I2V accepts exactly one first_frame. The approved end
-      // boundary is enforced deterministically after this task succeeds.
+      // boundary remains a reviewed semantic target and evaluation reference.
       media: [{ type: "first_frame", url: params.imageUrl }],
     },
     parameters: {
@@ -158,7 +173,8 @@ export async function submitAliyunImageToVideoTask(params: {
     forcedModel: true,
     imageUrl: params.imageUrl,
     lastFrameUrl: params.lastFrameUrl,
-    lastFrameMode: "deterministic_postprocess",
+    lastFrameMode: capabilities.endFrameSemanticMode,
+    providerCapabilities: capabilities,
     promptLength: prompt.length,
     requestedDurationSeconds: params.durationSeconds,
     durationSeconds: duration,

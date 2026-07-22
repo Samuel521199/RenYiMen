@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import {
-  planVideoProject,
+  queueVideoProjectPlanning,
   serializeVideoProject,
   updateVideoShot,
 } from "@/services/video-orchestrator/project-service";
 import { normalizePlanInput } from "@/services/video-orchestrator/planner";
+import { storyboardStageHttpStatus } from "@/services/video-orchestrator/storyboard-stage-retry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,8 +25,8 @@ export async function POST(req: Request, ctx: RouteContext) {
   const body = await readJson(req);
   const input = normalizePlanInput(isRecord(body) ? body : {});
   try {
-    const project = await planVideoProject(session.user.id, projectId, input);
-    return NextResponse.json({ ok: true, project: serializeVideoProject(project) });
+    const project = await queueVideoProjectPlanning(session.user.id, projectId, input);
+    return NextResponse.json({ ok: true, accepted: true, project: serializeVideoProject(project) }, { status: 202 });
   } catch (error) {
     return errorResponse(error);
   }
@@ -66,6 +67,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function errorResponse(error: unknown) {
   return NextResponse.json(
     { ok: false, error: error instanceof Error ? error.message : "操作失败" },
-    { status: 400 },
+    { status: storyboardStageHttpStatus(error) },
   );
 }

@@ -1,0 +1,74 @@
+{
+  "fixtureVersion": 1,
+  "storyBaseline": {
+    "videoCategory": "food",
+    "legacyPlannerBehavior": "pre-story-gate",
+    "capturedForStep": "16.1-phase0-freeze-current-baseline",
+    "knownCurrentFailurePoints": [
+      "food beauty shots can appear without preparation or sensory cause",
+      "customer reaction may be omitted, weakening the payoff",
+      "store CTA may appear as a final label without connection to appetite"
+    ],
+    "comparisonGoal": "Future planner output should show preparation -> sensory proof -> customer reaction -> store/meal CTA."
+  },
+  "project": {
+    "id": "fixture-food-sensory-ad",
+    "title": "Synthetic baseline: food sensory ad",
+    "status": "FINAL_REVIEW",
+    "input": {
+      "userPrompt": "Create a 30-second vertical beef noodle restaurant ad. Show kitchen preparation, steam and broth, customer reaction, and a final store combo CTA.",
+      "durationSeconds": 15,
+      "aspectRatio": "9:16",
+      "referenceImageUrls": []
+    },
+    "planJson": {
+      "schemaVersion": "plan-json",
+      "plannerVersion": "v2",
+      "promptVersion": "v2",
+      "assetLibrary": {
+        "items": [
+          { "assetId": "chef-front", "anchorId": "chef", "category": "person", "view": "front", "imagePrompt": "front full-body reference of a noodle restaurant chef", "imageUrl": "fixture://food/chef-front.png", "status": "approved" },
+          { "assetId": "chef-side", "anchorId": "chef", "category": "person", "view": "side", "imagePrompt": "side full-body reference of the same chef", "imageUrl": "fixture://food/chef-side.png", "status": "approved" },
+          { "assetId": "chef-back", "anchorId": "chef", "category": "person", "view": "back", "imagePrompt": "back full-body reference of the same chef", "imageUrl": "fixture://food/chef-back.png", "status": "approved" },
+          { "assetId": "bowl-single", "anchorId": "noodle_bowl", "category": "product", "view": "single", "imagePrompt": "single hero reference of a beef noodle bowl with red broth", "imageUrl": "fixture://food/bowl.png", "status": "approved" },
+          { "assetId": "restaurant-scene", "anchorId": "restaurant", "category": "scene", "view": "overview", "imagePrompt": "small warm noodle restaurant interior", "imageUrl": "fixture://food/restaurant.png", "status": "approved" }
+        ]
+      },
+      "narrativeEvents": [
+        { "eventId": "event-prep", "action": "chef lifts noodles from boiling water", "resultingState": "fresh preparation is established" },
+        { "eventId": "event-sensory", "action": "broth, beef slices, scallions and steam become visible", "resultingState": "appetite proof is visible" },
+        { "eventId": "event-reaction", "action": "customer reacts to the first bite", "resultingState": "payoff is proven by human response" },
+        { "eventId": "event-cta", "action": "store combo information appears", "resultingState": "restaurant CTA is connected to appetite" }
+      ],
+      "anchorStateTimeline": [
+        { "anchorId": "noodle_bowl", "states": [{ "segmentNo": 1, "startState": "empty_bowl", "endState": "noodles_added", "visibleTransitionPath": "chef transfers noodles into the same bowl" }, { "segmentNo": 2, "startState": "noodles_added", "endState": "broth_and_toppings_complete", "visibleTransitionPath": "broth, beef and scallions are added to the same bowl" }, { "segmentNo": 3, "startState": "served", "endState": "hero_combo_cta", "visibleTransitionPath": "same bowl moves from table reaction to hero store layout" }] }
+      ],
+      "keyframes": [
+        { "keyframeNo": 1, "timeSeconds": 0, "imagePrompt": "chef side view lifting noodles from boiling water in kitchen", "imageUrl": "fixture://food/kf-1.png", "usesConsistencyAnchors": ["chef", "restaurant"] },
+        { "keyframeNo": 2, "timeSeconds": 5, "imagePrompt": "noodles placed into a single bowl, steam rising", "imageUrl": "fixture://food/kf-2.png", "usesConsistencyAnchors": ["chef", "noodle_bowl"] },
+        { "keyframeNo": 3, "timeSeconds": 10, "imagePrompt": "customer at table reacts happily to beef noodle aroma", "imageUrl": "fixture://food/kf-3.png", "usesConsistencyAnchors": ["noodle_bowl", "restaurant"] },
+        { "keyframeNo": 4, "timeSeconds": 15, "imagePrompt": "hero beef noodle bowl with store combo CTA", "imageUrl": "fixture://food/kf-4.png", "usesConsistencyAnchors": ["noodle_bowl", "restaurant"] }
+      ],
+      "segments": [
+        { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "durationSeconds": 5, "videoPrompt": "chef lifts noodles and transfers them into the same bowl in one kitchen action", "clipUrl": "fixture://food/segment-1.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "noodles suspended between pot and bowl", "imageUrl": "fixture://food/segment-1-checkpoint-1.png" }] },
+        { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "durationSeconds": 5, "videoPrompt": "steam and toppings complete the bowl, then the served bowl reaches the customer table", "clipUrl": "fixture://food/segment-2.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "red broth and scallions added to the bowl", "imageUrl": "fixture://food/segment-2-checkpoint-1.png" }] },
+        { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "durationSeconds": 5, "videoPrompt": "customer reaction transitions to final hero bowl and store combo CTA", "clipUrl": "fixture://food/segment-3.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "customer smiles after first bite, steam still visible", "imageUrl": "fixture://food/segment-3-checkpoint-1.png" }] }
+      ],
+      "referenceSelectionOutputs": [
+        { "targetArtifactId": "keyframe:1", "selectedArtifactIds": ["consistency_reference:chef-side", "consistency_reference:restaurant-scene"], "selectedReferenceUrls": ["fixture://food/chef-side.png", "fixture://food/restaurant.png"], "candidates": [{ "artifactId": "consistency_reference:chef-side", "selected": true, "purpose": "chef side view for cooking action" }, { "artifactId": "consistency_reference:restaurant-scene", "selected": true, "purpose": "restaurant environment continuity" }] }
+      ],
+      "promptDebugArtifacts": {
+        "keyframe:4": { "targetArtifactId": "keyframe:4", "compilerVersion": "prompt-compiler-v1", "finalPrompt": "single beef noodle bowl hero image with store combo CTA, steam and toppings visible" }
+      },
+      "generationQualityReports": [
+        { "assetId": "keyframe:4:image", "identityScore": 88, "layoutScore": 90, "promptAlignmentScore": 92, "continuityScore": 87, "artifactIssues": [], "passed": true }
+      ],
+      "mediaRevisionHistory": {
+        "keyframe_image:keyframe-4": [{ "id": "food-kf4-r1", "url": "fixture://food/history/kf-4-r1.png", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "segment_clip:segment-3": [{ "id": "food-s3-r1", "url": "fixture://food/history/segment-3-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "final_video:final": [{ "id": "food-final-r1", "url": "fixture://food/history/final-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }]
+      }
+    },
+    "finalVideoUrl": "fixture://food/final.mp4"
+  }
+}

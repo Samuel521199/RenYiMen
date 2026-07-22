@@ -1,0 +1,75 @@
+{
+  "fixtureVersion": 1,
+  "storyBaseline": {
+    "videoCategory": "short_drama",
+    "legacyPlannerBehavior": "pre-story-gate",
+    "capturedForStep": "16.1-phase0-freeze-current-baseline",
+    "knownCurrentFailurePoints": [
+      "relationship conflict can be compressed into a sudden reunion without setup",
+      "the recognition clue may appear as a prop shot instead of a causal turning point",
+      "the ending can resolve emotionally before the audience sees why the character changes"
+    ],
+    "comparisonGoal": "Future planner output should show hesitation -> recognition clue -> emotional reaction -> unresolved/CTA-style suspense."
+  },
+  "project": {
+    "id": "fixture-short-drama-conflict-story",
+    "title": "Synthetic baseline: short drama relationship conflict",
+    "status": "FINAL_REVIEW",
+    "input": {
+      "userPrompt": "Create a 30-second vertical short drama. A woman waits outside a library on a rainy night, recognizes an old promise through a yellow umbrella, hesitates, then leaves the audience with a reunion cliffhanger.",
+      "durationSeconds": 15,
+      "aspectRatio": "9:16",
+      "referenceImageUrls": []
+    },
+    "planJson": {
+      "schemaVersion": "plan-json",
+      "plannerVersion": "v2",
+      "promptVersion": "v2",
+      "assetLibrary": {
+        "items": [
+          { "assetId": "lead-front", "anchorId": "lead", "category": "person", "view": "front", "imagePrompt": "front full-body reference of a young woman in a beige trench coat holding a book", "imageUrl": "fixture://short-drama/lead-front.png", "status": "approved" },
+          { "assetId": "lead-side", "anchorId": "lead", "category": "person", "view": "side", "imagePrompt": "side full-body reference of the same woman in the beige trench coat", "imageUrl": "fixture://short-drama/lead-side.png", "status": "approved" },
+          { "assetId": "lead-back", "anchorId": "lead", "category": "person", "view": "back", "imagePrompt": "back full-body reference of the same woman in the beige trench coat", "imageUrl": "fixture://short-drama/lead-back.png", "status": "approved" },
+          { "assetId": "yellow-umbrella", "anchorId": "umbrella", "category": "prop", "view": "single", "imagePrompt": "single yellow umbrella with a small library card tag tied to the handle", "imageUrl": "fixture://short-drama/yellow-umbrella.png", "status": "approved" },
+          { "assetId": "library-entrance", "anchorId": "library", "category": "scene", "view": "overview", "imagePrompt": "rainy night city library entrance with warm interior light", "imageUrl": "fixture://short-drama/library-entrance.png", "status": "approved" }
+        ]
+      },
+      "narrativeEvents": [
+        { "eventId": "event-hesitation", "action": "the lead waits outside the library and almost leaves", "resultingState": "emotional distance and uncertainty are established" },
+        { "eventId": "event-clue", "action": "a yellow umbrella with the old library card tag appears beside her", "resultingState": "the past promise becomes visible" },
+        { "eventId": "event-reaction", "action": "the lead recognizes the tag and turns back toward the entrance", "resultingState": "the decision changes because of the clue" },
+        { "eventId": "event-cliffhanger", "action": "a shadow opens the library door as she steps forward", "resultingState": "the reunion remains unresolved and suspenseful" }
+      ],
+      "anchorStateTimeline": [
+        { "anchorId": "lead", "states": [{ "segmentNo": 1, "startState": "waiting", "endState": "about_to_leave", "visibleTransitionPath": "lead lowers her gaze and turns slightly away from the library" }, { "segmentNo": 2, "startState": "about_to_leave", "endState": "recognizes_clue", "visibleTransitionPath": "lead sees the umbrella tag and stops mid-step" }, { "segmentNo": 3, "startState": "recognizes_clue", "endState": "steps_toward_door", "visibleTransitionPath": "lead turns from side view to front view and walks toward the opening door" }] },
+        { "anchorId": "umbrella", "states": [{ "segmentNo": 1, "startState": "absent", "endState": "appears_near_bench", "visibleTransitionPath": "umbrella enters frame near the library bench" }, { "segmentNo": 2, "startState": "near_bench", "endState": "tag_visible", "visibleTransitionPath": "camera moves closer to the handle tag" }, { "segmentNo": 3, "startState": "tag_visible", "endState": "left_on_bench", "visibleTransitionPath": "umbrella remains as the lead walks away from it toward the door" }] }
+      ],
+      "keyframes": [
+        { "keyframeNo": 1, "timeSeconds": 0, "imagePrompt": "lead woman waits alone outside rainy library entrance, about to leave", "imageUrl": "fixture://short-drama/kf-1.png", "usesConsistencyAnchors": ["lead", "library"] },
+        { "keyframeNo": 2, "timeSeconds": 5, "imagePrompt": "yellow umbrella appears beside library bench while the lead notices it from side view", "imageUrl": "fixture://short-drama/kf-2.png", "usesConsistencyAnchors": ["lead", "umbrella", "library"] },
+        { "keyframeNo": 3, "timeSeconds": 10, "imagePrompt": "close emotional reaction, lead recognizes the old library card tag on the umbrella", "imageUrl": "fixture://short-drama/kf-3.png", "usesConsistencyAnchors": ["lead", "umbrella"] },
+        { "keyframeNo": 4, "timeSeconds": 15, "imagePrompt": "library door opens with a warm silhouette, lead steps forward, cliffhanger ending", "imageUrl": "fixture://short-drama/kf-4.png", "usesConsistencyAnchors": ["lead", "library"] }
+      ],
+      "segments": [
+        { "segmentNo": 1, "startKeyframeNo": 1, "endKeyframeNo": 2, "durationSeconds": 5, "videoPrompt": "same rainy library entrance shot, lead starts to leave and then notices the yellow umbrella entering frame", "clipUrl": "fixture://short-drama/segment-1.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "lead turns away while yellow umbrella is visible near bench", "imageUrl": "fixture://short-drama/segment-1-checkpoint-1.png" }] },
+        { "segmentNo": 2, "startKeyframeNo": 2, "endKeyframeNo": 3, "durationSeconds": 5, "videoPrompt": "camera pushes toward the umbrella tag and the lead stops, recognizing the old promise", "clipUrl": "fixture://short-drama/segment-2.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "library card tag on yellow umbrella handle, lead hand reaching but not touching", "imageUrl": "fixture://short-drama/segment-2-checkpoint-1.png" }] },
+        { "segmentNo": 3, "startKeyframeNo": 3, "endKeyframeNo": 4, "durationSeconds": 5, "videoPrompt": "lead reacts, turns toward the door, and a warm silhouette opens it without revealing the person", "clipUrl": "fixture://short-drama/segment-3.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "lead side view stepping toward the warm library doorway", "imageUrl": "fixture://short-drama/segment-3-checkpoint-1.png" }] }
+      ],
+      "referenceSelectionOutputs": [
+        { "targetArtifactId": "keyframe:2", "selectedArtifactIds": ["consistency_reference:lead-side", "consistency_reference:yellow-umbrella", "consistency_reference:library-entrance"], "selectedReferenceUrls": ["fixture://short-drama/lead-side.png", "fixture://short-drama/yellow-umbrella.png", "fixture://short-drama/library-entrance.png"], "candidates": [{ "artifactId": "consistency_reference:lead-side", "selected": true, "purpose": "side view for hesitation and noticing motion" }, { "artifactId": "consistency_reference:yellow-umbrella", "selected": true, "purpose": "recognition clue identity lock" }, { "artifactId": "consistency_reference:library-entrance", "selected": true, "purpose": "rainy library environment continuity" }] }
+      ],
+      "promptDebugArtifacts": {
+        "keyframe:4": { "targetArtifactId": "keyframe:4", "compilerVersion": "prompt-compiler-v1", "finalPrompt": "rainy library doorway cliffhanger, one lead woman in beige trench coat, warm silhouette hidden, no extra faces revealed" }
+      },
+      "generationQualityReports": [
+        { "assetId": "keyframe:4:image", "identityScore": 89, "layoutScore": 88, "promptAlignmentScore": 91, "continuityScore": 86, "artifactIssues": [], "passed": true }
+      ],
+      "mediaRevisionHistory": {
+        "keyframe_image:keyframe-4": [{ "id": "short-drama-kf4-r1", "url": "fixture://short-drama/history/kf-4-r1.png", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "segment_clip:segment-3": [{ "id": "short-drama-s3-r1", "url": "fixture://short-drama/history/segment-3-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "final_video:final": [{ "id": "short-drama-final-r1", "url": "fixture://short-drama/history/final-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }]
+      }
+    },
+    "finalVideoUrl": "fixture://short-drama/final.mp4"
+  }
+}

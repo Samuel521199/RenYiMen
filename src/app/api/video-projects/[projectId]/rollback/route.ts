@@ -15,6 +15,7 @@ interface RouteContext {
 
 const ROLLBACK_TARGETS = new Set<VideoProjectRollbackTarget>([
   "PLAN_REVIEW",
+  "ASSET_LIBRARY_REVIEW",
   "IMAGE_REVIEW",
   "MICRO_SHOT_REVIEW",
   "CLIP_REVIEW",

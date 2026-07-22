@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AnchorStateTimeline,
   ArtifactMetadata,
@@ -12,25 +14,161 @@ import type {
   SegmentRenderDescription,
   StoryboardBrief,
   VideoAspectRatio,
+  VideoAssetView,
   VideoAudioPlan,
   VideoConsistencyAnchor,
+  VideoCreativeCategory,
+  VideoCreativeStrategy,
+  VideoCreativeTemplateId,
   VideoMicroShot,
+  VideoNarrativeMicroRules,
   VideoPlanKeyframe,
   VideoPlanningManifest,
   VideoPlanSegment,
   VideoPlanShot,
   VideoPromptDetailPlan,
   VideoStyleBible,
+  VideoStoryBeat,
+  VideoStoryFunction,
+  VideoStoryQualityReport,
+  VideoStoryTraceFields,
+  VideoShotGroupingPass,
   VideoTimelineBlueprintSegment,
 } from "./types";
 import { createVideoPlan } from "./planner";
 import { errorForLog, logOnePromptVideo } from "./logger";
+import { assertPlanValidForGeneration } from "./plan-validator";
+import { repairMotionfulEndpointContracts } from "./frame-contract";
+import { auditSingleTakePlan } from "./single-take-audit";
+import { decideStoryRewrite, markStoryRewriteRequired, withStoryQualityGate, type StoryRewriteDecision } from "./story-quality-gate";
+import {
+  readStoryRolloutConfig,
+  shouldAttemptStoryRewrite,
+  shouldEnableShotGrouping,
+  shouldEvaluateStoryQuality,
+  shouldRequireStoryQualityReview,
+  type OnePromptVideoStoryRolloutConfig,
+} from "./story-rollout-config";
+import {
+  StoryboardStageError,
+  runStoryboardStageWithRetry,
+} from "./storyboard-stage-retry";
 
 const MIN_SEGMENT_SECONDS = 3;
 const MAX_SEGMENT_SECONDS = 15;
 const MAX_SINGLE_TAKE_REVISIONS = 3;
+const MAX_STORY_QUALITY_REWRITES = 2;
 const MAX_JSON_REPAIR_INPUT_CHARS = 60000;
 const DEFAULT_JSON_STAGE_TIMEOUT_MS = 180000;
+
+type StoryTemplateBeatDefinition = {
+  storyFunction: VideoStoryFunction;
+  titleZh: string;
+  cause: string;
+  effect: string;
+  informationUnit: string;
+  actionContinuity?: NonNullable<VideoStoryTraceFields["actionContinuity"]>;
+  reactionBeat?: string;
+  powerShift?: string;
+};
+
+const STORY_TEMPLATE_DEFINITIONS: Record<VideoCreativeTemplateId, {
+  videoCategory: VideoCreativeCategory;
+  conversionGoalZh: string;
+  templateReasonZh: string;
+  minimumBeats: StoryTemplateBeatDefinition[];
+}> = {
+  game_reversal: {
+    videoCategory: "game",
+    conversionGoalZh: "让用户相信自己也能从劣势中翻盘并立即试玩。",
+    templateReasonZh: "适合有对手、失败压力、关键操作、反超爽点的游戏广告。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "逆风开局", cause: "玩家处于明显劣势", effect: "观众想知道如何翻盘", informationUnit: "展示失败压力和对手优势" },
+      { storyFunction: "conflict", titleZh: "最后机会", cause: "资源或时间快耗尽", effect: "行动动机被建立", informationUnit: "明确胜负条件" },
+      { storyFunction: "turning_point", titleZh: "关键操作触发", cause: "主角执行可见操作", effect: "局势开始改变", informationUnit: "展示触发动作", actionContinuity: { motivationOrPreparation: "主角观察局势并决定冒险", execution: "主角完成关键点击/下注/技能释放", resultOrReaction: "奖励、牌面或战局开始反转" }, reactionBeat: "对手或旁观者露出震惊反应", powerShift: "主角从劣势转为掌控局面" },
+      { storyFunction: "payoff", titleZh: "反超胜利", cause: "关键操作兑现结果", effect: "爽点成立", informationUnit: "展示胜利结果和奖励", actionContinuity: { motivationOrPreparation: "反转迹象已经出现", execution: "奖励/分数/牌局完成结算", resultOrReaction: "主角庆祝，对手震惊" }, reactionBeat: "主角和社交圈庆祝", powerShift: "主角成为赢家" },
+      { storyFunction: "cta", titleZh: "立即试玩", cause: "观众刚看到可复制的爽点", effect: "引导下载或试玩", informationUnit: "Play now / Download" },
+    ],
+  },
+  game_bonus_payoff: {
+    videoCategory: "game",
+    conversionGoalZh: "突出奖励机制和即时爽感，推动用户试玩。",
+    templateReasonZh: "适合以 bonus、combo、倍率、爆奖为核心卖点的游戏广告。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "奖励即将触发", cause: "画面出现接近奖励的状态", effect: "观众期待爆点", informationUnit: "展示奖励条件" },
+      { storyFunction: "turning_point", titleZh: "触发 bonus", cause: "主角完成最后一步操作", effect: "奖励机制启动", informationUnit: "展示触发动作", actionContinuity: { motivationOrPreparation: "主角识别 bonus 机会", execution: "完成最后一步操作", resultOrReaction: "bonus UI/奖励动效开始" }, reactionBeat: "主角露出惊喜反应", powerShift: "普通局面升级为高奖励局面" },
+      { storyFunction: "payoff", titleZh: "奖励爆发", cause: "bonus 被成功触发", effect: "爽点兑现", informationUnit: "展示金币、倍率或奖励结果", actionContinuity: { motivationOrPreparation: "bonus 已启动", execution: "奖励连锁释放", resultOrReaction: "主角庆祝奖励结果" }, reactionBeat: "观众角色/朋友震惊", powerShift: "主角获得明显收益" },
+      { storyFunction: "cta", titleZh: "领取奖励", cause: "奖励爽感已经建立", effect: "引导试玩", informationUnit: "Download / Claim bonus" },
+    ],
+  },
+  product_problem_solution: {
+    videoCategory: "product",
+    conversionGoalZh: "让用户理解产品解决了具体问题并产生购买信任。",
+    templateReasonZh: "适合护肤品、日用品、工具类产品的痛点-证明-结果广告。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "真实痛点", cause: "用户遇到具体困扰", effect: "观众产生代入", informationUnit: "展示使用前问题" },
+      { storyFunction: "proof", titleZh: "产品介入", cause: "痛点需要解决方案", effect: "产品价值开始被证明", informationUnit: "展示成分、使用方式或卖点证据" },
+      { storyFunction: "payoff", titleZh: "效果证明", cause: "产品持续作用", effect: "前后差异可见", informationUnit: "展示改善结果", actionContinuity: { motivationOrPreparation: "用户决定尝试产品", execution: "按正确方式使用产品", resultOrReaction: "用户看到改善并露出轻松/满意反应" }, reactionBeat: "用户自信或安心", powerShift: "从被问题困扰转为掌控状态" },
+      { storyFunction: "cta", titleZh: "品牌购买引导", cause: "效果和信任已经建立", effect: "引导购买/了解更多", informationUnit: "品牌、优惠或购买入口" },
+    ],
+  },
+  ecommerce_offer_conversion: {
+    videoCategory: "ecommerce",
+    conversionGoalZh: "用痛点、卖点证明和限时优惠推动下单。",
+    templateReasonZh: "适合电商短视频，强调需求、产品证明、优惠紧迫和下单 CTA。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "下单前痛点", cause: "用户有迫切需求", effect: "观众理解购买理由", informationUnit: "展示痛点场景" },
+      { storyFunction: "proof", titleZh: "卖点证明", cause: "产品解决痛点", effect: "购买信任上升", informationUnit: "展示核心卖点/规格/场景效果" },
+      { storyFunction: "payoff", titleZh: "优惠出现", cause: "价值已经证明", effect: "形成行动紧迫感", informationUnit: "价格、赠品、限时优惠", reactionBeat: "用户觉得现在买更划算", powerShift: "从犹豫转为下单理由充分" },
+      { storyFunction: "cta", titleZh: "立即下单", cause: "优惠窗口有限", effect: "引导点击购买", informationUnit: "Order now / Buy now" },
+    ],
+  },
+  food_sensory_reaction: {
+    videoCategory: "food",
+    conversionGoalZh: "用制作过程、感官刺激和顾客反应引发到店或下单欲望。",
+    templateReasonZh: "适合餐饮广告，围绕食材、制作、香气口感、顾客反应和门店 CTA。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "食材/出餐吸引", cause: "热腾腾的制作瞬间出现", effect: "观众被食欲吸引", informationUnit: "展示食材或出餐动作" },
+      { storyFunction: "proof", titleZh: "感官证明", cause: "制作过程释放香气和质感", effect: "味觉想象增强", informationUnit: "热气、汤汁、拉丝、酥脆、色泽" },
+      { storyFunction: "reaction", titleZh: "顾客第一口反应", cause: "食物被端到顾客面前", effect: "美味被人类反应证明", informationUnit: "顾客表情和动作", actionContinuity: { motivationOrPreparation: "顾客闻到香气准备品尝", execution: "顾客吃下第一口", resultOrReaction: "顾客露出满足反应" } },
+      { storyFunction: "cta", titleZh: "门店/套餐 CTA", cause: "食欲和信任已经建立", effect: "引导到店、团购或下单", informationUnit: "门店名、套餐、地址或立即下单" },
+    ],
+  },
+  auto_performance_hero: {
+    videoCategory: "auto",
+    conversionGoalZh: "突出车辆性能、质感和驾驶向往，推动预约试驾或咨询。",
+    templateReasonZh: "适合汽车或交通工具广告，强调外观、性能场景、驾驶体验和 CTA。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "视觉登场", cause: "车辆以强视觉姿态出现", effect: "建立高级感和注意力", informationUnit: "外观、灯光、道路环境" },
+      { storyFunction: "proof", titleZh: "性能证明", cause: "车辆进入动态场景", effect: "性能可信", informationUnit: "加速、操控、空间或智能功能" },
+      { storyFunction: "payoff", titleZh: "驾驶向往", cause: "性能和质感被证明", effect: "形成拥有欲", informationUnit: "驾驶者反应和英雄镜头", reactionBeat: "驾驶者自信/愉悦", powerShift: "从观察车辆转为想象拥有" },
+      { storyFunction: "cta", titleZh: "预约试驾", cause: "向往已经建立", effect: "引导留资或试驾", informationUnit: "Book a test drive" },
+    ],
+  },
+  short_drama_conflict_twist: {
+    videoCategory: "short_drama",
+    conversionGoalZh: "用人物关系、冲突、反转和悬念推动继续观看。",
+    templateReasonZh: "适合剧情短片，重点是人物关系、误会/冲突、反转线索和悬念收束。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "关系悬念", cause: "人物处在不稳定关系中", effect: "观众想知道发生了什么", informationUnit: "人物关系和情绪状态" },
+      { storyFunction: "conflict", titleZh: "冲突升级", cause: "误会、压力或秘密被揭开", effect: "情绪张力增加", informationUnit: "冲突原因" },
+      { storyFunction: "turning_point", titleZh: "反转线索", cause: "关键物件/一句话/动作出现", effect: "观众重新理解关系", informationUnit: "反转证据", actionContinuity: { motivationOrPreparation: "角色准备离开或做出决定", execution: "反转线索出现", resultOrReaction: "角色停下并重新判断" }, reactionBeat: "角色震惊/迟疑/心软", powerShift: "信息优势从隐藏方转向主角或观众" },
+      { storyFunction: "cliffhanger", titleZh: "悬念停顿", cause: "反转刚刚成立", effect: "推动继续观看", informationUnit: "未揭晓的下一步" },
+    ],
+  },
+  generic_brand_story: {
+    videoCategory: "brand",
+    conversionGoalZh: "用通用 hook、冲突、证明、payoff 和 CTA 建立品牌记忆或行动。",
+    templateReasonZh: "当分类不确定时使用，避免套用游戏、餐饮、电商等垂直语义。",
+    minimumBeats: [
+      { storyFunction: "hook", titleZh: "开场注意力", cause: "提出一个清晰问题或愿景", effect: "观众理解主题", informationUnit: "品牌/主题 hook" },
+      { storyFunction: "conflict", titleZh: "阻力或需求", cause: "目标尚未达成", effect: "故事需要推进", informationUnit: "问题、阻力或未满足需求" },
+      { storyFunction: "proof", titleZh: "解决路径", cause: "品牌/人物采取行动", effect: "可信度建立", informationUnit: "证据、过程或场景证明" },
+      { storyFunction: "payoff", titleZh: "价值兑现", cause: "解决路径奏效", effect: "主题被记住", informationUnit: "结果、情绪或品牌价值" },
+      { storyFunction: "cta", titleZh: "行动引导", cause: "价值已经兑现", effect: "引导了解、关注或购买", informationUnit: "CTA" },
+    ],
+  },
+};
 
 const JSON_REPAIR_SYSTEM_PROMPT = `You are a strict JSON repair tool.
 
@@ -44,8 +182,45 @@ Your job:
 - If a value is truncated or impossible to recover, close the nearest valid object/array conservatively.
 - Output one complete JSON object.`;
 
+const STORY_QUALITY_REWRITE_SYSTEM_PROMPT = `You are Story Quality Rewrite Planner for a controllable AI video pipeline.
+
+Return only valid JSON. No markdown, explanations, comments, or extra text.
+
+Your job:
+- Repair a weak video plan according to Story Quality Gate issues.
+- Preserve aspect ratio, total duration, segment count, segment numbers, segment start/end times, boundary keyframe numbers, consistency anchors, asset library intent, style bible, and camera continuity constraints.
+- Do not turn a non-game video into a game ad. Do not use bonus, jackpot, cards, coins, opponent shock, leaderboard, or win streak unless the selected category is game.
+- If rewrite_from_stage is creative_strategy, rewrite creative_strategy and all downstream story_beats, storyboard_brief, shot_grouping_pass, keyframes, segments, and prompt_detail_plan.
+- If rewrite_from_stage is beat_sheet, preserve creative_strategy but rewrite story_beats and all downstream storyboard/prompt fields.
+- If rewrite_from_stage is storyboard, preserve creative_strategy and story_beats but rewrite storyboard_brief, keyframes, segments, segment_render_descriptions, and prompt_detail_plan.
+- Every payoff, win, conversion, order, transformation, or reward must have a visible prior trigger/proof and a reactionBeat.
+- Every turning_point/proof/payoff must include action_continuity with motivation_or_preparation, execution, and result_or_reaction.
+- Every segment must provide a new information_unit, linked_beat_ids, story_function, cause, effect, and key_evidence_ids when evidence matters.
+- References are assets and identity/style constraints, not the story itself.
+
+Output contract:
+{
+  "story_quality_rewrite_plan": {
+    "rewrite_from_stage": "creative_strategy | beat_sheet | storyboard",
+    "creative_strategy": {},
+    "story_beats": [],
+    "shot_grouping_pass": {},
+    "storyboard_brief": [],
+    "segment_render_descriptions": [],
+    "keyframes": [],
+    "segments": [],
+    "prompt_detail_plan": {},
+    "rewrite_notes": []
+  }
+}`;
+
 type PlanStructureExtras = {
   narrativeEvents: NarrativeEvent[];
+  creativeStrategy: VideoCreativeStrategy;
+  storyBeats: VideoStoryBeat[];
+  narrativeMicroRules: VideoNarrativeMicroRules;
+  shotGroupingPass?: VideoShotGroupingPass;
+  storyQualityReport: VideoStoryQualityReport;
   anchorStateTimeline: AnchorStateTimeline[];
   audioBible: Record<string, unknown>;
   candidateTimeline: VideoTimelineBlueprintSegment[];
@@ -61,13 +236,20 @@ type PlanStructureExtras = {
   warnings: string[];
 };
 
+type ShotGroupingSplitReason = NonNullable<VideoShotGroupingPass["splitReasons"]>[number];
+
 const PLANNING_ARCHITECT_SYSTEM_PROMPT = `You are Planning Architect for a controllable AI video pipeline.
 
 Return only valid JSON. No markdown, explanations, or comments.
 
 Your only job in stage 1:
 - Understand the user's video task.
+- First output creative_strategy before narrative_events. Decide video_category, template_id, template_reason, conversion_goal, viewer promise, hook, conflict, turning point, payoff, CTA, and how references should be used as assets rather than as a finished storyboard.
+- Route the task to exactly one initial template_id: game_reversal, game_bonus_payoff, product_problem_solution, ecommerce_offer_conversion, food_sensory_reaction, auto_performance_hero, short_drama_conflict_twist, or generic_brand_story.
+- Do not use game-only semantics such as bonus, jackpot, opponent shock, cards, coins, leaderboard, or win streak unless video_category is game.
+- If category is uncertain, choose generic_brand_story and write fallback_reason_zh.
 - First decompose the task into narrative_events before deciding the segment timeline.
+- Output narrative_micro_rules so later stages know which story failures to avoid, especially sudden outcome, reference-only animation, missing visible trigger, and CTA before payoff.
 - Decide which objects, states, visual rules, and task elements must stay consistent across the whole video.
 - For every consistency anchor, separate static visual locks from dynamic state changes across the story.
 - Output anchor_state_timeline so later stages can distinguish legal state evolution from identity drift.
@@ -84,6 +266,10 @@ Hard rules:
 - If a beat requires a location change, environment replacement, large time jump, major camera setup change, major composition reset, subject teleport, product state discontinuity, or dissolve-like transformation, create a new segment boundary instead of putting that change inside one segment.
 - Start and end boundary frames of the same segment must be compatible as two moments from the same continuous shot: same location logic, same camera axis family, same subject/product identity, same lighting direction, and no impossible scene jump.
 - Identify consistency anchors dynamically. Do not assume every task has a product. Anchors may be person, product, prop, location, style, brand_visual, task_object, effect_state, vehicle, food, space_layout, or custom.
+- A consistency-anchor image prompt is an asset-sheet prompt, not a narrative keyframe. Keep identity/appearance facts, but remove story actions, screen positions, title interactions, scene decoration, and event-specific composition.
+- For a person anchor, image_prompt_zh/image_prompt_en must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
+- Reference images may contain a finished poster or advertisement. Extract the anchor's stable identity only; never copy the reference image's background, typography, logo placement, framing, or full composition into a person asset prompt.
+- Scene/location anchors may describe the environment. Brand-visual anchors may describe approved logos or typography. Do not leak those elements into person, prop, or product asset prompts unless they are an intrinsic part of that asset.
 - Every narrative_event must include event_id, dramatic_goal, participants, location_id, initial_state, action, resulting_state, required_anchor_ids, previous_event_ids, and must_become_separate_segment.
 - previous_event_ids must only reference earlier narrative_events.
 - required_anchor_ids must exist in consistency_manifest. If you discover a needed anchor, add it to consistency_manifest before referencing it.
@@ -96,6 +282,38 @@ Hard rules:
 
 Return this JSON shape:
 {
+  "creative_strategy": {
+    "video_type": "game_ad | product_ad | ecommerce_ad | food_ad | short_drama | brand_film | tutorial | custom",
+    "video_category": "game | product | ecommerce | food | auto | short_drama | brand | tutorial | custom",
+    "template_id": "game_reversal | game_bonus_payoff | product_problem_solution | ecommerce_offer_conversion | food_sensory_reaction | auto_performance_hero | short_drama_conflict_twist | generic_brand_story",
+    "template_reason_zh": "",
+    "conversion_goal_zh": "",
+    "fallback_reason_zh": "",
+    "audience_zh": "",
+    "core_promise_zh": "",
+    "hook_zh": "",
+    "conflict_zh": "",
+    "turning_point_zh": "",
+    "payoff_zh": "",
+    "cta_zh": "",
+    "emotional_arc": [],
+    "selling_point_ids": [],
+    "reference_usage_strategy_zh": "",
+    "risks": []
+  },
+  "narrative_micro_rules": {
+    "causal_chain_required": true,
+    "forbid_sudden_outcome": true,
+    "forbid_reference_only_animation": true,
+    "require_hook_before_asset_showcase": true,
+    "require_payoff_before_cta": true,
+    "require_reaction_after_turning_point": true,
+    "require_visible_trigger_before_state_change": true,
+    "required_beat_functions": ["hook", "setup", "conflict", "turning_point", "payoff", "cta"],
+    "forbidden_patterns": [],
+    "continuity_rules": [],
+    "cta_rules": []
+  },
   "consistency_manifest": {
     "anchors": []
   },
@@ -253,7 +471,10 @@ Return only valid JSON. No markdown, explanations, or comments.
 
 Your only job in stage 2A:
 - Use planning_manifest as the source of truth.
+- Use creative_strategy and narrative_micro_rules as story quality constraints.
 - Create a concise whole-story storyboard brief for each segment.
+- Create story_beats before or alongside storyboard_brief. Each story beat must explain story_function, emotional_beat, cause, effect, information_unit, key_evidence_ids, and required_anchor_ids.
+- Create shot_grouping_pass that maps story_beats to segment numbers, merges adjacent micro-beats only when they share narrative focus, physical space, continuous action chain, emotion direction, and compatible POV/objective camera relation, and explains why each beat group can be executed as one continuous i2v segment.
 - Draft camera_graph and final_transition_plan.
 - Keep output short and structural.
 
@@ -263,7 +484,15 @@ Hard rules:
 - Do not output complete video prompts.
 - Do not output detailed checkpoint prompts.
 - Do not rewrite planning_manifest.timeline_blueprint.
+- Every storyboard_brief item must include linked_beat_ids and story_function.
+- shot_grouping_pass.groups must never exceed 15 seconds total duration.
+- shot_grouping_pass.split_reasons is required for every adjacent segment pair that is not in the same group.
+- Always split for space changes, time jumps, new conflict relationship, obvious payoff state change, or CTA entry.
 - Each storyboard_brief item must include segment_no, source_event_ids, camera_id, visual_desc_zh, visual_desc_en, beat_role, required_anchor_ids, location_id, and separation_reason.
+- Every new_camera_setup must either create a transition_reference_plan item for its target camera/segment or put an explicit no-inheritance explanation in inheritance_reason_zh. Never leave missing_info unresolved.
+- Every alternate_view must include axis_description and spatial_layout_lock. If either is missing, the hard audit reason is alternate_view_axis_or_left_right_lock_missing.
+- Evaluate transition-reference need for every alternate_view, derived_reframe whose parent frame cannot directly supply the target framing, and new setup inheriting layout, light, or positions. Use mode=short when an approved parent frame is sufficient; use mode=full when a generated camera move and extracted target-view frame are required.
+- A transition reference is generation-only scene-layout evidence and never enters the final edit. A generated_bridge is an independent final-edit clip. Never reuse one artifact or approval state for both concepts.
 
 Return this JSON shape:
 {
@@ -279,9 +508,60 @@ Return this JSON shape:
       "lighting_tone_lock": "",
       "negative_prompt": ""
     },
+    "story_beats": [
+      {
+        "beat_id": "beat_1",
+        "order": 1,
+        "title_zh": "",
+        "story_function": "hook | setup | conflict | escalation | turning_point | proof | payoff | reaction | cta | cliffhanger | ending | transition | custom",
+        "emotional_beat_zh": "",
+        "cause": "",
+        "effect": "",
+        "information_unit": "",
+        "key_evidence_ids": [],
+        "required_anchor_ids": [],
+        "source_event_ids": [],
+        "target_segment_nos": [1],
+        "must_be_visible_before_beat_ids": [],
+        "action_continuity": {
+          "motivation_or_preparation": "",
+          "execution": "",
+          "result_or_reaction": ""
+        },
+        "reaction_beat": "",
+        "power_shift": ""
+      }
+    ],
+    "shot_grouping_pass": {
+      "strategy_zh": "",
+      "source_beat_ids": [],
+      "groups": [
+        {
+          "group_id": "group_1",
+          "beat_ids": ["beat_1"],
+          "segment_nos": [1],
+          "story_function": "hook",
+          "reason_zh": "",
+          "continuous_take_risk": "low | medium | high",
+          "split_required": false
+        }
+      ],
+      "split_reasons": [
+        {
+          "after_segment_no": 1,
+          "before_segment_no": 2,
+          "reason_code": "space_change | time_jump | new_conflict_relation | payoff_state_change | cta_enter | duration_limit | camera_mismatch | narrative_focus_change | model_continuity_risk",
+          "reason_zh": "",
+          "merge_rejected": true
+        }
+      ],
+      "warnings": []
+    },
     "storyboard_brief": [
       {
         "segment_no": 1,
+        "linked_beat_ids": ["beat_1"],
+        "story_function": "hook | setup | conflict | escalation | turning_point | proof | payoff | reaction | cta | cliffhanger | ending | transition | custom",
         "source_event_ids": [],
         "camera_id": "camera_01",
         "visual_desc_zh": "",
@@ -298,7 +578,16 @@ Return this JSON shape:
           "camera_id": "camera_01",
           "segment_nos": [1],
           "location_id": "",
-          "description": ""
+          "description": "",
+          "parent_camera_id": "",
+          "parent_segment_no": 0,
+          "axis_description": "",
+          "framing_range": "",
+          "movement_style": "",
+          "spatial_layout_lock": "",
+          "relation_to_parent": "same_camera_setup | same_axis | derived_reframe | same_spatial_context | same_subject_group | alternate_view | new_camera_setup",
+          "missing_info": [],
+          "inheritance_reason_zh": ""
         }
       ],
       "relations": [
@@ -310,6 +599,16 @@ Return this JSON shape:
         }
       ]
     },
+    "transition_reference_plan": [
+      {
+        "source_camera_id": "camera_01",
+        "to_camera_id": "camera_02",
+        "to_segment_no": 2,
+        "required": true,
+        "mode": "short | full",
+        "reason": ""
+      }
+    ],
     "final_transition_plan": [
       {
         "from_segment_no": 1,
@@ -330,6 +629,7 @@ Return only valid JSON. No markdown, explanations, or comments.
 
 Your only job in stage 2B:
 - Use planning_manifest and storyboard_artist_plan as the source of truth.
+- Use story_beats and shot_grouping_pass as the source of truth for story causality.
 - Follow planning_manifest.timeline_blueprint exactly for segment count, start time, end time, and duration.
 - Convert every storyboard brief into executable start/end frame contracts, motion contracts, single-take contracts, boundary keyframe descriptions, segment descriptions, subtitles, audio_plan, and same-take motion checkpoints.
 - Follow planning_manifest.subtitle_policy. If subtitles are not needed, leave segment.subtitle empty. If subtitles are needed, generate concise editable overlay subtitles for each appropriate segment.
@@ -343,11 +643,15 @@ Hard rules:
 - Every keyframe, segment, motion_checkpoint, and micro_shot must list uses_consistency_anchors.
 - Do not change anchor identity, product shape, scene layout, brand visual rules, effect state, segment count, or segment durations.
 - Subtitles are editorial overlay copy. Do not ask generated images/videos to render text.
+- Read camera_graph inheritance for every segment. same_camera_setup inherits composition/axis/layout/lighting; same_axis inherits axis/direction; derived_reframe inherits subject relationships/layout; same_spatial_context inherits only location/fixed objects/lighting; same_subject_group inherits only the subject combination; alternate_view must preserve the 180-degree axis and left-right relationships; new_camera_setup must name a transition reference requirement or explicitly explain why inheritance is unnecessary.
 - Each segment must be written as a single continuous take from its start boundary keyframe to its end boundary keyframe. Do not describe internal cuts, dissolves, fades, montage edits, shot switches, or scene transitions inside a segment.
 - For any segment, the start and end keyframes must look like two reachable moments within the same scene and camera setup family. They may change pose, product handling, camera distance, focus, or framing gradually, but not location, time period, environment, outfit, identity, or layout abruptly.
 - micro_shots are internal same-take motion checkpoints, not extra clips, not extra scenes, and not edit points. Use text, image_prompt, or mixed only to describe reachable intermediate states inside the same continuous shot.
 - All micro_shots in a segment must preserve the same location, camera axis family, lighting direction, color tone, subject identity, product identity, and prop layout. If this is impossible, flag the segment as high risk.
 - Every user-visible micro_shot field must be bilingual. Fill scene_zh/action_zh/camera_zh/prompt_zh in Chinese only, and scene_en/action_en/camera_en/prompt_en in English only. Do not mix Chinese and English inside the same language field.
+- Every segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, and key_evidence_ids. Do not leave linked_beat_ids empty.
+- If a segment contains a complex action, state action_continuity with motivation_or_preparation, execution, and result_or_reaction.
+- If story_function is payoff or turning_point, include reaction_beat and power_shift.
 
 Return this JSON shape:
 {
@@ -472,6 +776,10 @@ Your job:
 - The start and end keyframes must be reachable moments in the same scene and camera setup family.
 - Include concise bilingual fields for user-visible text.
 - Subtitles are editorial overlay copy. Do not ask generated images/videos to render text.
+- Use target_story_beats and target_shot_group to preserve story causality.
+- The target segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, and key_evidence_ids. Do not leave linked_beat_ids empty.
+- If the target segment contains a complex action, state action_continuity with motivation_or_preparation, execution, and result_or_reaction.
+- If story_function is payoff or turning_point, include reaction_beat and power_shift.
 
 Return this JSON shape, containing only the target segment, its render description, and keyframes N/N+1:
 {
@@ -543,6 +851,20 @@ Return this JSON shape, containing only the target segment, its render descripti
           "rationale": ""
         },
         "output_mode": "mixed",
+        "linked_beat_ids": ["beat_1"],
+        "story_function": "hook | setup | conflict | escalation | turning_point | proof | payoff | reaction | cta | cliffhanger | ending | transition | custom",
+        "emotional_beat_zh": "",
+        "cause": "",
+        "effect": "",
+        "information_unit": "",
+        "key_evidence_ids": [],
+        "action_continuity": {
+          "motivation_or_preparation": "",
+          "execution": "",
+          "result_or_reaction": ""
+        },
+        "reaction_beat": "",
+        "power_shift": "",
         "constraints": [],
         "timed_prompts": [],
         "micro_shots": [],
@@ -584,7 +906,9 @@ Return only valid JSON. No markdown, explanations, or comments.
 Your only job in stage 3:
 - Compile detailed generation prompts from the approved planning_manifest and the merged storyboard_plan produced by Stage 2A Storyboard Artist + Stage 2B Shot Decomposer.
 - Do not rewrite story, timeline, subtitles, audio plan, or micro-shot structure.
+- Preserve story_beats, linked_beat_ids, story_function, cause/effect, and payoff/turning-point reaction information as prompt context. Do not erase the story trace.
 - Respect storyboard_brief, camera_graph, final_transition_plan, segment_render_descriptions, start/end frame contracts, motion contracts, and single_take_contracts.
+- Compile the exact camera_graph inheritance scope into every affected image/video prompt. Never turn a same_spatial_context or same_subject_group relation into unrestricted visual copying. For alternate_view preserve the 180-degree axis and left-right relationships. For new_camera_setup use its transition reference decision and do not silently copy the previous composition.
 - Every prompt must preserve the anchors referenced by that keyframe, segment, or micro-shot.
 - Keyframe prompts describe one still image only, no motion process, no subtitles, no watermark, no UI.
 - Segment prompts describe one continuous unbroken camera take from start boundary frame to end boundary frame.
@@ -636,13 +960,74 @@ type JsonStageContentResult = {
   errorMessage?: string;
 };
 
-export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): Promise<OnePromptVideoPlan> {
+export interface AliyunStoryboardPlannerCheckpoint {
+  version: 1;
+  inputFingerprint: string;
+  planningRaw?: unknown;
+  storyboardArtistPlan?: Record<string, unknown>;
+  shotDecomposerSegmentPlans?: Record<string, Record<string, unknown>>;
+  updatedAt: string;
+}
+
+export type AliyunStoryboardProgressStage =
+  | "queued"
+  | "planning_architect"
+  | "storyboard_artist"
+  | "shot_decomposer"
+  | "single_take_audit"
+  | "split_repair"
+  | "json_repair"
+  | "prompt_detailer"
+  | "story_quality_gate"
+  | "complete"
+  | "failed";
+
+export interface AliyunStoryboardProgressUpdate {
+  stage: AliyunStoryboardProgressStage;
+  completedSteps?: number;
+  totalSteps?: number;
+  currentSegmentNo?: number;
+  completedSegments?: number;
+  totalSegments?: number;
+  attempt?: number;
+  detailZh?: string;
+  detailEn?: string;
+  metricsDelta?: {
+    jsonRepairCount?: number;
+    jsonRepairDurationMs?: number;
+    singleTakeRepairCount?: number;
+    singleTakeRepairDurationMs?: number;
+  };
+}
+
+interface AliyunStoryboardPlannerOptions {
+  checkpoint?: unknown;
+  onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
+  onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
+}
+
+const plannerProgressStorage = new AsyncLocalStorage<{
+  onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
+}>();
+
+export async function createAliyunStoryboardPlan(
+  input: PlanVideoProjectInput,
+  options: AliyunStoryboardPlannerOptions = {},
+): Promise<OnePromptVideoPlan> {
+  return plannerProgressStorage.run({ onProgress: options.onProgress }, () => createAliyunStoryboardPlanInternal(input, options));
+}
+
+async function createAliyunStoryboardPlanInternal(
+  input: PlanVideoProjectInput,
+  options: AliyunStoryboardPlannerOptions,
+): Promise<OnePromptVideoPlan> {
   const referenceImageUrls = input.referenceImageUrls.slice(0, 4);
   const fallback = createVideoPlan(input);
   const visionModel = referenceImageUrls.length
     ? model("ALIYUN_STORYBOARD_VISION_MODEL", "qwen-vl-max")
     : model("ALIYUN_STORYBOARD_MODEL", "qwen3.7-plus");
   const textModel = model("ALIYUN_STORYBOARD_MODEL", "qwen3.7-plus");
+  const checkpoint = normalizeAliyunStoryboardPlannerCheckpoint(options.checkpoint, input);
 
   await logOnePromptVideo("aliyun.storyboard.three_stage.start", {
     promptLength: input.userPrompt.length,
@@ -652,35 +1037,85 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
   });
 
   try {
-    const planningRaw = await callJsonStage({
+    await reportPlannerProgress({
       stage: "planning_architect",
-      modelName: visionModel,
-      systemPrompt: PLANNING_ARCHITECT_SYSTEM_PROMPT,
-      userContent: buildPlanningArchitectContent(input, referenceImageUrls),
-      temperature: 0.25,
+      completedSteps: 0,
+      totalSteps: 4,
+      detailZh: "正在理解创意、参考图、广告目标和时间轴约束。",
+      detailEn: "Understanding the brief, references, campaign goal, and timeline constraints.",
     });
+    const planningRaw = checkpoint.planningRaw ?? await callJsonStage({
+        stage: "planning_architect",
+        modelName: visionModel,
+        systemPrompt: PLANNING_ARCHITECT_SYSTEM_PROMPT,
+        userContent: buildPlanningArchitectContent(input, referenceImageUrls),
+        temperature: 0.25,
+      });
+    if (checkpoint.planningRaw === undefined) {
+      checkpoint.planningRaw = planningRaw;
+      await savePlannerCheckpoint(checkpoint, options.onCheckpoint);
+    } else {
+      await logOnePromptVideo("aliyun.storyboard.planning_architect.checkpoint_reused", {
+        inputFingerprint: checkpoint.inputFingerprint,
+      });
+    }
     const planningManifest = normalizePlanningManifest(planningRaw, input, fallback);
+    const totalSegments = planningManifest.timelineBlueprint.segments.length;
+    const totalPlanningSteps = totalSegments + 4;
+    await reportPlannerProgress({
+      stage: "storyboard_artist",
+      completedSteps: 1,
+      totalSteps: totalPlanningSteps,
+      totalSegments,
+      detailZh: `规划架构已完成，正在设计剧情节拍、冲突、转折和 CTA；后续需要拆解 ${totalSegments} 个片段。`,
+      detailEn: `Planning architecture is complete. Designing story beats, conflict, payoff, and CTA before decomposing ${totalSegments} segments.`,
+    });
+    const planningStoryDesignBase = storyDesignStageContext(planningRaw);
+    const planningStoryDesignContext: Record<string, unknown> = {
+      ...planningStoryDesignBase,
+      creative_strategy: normalizeCreativeStrategy(planningStoryDesignBase.creative_strategy, planningManifest, []),
+    };
     await logOnePromptVideo("aliyun.storyboard.planning_architect.parsed", {
       planningRaw,
       planningManifest,
+      storyDesignContext: planningStoryDesignContext,
     });
 
-    const storyboardArtistRaw = await callJsonStage({
-      stage: "storyboard_artist",
-      modelName: textModel,
-      systemPrompt: STORYBOARD_ARTIST_SYSTEM_PROMPT,
-      userContent: JSON.stringify({
-        user_idea: input.userPrompt,
-        aspect_ratio: input.aspectRatio,
-        duration_seconds: input.durationSeconds,
-        planning_manifest: planningManifest,
-        confirmed_anchor_images: [],
-      }),
-      temperature: 0.3,
-    });
-    const storyboardArtistPlan = unwrapPlanRoot(storyboardArtistRaw, "storyboard_artist_plan");
+    let storyboardArtistPlan = checkpoint.storyboardArtistPlan;
+    if (!storyboardArtistPlan) {
+      const storyboardArtistRaw = await callJsonStage({
+        stage: "storyboard_artist",
+        modelName: textModel,
+        systemPrompt: STORYBOARD_ARTIST_SYSTEM_PROMPT,
+        userContent: JSON.stringify({
+          user_idea: input.userPrompt,
+          aspect_ratio: input.aspectRatio,
+          duration_seconds: input.durationSeconds,
+          planning_manifest: planningManifest,
+          story_design_context: planningStoryDesignContext,
+          confirmed_anchor_images: [],
+        }),
+        temperature: 0.3,
+      });
+      storyboardArtistPlan = unwrapPlanRoot(storyboardArtistRaw, "storyboard_artist_plan");
+      checkpoint.storyboardArtistPlan = storyboardArtistPlan;
+      await savePlannerCheckpoint(checkpoint, options.onCheckpoint);
+    } else {
+      await logOnePromptVideo("aliyun.storyboard.storyboard_artist.checkpoint_reused", {
+        inputFingerprint: checkpoint.inputFingerprint,
+      });
+    }
     await logOnePromptVideo("aliyun.storyboard.storyboard_artist.parsed", {
       storyboardArtistPlan,
+    });
+    await reportPlannerProgress({
+      stage: "shot_decomposer",
+      completedSteps: 2,
+      totalSteps: totalPlanningSteps,
+      completedSegments: 0,
+      totalSegments,
+      detailZh: `剧情设计已完成，开始拆解 ${totalSegments} 个可执行视频片段。`,
+      detailEn: `Story design is complete. Decomposing ${totalSegments} executable video segments.`,
     });
 
     let shotDecomposerPlan = await createShotDecomposerPlan({
@@ -688,6 +1123,13 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
       modelName: textModel,
       planningManifest,
       storyboardArtistPlan,
+      storyDesignContext: {
+        ...planningStoryDesignContext,
+        story_beats: readLoose(storyboardArtistPlan, "storyBeats", "story_beats") ?? planningStoryDesignContext.story_beats,
+        shot_grouping_pass: readLoose(storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") ?? planningStoryDesignContext.shot_grouping_pass,
+      },
+      checkpoint,
+      onCheckpoint: options.onCheckpoint,
     });
     await logOnePromptVideo("aliyun.storyboard.shot_decomposer.parsed", {
       shotDecomposerPlan,
@@ -697,9 +1139,23 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
       modelName: textModel,
       planningManifest,
       storyboardArtistPlan,
+      storyDesignContext: {
+        ...planningStoryDesignContext,
+        story_beats: readLoose(storyboardArtistPlan, "storyBeats", "story_beats") ?? planningStoryDesignContext.story_beats,
+        shot_grouping_pass: readLoose(storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") ?? planningStoryDesignContext.shot_grouping_pass,
+      },
       shotDecomposerPlan,
     });
-    const storyboardPlan = mergeStage2Plans(storyboardArtistPlan, shotDecomposerPlan);
+    await reportPlannerProgress({
+      stage: "prompt_detailer",
+      completedSteps: totalSegments + 3,
+      totalSteps: totalPlanningSteps,
+      completedSegments: totalSegments,
+      totalSegments,
+      detailZh: "分镜和一镜到底检查已完成，正在编译图片、视频和负面提示词。",
+      detailEn: "Shot decomposition and single-take audit are complete. Compiling image, video, and negative prompts.",
+    });
+    let storyboardPlan = mergeStage2Plans(storyboardArtistPlan, shotDecomposerPlan);
 
     const promptDetailRaw = await callJsonStage({
       stage: "prompt_detailer",
@@ -707,6 +1163,7 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
       systemPrompt: PROMPT_DETAILER_SYSTEM_PROMPT,
       userContent: JSON.stringify({
         planning_manifest: planningManifest,
+        story_design_context: storyDesignStageContext(storyboardPlan),
         storyboard_plan: storyboardPlan,
         storyboard_artist_plan: storyboardArtistPlan,
         shot_decomposer_plan: shotDecomposerPlan,
@@ -716,25 +1173,71 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
       }),
       temperature: 0.25,
     });
-    const promptDetailPlan = normalizePromptDetailPlan(promptDetailRaw);
+    let promptDetailPlan = normalizePromptDetailPlan(promptDetailRaw);
     await logOnePromptVideo("aliyun.storyboard.prompt_detailer.parsed", {
       promptDetailRaw,
       promptDetailPlan,
     });
+    await reportPlannerProgress({
+      stage: "story_quality_gate",
+      completedSteps: totalSegments + 3,
+      totalSteps: totalPlanningSteps,
+      completedSegments: totalSegments,
+      totalSegments,
+      detailZh: "提示词已完成，正在执行剧情质量和结构校验。",
+      detailEn: "Prompts are complete. Running story quality and structural validation.",
+    });
 
-    const plan = buildThreeStagePlan({
+    const storyRolloutConfig = readStoryRolloutConfig();
+    await logOnePromptVideo("story_rollout.config", { ...storyRolloutConfig });
+
+    const planFallback = createVideoPlan({ ...input, shotCount: planningManifest.timelineBlueprint.segmentCount });
+    let plan = buildThreeStagePlan({
       input,
-      fallback: createVideoPlan({ ...input, shotCount: planningManifest.timelineBlueprint.segmentCount }),
+      fallback: planFallback,
       planningRaw,
       planningManifest,
       storyboardPlan,
       promptDetailPlan,
+      shotGroupingEnabled: shouldEnableShotGrouping(storyRolloutConfig),
     });
+    plan = applyStoryQualityGateForRollout(plan, storyRolloutConfig);
+    if (shouldAttemptStoryRewrite(storyRolloutConfig)) {
+      const storyRewriteResult = await rewriteStoryPlanUntilQualityPass({
+        input,
+        modelName: textModel,
+        planningRaw,
+        planningManifest,
+        fallback: planFallback,
+        storyboardPlan,
+        promptDetailPlan,
+        plan,
+        rolloutConfig: storyRolloutConfig,
+      });
+      plan = storyRewriteResult.plan;
+      storyboardPlan = storyRewriteResult.storyboardPlan;
+      promptDetailPlan = storyRewriteResult.promptDetailPlan;
+    } else {
+      plan = finalizeStoryQualityRollout(plan, storyRolloutConfig, 0, decideStoryRewrite(plan.storyQualityReport));
+      await logOnePromptVideo("story_quality_rewrite.skipped", {
+        storyGateMode: storyRolloutConfig.storyGateMode,
+        storyRewriteMax: storyRolloutConfig.storyRewriteMax,
+        score: plan.storyQualityReport?.score,
+        issueCodes: plan.storyQualityReport?.issueCodes ?? [],
+      }, decideStoryRewrite(plan.storyQualityReport).shouldRewrite ? "warn" : "info");
+    }
+    plan = repairMotionfulEndpointContracts(plan);
+    const validationIssues = assertPlanValidForGeneration(plan, { stage: "planning" });
 
     await logOnePromptVideo("aliyun.storyboard.three_stage.parsed", {
       title: plan.title,
       planningManifest: plan.planningManifest,
       narrativeEvents: plan.narrativeEvents,
+      creativeStrategy: plan.creativeStrategy,
+      storyBeats: plan.storyBeats,
+      narrativeMicroRules: plan.narrativeMicroRules,
+      shotGroupingPass: plan.shotGroupingPass,
+      storyQualityReport: plan.storyQualityReport,
       anchorStateTimeline: plan.anchorStateTimeline,
       storyboardBrief: plan.storyboardBrief,
       segmentRenderDescriptions: plan.segmentRenderDescriptions,
@@ -748,6 +1251,16 @@ export async function createAliyunStoryboardPlan(input: PlanVideoProjectInput): 
         anchors: segment.usesConsistencyAnchors,
       })),
       plannerWarnings: plan.plannerWarnings ?? [],
+      validationIssues,
+    });
+    await reportPlannerProgress({
+      stage: "complete",
+      completedSteps: totalPlanningSteps,
+      totalSteps: totalPlanningSteps,
+      completedSegments: totalSegments,
+      totalSegments,
+      detailZh: "剧本、分镜、提示词和质量校验均已完成。",
+      detailEn: "Script, shots, prompts, and quality validation are complete.",
     });
     return plan;
   } catch (error) {
@@ -784,7 +1297,16 @@ async function callJsonStage(params: {
     durationMs: Date.now() - startedAt,
     rawSummary: result.rawSummary,
   }, result.ok ? "info" : "error");
-  if (!result.ok) throw new Error(result.errorMessage || `Aliyun storyboard ${params.stage} failed HTTP ${result.httpStatus}`);
+  if (!result.ok) {
+    throw new StoryboardStageError(
+      result.errorMessage || `Aliyun storyboard ${params.stage} failed HTTP ${result.httpStatus}`,
+      {
+        code: "upstream_http_error",
+        retryable: result.httpStatus === 408 || result.httpStatus === 429 || result.httpStatus >= 500,
+        httpStatus: result.httpStatus,
+      },
+    );
+  }
   const content = result.content;
   if (!content) throw new Error(`Aliyun storyboard ${params.stage} returned empty content`);
   try {
@@ -825,7 +1347,10 @@ async function fetchJsonStage(stage: string, body: Record<string, unknown>): Pro
         timeoutMs,
         model: body.model,
       }, "error");
-      throw new Error(`三阶段脚本拆解 ${stage} 请求超过 ${Math.round(timeoutMs / 1000)} 秒未返回，已停止生成。请稍后重试，或检查 DASHSCOPE/百炼网络与额度。`);
+      throw new StoryboardStageError(
+        `三阶段脚本拆解 ${stage} 请求超过 ${Math.round(timeoutMs / 1000)} 秒未返回，已停止生成。请稍后重试，或检查 DASHSCOPE/百炼网络与额度。`,
+        { code: "request_timeout", retryable: true, cause: error },
+      );
     }
     throw error;
   } finally {
@@ -986,7 +1511,15 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         idleTimeoutMs,
         maxStreamMs,
       }, "error");
-      throw new Error(`三阶段脚本拆解 ${stage} 流式请求超时（${abortReason}），已停止生成。请稍后重试，或检查 DASHSCOPE/百炼网络与额度。`);
+      const code = abortReason === "stream_idle_timeout"
+        ? "stream_idle_timeout"
+        : abortReason === "max_stream_timeout"
+          ? "max_stream_timeout"
+          : "first_chunk_timeout";
+      throw new StoryboardStageError(
+        `三阶段脚本拆解 ${stage} 流式请求超时（${abortReason}），已停止生成。请稍后重试，或检查 DASHSCOPE/百炼网络与额度。`,
+        { code, retryable: true, cause: error },
+      );
     }
     throw error;
   }
@@ -1017,13 +1550,26 @@ async function repairJsonStageContent(params: {
     model: params.modelName,
     contentLength: params.content.length,
   }, "warn");
+  await reportPlannerProgress({
+    stage: "json_repair",
+    detailZh: `${params.stage} 返回的 JSON 不完整，正在执行结构修复。`,
+    detailEn: `${params.stage} returned invalid JSON. Repairing its structure.`,
+    metricsDelta: { jsonRepairCount: 1 },
+  });
   const result = await fetchJsonStageContent(`json_repair_${params.stage}`, body);
+  const repairDurationMs = Date.now() - startedAt;
   await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_repair.response`, {
     httpStatus: result.httpStatus,
     ok: result.ok,
-    durationMs: Date.now() - startedAt,
+    durationMs: repairDurationMs,
     rawSummary: result.rawSummary,
   }, result.ok ? "info" : "error");
+  await reportPlannerProgress({
+    stage: "json_repair",
+    detailZh: `${params.stage} JSON 结构修复已结束。`,
+    detailEn: `${params.stage} JSON repair finished.`,
+    metricsDelta: { jsonRepairDurationMs: repairDurationMs },
+  });
   if (!result.ok) throw new Error(result.errorMessage || `Aliyun storyboard ${params.stage} JSON repair failed HTTP ${result.httpStatus}`);
   const repairedContent = result.content;
   if (!repairedContent) throw new Error(`Aliyun storyboard ${params.stage} JSON repair returned empty content`);
@@ -1058,11 +1604,25 @@ function buildPlanningArchitectContent(input: PlanVideoProjectInput, referenceIm
   ];
 }
 
+function storyDesignStageContext(source: unknown): Record<string, unknown> {
+  const envelope = isRecord(source) ? source : {};
+  const root = unwrapPlanRoot(source, "planning_manifest");
+  return {
+    creative_strategy: readLoose(envelope, "creativeStrategy", "creative_strategy") ?? readLoose(root, "creativeStrategy", "creative_strategy") ?? {},
+    narrative_micro_rules: readLoose(envelope, "narrativeMicroRules", "narrative_micro_rules") ?? readLoose(root, "narrativeMicroRules", "narrative_micro_rules") ?? {},
+    story_beats: readLoose(envelope, "storyBeats", "story_beats") ?? readLoose(root, "storyBeats", "story_beats") ?? [],
+    shot_grouping_pass: readLoose(envelope, "shotGroupingPass", "shot_grouping_pass") ?? readLoose(root, "shotGroupingPass", "shot_grouping_pass") ?? {},
+  };
+}
+
 async function createShotDecomposerPlan(params: {
   input: PlanVideoProjectInput;
   modelName: string;
   planningManifest: VideoPlanningManifest;
   storyboardArtistPlan: Record<string, unknown>;
+  storyDesignContext: Record<string, unknown>;
+  checkpoint: AliyunStoryboardPlannerCheckpoint;
+  onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
 }): Promise<Record<string, unknown>> {
   if (shotDecomposerMode() === "whole") {
     return callWholeShotDecomposerPlan(params);
@@ -1080,23 +1640,76 @@ async function createShotDecomposerPlan(params: {
     model: params.modelName,
   });
 
+  let completedSegments = 0;
   const segmentPlans = await mapWithConcurrency(timelineSegments, concurrency, async (segment) => {
-    const raw = await callJsonStage({
-      stage: `shot_decomposer_s${segment.segmentNo}`,
-      modelName: params.modelName,
-      systemPrompt: SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT,
-      userContent: buildShotDecomposerSegmentContent({
-        ...params,
-        segment,
-      }),
-      temperature: 0.28,
-    });
-    const plan = unwrapPlanRoot(raw, "shot_decomposer_plan");
+    const stage = `shot_decomposer_s${segment.segmentNo}`;
+    const checkpointKey = String(segment.segmentNo);
+    let plan = params.checkpoint.shotDecomposerSegmentPlans?.[checkpointKey];
+    if (!plan) {
+      const raw = await runStoryboardStageWithRetry({
+        stage,
+        maxAttempts: shotDecomposerRetryAttempts(),
+        baseDelayMs: shotDecomposerRetryBaseDelayMs(),
+        run: () => callJsonStage({
+          stage,
+          modelName: params.modelName,
+          systemPrompt: SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT,
+          userContent: buildShotDecomposerSegmentContent({
+            ...params,
+            segment,
+          }),
+          temperature: 0.28,
+        }),
+        onRetry: async ({ attempt, nextAttempt, delayMs, error }) => {
+          await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segment.retry", {
+            segmentNo: segment.segmentNo,
+            stage,
+            attempt,
+            nextAttempt,
+            delayMs,
+            error: errorForLog(error),
+          }, "warn");
+          await reportPlannerProgress({
+            stage: "shot_decomposer",
+            completedSteps: 2 + completedSegments,
+            totalSteps: timelineSegments.length + 4,
+            currentSegmentNo: segment.segmentNo,
+            completedSegments,
+            totalSegments: timelineSegments.length,
+            attempt: nextAttempt,
+            detailZh: `第 ${segment.segmentNo} 段上游请求超时，${Math.round(delayMs / 1000)} 秒后进行第 ${nextAttempt} 次尝试；已完成 ${completedSegments}/${timelineSegments.length} 段。`,
+            detailEn: `Segment ${segment.segmentNo} timed out upstream. Attempt ${nextAttempt} starts in ${Math.round(delayMs / 1000)}s; ${completedSegments}/${timelineSegments.length} segments are complete.`,
+          });
+        },
+      });
+      plan = unwrapPlanRoot(raw, "shot_decomposer_plan");
+      params.checkpoint.shotDecomposerSegmentPlans = {
+        ...(params.checkpoint.shotDecomposerSegmentPlans ?? {}),
+        [checkpointKey]: plan,
+      };
+      await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+    } else {
+      await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segment.checkpoint_reused", {
+        segmentNo: segment.segmentNo,
+        stage,
+      });
+    }
     await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segment.parsed", {
       segmentNo: segment.segmentNo,
       keyframeCount: arrayOfRecords(plan.keyframes).length,
       segmentCount: arrayOfRecords(plan.segments).length,
       renderDescriptionCount: arrayOfRecords(plan.segment_render_descriptions ?? plan.segmentRenderDescriptions).length,
+    });
+    completedSegments += 1;
+    await reportPlannerProgress({
+      stage: "shot_decomposer",
+      completedSteps: 2 + completedSegments,
+      totalSteps: timelineSegments.length + 4,
+      currentSegmentNo: segment.segmentNo,
+      completedSegments,
+      totalSegments: timelineSegments.length,
+      detailZh: `已完成 ${completedSegments}/${timelineSegments.length} 个片段，刚完成第 ${segment.segmentNo} 段。`,
+      detailEn: `Completed ${completedSegments}/${timelineSegments.length} segments; segment ${segment.segmentNo} just finished.`,
     });
     return plan;
   });
@@ -1119,6 +1732,7 @@ async function callWholeShotDecomposerPlan(params: {
   modelName: string;
   planningManifest: VideoPlanningManifest;
   storyboardArtistPlan: Record<string, unknown>;
+  storyDesignContext: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
   const shotDecomposerRaw = await callJsonStage({
     stage: "shot_decomposer",
@@ -1129,6 +1743,7 @@ async function callWholeShotDecomposerPlan(params: {
       aspect_ratio: params.input.aspectRatio,
       duration_seconds: params.input.durationSeconds,
       planning_manifest: params.planningManifest,
+      story_design_context: params.storyDesignContext,
       storyboard_artist_plan: params.storyboardArtistPlan,
       confirmed_anchor_images: [],
     }),
@@ -1141,6 +1756,7 @@ function buildShotDecomposerSegmentContent(params: {
   input: PlanVideoProjectInput;
   planningManifest: VideoPlanningManifest;
   storyboardArtistPlan: Record<string, unknown>;
+  storyDesignContext: Record<string, unknown>;
   segment: VideoTimelineBlueprintSegment;
 }): string {
   const segmentNo = params.segment.segmentNo;
@@ -1149,6 +1765,16 @@ function buildShotDecomposerSegmentContent(params: {
   const storyboardBrief = arrayOfRecords(readLoose(params.storyboardArtistPlan, "storyboardBrief", "storyboard_brief"));
   const targetStoryboardBrief = storyboardBrief.find((item) => numberFrom(item.segmentNo ?? item.segment_no) === segmentNo) ?? {};
   const adjacentStoryboardBrief = storyboardBrief.filter((item) => Math.abs(numberFrom(item.segmentNo ?? item.segment_no) - segmentNo) <= 1);
+  const storyBeats = arrayOfRecords(readLoose(params.storyboardArtistPlan, "storyBeats", "story_beats") ?? params.storyDesignContext.story_beats);
+  const targetStoryBeats = storyBeats.filter((item) => {
+    const segmentNos = normalizeNumberArray(item.targetSegmentNos ?? item.target_segment_nos);
+    const linkedBeatIds = normalizeStringArray(targetStoryboardBrief.linkedBeatIds ?? targetStoryboardBrief.linked_beat_ids) ?? [];
+    const beatId = safeId(item.beatId ?? item.beat_id, "");
+    return segmentNos.includes(segmentNo) || (beatId && linkedBeatIds.includes(beatId));
+  });
+  const shotGroupingGroups = arrayOfRecords(readLoose(isRecord(params.storyDesignContext.shot_grouping_pass) ? params.storyDesignContext.shot_grouping_pass : {}, "groups", "groups"))
+    .concat(arrayOfRecords(readLoose(isRecord(readLoose(params.storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass")) ? readLoose(params.storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") as Record<string, unknown> : {}, "groups", "groups")));
+  const targetShotGroup = shotGroupingGroups.find((group) => normalizeNumberArray(group.segmentNos ?? group.segment_nos).includes(segmentNo)) ?? {};
   const finalTransitionPlan = arrayOfRecords(readLoose(params.storyboardArtistPlan, "finalTransitionPlan", "final_transition_plan"))
     .filter((item) => numberFrom(item.fromSegmentNo ?? item.from_segment_no) === segmentNo || numberFrom(item.toSegmentNo ?? item.to_segment_no) === segmentNo);
 
@@ -1173,6 +1799,7 @@ function buildShotDecomposerSegmentContent(params: {
       },
       consistency_manifest: params.planningManifest.consistencyManifest,
     },
+    story_design_context: params.storyDesignContext,
     storyboard_context: {
       title: params.storyboardArtistPlan.title,
       logline: params.storyboardArtistPlan.logline,
@@ -1181,6 +1808,8 @@ function buildShotDecomposerSegmentContent(params: {
       adjacent_storyboard_brief: adjacentStoryboardBrief,
       camera_graph: readLoose(params.storyboardArtistPlan, "cameraGraph", "camera_graph"),
       relevant_final_transition_plan: finalTransitionPlan,
+      target_story_beats: targetStoryBeats,
+      target_shot_group: targetShotGroup,
     },
     output_contract: {
       only_target_segment: true,
@@ -1279,6 +1908,9 @@ function mergeStage2Plans(storyboardArtistPlan: Record<string, unknown>, shotDec
           ? storyboardArtistPlan.style_bible
           : storyboardArtistPlan.styleBible,
     storyboard_brief: readLoose(storyboardArtistPlan, "storyboardBrief", "storyboard_brief") ?? [],
+    story_beats: readLoose(storyboardArtistPlan, "storyBeats", "story_beats") ?? [],
+    shot_grouping_pass: readLoose(storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") ?? {},
+    story_quality_report: readLoose(storyboardArtistPlan, "storyQualityReport", "story_quality_report") ?? {},
     camera_graph: readLoose(storyboardArtistPlan, "cameraGraph", "camera_graph") ?? {},
     final_transition_plan: readLoose(storyboardArtistPlan, "finalTransitionPlan", "final_transition_plan") ?? [],
     segment_render_descriptions: readLoose(shotDecomposerPlan, "segmentRenderDescriptions", "segment_render_descriptions") ?? [],
@@ -1288,16 +1920,315 @@ function mergeStage2Plans(storyboardArtistPlan: Record<string, unknown>, shotDec
   };
 }
 
+async function rewriteStoryPlanUntilQualityPass(params: {
+  input: PlanVideoProjectInput;
+  modelName: string;
+  planningRaw?: unknown;
+  planningManifest: VideoPlanningManifest;
+  fallback: OnePromptVideoPlan;
+  storyboardPlan: Record<string, unknown>;
+  promptDetailPlan: VideoPromptDetailPlan;
+  plan: OnePromptVideoPlan;
+  rolloutConfig: OnePromptVideoStoryRolloutConfig;
+}): Promise<{
+  plan: OnePromptVideoPlan;
+  storyboardPlan: Record<string, unknown>;
+  promptDetailPlan: VideoPromptDetailPlan;
+}> {
+  let currentPlan = params.plan;
+  let currentStoryboardPlan = params.storyboardPlan;
+  let currentPromptDetailPlan = params.promptDetailPlan;
+  const maxAttempts = Math.min(MAX_STORY_QUALITY_REWRITES, params.rolloutConfig.storyRewriteMax);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const decision = decideStoryRewrite(currentPlan.storyQualityReport);
+    await logOnePromptVideo("story_quality_rewrite.decision", {
+      attempt,
+      shouldRewrite: decision.shouldRewrite,
+      stage: decision.stage,
+      score: decision.score,
+      riskScores: decision.riskScores,
+      hardIssueCodes: decision.hardIssueCodes,
+      reasons: decision.reasons,
+      issueCodes: currentPlan.storyQualityReport?.issueCodes ?? [],
+    }, decision.shouldRewrite ? "warn" : "info");
+    if (!decision.shouldRewrite) {
+      return {
+        plan: {
+          ...currentPlan,
+          storyQualityReport: {
+            ...(currentPlan.storyQualityReport ?? {}),
+            rewriteRequired: false,
+            autoRewriteAttempts: attempt,
+            rewriteReasons: [],
+            rewriteFromStage: "none",
+          },
+        },
+        storyboardPlan: currentStoryboardPlan,
+        promptDetailPlan: currentPromptDetailPlan,
+      };
+    }
+
+    const rewriteRaw = await callJsonStage({
+      stage: `story_quality_rewrite_${attempt + 1}_${decision.stage}`,
+      modelName: params.modelName,
+      systemPrompt: STORY_QUALITY_REWRITE_SYSTEM_PROMPT,
+      userContent: buildStoryQualityRewriteContent({
+        input: params.input,
+        planningManifest: params.planningManifest,
+        storyboardPlan: currentStoryboardPlan,
+        promptDetailPlan: currentPromptDetailPlan,
+        plan: currentPlan,
+        decision,
+        attempt: attempt + 1,
+        maxAttempts,
+      }),
+      temperature: 0.22,
+    });
+    const applied = applyStoryQualityRewrite({
+      stage: decision.stage,
+      storyboardPlan: currentStoryboardPlan,
+      promptDetailPlan: currentPromptDetailPlan,
+      rewriteRaw,
+    });
+    currentStoryboardPlan = applied.storyboardPlan;
+    currentPromptDetailPlan = applied.promptDetailPlan;
+    currentPlan = withStoryQualityGate(buildThreeStagePlan({
+      input: params.input,
+      fallback: params.fallback,
+      planningRaw: params.planningRaw,
+      planningManifest: params.planningManifest,
+      storyboardPlan: currentStoryboardPlan,
+      promptDetailPlan: currentPromptDetailPlan,
+      shotGroupingEnabled: shouldEnableShotGrouping(params.rolloutConfig),
+    }));
+    currentPlan = {
+      ...currentPlan,
+      storyQualityReport: {
+        ...(currentPlan.storyQualityReport ?? {}),
+        autoRewriteAttempts: attempt + 1,
+        rewriteReasons: decideStoryRewrite(currentPlan.storyQualityReport).reasons,
+      },
+      plannerWarnings: uniqueStrings([
+        ...(currentPlan.plannerWarnings ?? []),
+        `story quality rewrite attempt ${attempt + 1} from ${decision.stage}: ${decision.reasons.join("; ")}`,
+      ]),
+    };
+    await logOnePromptVideo("story_quality_rewrite.result", {
+      attempt: attempt + 1,
+      fromStage: decision.stage,
+      rewriteNotes: applied.rewriteNotes,
+      score: currentPlan.storyQualityReport?.score,
+      issueCodes: currentPlan.storyQualityReport?.issueCodes ?? [],
+    }, decideStoryRewrite(currentPlan.storyQualityReport).shouldRewrite ? "warn" : "info");
+  }
+
+  const finalDecision = decideStoryRewrite(currentPlan.storyQualityReport);
+  if (!finalDecision.shouldRewrite) {
+    return { plan: currentPlan, storyboardPlan: currentStoryboardPlan, promptDetailPlan: currentPromptDetailPlan };
+  }
+  return {
+    plan: finalizeStoryQualityRollout(currentPlan, params.rolloutConfig, maxAttempts, finalDecision),
+    storyboardPlan: currentStoryboardPlan,
+    promptDetailPlan: currentPromptDetailPlan,
+  };
+}
+
+function applyStoryQualityGateForRollout(
+  plan: OnePromptVideoPlan,
+  config: OnePromptVideoStoryRolloutConfig,
+): OnePromptVideoPlan {
+  if (shouldEvaluateStoryQuality(config)) return withStoryQualityGate(plan);
+  return {
+    ...plan,
+    plannerWarnings: uniqueStrings([
+      ...(plan.plannerWarnings ?? []),
+      "story quality gate disabled by ONE_PROMPT_VIDEO_STORY_GATE=off",
+    ]),
+  };
+}
+
+function finalizeStoryQualityRollout(
+  plan: OnePromptVideoPlan,
+  config: OnePromptVideoStoryRolloutConfig,
+  attempts: number,
+  decision: StoryRewriteDecision,
+): OnePromptVideoPlan {
+  if (!shouldEvaluateStoryQuality(config)) return plan;
+  if (decision.shouldRewrite && shouldRequireStoryQualityReview(config)) {
+    return markStoryRewriteRequired(plan, attempts, decision);
+  }
+  return {
+    ...plan,
+    storyQualityReport: {
+      ...(plan.storyQualityReport ?? {}),
+      rewriteRequired: false,
+      autoRewriteAttempts: attempts,
+      rewriteReasons: decision.shouldRewrite ? decision.reasons : [],
+      rewriteFromStage: decision.shouldRewrite ? decision.stage : "none",
+    },
+  };
+}
+
+function buildStoryQualityRewriteContent(params: {
+  input: PlanVideoProjectInput;
+  planningManifest: VideoPlanningManifest;
+  storyboardPlan: Record<string, unknown>;
+  promptDetailPlan: VideoPromptDetailPlan;
+  plan: OnePromptVideoPlan;
+  decision: StoryRewriteDecision;
+  attempt: number;
+  maxAttempts: number;
+}): string {
+  return JSON.stringify({
+    user_idea: params.input.userPrompt,
+    aspect_ratio: params.input.aspectRatio,
+    duration_seconds: params.input.durationSeconds,
+    rewrite_from_stage: params.decision.stage,
+    attempt: params.attempt,
+    max_attempts: params.maxAttempts,
+    story_quality_report: params.plan.storyQualityReport,
+    rewrite_reasons: params.decision.reasons,
+    planning_manifest: params.planningManifest,
+    current_story_design: {
+      creative_strategy: params.plan.creativeStrategy,
+      story_beats: params.plan.storyBeats,
+      narrative_micro_rules: params.plan.narrativeMicroRules,
+      shot_grouping_pass: params.plan.shotGroupingPass,
+    },
+    current_storyboard_plan: params.storyboardPlan,
+    current_prompt_detail_plan: params.promptDetailPlan,
+    current_normalized_plan_summary: {
+      title: params.plan.title,
+      logline: params.plan.logline,
+      segments: params.plan.segments.map((segment) => ({
+        segment_no: segment.segmentNo,
+        start_time_seconds: segment.startTimeSeconds,
+        end_time_seconds: segment.endTimeSeconds,
+        duration_seconds: segment.durationSeconds,
+        linked_beat_ids: segment.linkedBeatIds,
+        story_function: segment.storyFunction,
+        purpose: segment.purpose,
+        cause: segment.cause,
+        effect: segment.effect,
+        information_unit: segment.informationUnit,
+        key_evidence_ids: segment.keyEvidenceIds,
+        action_continuity: segment.actionContinuity,
+        reaction_beat: segment.reactionBeat,
+        power_shift: segment.powerShift,
+      })),
+    },
+    hard_constraints: {
+      preserve_timeline_segment_count: params.planningManifest.timelineBlueprint.segmentCount,
+      preserve_segment_times: params.planningManifest.timelineBlueprint.segments,
+      preserve_consistency_anchors: params.planningManifest.consistencyManifest.anchors,
+    },
+  });
+}
+
+function applyStoryQualityRewrite(params: {
+  stage: StoryRewriteDecision["stage"];
+  storyboardPlan: Record<string, unknown>;
+  promptDetailPlan: VideoPromptDetailPlan;
+  rewriteRaw: unknown;
+}): {
+  storyboardPlan: Record<string, unknown>;
+  promptDetailPlan: VideoPromptDetailPlan;
+  rewriteNotes: string[];
+} {
+  const root = unwrapPlanRoot(params.rewriteRaw, "story_quality_rewrite_plan");
+  const nextStoryboardPlan = { ...params.storyboardPlan };
+  nextStoryboardPlan.story_quality_report = {};
+  nextStoryboardPlan.storyQualityReport = {};
+  const allowCreative = params.stage === "creative_strategy";
+  const allowBeats = allowCreative || params.stage === "beat_sheet";
+  const allowStoryboard = allowBeats || params.stage === "storyboard" || params.stage === "shot_grouping";
+  if (allowCreative && isRecord(readLoose(root, "creativeStrategy", "creative_strategy"))) {
+    nextStoryboardPlan.creative_strategy = readLoose(root, "creativeStrategy", "creative_strategy");
+    nextStoryboardPlan.creativeStrategy = readLoose(root, "creativeStrategy", "creative_strategy");
+  }
+  if (allowBeats && Array.isArray(readLoose(root, "storyBeats", "story_beats"))) {
+    nextStoryboardPlan.story_beats = readLoose(root, "storyBeats", "story_beats");
+    nextStoryboardPlan.storyBeats = readLoose(root, "storyBeats", "story_beats");
+  }
+  if ((allowBeats || params.stage === "shot_grouping") && isRecord(readLoose(root, "shotGroupingPass", "shot_grouping_pass"))) {
+    nextStoryboardPlan.shot_grouping_pass = readLoose(root, "shotGroupingPass", "shot_grouping_pass");
+    nextStoryboardPlan.shotGroupingPass = readLoose(root, "shotGroupingPass", "shot_grouping_pass");
+  }
+  if (allowStoryboard) {
+    for (const [camelKey, snakeKey] of [
+      ["storyboardBrief", "storyboard_brief"],
+      ["segmentRenderDescriptions", "segment_render_descriptions"],
+      ["keyframes", "keyframes"],
+      ["segments", "segments"],
+    ] as const) {
+      const value = readLoose(root, camelKey, snakeKey);
+      if (Array.isArray(value)) {
+        nextStoryboardPlan[snakeKey] = value;
+        nextStoryboardPlan[camelKey] = value;
+      }
+    }
+  }
+  const promptDetailRaw = readLoose(root, "promptDetailPlan", "prompt_detail_plan");
+  const nextPromptDetailPlan = isRecord(promptDetailRaw)
+    ? mergePromptDetailPlans(params.promptDetailPlan, normalizePromptDetailPlan({ prompt_detail_plan: promptDetailRaw }))
+    : params.promptDetailPlan;
+  return {
+    storyboardPlan: nextStoryboardPlan,
+    promptDetailPlan: nextPromptDetailPlan,
+    rewriteNotes: normalizeStringArray(readLoose(root, "rewriteNotes", "rewrite_notes")) ?? [],
+  };
+}
+
+function mergePromptDetailPlans(base: VideoPromptDetailPlan, patch: VideoPromptDetailPlan): VideoPromptDetailPlan {
+  return {
+    keyframePrompts: mergeByNumber(base.keyframePrompts ?? [], patch.keyframePrompts ?? [], "keyframeNo"),
+    segmentVideoPrompts: mergeByNumber(base.segmentVideoPrompts ?? [], patch.segmentVideoPrompts ?? [], "segmentNo"),
+    microShotImagePrompts: mergeByTwoNumbers(base.microShotImagePrompts ?? [], patch.microShotImagePrompts ?? [], "segmentNo", "microShotNo"),
+    negativePromptGroups: patch.negativePromptGroups ?? base.negativePromptGroups,
+    generationNotes: uniqueStrings([...(base.generationNotes ?? []), ...(patch.generationNotes ?? [])]),
+  };
+}
+
+function mergeByNumber<T extends Record<K, number>, K extends keyof T>(base: T[], patch: T[], key: K): T[] {
+  const map = new Map<number, T>();
+  for (const item of base) map.set(Number(item[key]), item);
+  for (const item of patch) map.set(Number(item[key]), { ...(map.get(Number(item[key])) ?? {} as T), ...item });
+  return Array.from(map.values()).sort((a, b) => Number(a[key]) - Number(b[key]));
+}
+
+function mergeByTwoNumbers<T extends Record<K1 | K2, number>, K1 extends keyof T, K2 extends keyof T>(base: T[], patch: T[], key1: K1, key2: K2): T[] {
+  const keyFor = (item: T) => `${Number(item[key1])}:${Number(item[key2])}`;
+  const map = new Map<string, T>();
+  for (const item of base) map.set(keyFor(item), item);
+  for (const item of patch) map.set(keyFor(item), { ...(map.get(keyFor(item)) ?? {} as T), ...item });
+  return Array.from(map.values()).sort((a, b) => Number(a[key1]) - Number(b[key1]) || Number(a[key2]) - Number(b[key2]));
+}
+
 async function repairShotDecomposerPlanUntilSingleTake(params: {
   input: PlanVideoProjectInput;
   modelName: string;
   planningManifest: VideoPlanningManifest;
   storyboardArtistPlan: Record<string, unknown>;
+  storyDesignContext: Record<string, unknown>;
   shotDecomposerPlan: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
   let currentPlan = params.shotDecomposerPlan;
   for (let revision = 0; revision <= MAX_SINGLE_TAKE_REVISIONS; revision += 1) {
-    const audit = auditShotDecomposerPlan(currentPlan, params.planningManifest);
+    await reportPlannerProgress({
+      stage: "single_take_audit",
+      attempt: revision + 1,
+      detailZh: revision === 0 ? "正在检查每个片段能否一镜到底执行。" : `正在复核第 ${revision} 轮一镜到底修复结果。`,
+      detailEn: revision === 0 ? "Auditing whether every segment is executable as one continuous take." : `Reviewing single-take repair round ${revision}.`,
+    });
+    const audit = auditSingleTakePlan({
+      ...params.storyboardArtistPlan,
+      ...currentPlan,
+      durationSeconds: params.input.durationSeconds,
+      cameraGraph: params.storyboardArtistPlan.cameraGraph ?? params.storyboardArtistPlan.camera_graph,
+      storyboardBrief: params.storyboardArtistPlan.storyboardBrief ?? params.storyboardArtistPlan.storyboard_brief,
+      segments: currentPlan.segments,
+      segmentRenderDescriptions: currentPlan.segmentRenderDescriptions ?? currentPlan.segment_render_descriptions,
+    }, params.planningManifest.timelineBlueprint.segments.map((segment) => segment.segmentNo));
     await logOnePromptVideo("single_take_audit.result", {
       revision,
       passed: audit.passed,
@@ -1308,6 +2239,14 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
       throw new Error(singleTakeAuditErrorMessage(audit.issues));
     }
 
+    const repairStartedAt = Date.now();
+    await reportPlannerProgress({
+      stage: "split_repair",
+      attempt: revision + 1,
+      detailZh: `一镜到底审计发现 ${audit.issues.length} 个结构问题，正在执行第 ${revision + 1} 轮拆分修复。`,
+      detailEn: `Single-take audit found ${audit.issues.length} structural issue(s). Running split repair round ${revision + 1}.`,
+      metricsDelta: { singleTakeRepairCount: 1 },
+    });
     const repairRaw = await callJsonStage({
       stage: `split_repair_${revision + 1}`,
       modelName: params.modelName,
@@ -1317,6 +2256,7 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
         aspect_ratio: params.input.aspectRatio,
         duration_seconds: params.input.durationSeconds,
         planning_manifest: params.planningManifest,
+        story_design_context: params.storyDesignContext,
         storyboard_artist_plan: params.storyboardArtistPlan,
         shot_decomposer_plan: currentPlan,
         single_take_audit_issues: audit.issues,
@@ -1324,6 +2264,13 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
         max_revisions: MAX_SINGLE_TAKE_REVISIONS,
       }),
       temperature: 0.2,
+    });
+    await reportPlannerProgress({
+      stage: "single_take_audit",
+      attempt: revision + 2,
+      detailZh: `第 ${revision + 1} 轮拆分修复已完成，正在重新审计。`,
+      detailEn: `Split repair round ${revision + 1} is complete. Re-running the audit.`,
+      metricsDelta: { singleTakeRepairDurationMs: Date.now() - repairStartedAt },
     });
     const repairedEnvelope = isRecord(repairRaw) ? repairRaw : {};
     const repairedPlan = unwrapPlanRoot(
@@ -1341,55 +2288,7 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
   return currentPlan;
 }
 
-function auditShotDecomposerPlan(plan: Record<string, unknown>, manifest: VideoPlanningManifest): { passed: boolean; issues: Array<Record<string, unknown>> } {
-  const issues: Array<Record<string, unknown>> = [];
-  const descriptions = arrayOfRecords(plan.segment_render_descriptions ?? plan.segmentRenderDescriptions);
-  const descriptionsBySegment = new Map(descriptions.map((item) => [numberFrom(item.segmentNo ?? item.segment_no), item]));
-  for (const segment of manifest.timelineBlueprint.segments) {
-    const description = descriptionsBySegment.get(segment.segmentNo);
-    if (!description) {
-      issues.push({
-        segmentNo: segment.segmentNo,
-        severity: "high",
-        reason: "segment_render_description_missing",
-        instruction: "Return start/end frame contracts, motion contract, single-take contract, and motion checkpoints for this segment.",
-      });
-      continue;
-    }
-    const startFrame = description.startFrameContract ?? description.start_frame_contract;
-    const endFrame = description.endFrameContract ?? description.end_frame_contract;
-    const motion = description.motionContract ?? description.motion_contract;
-    const singleTake = description.singleTakeContract ?? description.single_take_contract;
-    const checkpoints = arrayOfRecords(description.motionCheckpoints ?? description.motion_checkpoints);
-    const recommendedSplit = normalizeUnknownArray(description.recommendedSplit ?? description.recommended_split);
-    const baseIssue = {
-      segmentNo: segment.segmentNo,
-      recommendedSplit,
-      instruction: "Repair this segment so it is one continuous take. If impossible, keep requires_cut=true and explain recommended_split.",
-    };
-    if (!isRecord(startFrame)) issues.push({ ...baseIssue, severity: "high", reason: "start_frame_contract_missing" });
-    if (!isRecord(endFrame)) issues.push({ ...baseIssue, severity: "high", reason: "end_frame_contract_missing" });
-    if (!isRecord(motion)) issues.push({ ...baseIssue, severity: "high", reason: "motion_contract_missing" });
-    if (!isRecord(singleTake)) issues.push({ ...baseIssue, severity: "high", reason: "single_take_contract_missing" });
-    if (truthyFlag(description.requiresCut ?? description.requires_cut)) issues.push({ ...baseIssue, severity: "high", reason: "requires_cut_true" });
-    if (String(description.riskLevel ?? description.risk_level ?? "").toLowerCase() === "high") issues.push({ ...baseIssue, severity: "high", reason: "risk_level_high" });
-    if (isRecord(singleTake)) {
-      if (truthyFlag(singleTake.requiresCut ?? singleTake.requires_cut)) issues.push({ ...baseIssue, severity: "high", reason: "single_take_contract_requires_cut" });
-      if (String(singleTake.riskLevel ?? singleTake.risk_level ?? "").toLowerCase() === "high") issues.push({ ...baseIssue, severity: "high", reason: "single_take_contract_high_risk" });
-      if (singleTake.physicallyReachable === false || singleTake.physically_reachable === false) issues.push({ ...baseIssue, severity: "high", reason: "physically_unreachable" });
-    }
-    if (checkpoints.length > 4) issues.push({ ...baseIssue, severity: "medium", reason: "too_many_motion_checkpoints", checkpointCount: checkpoints.length });
-    if (containsInternalCutLanguage([description, startFrame, endFrame, motion, singleTake, checkpoints])) {
-      issues.push({ ...baseIssue, severity: "high", reason: "internal_cut_language_detected" });
-    }
-  }
-  return {
-    passed: !issues.some((issue) => issue.severity === "high"),
-    issues,
-  };
-}
-
-function singleTakeAuditErrorMessage(issues: Array<Record<string, unknown>>): string {
+function singleTakeAuditErrorMessage(issues: Array<{ segmentNo?: number; reason?: string }>): string {
   const summary = issues.slice(0, 5).map((issue) => {
     const segmentNo = typeof issue.segmentNo === "number" ? `镜头 ${issue.segmentNo}` : "某个镜头";
     const reason = typeof issue.reason === "string" ? issue.reason : "single_take_audit_failed";
@@ -1406,6 +2305,7 @@ function buildThreeStagePlan(params: {
   planningManifest: VideoPlanningManifest;
   storyboardPlan: unknown;
   promptDetailPlan: VideoPromptDetailPlan;
+  shotGroupingEnabled?: boolean;
 }): OnePromptVideoPlan {
   const source = isRecord(params.storyboardPlan) ? params.storyboardPlan : {};
   const extras = normalizePlanStructureExtras({
@@ -1413,6 +2313,7 @@ function buildThreeStagePlan(params: {
     storyboardPlan: params.storyboardPlan,
     promptDetailPlan: params.promptDetailPlan,
     manifest: params.planningManifest,
+    shotGroupingEnabled: params.shotGroupingEnabled,
   });
   const promptDetails = params.promptDetailPlan;
   const styleBible = normalizeStyleBible(source.styleBible ?? source.style_bible, params.planningManifest, params.fallback.styleBible);
@@ -1424,6 +2325,7 @@ function buildThreeStagePlan(params: {
   const segmentsRaw = arrayOfRecords(source.segments);
   const keyframeCount = timeline.segments.length + 1;
   const boundaryTimes = [0, ...timeline.segments.map((segment) => segment.endTimeSeconds)];
+  const storyWarnings = [...extras.warnings];
 
   const keyframes: VideoPlanKeyframe[] = Array.from({ length: keyframeCount }, (_, index) => {
     const keyframeNo = index + 1;
@@ -1464,6 +2366,14 @@ function buildThreeStagePlan(params: {
     const anchors = normalizeStringArray(sourceSegment.usesConsistencyAnchors ?? sourceSegment.uses_consistency_anchors) ??
       timelineSegment.requiredAnchorIds ?? [];
     const negative = flattenNegative(sourceSegment.negativePrompt ?? sourceSegment.negative_prompt) || styleBible.negativePrompt;
+    const storyboardBrief = extras.storyboardBrief.find((brief) => brief.segmentNo === segmentNo);
+    const storyTrace = normalizeSegmentStoryTrace({
+      sourceSegment,
+      timelineSegment,
+      storyboardBrief,
+      storyBeats: extras.storyBeats,
+      warnings: storyWarnings,
+    });
     const microShots = normalizeMicroShotsForSegment({
       value: sourceSegment.microShots ?? sourceSegment.micro_shots,
       fallback: fallbackSegment.microShots,
@@ -1503,6 +2413,7 @@ function buildThreeStagePlan(params: {
       videoPromptEn,
       subtitle: stringOr(sourceSegment.subtitle, fallbackSegment.subtitle),
       outputMode: normalizeOutputMode(sourceSegment.outputMode ?? sourceSegment.output_mode) ?? fallbackSegment.outputMode ?? "mixed",
+      ...storyTrace,
       constraints: normalizeConstraintArray(sourceSegment.constraints) ?? fallbackSegment.constraints,
       timedPrompts: fallbackSegment.timedPrompts,
       microShots,
@@ -1528,6 +2439,11 @@ function buildThreeStagePlan(params: {
     consistencyManifest: params.planningManifest.consistencyManifest,
     timelineBlueprint: params.planningManifest.timelineBlueprint,
     narrativeEvents: extras.narrativeEvents,
+    creativeStrategy: extras.creativeStrategy,
+    storyBeats: extras.storyBeats,
+    narrativeMicroRules: extras.narrativeMicroRules,
+    shotGroupingPass: extras.shotGroupingPass,
+    storyQualityReport: withStoryQualityWarnings(extras.storyQualityReport, storyWarnings),
     anchorStateTimeline: extras.anchorStateTimeline,
     audioBible: extras.audioBible,
     candidateTimeline: extras.candidateTimeline,
@@ -1540,7 +2456,7 @@ function buildThreeStagePlan(params: {
     promptDebugArtifacts: extras.promptDebugArtifacts,
     artifactMetadata: extras.artifactMetadata,
     generationQualityReports: extras.generationQualityReports,
-    plannerWarnings: extras.warnings,
+    plannerWarnings: uniqueStrings(storyWarnings),
     storyboardPlan: source,
     promptDetailPlan: promptDetails,
     consistencyReferences,
@@ -1555,6 +2471,7 @@ function normalizePlanStructureExtras(params: {
   storyboardPlan: unknown;
   promptDetailPlan: VideoPromptDetailPlan;
   manifest: VideoPlanningManifest;
+  shotGroupingEnabled?: boolean;
 }): PlanStructureExtras {
   const warnings: string[] = [];
   const planningEnvelope = isRecord(params.planningRaw) ? params.planningRaw : {};
@@ -1563,6 +2480,16 @@ function normalizePlanStructureExtras(params: {
   const promptRoot = unwrapPlanRoot(params.promptDetailPlan, "prompt_detail_plan");
   const anchorIds = new Set(params.manifest.consistencyManifest.anchors.map((anchor) => anchor.id));
 
+  const creativeStrategy = normalizeCreativeStrategy(firstDefined(
+    readLoose(planningEnvelope, "creativeStrategy", "creative_strategy"),
+    readLoose(planningRoot, "creativeStrategy", "creative_strategy"),
+    readLoose(storyboardRoot, "creativeStrategy", "creative_strategy"),
+  ), params.manifest, warnings);
+  const narrativeMicroRules = normalizeNarrativeMicroRules(firstDefined(
+    readLoose(planningEnvelope, "narrativeMicroRules", "narrative_micro_rules"),
+    readLoose(planningRoot, "narrativeMicroRules", "narrative_micro_rules"),
+    readLoose(storyboardRoot, "narrativeMicroRules", "narrative_micro_rules"),
+  ), warnings);
   const narrativeEvents = normalizeNarrativeEvents(
     firstDefined(
       readLoose(planningEnvelope, "narrativeEvents", "narrative_events"),
@@ -1573,6 +2500,33 @@ function normalizePlanStructureExtras(params: {
   );
   const eventIds = new Set(narrativeEvents.map((event) => event.eventId));
   validateNarrativeEventReferences(narrativeEvents, warnings);
+  const storyBeats = normalizeStoryBeats(
+    firstDefined(
+      readLoose(storyboardRoot, "storyBeats", "story_beats"),
+      readLoose(planningEnvelope, "storyBeats", "story_beats"),
+      readLoose(planningRoot, "storyBeats", "story_beats"),
+    ),
+    creativeStrategy,
+    narrativeEvents,
+    params.manifest.timelineBlueprint.segments,
+    { warnings, anchorIds, eventIds },
+  );
+  const beatIds = new Set(storyBeats.map((beat) => beat.beatId));
+  const shotGroupingPass = params.shotGroupingEnabled === false
+    ? undefined
+    : normalizeShotGroupingPass(
+      firstDefined(
+        readLoose(storyboardRoot, "shotGroupingPass", "shot_grouping_pass"),
+        readLoose(planningEnvelope, "shotGroupingPass", "shot_grouping_pass"),
+        readLoose(planningRoot, "shotGroupingPass", "shot_grouping_pass"),
+      ),
+      storyBeats,
+      params.manifest.timelineBlueprint.segments,
+      warnings,
+    );
+  if (params.shotGroupingEnabled === false) {
+    warnings.push("shot grouping pass disabled by ONE_PROMPT_VIDEO_SHOT_GROUPING=off");
+  }
   const anchorStateTimeline = normalizeAnchorStateTimeline(
     firstDefined(
       readLoose(planningEnvelope, "anchorStateTimeline", "anchor_state_timeline"),
@@ -1595,7 +2549,7 @@ function normalizePlanStructureExtras(params: {
       readLoose(storyboardRoot, "storyboardBrief", "storyboard_brief"),
       readLoose(storyboardRoot, "segmentsBrief", "segments_brief"),
     ),
-    { warnings, anchorIds, eventIds },
+    { warnings, anchorIds, eventIds, beatIds },
   );
   const cameraIds = new Set(storyboardBrief.map((brief) => brief.cameraId).filter(Boolean));
   const segmentRenderDescriptions = normalizeSegmentRenderDescriptions(
@@ -1629,8 +2583,23 @@ function normalizePlanStructureExtras(params: {
     ),
     { warnings, anchorIds },
   );
+  const storyQualityReport = normalizeStoryQualityReport(
+    firstDefined(
+      readLoose(storyboardRoot, "storyQualityReport", "story_quality_report"),
+      readLoose(promptRoot, "storyQualityReport", "story_quality_report"),
+      readLoose(planningEnvelope, "storyQualityReport", "story_quality_report"),
+    ),
+    storyBeats,
+    params.manifest.timelineBlueprint.segments,
+    warnings,
+  );
   return {
     narrativeEvents,
+    creativeStrategy,
+    storyBeats,
+    narrativeMicroRules,
+    shotGroupingPass,
+    storyQualityReport,
     anchorStateTimeline,
     audioBible: normalizeAudioBible(firstDefined(
       readLoose(planningEnvelope, "audioBible", "audio_bible"),
@@ -1666,6 +2635,661 @@ function normalizePlanStructureExtras(params: {
     )),
     warnings: uniqueStrings(warnings),
   };
+}
+
+function normalizeCreativeStrategy(value: unknown, manifest: VideoPlanningManifest, warnings: string[]): VideoCreativeStrategy {
+  const raw = isRecord(value) ? value : {};
+  if (!Object.keys(raw).length) warnings.push("storyDesign creativeStrategy missing; derived fallback from planning_manifest");
+  const projectIntent = manifest.projectIntent ?? {};
+  const storyStrategy = manifest.storyStrategy ?? {};
+  const route = routeCreativeTemplate(raw, manifest, warnings);
+  const definition = STORY_TEMPLATE_DEFINITIONS[route.templateId];
+  return {
+    videoType: normalizeCreativeVideoType(raw.videoType ?? raw.video_type ?? projectIntent.videoType),
+    videoCategory: route.videoCategory,
+    templateId: route.templateId,
+    templateReason: stringOr(raw.templateReason ?? raw.template_reason, ""),
+    templateReasonZh: stringOr(raw.templateReasonZh ?? raw.template_reason_zh, definition.templateReasonZh),
+    conversionGoal: stringOr(raw.conversionGoal ?? raw.conversion_goal, ""),
+    conversionGoalZh: stringOr(raw.conversionGoalZh ?? raw.conversion_goal_zh, definition.conversionGoalZh),
+    fallbackReason: stringOr(raw.fallbackReason ?? raw.fallback_reason, ""),
+    fallbackReasonZh: stringOr(raw.fallbackReasonZh ?? raw.fallback_reason_zh, route.fallbackReasonZh ?? ""),
+    audience: stringOr(raw.audience, ""),
+    audienceZh: stringOr(raw.audienceZh ?? raw.audience_zh, projectIntent.targetViewerZh ?? ""),
+    audienceEn: stringOr(raw.audienceEn ?? raw.audience_en, projectIntent.targetViewerEn ?? ""),
+    corePromise: stringOr(raw.corePromise ?? raw.core_promise, ""),
+    corePromiseZh: stringOr(raw.corePromiseZh ?? raw.core_promise_zh, projectIntent.primaryGoalZh ?? ""),
+    corePromiseEn: stringOr(raw.corePromiseEn ?? raw.core_promise_en, projectIntent.primaryGoalEn ?? ""),
+    hook: stringOr(raw.hook, ""),
+    hookZh: stringOr(raw.hookZh ?? raw.hook_zh, storyStrategy.narrativeArcZh ?? ""),
+    hookEn: stringOr(raw.hookEn ?? raw.hook_en, storyStrategy.narrativeArcEn ?? ""),
+    conflict: stringOr(raw.conflict, ""),
+    conflictZh: stringOr(raw.conflictZh ?? raw.conflict_zh, ""),
+    conflictEn: stringOr(raw.conflictEn ?? raw.conflict_en, ""),
+    turningPoint: stringOr(raw.turningPoint ?? raw.turning_point, ""),
+    turningPointZh: stringOr(raw.turningPointZh ?? raw.turning_point_zh, ""),
+    turningPointEn: stringOr(raw.turningPointEn ?? raw.turning_point_en, ""),
+    payoff: stringOr(raw.payoff, ""),
+    payoffZh: stringOr(raw.payoffZh ?? raw.payoff_zh, ""),
+    payoffEn: stringOr(raw.payoffEn ?? raw.payoff_en, ""),
+    cta: stringOr(raw.cta, ""),
+    ctaZh: stringOr(raw.ctaZh ?? raw.cta_zh, ""),
+    ctaEn: stringOr(raw.ctaEn ?? raw.cta_en, ""),
+    emotionalArc: normalizeStringArray(raw.emotionalArc ?? raw.emotional_arc) ?? [],
+    sellingPointIds: normalizeStringArray(raw.sellingPointIds ?? raw.selling_point_ids) ?? [],
+    referenceUsageStrategy: stringOr(raw.referenceUsageStrategy ?? raw.reference_usage_strategy, ""),
+    referenceUsageStrategyZh: stringOr(raw.referenceUsageStrategyZh ?? raw.reference_usage_strategy_zh, ""),
+    risks: normalizeStringArray(raw.risks) ?? [],
+    notes: normalizeStringArray(raw.notes) ?? [],
+  };
+}
+
+function routeCreativeTemplate(
+  raw: Record<string, unknown>,
+  manifest: VideoPlanningManifest,
+  warnings: string[],
+): { videoCategory: VideoCreativeCategory; templateId: VideoCreativeTemplateId; fallbackReasonZh?: string } {
+  const requestedTemplate = normalizeCreativeTemplateId(raw.templateId ?? raw.template_id);
+  if (requestedTemplate) {
+    return {
+      videoCategory: STORY_TEMPLATE_DEFINITIONS[requestedTemplate].videoCategory,
+      templateId: requestedTemplate,
+    };
+  }
+  const rawCategory = normalizeCreativeCategory(raw.videoCategory ?? raw.video_category);
+  const videoType = normalizeCreativeVideoType(raw.videoType ?? raw.video_type ?? manifest.projectIntent?.videoType);
+  const text = [
+    rawCategory,
+    videoType,
+    raw.templateReason,
+    raw.template_reason,
+    raw.conversionGoal,
+    raw.conversion_goal,
+    raw.corePromise,
+    raw.core_promise,
+    raw.hook,
+    raw.hook_zh,
+    raw.conflict,
+    raw.conflict_zh,
+    raw.payoff,
+    raw.payoff_zh,
+    manifest.projectIntent?.videoType,
+    manifest.projectIntent?.primaryGoalZh,
+    manifest.projectIntent?.primaryGoalEn,
+    manifest.storyStrategy?.narrativeArcZh,
+    manifest.storyStrategy?.narrativeArcEn,
+    ...(manifest.projectIntent?.successCriteria ?? []),
+  ].filter(Boolean).join(" ").toLowerCase();
+  const category = rawCategory ?? categoryFromVideoType(videoType) ?? classifyVideoCategoryFromText(text);
+  const templateId = templateForCategory(category, text);
+  if (templateId === "generic_brand_story" && !rawCategory && !videoType) {
+    const fallbackReasonZh = "视频类型无法稳定判断，使用通用品牌故事模板，避免误套游戏、餐饮或电商语义。";
+    warnings.push(`storyDesign template fallback: ${fallbackReasonZh}`);
+    return { videoCategory: "brand", templateId, fallbackReasonZh };
+  }
+  return {
+    videoCategory: STORY_TEMPLATE_DEFINITIONS[templateId].videoCategory,
+    templateId,
+    fallbackReasonZh: templateId === "generic_brand_story" ? "未匹配到垂直行业模板，使用通用品牌故事模板。" : undefined,
+  };
+}
+
+function normalizeNarrativeMicroRules(value: unknown, warnings: string[]): VideoNarrativeMicroRules {
+  const raw = isRecord(value) ? value : {};
+  if (!Object.keys(raw).length) warnings.push("storyDesign narrativeMicroRules missing; using non-blocking default rules");
+  return {
+    causalChainRequired: booleanOr(raw.causalChainRequired ?? raw.causal_chain_required, true),
+    forbidSuddenOutcome: booleanOr(raw.forbidSuddenOutcome ?? raw.forbid_sudden_outcome, true),
+    forbidReferenceOnlyAnimation: booleanOr(raw.forbidReferenceOnlyAnimation ?? raw.forbid_reference_only_animation, true),
+    requireHookBeforeAssetShowcase: booleanOr(raw.requireHookBeforeAssetShowcase ?? raw.require_hook_before_asset_showcase, true),
+    requirePayoffBeforeCta: booleanOr(raw.requirePayoffBeforeCta ?? raw.require_payoff_before_cta, true),
+    requireReactionAfterTurningPoint: booleanOr(raw.requireReactionAfterTurningPoint ?? raw.require_reaction_after_turning_point, true),
+    requireVisibleTriggerBeforeStateChange: booleanOr(raw.requireVisibleTriggerBeforeStateChange ?? raw.require_visible_trigger_before_state_change, true),
+    requiredBeatFunctions: normalizeStoryFunctionArray(raw.requiredBeatFunctions ?? raw.required_beat_functions),
+    forbiddenPatterns: normalizeStringArray(raw.forbiddenPatterns ?? raw.forbidden_patterns) ?? [],
+    continuityRules: normalizeStringArray(raw.continuityRules ?? raw.continuity_rules) ?? [],
+    ctaRules: normalizeStringArray(raw.ctaRules ?? raw.cta_rules) ?? [],
+    notes: normalizeStringArray(raw.notes) ?? [],
+  };
+}
+
+function normalizeStoryBeats(
+  value: unknown,
+  creativeStrategy: VideoCreativeStrategy,
+  narrativeEvents: NarrativeEvent[],
+  timelineSegments: VideoTimelineBlueprintSegment[],
+  context: { warnings: string[]; anchorIds: Set<string>; eventIds: Set<string> },
+): VideoStoryBeat[] {
+  const records = arrayOfRecords(value);
+  if (!records.length) context.warnings.push("storyDesign storyBeats missing; derived fallback beats from selected template and timeline source_event_ids");
+  const sourceRecords: Record<string, unknown>[] = records.length
+    ? records
+    : fallbackStoryBeatRecordsForTemplate(creativeStrategy.templateId, timelineSegments);
+  return sourceRecords.flatMap((item, index) => {
+    const beatId = safeId(item.beatId ?? item.beat_id, `beat_${index + 1}`);
+    const requiredAnchorIds = normalizeStringArray(item.requiredAnchorIds ?? item.required_anchor_ids) ?? [];
+    for (const anchorId of requiredAnchorIds) {
+      if (!context.anchorIds.has(anchorId)) context.warnings.push(`storyBeat ${beatId} references missing anchor ${anchorId}`);
+    }
+    const sourceEventIds = normalizeStringArray(item.sourceEventIds ?? item.source_event_ids) ?? [];
+    for (const eventId of sourceEventIds) {
+      if (context.eventIds.size && !context.eventIds.has(eventId)) context.warnings.push(`storyBeat ${beatId} references missing event ${eventId}`);
+    }
+    return [{
+      beatId,
+      order: numberFrom(item.order) || index + 1,
+      title: stringOr(item.title, ""),
+      titleZh: stringOr(item.titleZh ?? item.title_zh, ""),
+      titleEn: stringOr(item.titleEn ?? item.title_en, ""),
+      storyFunction: normalizeStoryFunction(item.storyFunction ?? item.story_function) ?? "custom",
+      emotionalBeat: stringOr(item.emotionalBeat ?? item.emotional_beat, ""),
+      emotionalBeatZh: stringOr(item.emotionalBeatZh ?? item.emotional_beat_zh, ""),
+      emotionalBeatEn: stringOr(item.emotionalBeatEn ?? item.emotional_beat_en, ""),
+      cause: stringOr(item.cause, ""),
+      effect: stringOr(item.effect, ""),
+      informationUnit: stringOr(item.informationUnit ?? item.information_unit, ""),
+      keyEvidenceIds: normalizeStringArray(item.keyEvidenceIds ?? item.key_evidence_ids) ?? [],
+      requiredAnchorIds,
+      sourceEventIds,
+      targetSegmentNos: normalizeNumberArray(item.targetSegmentNos ?? item.target_segment_nos),
+      mustBeVisibleBeforeBeatIds: normalizeStringArray(item.mustBeVisibleBeforeBeatIds ?? item.must_be_visible_before_beat_ids) ?? [],
+      actionContinuity: normalizeActionContinuity(item.actionContinuity ?? item.action_continuity),
+      reactionBeat: stringOr(item.reactionBeat ?? item.reaction_beat, ""),
+      powerShift: stringOr(item.powerShift ?? item.power_shift, ""),
+      notes: normalizeStringArray(item.notes) ?? [],
+    }];
+  }).sort((a, b) => a.order - b.order).slice(0, 80);
+}
+
+function fallbackStoryBeatRecordsForTemplate(
+  templateId: VideoCreativeTemplateId | undefined,
+  timelineSegments: VideoTimelineBlueprintSegment[],
+): Record<string, unknown>[] {
+  const definition = STORY_TEMPLATE_DEFINITIONS[templateId ?? "generic_brand_story"] ?? STORY_TEMPLATE_DEFINITIONS.generic_brand_story;
+  const segmentCount = Math.max(1, timelineSegments.length);
+  return definition.minimumBeats.map<Record<string, unknown>>((beat, index) => {
+    const targetSegment = timelineSegments[Math.min(index, segmentCount - 1)] ?? timelineSegments[0];
+    const segmentNo = targetSegment?.segmentNo ?? index + 1;
+    return {
+      beat_id: `beat_${index + 1}_${beat.storyFunction}`,
+      order: index + 1,
+      story_function: beat.storyFunction,
+      title_zh: beat.titleZh,
+      emotional_beat_zh: beat.titleZh,
+      cause: beat.cause,
+      effect: beat.effect,
+      information_unit: beat.informationUnit || targetSegment?.purposeZh || targetSegment?.purposeEn || "",
+      key_evidence_ids: targetSegment?.requiredAnchorIds ?? [],
+      required_anchor_ids: targetSegment?.requiredAnchorIds ?? [],
+      source_event_ids: targetSegment?.sourceEventIds ?? [],
+      target_segment_nos: [segmentNo],
+      action_continuity: beat.actionContinuity,
+      reaction_beat: beat.reactionBeat ?? "",
+      power_shift: beat.powerShift ?? "",
+      notes: [`template:${templateId ?? "generic_brand_story"}`],
+    };
+  });
+}
+
+function normalizeShotGroupingPass(
+  value: unknown,
+  storyBeats: VideoStoryBeat[],
+  timelineSegments: VideoTimelineBlueprintSegment[],
+  warnings: string[],
+): VideoShotGroupingPass {
+  const raw = isRecord(value) ? value : {};
+  if (!Object.keys(raw).length) warnings.push("storyDesign shotGroupingPass missing; derived fallback groups from storyBeats target segments");
+  const beatIds = new Set(storyBeats.map((beat) => beat.beatId));
+  const groupsRaw = arrayOfRecords(raw.groups);
+  const derivedGrouping = deriveShotGroupingPass(storyBeats, timelineSegments);
+  const groupSourceRecords: Record<string, unknown>[] = groupsRaw.length ? groupsRaw : derivedGrouping.groups;
+  const groups = groupSourceRecords.flatMap((group, index) => {
+    const beatIdsForGroup = normalizeStringArray(group.beatIds ?? group.beat_ids) ?? [];
+    for (const beatId of beatIdsForGroup) {
+      if (!beatIds.has(beatId)) warnings.push(`shotGroupingPass group ${index + 1} references missing story beat ${beatId}`);
+    }
+    return [{
+      groupId: safeId(group.groupId ?? group.group_id, `group_${index + 1}`),
+      beatIds: beatIdsForGroup,
+      segmentNos: normalizeNumberArray(group.segmentNos ?? group.segment_nos),
+      storyFunction: normalizeStoryFunction(group.storyFunction ?? group.story_function),
+      reason: stringOr(group.reason, ""),
+      reasonZh: stringOr(group.reasonZh ?? group.reason_zh, ""),
+      continuousTakeRisk: normalizeRiskLevel(group.continuousTakeRisk ?? group.continuous_take_risk),
+      splitRequired: booleanOr(group.splitRequired ?? group.split_required, false),
+    }];
+  }).slice(0, 80);
+  const splitReasonsRaw = arrayOfRecords(raw.splitReasons ?? raw.split_reasons);
+  const splitReasons = normalizeShotGroupingSplitReasons(splitReasonsRaw.length ? splitReasonsRaw : derivedGrouping.splitReasons, warnings);
+  validateShotGroupingContinuity(groups, splitReasons, timelineSegments, warnings);
+  return {
+    strategy: stringOr(raw.strategy, derivedGrouping.strategy),
+    strategyZh: stringOr(raw.strategyZh ?? raw.strategy_zh, derivedGrouping.strategyZh),
+    sourceBeatIds: normalizeStringArray(raw.sourceBeatIds ?? raw.source_beat_ids) ?? storyBeats.map((beat) => beat.beatId),
+    groups,
+    splitReasons,
+    warnings: normalizeStringArray(raw.warnings) ?? [],
+  };
+}
+
+export function deriveShotGroupingPass(
+  storyBeats: VideoStoryBeat[],
+  timelineSegments: VideoTimelineBlueprintSegment[],
+): {
+  strategy: string;
+  strategyZh: string;
+  groups: Record<string, unknown>[];
+  splitReasons: Record<string, unknown>[];
+} {
+  const ordered = [...timelineSegments].sort((a, b) => a.segmentNo - b.segmentNo);
+  const groups: Record<string, unknown>[] = [];
+  const splitReasons: Record<string, unknown>[] = [];
+  let current: VideoTimelineBlueprintSegment[] = [];
+  for (const segment of ordered) {
+    if (!current.length) {
+      current = [segment];
+      continue;
+    }
+    const previous = current[current.length - 1];
+    const decision = shouldSplitShotGroup(previous, segment, current, storyBeats);
+    if (decision) {
+      splitReasons.push({
+        after_segment_no: previous.segmentNo,
+        before_segment_no: segment.segmentNo,
+        reason_code: decision.reasonCode,
+        reason_zh: decision.reasonZh,
+        merge_rejected: true,
+      });
+      groups.push(shotGroupRecordForSegments(current, storyBeats, groups.length + 1));
+      current = [segment];
+    } else {
+      current.push(segment);
+    }
+  }
+  if (current.length) groups.push(shotGroupRecordForSegments(current, storyBeats, groups.length + 1));
+  return {
+    strategy: "deterministic_adjacent_segment_grouping",
+    strategyZh: "按叙事焦点、物理空间、连续动作链、情绪方向、主客观镜头匹配和 15 秒上限，对相邻微镜头/片段进行合并或切分标注。",
+    groups,
+    splitReasons,
+  };
+}
+
+function shotGroupRecordForSegments(
+  segments: VideoTimelineBlueprintSegment[],
+  storyBeats: VideoStoryBeat[],
+  index: number,
+): Record<string, unknown> {
+  const segmentNos = segments.map((segment) => segment.segmentNo);
+  const beatIds = storyBeats
+    .filter((beat) => beat.targetSegmentNos?.some((segmentNo) => segmentNos.includes(segmentNo)))
+    .map((beat) => beat.beatId);
+  const functions = segments.map((segment) => storyFunctionFromBeatRole(segment.beatRole)).filter(Boolean);
+  const primaryFunction = functions.find((fn) => fn !== "custom") ?? functions[0] ?? "custom";
+  const totalDuration = segments.reduce((sum, segment) => sum + segment.durationSeconds, 0);
+  return {
+    group_id: `shot_group_${index}`,
+    beat_ids: uniqueStrings(beatIds),
+    segment_nos: segmentNos,
+    story_function: primaryFunction,
+    reason_zh: describeShotGroupReason(segments, totalDuration),
+    continuous_take_risk: totalDuration > 12 || segments.length > 2 ? "medium" : "low",
+    split_required: false,
+  };
+}
+
+function shouldSplitShotGroup(
+  previous: VideoTimelineBlueprintSegment,
+  next: VideoTimelineBlueprintSegment,
+  currentGroup: VideoTimelineBlueprintSegment[],
+  storyBeats: VideoStoryBeat[],
+): ShotGroupingSplitReason | null {
+  const mergedDuration = currentGroup.reduce((sum, segment) => sum + segment.durationSeconds, 0) + next.durationSeconds;
+  if (mergedDuration > MAX_SEGMENT_SECONDS) return splitReason(previous, next, "duration_limit", `合并后 ${mergedDuration}s 超过 i2v 单段 ${MAX_SEGMENT_SECONDS}s 上限。`);
+  const nextFunction = storyFunctionFromBeatRole(next.beatRole);
+  const previousFunction = storyFunctionFromBeatRole(previous.beatRole);
+  if (nextFunction === "cta" || isCtaTimelineSegment(next)) return splitReason(previous, next, "cta_enter", "CTA 进入，需要独立承接前面的利益点，避免和 payoff/证明动作混在同一连续镜头里。");
+  if (nextFunction === "payoff" && previousFunction !== "payoff") return splitReason(previous, next, "payoff_state_change", "payoff 状态明显改变，需要让结果兑现成为清晰的新段落。");
+  if (nextFunction === "conflict" && previousFunction !== "hook" && previousFunction !== "conflict") return splitReason(previous, next, "new_conflict_relation", "新的冲突关系出现，需要切出新的叙事焦点。");
+  if (hasTimeJump(previous, next)) return splitReason(previous, next, "time_jump", "相邻段存在时间跳跃，不能作为同一连续动作链。");
+  if (hasSpaceChange(previous, next)) return splitReason(previous, next, "space_change", "物理空间或硬一致性锚点变化明显，需要切分。");
+  if (!hasCompatibleNarrativeFocus(previous, next, storyBeats)) return splitReason(previous, next, "narrative_focus_change", "相邻段叙事焦点不同，合并会削弱信息递进。");
+  if (!hasCompatibleCameraView(previous, next)) return splitReason(previous, next, "camera_mismatch", "视线或主客观镜头关系不匹配，不适合作为同一连续镜头。");
+  if (!hasCompatibleEmotionDirection(previous, next)) return splitReason(previous, next, "model_continuity_risk", "情绪方向或动作连续性不足，合并后容易让模型生成跳变。");
+  return null;
+}
+
+function splitReason(
+  previous: VideoTimelineBlueprintSegment,
+  next: VideoTimelineBlueprintSegment,
+  reasonCode: ShotGroupingSplitReason["reasonCode"],
+  reasonZh: string,
+): ShotGroupingSplitReason {
+  return {
+    afterSegmentNo: previous.segmentNo,
+    beforeSegmentNo: next.segmentNo,
+    reasonCode,
+    reasonZh,
+    mergeRejected: true,
+  };
+}
+
+function normalizeShotGroupingSplitReasons(
+  values: Record<string, unknown>[],
+  warnings: string[],
+): ShotGroupingSplitReason[] {
+  return values.flatMap((item, index) => {
+    const afterSegmentNo = numberFrom(item.afterSegmentNo ?? item.after_segment_no);
+    const beforeSegmentNo = numberFrom(item.beforeSegmentNo ?? item.before_segment_no);
+    const reasonCode = normalizeShotGroupingSplitReasonCode(item.reasonCode ?? item.reason_code);
+    if (!afterSegmentNo || !beforeSegmentNo || !reasonCode) {
+      warnings.push(`shotGroupingPass splitReason ${index + 1} is incomplete`);
+      return [];
+    }
+    return [{
+      afterSegmentNo,
+      beforeSegmentNo,
+      reasonCode,
+      reasonZh: stringOr(item.reasonZh ?? item.reason_zh, ""),
+      mergeRejected: booleanOr(item.mergeRejected ?? item.merge_rejected, true),
+    }];
+  }).slice(0, 80);
+}
+
+function validateShotGroupingContinuity(
+  groups: NonNullable<VideoShotGroupingPass["groups"]>,
+  splitReasons: ShotGroupingSplitReason[],
+  timelineSegments: VideoTimelineBlueprintSegment[],
+  warnings: string[],
+): void {
+  const segmentNos = new Set(timelineSegments.map((segment) => segment.segmentNo));
+  const covered = new Set<number>();
+  for (const group of groups) {
+    const duration = group.segmentNos.reduce((sum, segmentNo) => {
+      const segment = timelineSegments.find((item) => item.segmentNo === segmentNo);
+      return sum + (segment?.durationSeconds ?? 0);
+    }, 0);
+    if (duration > MAX_SEGMENT_SECONDS) warnings.push(`shotGroupingPass group ${group.groupId} exceeds ${MAX_SEGMENT_SECONDS}s`);
+    if (!group.reasonZh && !group.reason) warnings.push(`shotGroupingPass group ${group.groupId} lacks state-change reason`);
+    for (const segmentNo of group.segmentNos) {
+      if (!segmentNos.has(segmentNo)) warnings.push(`shotGroupingPass group ${group.groupId} references missing segment ${segmentNo}`);
+      covered.add(segmentNo);
+    }
+  }
+  for (const segmentNo of segmentNos) {
+    if (!covered.has(segmentNo)) warnings.push(`shotGroupingPass does not cover segment ${segmentNo}`);
+  }
+  const splitPairs = new Set(splitReasons.map((item) => `${item.afterSegmentNo}:${item.beforeSegmentNo}`));
+  for (let index = 1; index < timelineSegments.length; index += 1) {
+    const prev = timelineSegments[index - 1];
+    const next = timelineSegments[index];
+    const sameGroup = groups.some((group) => group.segmentNos.includes(prev.segmentNo) && group.segmentNos.includes(next.segmentNo));
+    if (!sameGroup && !splitPairs.has(`${prev.segmentNo}:${next.segmentNo}`)) {
+      warnings.push(`shotGroupingPass missing splitReason between segment ${prev.segmentNo} and ${next.segmentNo}`);
+    }
+  }
+}
+
+function describeShotGroupReason(segments: VideoTimelineBlueprintSegment[], totalDuration: number): string {
+  const first = segments[0];
+  const last = segments[segments.length - 1] ?? first;
+  if (!first || !last) return "";
+  if (segments.length === 1) {
+    return `单段执行：从“${first.purposeZh || first.beatRole || "当前状态"}”推进到本段结束状态，时长 ${totalDuration}s。`;
+  }
+  return `合并为同一连续执行单元：从“${first.purposeZh || first.beatRole || "起始状态"}”递进到“${last.purposeZh || last.beatRole || "结束状态"}”，总时长 ${totalDuration}s，不超过 ${MAX_SEGMENT_SECONDS}s。`;
+}
+
+function hasTimeJump(previous: VideoTimelineBlueprintSegment, next: VideoTimelineBlueprintSegment): boolean {
+  const text = segmentGroupingText(previous, next);
+  return /时间跳跃|隔天|之后|几小时|多年后|回忆|闪回|time jump|later|next day|flashback/i.test(text);
+}
+
+function isCtaTimelineSegment(segment: VideoTimelineBlueprintSegment): boolean {
+  return /cta|call to action|下载|立即|购买|下单|预约|了解更多|继续观看|download|buy now|order now|book now|learn more/i.test(segmentGroupingText(segment));
+}
+
+function hasSpaceChange(previous: VideoTimelineBlueprintSegment, next: VideoTimelineBlueprintSegment): boolean {
+  if (previous.boundaryModeHint === "hard_cut" || next.boundaryModeHint === "hard_cut") return true;
+  const previousAnchors = new Set(previous.requiredAnchorIds ?? []);
+  const nextAnchors = new Set(next.requiredAnchorIds ?? []);
+  const hasAnchorSignal = previousAnchors.size > 0 || nextAnchors.size > 0;
+  if (hasAnchorSignal && !setsOverlap(previousAnchors, nextAnchors)) return true;
+  const text = segmentGroupingText(previous, next);
+  return /空间变化|换场|新地点|室内到室外|外景|门店|厨房到餐桌|from .* to .*location|new location|space change/i.test(text);
+}
+
+function hasCompatibleNarrativeFocus(previous: VideoTimelineBlueprintSegment, next: VideoTimelineBlueprintSegment, storyBeats: VideoStoryBeat[]): boolean {
+  const previousFunction = storyFunctionFromBeatRole(previous.beatRole);
+  const nextFunction = storyFunctionFromBeatRole(next.beatRole);
+  if (previousFunction === nextFunction) return true;
+  const compatiblePairs = new Set([
+    "hook:setup",
+    "hook:conflict",
+    "hook:proof",
+    "setup:conflict",
+    "setup:proof",
+    "conflict:escalation",
+    "escalation:turning_point",
+    "turning_point:proof",
+    "proof:reaction",
+    "reaction:payoff",
+  ]);
+  if (compatiblePairs.has(`${previousFunction}:${nextFunction}`)) return true;
+  const previousBeatIds = beatIdsForTimelineSegment(previous, storyBeats);
+  const nextBeatIds = beatIdsForTimelineSegment(next, storyBeats);
+  return setsOverlap(new Set(previousBeatIds), new Set(nextBeatIds));
+}
+
+function hasCompatibleCameraView(previous: VideoTimelineBlueprintSegment, next: VideoTimelineBlueprintSegment): boolean {
+  if (previous.boundaryModeHint === "match_cut" || next.boundaryModeHint === "match_cut") return true;
+  const text = segmentGroupingText(previous, next);
+  if (/主观|第一视角|POV/i.test(previous.purposeZh ?? "") !== /主观|第一视角|POV/i.test(next.purposeZh ?? "")) return false;
+  return !/反打|reverse shot|new camera setup|新机位|轴线改变|axis change/i.test(text);
+}
+
+function hasCompatibleEmotionDirection(previous: VideoTimelineBlueprintSegment, next: VideoTimelineBlueprintSegment): boolean {
+  const previousFunction = storyFunctionFromBeatRole(previous.beatRole);
+  const nextFunction = storyFunctionFromBeatRole(next.beatRole);
+  if (previousFunction === "payoff" && nextFunction === "conflict") return false;
+  if (previousFunction === "cta") return false;
+  return true;
+}
+
+function beatIdsForTimelineSegment(segment: VideoTimelineBlueprintSegment, storyBeats: VideoStoryBeat[]): string[] {
+  return storyBeats
+    .filter((beat) => beat.targetSegmentNos?.includes(segment.segmentNo))
+    .map((beat) => beat.beatId);
+}
+
+function segmentGroupingText(...segments: VideoTimelineBlueprintSegment[]): string {
+  return segments.map((segment) => [
+    segment.purposeZh,
+    segment.purposeEn,
+    segment.splitReasonZh,
+    segment.subtitleIntentZh,
+    segment.audioIntentZh,
+    segment.beatRole,
+    ...(segment.sourceEventIds ?? []),
+    ...(segment.requiredAnchorIds ?? []),
+  ].filter(Boolean).join(" ")).join(" ");
+}
+
+function setsOverlap<T>(a: Set<T>, b: Set<T>): boolean {
+  for (const value of a) {
+    if (b.has(value)) return true;
+  }
+  return false;
+}
+
+function normalizeShotGroupingSplitReasonCode(value: unknown): ShotGroupingSplitReason["reasonCode"] | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[-\s]+/g, "_") : value;
+  if (
+    normalized === "space_change" ||
+    normalized === "time_jump" ||
+    normalized === "new_conflict_relation" ||
+    normalized === "payoff_state_change" ||
+    normalized === "cta_enter" ||
+    normalized === "duration_limit" ||
+    normalized === "camera_mismatch" ||
+    normalized === "narrative_focus_change" ||
+    normalized === "model_continuity_risk"
+  ) return normalized;
+  return undefined;
+}
+
+function normalizeStoryQualityReport(
+  value: unknown,
+  storyBeats: VideoStoryBeat[],
+  timelineSegments: VideoTimelineBlueprintSegment[],
+  warnings: string[],
+): VideoStoryQualityReport {
+  const raw = isRecord(value) ? value : {};
+  const issues: NonNullable<VideoStoryQualityReport["issues"]> = arrayOfRecords(raw.issues).map((issue) => ({
+    code: safeId(issue.code, "story_quality_warning"),
+    severity: issue.severity === "error" ? "error" : "warning",
+    beatId: stringOr(issue.beatId ?? issue.beat_id, "") || undefined,
+    segmentNo: numberFrom(issue.segmentNo ?? issue.segment_no) || undefined,
+    messageZh: stringOr(issue.messageZh ?? issue.message_zh, ""),
+    recommendationZh: stringOr(issue.recommendationZh ?? issue.recommendation_zh, ""),
+  }));
+  for (const warning of warnings.filter((item) => item.startsWith("storyDesign "))) {
+    issues.push({
+      code: "story_design_contract_warning",
+      severity: "warning",
+      messageZh: warning,
+      recommendationZh: "当前阶段只记录 warning，不阻断生成；后续质量门禁阶段再决定是否重写。",
+    });
+  }
+  validateStoryBeatCoverage(storyBeats, timelineSegments, issues);
+  return {
+    passed: booleanOr(raw.passed, !issues.some((issue) => issue.severity === "error")),
+    score: numberFrom(raw.score),
+    hookScore: numberFrom(raw.hookScore ?? raw.hook_score),
+    causalityScore: numberFrom(raw.causalityScore ?? raw.causality_score),
+    payoffScore: numberFrom(raw.payoffScore ?? raw.payoff_score),
+    ctaScore: numberFrom(raw.ctaScore ?? raw.cta_score),
+    continuityScore: numberFrom(raw.continuityScore ?? raw.continuity_score),
+    issueCodes: normalizeStringArray(raw.issueCodes ?? raw.issue_codes) ?? issues.map((issue) => issue.code),
+    issues,
+    rewriteRequired: booleanOr(raw.rewriteRequired ?? raw.rewrite_required, false),
+    rewriteFromStage: normalizeStoryRewriteStage(raw.rewriteFromStage ?? raw.rewrite_from_stage),
+    summaryZh: stringOr(raw.summaryZh ?? raw.summary_zh, issues.length ? "剧情结构字段已接入，但部分字段由系统派生或缺失，当前仅记录 warning。" : "剧情结构字段完整。"),
+  };
+}
+
+function normalizeSegmentStoryTrace(params: {
+  sourceSegment: Record<string, unknown>;
+  timelineSegment: VideoTimelineBlueprintSegment;
+  storyboardBrief?: StoryboardBrief;
+  storyBeats: VideoStoryBeat[];
+  warnings: string[];
+}): Pick<VideoPlanSegment, "linkedBeatIds" | "storyFunction" | "emotionalBeat" | "emotionalBeatZh" | "emotionalBeatEn" | "cause" | "effect" | "informationUnit" | "keyEvidenceIds" | "actionContinuity" | "reactionBeat" | "powerShift"> {
+  const linkedBeatIds = normalizeStringArray(params.sourceSegment.linkedBeatIds ?? params.sourceSegment.linked_beat_ids) ??
+    params.storyboardBrief?.linkedBeatIds ??
+    params.storyBeats.filter((beat) => beat.targetSegmentNos?.includes(params.timelineSegment.segmentNo)).map((beat) => beat.beatId);
+  if (!linkedBeatIds.length) params.warnings.push(`storyDesign segment ${params.timelineSegment.segmentNo} has no linkedBeatIds`);
+  const linkedBeats = params.storyBeats.filter((beat) => linkedBeatIds.includes(beat.beatId));
+  const primaryBeat = linkedBeats[0];
+  const storyFunction = normalizeStoryFunction(params.sourceSegment.storyFunction ?? params.sourceSegment.story_function) ??
+    params.storyboardBrief?.storyFunction ??
+    primaryBeat?.storyFunction ??
+    storyFunctionFromBeatRole(params.timelineSegment.beatRole);
+  const actionContinuity = normalizeActionContinuity(params.sourceSegment.actionContinuity ?? params.sourceSegment.action_continuity) ?? primaryBeat?.actionContinuity;
+  if (!linkedBeatIds.length) {
+    params.warnings.push(`storyDesign segment ${params.timelineSegment.segmentNo} will continue with non-blocking story trace warning`);
+  }
+  if ((storyFunction === "payoff" || storyFunction === "turning_point") && (!actionContinuity?.execution || !actionContinuity?.resultOrReaction)) {
+    params.warnings.push(`storyDesign ${storyFunction} segment ${params.timelineSegment.segmentNo} lacks complete actionContinuity trigger/result`);
+  }
+  const reactionBeat = stringOr(params.sourceSegment.reactionBeat ?? params.sourceSegment.reaction_beat, primaryBeat?.reactionBeat ?? "");
+  const powerShift = stringOr(params.sourceSegment.powerShift ?? params.sourceSegment.power_shift, primaryBeat?.powerShift ?? "");
+  if ((storyFunction === "payoff" || storyFunction === "turning_point") && (!reactionBeat || !powerShift)) {
+    params.warnings.push(`storyDesign ${storyFunction} segment ${params.timelineSegment.segmentNo} lacks reactionBeat or powerShift`);
+  }
+  return {
+    linkedBeatIds,
+    storyFunction,
+    emotionalBeat: stringOr(params.sourceSegment.emotionalBeat ?? params.sourceSegment.emotional_beat, primaryBeat?.emotionalBeat ?? ""),
+    emotionalBeatZh: stringOr(params.sourceSegment.emotionalBeatZh ?? params.sourceSegment.emotional_beat_zh, primaryBeat?.emotionalBeatZh ?? ""),
+    emotionalBeatEn: stringOr(params.sourceSegment.emotionalBeatEn ?? params.sourceSegment.emotional_beat_en, primaryBeat?.emotionalBeatEn ?? ""),
+    cause: stringOr(params.sourceSegment.cause, primaryBeat?.cause ?? ""),
+    effect: stringOr(params.sourceSegment.effect, primaryBeat?.effect ?? ""),
+    informationUnit: stringOr(params.sourceSegment.informationUnit ?? params.sourceSegment.information_unit, primaryBeat?.informationUnit ?? ""),
+    keyEvidenceIds: normalizeStringArray(params.sourceSegment.keyEvidenceIds ?? params.sourceSegment.key_evidence_ids) ?? primaryBeat?.keyEvidenceIds ?? [],
+    actionContinuity,
+    reactionBeat,
+    powerShift,
+  };
+}
+
+function withStoryQualityWarnings(report: VideoStoryQualityReport, warnings: string[]): VideoStoryQualityReport {
+  const existing = report.issues ?? [];
+  const existingMessages = new Set(existing.map((issue) => issue.messageZh).filter(Boolean));
+  const warningIssues = warnings
+    .filter((warning) => warning.startsWith("storyDesign "))
+    .filter((warning) => !existingMessages.has(warning))
+    .map((warning) => ({
+      code: "story_design_contract_warning",
+      severity: "warning" as const,
+      messageZh: warning,
+      recommendationZh: "当前阶段只记录 warning，不阻断生成；后续质量门禁阶段再决定是否重写。",
+    }));
+  const issues = [...existing, ...warningIssues];
+  return {
+    ...report,
+    passed: report.passed ?? !issues.some((issue) => issue.severity === "error"),
+    issueCodes: report.issueCodes?.length ? report.issueCodes : issues.map((issue) => issue.code),
+    issues,
+  };
+}
+
+function validateStoryBeatCoverage(
+  storyBeats: VideoStoryBeat[],
+  timelineSegments: VideoTimelineBlueprintSegment[],
+  issues: NonNullable<VideoStoryQualityReport["issues"]>,
+): void {
+  for (const segment of timelineSegments) {
+    if (!storyBeats.some((beat) => beat.targetSegmentNos?.includes(segment.segmentNo))) {
+      issues.push({
+        code: "story_beat_segment_trace_missing",
+        severity: "warning",
+        segmentNo: segment.segmentNo,
+        messageZh: `片段 ${segment.segmentNo} 没有明确绑定 story beat。`,
+        recommendationZh: "当前阶段不阻断生成；后续质量门禁阶段应要求重写 beat sheet 或 shot grouping。",
+      });
+    }
+  }
+  const payoffOrder = storyBeats.find((beat) => beat.storyFunction === "payoff")?.order;
+  const triggerOrder = storyBeats.find((beat) => beat.storyFunction === "turning_point" || beat.storyFunction === "proof")?.order;
+  if (payoffOrder && (!triggerOrder || triggerOrder >= payoffOrder)) {
+    issues.push({
+      code: "payoff_without_prior_trigger",
+      severity: "warning",
+      messageZh: "payoff 前没有明确的 turning point/proof 触发 beat，可能出现“突然赢了”。",
+      recommendationZh: "后续 Planner 应补出可见触发动作，再进入 payoff。",
+    });
+  }
+  for (const beat of storyBeats) {
+    if ((beat.storyFunction === "payoff" || beat.storyFunction === "turning_point") && (!beat.actionContinuity?.execution || !beat.actionContinuity.resultOrReaction)) {
+      issues.push({
+        code: "payoff_or_turning_point_action_continuity_missing",
+        severity: "warning",
+        beatId: beat.beatId,
+        messageZh: `${beat.storyFunction} beat 缺少完整 actionContinuity。`,
+        recommendationZh: "补充 motivation_or_preparation、execution、result_or_reaction，避免结果突然发生。",
+      });
+    }
+    if ((beat.storyFunction === "payoff" || beat.storyFunction === "turning_point") && (!beat.reactionBeat || !beat.powerShift)) {
+      issues.push({
+        code: "reaction_or_power_shift_missing",
+        severity: "warning",
+        beatId: beat.beatId,
+        messageZh: `${beat.storyFunction} beat 缺少 reactionBeat 或 powerShift。`,
+        recommendationZh: "补充角色/用户反应和力量关系变化，让爽点成立。",
+      });
+    }
+  }
 }
 
 function normalizeNarrativeEvents(
@@ -1813,13 +3437,14 @@ function validateTimelineEventTrace(segments: VideoTimelineBlueprintSegment[], e
 
 function normalizeStoryboardBrief(
   value: unknown,
-  context: { warnings: string[]; anchorIds: Set<string>; eventIds: Set<string> },
+  context: { warnings: string[]; anchorIds: Set<string>; eventIds: Set<string>; beatIds: Set<string> },
 ): StoryboardBrief[] {
   return arrayOfRecords(value).flatMap((item) => {
     const segmentNo = numberFrom(item.segmentNo ?? item.segment_no);
     if (!segmentNo) return [];
     const sourceEventIds = normalizeStringArray(item.sourceEventIds ?? item.source_event_ids) ?? [];
     const eventIds = normalizeStringArray(item.eventIds ?? item.event_ids) ?? sourceEventIds;
+    const linkedBeatIds = normalizeStringArray(item.linkedBeatIds ?? item.linked_beat_ids) ?? [];
     const requiredAnchorIds = normalizeStringArray(item.requiredAnchorIds ?? item.required_anchor_ids) ?? [];
     const visibleAnchorIds = normalizeStringArray(item.visibleAnchorIds ?? item.visible_anchor_ids) ?? requiredAnchorIds;
     for (const eventId of eventIds) {
@@ -1828,10 +3453,16 @@ function normalizeStoryboardBrief(
     for (const anchorId of visibleAnchorIds) {
       if (!context.anchorIds.has(anchorId)) context.warnings.push(`storyboardBrief segment ${segmentNo} references missing anchor ${anchorId}`);
     }
+    if (!linkedBeatIds.length) context.warnings.push(`storyboardBrief segment ${segmentNo} has no linked_beat_ids`);
+    for (const beatId of linkedBeatIds) {
+      if (context.beatIds.size && !context.beatIds.has(beatId)) context.warnings.push(`storyboardBrief segment ${segmentNo} references missing story beat ${beatId}`);
+    }
     return [{
       segmentNo,
       eventIds,
       sourceEventIds,
+      linkedBeatIds,
+      storyFunction: normalizeStoryFunction(item.storyFunction ?? item.story_function),
       narrativeFunction: stringOr(item.narrativeFunction ?? item.narrative_function, ""),
       cameraId: safeId(item.cameraId ?? item.camera_id, `camera_${segmentNo}`),
       locationId: safeId(item.locationId ?? item.location_id, ""),
@@ -1917,6 +3548,17 @@ function normalizeCameraGraph(
       segmentNos: normalizeNumberArray(item.segmentNos ?? item.segment_nos ?? item.segments),
       locationId: safeId(item.locationId ?? item.location_id, ""),
       description: stringOr(item.description, ""),
+      parentCameraId: safeId(item.parentCameraId ?? item.parent_camera_id, "") || undefined,
+      parentSegmentNo: numberFrom(item.parentSegmentNo ?? item.parent_segment_no) || undefined,
+      axisDescription: stringOr(item.axisDescription ?? item.axis_description, "") || undefined,
+      framingRange: stringOr(item.framingRange ?? item.framing_range, "") || undefined,
+      movementStyle: stringOr(item.movementStyle ?? item.movement_style, "") || undefined,
+      spatialLayoutLock: stringOr(item.spatialLayoutLock ?? item.spatial_layout_lock, "") || undefined,
+      relationToParent: item.relationToParent != null || item.relation_to_parent != null
+        ? normalizeCameraRelation(item.relationToParent ?? item.relation_to_parent)
+        : undefined,
+      missingInfo: normalizeStringArray(item.missingInfo ?? item.missing_info),
+      inheritanceReasonZh: stringOr(item.inheritanceReasonZh ?? item.inheritance_reason_zh, "") || undefined,
     }];
   });
   const known = new Set([...context.cameraIds, ...cameras.map((camera) => camera.cameraId)]);
@@ -1978,6 +3620,11 @@ function normalizeReferenceSelectionOutputs(
       recencyScore: normalizeScore(candidate.recencyScore ?? candidate.recency_score),
       viewMatchScore: normalizeScore(candidate.viewMatchScore ?? candidate.view_match_score),
       finalScore: normalizeScore(candidate.finalScore ?? candidate.final_score),
+      anchorId: stringOr(candidate.anchorId ?? candidate.anchor_id, "") || undefined,
+      assetView: normalizeAssetView(candidate.assetView ?? candidate.asset_view),
+      hardRequired: booleanOr(candidate.hardRequired ?? candidate.hard_required, false),
+      conflictReasons: normalizeStringArray(candidate.conflictReasons ?? candidate.conflict_reasons) ?? [],
+      detectedOrientation: normalizeReferenceOrientation(candidate.detectedOrientation ?? candidate.detected_orientation),
       selected: booleanOr(candidate.selected, false),
       rejectionReason: stringOr(candidate.rejectionReason ?? candidate.rejection_reason, ""),
       usageNote: stringOr(candidate.usageNote ?? candidate.usage_note, ""),
@@ -1994,6 +3641,10 @@ function normalizeReferenceSelectionOutputs(
       candidates,
       usageNotes: normalizeStringArray(item.usageNotes ?? item.usage_notes) ?? [],
       finalTextPrompt: stringOr(item.finalTextPrompt ?? item.final_text_prompt, ""),
+      targetOrientation: normalizeReferenceOrientation(item.targetOrientation ?? item.target_orientation),
+      selectedView: normalizeAssetView(item.selectedView ?? item.selected_view),
+      orientationFallbackReason: stringOr(item.orientationFallbackReason ?? item.orientation_fallback_reason, "") || undefined,
+      selectionPolicyVersion: stringOr(item.selectionPolicyVersion ?? item.selection_policy_version, "") || undefined,
       warnings: normalizeStringArray(item.warnings) ?? [],
     }];
   }).slice(0, 80);
@@ -2039,6 +3690,9 @@ function normalizeArtifactMetadata(value: unknown): Record<string, ArtifactMetad
   for (const [key, raw] of Object.entries(value)) {
     if (!isRecord(raw)) continue;
     out[safeId(key, key)] = {
+      artifactId: stringOr(raw.artifactId ?? raw.artifact_id, key),
+      artifactType: stringOr(raw.artifactType ?? raw.artifact_type, "unknown"),
+      producedByStage: stringOr(raw.producedByStage ?? raw.produced_by_stage, "unknown"),
       revision: Math.max(1, numberFrom(raw.revision) || 1),
       schemaVersion: stringOr(raw.schemaVersion ?? raw.schema_version, ""),
       plannerVersion: stringOr(raw.plannerVersion ?? raw.planner_version, ""),
@@ -2046,6 +3700,9 @@ function normalizeArtifactMetadata(value: unknown): Record<string, ArtifactMetad
       modelVersion: stringOr(raw.modelVersion ?? raw.model_version, ""),
       inputHash: stringOr(raw.inputHash ?? raw.input_hash, ""),
       dependsOn: normalizeStringArray(raw.dependsOn ?? raw.depends_on) ?? [],
+      invalidatedByArtifactIds: normalizeStringArray(raw.invalidatedByArtifactIds ?? raw.invalidated_by_artifact_ids) ?? [],
+      parentRevisionIds: normalizeStringArray(raw.parentRevisionIds ?? raw.parent_revision_ids) ?? [],
+      userAccepted: booleanOr(raw.userAccepted ?? raw.user_accepted, false),
       status: normalizeArtifactStatus(raw.status),
       dirtyReason: stringOr(raw.dirtyReason ?? raw.dirty_reason, ""),
       retryFromStage: normalizeArtifactRetryFromStage(raw.retryFromStage ?? raw.retry_from_stage),
@@ -2523,6 +4180,18 @@ function segmentsToCompatShots(keyframes: VideoPlanKeyframe[], segments: VideoPl
       videoPromptZh: segment.videoPromptZh,
       videoPromptEn: segment.videoPromptEn,
       outputMode: segment.outputMode,
+      linkedBeatIds: segment.linkedBeatIds,
+      storyFunction: segment.storyFunction,
+      emotionalBeat: segment.emotionalBeat,
+      emotionalBeatZh: segment.emotionalBeatZh,
+      emotionalBeatEn: segment.emotionalBeatEn,
+      cause: segment.cause,
+      effect: segment.effect,
+      informationUnit: segment.informationUnit,
+      keyEvidenceIds: segment.keyEvidenceIds,
+      actionContinuity: segment.actionContinuity,
+      reactionBeat: segment.reactionBeat,
+      powerShift: segment.powerShift,
       constraints: segment.constraints,
       timedPrompts: segment.timedPrompts,
       microShots: segment.microShots,
@@ -2605,6 +4274,18 @@ function jsonStageStreamMaxTimeoutMs(): number {
   return Math.max(jsonStageTimeoutMs(), Math.round(raw));
 }
 
+function shotDecomposerRetryAttempts(): number {
+  const raw = Number(process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_RETRY_ATTEMPTS);
+  if (!Number.isFinite(raw) || raw <= 0) return 3;
+  return Math.max(1, Math.min(5, Math.round(raw)));
+}
+
+function shotDecomposerRetryBaseDelayMs(): number {
+  const raw = Number(process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_RETRY_BASE_DELAY_MS);
+  if (!Number.isFinite(raw) || raw < 0) return 2000;
+  return Math.min(30000, Math.round(raw));
+}
+
 function shotDecomposerMode(): "segment" | "whole" {
   return process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_MODE?.trim().toLowerCase() === "whole" ? "whole" : "segment";
 }
@@ -2613,6 +4294,61 @@ function shotDecomposerConcurrency(): number {
   const raw = Number(process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_CONCURRENCY);
   if (!Number.isFinite(raw) || raw <= 0) return 2;
   return Math.max(1, Math.min(4, Math.round(raw)));
+}
+
+function plannerInputFingerprint(input: PlanVideoProjectInput): string {
+  return createHash("sha256").update(JSON.stringify({
+    userPrompt: input.userPrompt,
+    aspectRatio: input.aspectRatio,
+    durationSeconds: input.durationSeconds,
+    shotCount: input.shotCount ?? null,
+    stylePreset: input.stylePreset ?? "",
+    referenceImageUrls: input.referenceImageUrls,
+  })).digest("hex");
+}
+
+export function normalizeAliyunStoryboardPlannerCheckpoint(
+  value: unknown,
+  input: PlanVideoProjectInput,
+): AliyunStoryboardPlannerCheckpoint {
+  const fingerprint = plannerInputFingerprint(input);
+  const envelope = isRecord(value) && isRecord(value.plannerCheckpoint)
+    ? value.plannerCheckpoint
+    : isRecord(value)
+      ? value
+      : {};
+  if (envelope.version !== 1 || envelope.inputFingerprint !== fingerprint) {
+    return {
+      version: 1,
+      inputFingerprint: fingerprint,
+      shotDecomposerSegmentPlans: {},
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  const segmentPlans = isRecord(envelope.shotDecomposerSegmentPlans)
+    ? Object.fromEntries(Object.entries(envelope.shotDecomposerSegmentPlans).filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])))
+    : {};
+  return {
+    version: 1,
+    inputFingerprint: fingerprint,
+    planningRaw: envelope.planningRaw,
+    storyboardArtistPlan: isRecord(envelope.storyboardArtistPlan) ? envelope.storyboardArtistPlan : undefined,
+    shotDecomposerSegmentPlans: segmentPlans,
+    updatedAt: typeof envelope.updatedAt === "string" ? envelope.updatedAt : new Date().toISOString(),
+  };
+}
+
+async function savePlannerCheckpoint(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+  onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void,
+): Promise<void> {
+  if (!onCheckpoint) return;
+  checkpoint.updatedAt = new Date().toISOString();
+  await onCheckpoint(structuredClone(checkpoint));
+}
+
+async function reportPlannerProgress(progress: AliyunStoryboardProgressUpdate): Promise<void> {
+  await plannerProgressStorage.getStore()?.onProgress?.(progress);
 }
 
 async function safeJson(res: Response): Promise<unknown> {
@@ -2800,17 +4536,14 @@ function normalizeReferenceQuotaType(value: unknown): ReferenceSelectionOutput["
   return undefined;
 }
 
-function truthyFlag(value: unknown): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") return /^(true|yes|1|requires_cut|high)$/i.test(value.trim());
-  if (typeof value === "number") return value > 0;
-  return false;
+function normalizeAssetView(value: unknown): VideoAssetView | undefined {
+  if (value === "front" || value === "side" || value === "back" || value === "face_closeup" || value === "overview" || value === "single") return value;
+  return undefined;
 }
 
-function containsInternalCutLanguage(value: unknown): boolean {
-  const text = JSON.stringify(value ?? "").toLowerCase();
-  return /\b(cut to|jump cut|hard cut|dissolve|fade out|fade in|crossfade|montage|switch to|scene transition|new shot|another shot|shot change)\b/.test(text) ||
-    /切到|切镜|跳切|转场|叠化|淡入|淡出|蒙太奇|换镜头|镜头切换|场景切换/.test(text);
+function normalizeReferenceOrientation(value: unknown): "front" | "side" | "back" | "unknown" {
+  if (value === "front" || value === "side" || value === "back") return value;
+  return "unknown";
 }
 
 function normalizeRiskLevel(value: unknown): NonNullable<SegmentRenderDescription["riskLevel"]> {
@@ -2916,6 +4649,148 @@ function normalizeAppliesTo(value: unknown): VideoConsistencyAnchor["appliesTo"]
 function normalizeBeatRole(value: unknown): VideoTimelineBlueprintSegment["beatRole"] {
   if (value === "hook" || value === "setup" || value === "interaction" || value === "proof" || value === "payoff" || value === "ending" || value === "custom") return value;
   return "custom";
+}
+
+function normalizeStoryFunction(value: unknown): VideoStoryFunction | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[-\s]+/g, "_") : value;
+  if (
+    normalized === "hook" ||
+    normalized === "setup" ||
+    normalized === "conflict" ||
+    normalized === "escalation" ||
+    normalized === "turning_point" ||
+    normalized === "proof" ||
+    normalized === "payoff" ||
+    normalized === "reaction" ||
+    normalized === "cta" ||
+    normalized === "cliffhanger" ||
+    normalized === "ending" ||
+    normalized === "transition" ||
+    normalized === "custom"
+  ) return normalized;
+  if (normalized === "interaction") return "proof";
+  return undefined;
+}
+
+function normalizeStoryFunctionArray(value: unknown): VideoStoryFunction[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeStoryFunction).filter((item): item is VideoStoryFunction => Boolean(item)).slice(0, 30);
+}
+
+function storyFunctionFromBeatRole(value: unknown): VideoStoryFunction {
+  const beatRole = normalizeBeatRole(value);
+  if (beatRole === "interaction") return "proof";
+  if (beatRole === "hook" || beatRole === "setup" || beatRole === "proof" || beatRole === "payoff" || beatRole === "ending" || beatRole === "custom") return beatRole;
+  return "custom";
+}
+
+function normalizeActionContinuity(value: unknown): VideoStoryTraceFields["actionContinuity"] | undefined {
+  if (!isRecord(value)) return undefined;
+  const motivationOrPreparation = stringOr(value.motivationOrPreparation ?? value.motivation_or_preparation, "");
+  const execution = stringOr(value.execution, "");
+  const resultOrReaction = stringOr(value.resultOrReaction ?? value.result_or_reaction, "");
+  return motivationOrPreparation || execution || resultOrReaction
+    ? { motivationOrPreparation, execution, resultOrReaction }
+    : undefined;
+}
+
+function normalizeCreativeVideoType(value: unknown): VideoCreativeStrategy["videoType"] {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[-\s]+/g, "_") : value;
+  if (
+    normalized === "game_ad" ||
+    normalized === "product_ad" ||
+    normalized === "ecommerce_ad" ||
+    normalized === "food_ad" ||
+    normalized === "short_drama" ||
+    normalized === "brand_film" ||
+    normalized === "tutorial" ||
+    normalized === "custom"
+  ) return normalized;
+  if (normalized === "game") return "game_ad";
+  if (normalized === "product") return "product_ad";
+  if (normalized === "ecommerce" || normalized === "e_commerce") return "ecommerce_ad";
+  if (normalized === "food" || normalized === "restaurant") return "food_ad";
+  return "custom";
+}
+
+function normalizeCreativeTemplateId(value: unknown): VideoCreativeTemplateId | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[-\s]+/g, "_") : value;
+  if (
+    normalized === "game_reversal" ||
+    normalized === "game_bonus_payoff" ||
+    normalized === "product_problem_solution" ||
+    normalized === "ecommerce_offer_conversion" ||
+    normalized === "food_sensory_reaction" ||
+    normalized === "auto_performance_hero" ||
+    normalized === "short_drama_conflict_twist" ||
+    normalized === "generic_brand_story"
+  ) return normalized;
+  return undefined;
+}
+
+function normalizeCreativeCategory(value: unknown): VideoCreativeCategory | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[-\s]+/g, "_") : value;
+  if (
+    normalized === "game" ||
+    normalized === "product" ||
+    normalized === "ecommerce" ||
+    normalized === "food" ||
+    normalized === "auto" ||
+    normalized === "short_drama" ||
+    normalized === "brand" ||
+    normalized === "tutorial" ||
+    normalized === "custom"
+  ) return normalized;
+  if (normalized === "restaurant" || normalized === "catering") return "food";
+  if (normalized === "car" || normalized === "vehicle" || normalized === "automotive") return "auto";
+  if (normalized === "drama" || normalized === "shortfilm" || normalized === "short_film") return "short_drama";
+  if (normalized === "e_commerce" || normalized === "shopping") return "ecommerce";
+  return undefined;
+}
+
+function categoryFromVideoType(value: VideoCreativeStrategy["videoType"]): VideoCreativeCategory | undefined {
+  if (value === "game_ad") return "game";
+  if (value === "product_ad") return "product";
+  if (value === "ecommerce_ad") return "ecommerce";
+  if (value === "food_ad") return "food";
+  if (value === "short_drama") return "short_drama";
+  if (value === "brand_film") return "brand";
+  if (value === "tutorial") return "tutorial";
+  return undefined;
+}
+
+function classifyVideoCategoryFromText(text: string): VideoCreativeCategory {
+  if (/(餐饮|餐厅|门店|出餐|食材|美食|顾客|汤|面|火锅|烧烤|咖啡|奶茶|restaurant|food|meal|chef|noodle|beef|coffee|drink shop)/i.test(text)) return "food";
+  if (/(电商|下单|优惠|限时|折扣|购买|加购|购物车|包邮|order now|buy now|discount|offer|coupon|ecommerce|shop|cart)/i.test(text)) return "ecommerce";
+  if (/(护肤|精华|面霜|口红|产品|卖点|使用前后|成分|功效|改善|证明|skincare|serum|cream|before and after|ingredient|product benefit)/i.test(text)) return "product";
+  if (/(汽车|车型|试驾|驾驶|加速|操控|座舱|新能源|suv|sedan|car|vehicle|test drive|performance|driving)/i.test(text)) return "auto";
+  if (/(剧情|短剧|人物关系|冲突|反转|悬念|误会|重逢|drama|conflict|twist|cliffhanger|reunion)/i.test(text)) return "short_drama";
+  if (/(游戏|手游|棋牌|打牌|下注|bonus|jackpot|金币|倍率|排行榜|胜利|game|player|level|win|opponent|leaderboard)/i.test(text)) return "game";
+  if (/(教程|教学|步骤|how to|tutorial|guide|step)/i.test(text)) return "tutorial";
+  return "brand";
+}
+
+function templateForCategory(category: VideoCreativeCategory, text: string): VideoCreativeTemplateId {
+  if (category === "game") {
+    return /(bonus|jackpot|金币|倍率|奖励|爆奖|bonus|reward|multiplier)/i.test(text) ? "game_bonus_payoff" : "game_reversal";
+  }
+  if (category === "product") return "product_problem_solution";
+  if (category === "ecommerce") return "ecommerce_offer_conversion";
+  if (category === "food") return "food_sensory_reaction";
+  if (category === "auto") return "auto_performance_hero";
+  if (category === "short_drama") return "short_drama_conflict_twist";
+  return "generic_brand_story";
+}
+
+function normalizeStoryRewriteStage(value: unknown): VideoStoryQualityReport["rewriteFromStage"] {
+  if (
+    value === "creative_strategy" ||
+    value === "beat_sheet" ||
+    value === "storyboard" ||
+    value === "shot_grouping" ||
+    value === "none"
+  ) return value;
+  return "none";
 }
 
 function normalizeSegmentDensity(value: unknown): NonNullable<VideoPlanningManifest["storyStrategy"]>["recommendedSegmentDensity"] {

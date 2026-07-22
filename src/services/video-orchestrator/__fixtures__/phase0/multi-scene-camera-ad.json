@@ -1,0 +1,81 @@
+{
+  "fixtureVersion": 1,
+  "storyBaseline": {
+    "videoCategory": "generic_brand_story",
+    "legacyPlannerBehavior": "pre-story-gate",
+    "capturedForStep": "16.1-phase0-freeze-current-baseline",
+    "knownCurrentFailurePoints": [
+      "scene transitions can become location changes without a narrative reason",
+      "camera changes may be technically correct but emotionally unmotivated",
+      "the final summary can appear without a cause-and-effect payoff"
+    ],
+    "comparisonGoal": "Future planner output should connect scene change, camera choice, and emotional/story function before generating shots."
+  },
+  "project": {
+    "id": "fixture-multi-scene-camera-ad",
+    "title": "合成样例：多场景与多机位短片",
+    "status": "FINAL_REVIEW",
+    "input": {
+      "userPrompt": "制作一条人物从工作室进入户外体验区的短片，至少包含两个机位。",
+      "durationSeconds": 18,
+      "aspectRatio": "16:9",
+      "referenceImageUrls": []
+    },
+    "planJson": {
+      "schemaVersion": "plan-json",
+      "plannerVersion": "v2",
+      "promptVersion": "v2",
+      "assetLibrary": {
+        "items": [
+          { "assetId": "guide-front", "anchorId": "guide", "category": "person", "view": "front", "imagePrompt": "向导人物严格正面全身设定图", "imageUrl": "fixture://camera/guide-front.png", "status": "approved" },
+          { "assetId": "guide-side", "anchorId": "guide", "category": "person", "view": "side", "imagePrompt": "同一向导人物严格侧面全身设定图", "imageUrl": "fixture://camera/guide-side.png", "status": "approved" },
+          { "assetId": "guide-back", "anchorId": "guide", "category": "person", "view": "back", "imagePrompt": "同一向导人物严格背面全身设定图", "imageUrl": "fixture://camera/guide-back.png", "status": "approved" },
+          { "assetId": "studio-overview", "anchorId": "studio", "category": "scene", "view": "overview", "imagePrompt": "工作室固定空间布局总览", "imageUrl": "fixture://camera/studio.png", "status": "approved" },
+          { "assetId": "outdoor-overview", "anchorId": "outdoor", "category": "scene", "view": "overview", "imagePrompt": "户外体验区固定空间布局总览", "imageUrl": "fixture://camera/outdoor.png", "status": "approved" }
+        ]
+      },
+      "narrativeEvents": [
+        { "eventId": "event-studio", "action": "人物在工作室介绍任务", "resultingState": "人物走向出口" },
+        { "eventId": "event-outdoor", "action": "人物进入户外体验区", "resultingState": "人物开始体验" },
+        { "eventId": "event-result", "action": "人物完成体验并总结", "resultingState": "人物面向镜头" }
+      ],
+      "cameraGraph": {
+        "cameras": [
+          { "cameraId": "cam-studio-wide", "segmentNos": [1], "locationId": "studio", "description": "工作室正向广角" },
+          { "cameraId": "cam-outdoor-follow", "segmentNos": [2], "locationId": "outdoor", "description": "户外背后跟拍" },
+          { "cameraId": "cam-outdoor-front", "segmentNos": [3], "locationId": "outdoor", "description": "户外正面中景" }
+        ],
+        "relations": [
+          { "fromCameraId": "cam-studio-wide", "toCameraId": "cam-outdoor-follow", "relation": "new_camera_setup", "reason": "地点变化" },
+          { "fromCameraId": "cam-outdoor-follow", "toCameraId": "cam-outdoor-front", "relation": "alternate_view", "reason": "同一户外空间切换到正面总结" }
+        ]
+      },
+      "keyframes": [
+        { "keyframeNo": 1, "timeSeconds": 0, "imagePrompt": "人物正面站在工作室广角画面", "imageUrl": "fixture://camera/kf-1.png", "usesConsistencyAnchors": ["guide", "studio"] },
+        { "keyframeNo": 2, "timeSeconds": 6, "imagePrompt": "人物背向镜头走到工作室出口", "imageUrl": "fixture://camera/kf-2.png", "usesConsistencyAnchors": ["guide", "studio"] },
+        { "keyframeNo": 3, "timeSeconds": 12, "imagePrompt": "人物背向镜头进入户外体验区", "imageUrl": "fixture://camera/kf-3.png", "usesConsistencyAnchors": ["guide", "outdoor"] },
+        { "keyframeNo": 4, "timeSeconds": 18, "imagePrompt": "人物正面站在户外体验区总结", "imageUrl": "fixture://camera/kf-4.png", "usesConsistencyAnchors": ["guide", "outdoor"] }
+      ],
+      "segments": [
+        { "segmentNo": 1, "cameraId": "cam-studio-wide", "startKeyframeNo": 1, "endKeyframeNo": 2, "durationSeconds": 6, "videoPrompt": "工作室广角连续镜头，人物转身走向出口", "clipUrl": "fixture://camera/segment-1.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "人物侧身经过工作台", "imageUrl": "fixture://camera/segment-1-checkpoint-1.png" }] },
+        { "segmentNo": 2, "cameraId": "cam-outdoor-follow", "startKeyframeNo": 2, "endKeyframeNo": 3, "durationSeconds": 6, "videoPrompt": "背后跟拍人物连续走入户外体验区", "clipUrl": "fixture://camera/segment-2.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "人物背面经过户外入口", "imageUrl": "fixture://camera/segment-2-checkpoint-1.png" }] },
+        { "segmentNo": 3, "cameraId": "cam-outdoor-front", "startKeyframeNo": 3, "endKeyframeNo": 4, "durationSeconds": 6, "videoPrompt": "户外正面机位中人物完成体验并总结", "clipUrl": "fixture://camera/segment-3.mp4", "microShots": [{ "microShotNo": 1, "localTimeSeconds": 3, "imagePrompt": "人物从侧面自然转向正面", "imageUrl": "fixture://camera/segment-3-checkpoint-1.png" }] }
+      ],
+      "referenceSelectionOutputs": [
+        { "targetArtifactId": "keyframe:3", "selectedArtifactIds": ["consistency_reference:guide-back", "consistency_reference:outdoor-overview"], "selectedReferenceUrls": ["fixture://camera/guide-back.png", "fixture://camera/outdoor.png"], "candidates": [{ "artifactId": "consistency_reference:guide-back", "selected": true, "purpose": "人物背面身份参考" }, { "artifactId": "consistency_reference:outdoor-overview", "selected": true, "purpose": "户外空间布局参考" }] }
+      ],
+      "promptDebugArtifacts": {
+        "keyframe:3": { "targetArtifactId": "keyframe:3", "compilerVersion": "prompt-compiler-v1", "finalPrompt": "使用人物背面身份参考和户外空间布局参考。" }
+      },
+      "generationQualityReports": [
+        { "assetId": "keyframe:3:image", "identityScore": 89, "layoutScore": 92, "promptAlignmentScore": 90, "continuityScore": 87, "artifactIssues": [], "passed": true }
+      ],
+      "mediaRevisionHistory": {
+        "keyframe_image:keyframe-3": [{ "id": "camera-kf3-r1", "url": "fixture://camera/history/kf-3-r1.png", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "segment_clip:segment-3": [{ "id": "camera-s3-r1", "url": "fixture://camera/history/segment-3-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }],
+        "final_video:final": [{ "id": "camera-final-r1", "url": "fixture://camera/history/final-r1.mp4", "createdAt": "2026-07-21T00:00:00.000Z" }]
+      }
+    },
+    "finalVideoUrl": "fixture://camera/final.mp4"
+  }
+}

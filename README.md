@@ -71,8 +71,9 @@ NEXT_PUBLIC_API_BASE_URL=https://api.example.com docker compose --profile prod u
 
 ## 文档
 
-- [架构说明：动态表单与 RunningHub 解耦](docs/ARCHITECTURE.md)
-- [目录结构说明](docs/FOLDER_STRUCTURE.md)
+- [文档索引](docs/README.md)
+- [系统架构](docs/ARCHITECTURE.md)
+- [RunningHub 集成规范](docs/runninghub-api.md)
 
 ## 许可证
 

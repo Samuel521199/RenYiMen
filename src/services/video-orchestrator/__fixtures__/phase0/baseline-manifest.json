@@ -1,0 +1,35 @@
+{
+  "baselineId": "one-prompt-video-phase0-2026-07-21",
+  "capturedAt": "2026-07-21T00:00:00.000Z",
+  "schemaVersion": "plan-json",
+  "plannerArchitecture": "v2",
+  "plannerVersion": "v2",
+  "promptVersion": "v2",
+  "compilerVersion": "prompt-compiler-v1",
+  "assetViews": ["front", "side", "back"],
+  "mediaRevisionLimitPerArtifact": 10,
+  "fixtures": [
+    "single-character-game-ad.json",
+    "character-product-ad.json",
+    "ecommerce-offer-ad.json",
+    "food-sensory-ad.json",
+    "short-drama-conflict-story.json",
+    "multi-scene-camera-ad.json"
+  ],
+  "storyBaseline": {
+    "purpose": "Freeze pre-story-gate synthetic outputs before changing the creative strategy, beat sheet, story quality gate, and shot grouping planner.",
+    "minimumCategories": ["game", "product", "ecommerce", "food", "short_drama"],
+    "knownLegacyFailureExamples": [
+      "sudden outcome without visible cause",
+      "reference image simply animated without a story function",
+      "CTA appears without a payoff-driven reason"
+    ]
+  },
+  "privacy": {
+    "syntheticOnly": true,
+    "allowedMediaScheme": "fixture://",
+    "containsUserData": false,
+    "containsCredentials": false,
+    "containsSignedUrls": false
+  }
+}
