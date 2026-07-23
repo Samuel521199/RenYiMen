@@ -1,4 +1,5 @@
 import type { ReferenceSelectionCandidate, VideoAssetView } from "./types";
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 
 export type ReferenceOrientation = "front" | "side" | "back" | "unknown";
 
@@ -57,7 +58,10 @@ export function selectReferenceCandidates(params: {
   maxReferenceCount?: number;
   conflictThreshold?: number;
 }): ReferenceSelectionDecision {
-  const maxReferenceCount = Math.max(1, Math.min(4, params.maxReferenceCount ?? 4));
+  const maxReferenceCount = Math.max(
+    1,
+    Math.min(ONE_PROMPT_MAX_REFERENCE_IMAGES, params.maxReferenceCount ?? ONE_PROMPT_MAX_REFERENCE_IMAGES),
+  );
   const conflictThreshold = clamp01(params.conflictThreshold ?? REFERENCE_CONFLICT_THRESHOLD);
   const scored = params.candidates
     .map((candidate) => ({ ...candidate, finalScore: referenceFinalScore(candidate) }))
@@ -96,6 +100,17 @@ export function selectReferenceCandidates(params: {
     if (candidate.quotaType && quotaUsed.has(candidate.quotaType)) continue;
     selectedIds.add(candidate.artifactId);
     if (candidate.quotaType) quotaUsed.add(candidate.quotaType);
+  }
+
+  // Quotas guarantee category coverage; they are not a global one-per-category
+  // ceiling. Once every useful category has a representative, use remaining
+  // model capacity for the next strongest non-conflicting references.
+  for (const candidate of scored) {
+    if (selectedIds.size >= maxReferenceCount) break;
+    if (selectedIds.has(candidate.artifactId)) continue;
+    if (candidate.hardRequired) continue;
+    if (candidate.conflictScore >= conflictThreshold && !isMandatoryTransitionCandidate(candidate)) continue;
+    selectedIds.add(candidate.artifactId);
   }
 
   const selectedCharacter = scored.find((candidate) => selectedIds.has(candidate.artifactId) && candidate.quotaType === "character");

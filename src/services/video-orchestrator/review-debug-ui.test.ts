@@ -71,11 +71,27 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.doesNotMatch(picker, /userAccepted=true/);
   assert.doesNotMatch(picker, /artifactIssues\.join/);
   assert.doesNotMatch(picker, /\{report\.retryInstruction\}<\/p>/);
+  assert.match(picker, /快速质检中/);
 });
 
 test("selecting a boundary candidate explains that the next frame continues automatically", () => {
   assert.match(pageSource, /已采用该画面，正在自动生成下一帧/);
   assert.match(pageSource, /Image accepted; generating the next frame automatically/);
+});
+
+test("approving boundary frames opens micro-shot review without waiting for upstream submissions", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"),
+    "utf8",
+  );
+  const approveStart = service.indexOf("export async function approveShotImages");
+  const approveEnd = service.indexOf("export async function approveMicroShotReferences", approveStart);
+  const approve = service.slice(approveStart, approveEnd);
+  assert.doesNotMatch(approve, /await submitRequiredMicroShotImageTasks/);
+  assert.ok(approve.indexOf("VideoProjectStatus.MICRO_SHOT_REVIEW") < approve.indexOf("queueRequiredMicroShotImageTasks"));
+  assert.match(service, /onePromptVideoMicroShotSubmissionRuns/);
+  assert.match(service, /project\.status === VideoProjectStatus\.MICRO_SHOT_REVIEW && hasSubmittableRequiredMicroShotImage\(project\)/);
+  assert.match(pageSource, /item\.imageStatus === "running" \|\| item\.imageStatus === "pending" \|\| !item\.imageStatus \|\| item\.imageStatus === "idle"/);
 });
 
 test("all enlarged image previews share wheel zoom, drag pan, and reset controls", () => {
@@ -95,6 +111,30 @@ test("all enlarged image previews share wheel zoom, drag pan, and reset controls
   assert.equal((pageSource.match(/<ZoomableImage/g) ?? []).length, 3);
 });
 
+test("boundary-frame preview switches between adjacent shots with buttons and arrow keys", () => {
+  assert.match(pageSource, /const previewKeyframeSequence =/);
+  assert.match(pageSource, /orderedBoundaryKeyframes\.filter\(\(keyframe\) => Boolean\(keyframe\.imageUrl\)\)/);
+  assert.match(pageSource, /const previousPreviewKeyframe =/);
+  assert.match(pageSource, /const nextPreviewKeyframe =/);
+  assert.match(pageSource, /event\.key === "ArrowLeft"/);
+  assert.match(pageSource, /event\.key === "ArrowRight"/);
+  assert.match(pageSource, /aria-label=\{pageLang === "zh" \? "查看上一个镜头"/);
+  assert.match(pageSource, /aria-label=\{pageLang === "zh" \? "查看下一个镜头"/);
+  assert.match(pageSource, /disabled=\{!previousPreviewKeyframe\}/);
+  assert.match(pageSource, /disabled=\{!nextPreviewKeyframe\}/);
+});
+
+test("double-clicking a shot card opens the existing shot editor", () => {
+  const shotCards = pageSource.slice(
+    pageSource.indexOf("{project.shots.map((shot) => ("),
+    pageSource.indexOf("</section>", pageSource.indexOf("{project.shots.map((shot) => (")),
+  );
+  assert.match(shotCards, /onClick=\{\(\) => selectShot\(shot\.id\)\}/);
+  assert.match(shotCards, /onDoubleClick=\{\(\) => openShotEditor\(shot\.id\)\}/);
+  assert.match(shotCards, /双击编辑镜头/);
+  assert.match(pageSource, /function openShotEditor\(shotId: string\) \{\s*selectShot\(shotId\);\s*setShotEditorOpen\(true\);/);
+});
+
 test("candidate issue summary stays compact and loads localized copy without blocking generation", () => {
   const picker = pageSource.slice(
     pageSource.indexOf("function GenerationCandidatePicker"),
@@ -108,6 +148,8 @@ test("candidate issue summary stays compact and loads localized copy without blo
   assert.match(picker, /issue\.status === "invalid_for_stage"/);
   assert.match(picker, /requestQualitySummary/);
   assert.match(picker, /\/quality-summary/);
+  assert.match(picker, /storedSummary\?\.version === "quality-summary-v2"/);
+  assert.match(picker, /storedQualitySummary\?\.version === "quality-summary-v2"/);
   assert.match(picker, /qualitySummaryLoading/);
   assert.match(picker, /qualitySummary\.items\.map/);
   assert.match(picker, /正在整理质检结论/);
@@ -168,7 +210,9 @@ test("a previous project error is hidden while a new generation cycle is active"
   assert.match(pageSource, /const generationRecoveryActive = Boolean/);
   assert.match(pageSource, /generationProjectId === project\.id/);
   assert.match(pageSource, /const visibleProjectError = project\?\.errorMessage[\s\S]*?!generationRecoveryActive/);
-  assert.match(pageSource, /\{\(error \|\| visibleProjectError\) && \(/);
+  assert.match(pageSource, /\{localizedActionError && \(/);
+  assert.match(pageSource, /\{projectWorkflowNotice && \(/);
+  assert.match(pageSource, /\{localizedProjectError && visibleProjectError !== error && \(/);
   assert.doesNotMatch(pageSource, /\{\(error \|\| \(project\?\.errorMessage/);
 });
 
@@ -185,9 +229,25 @@ test("workflow errors follow the selected interface language instead of renderin
   assert.match(localizer, /compiler-verified generation-contract conflict/);
   assert.match(localizer, /function localizeQualityIssue/);
   assert.match(pageSource, /const localizedActionError = error \? localizeWorkflowError\(error, pageLang\)/);
-  assert.match(pageSource, /const localizedProjectError = visibleProjectError \? localizeWorkflowError\(visibleProjectError, pageLang\)/);
+  assert.match(pageSource, /const projectWorkflowNotice = visibleProjectError \? workflowNoticeForMessage\(visibleProjectError, pageLang\)/);
+  assert.match(pageSource, /const localizedProjectError = visibleProjectError && !projectWorkflowNotice \? localizeWorkflowError\(visibleProjectError, pageLang\)/);
   assert.doesNotMatch(pageSource, /<p className="text-red-300">\{error\}<\/p>/);
   assert.doesNotMatch(pageSource, /<p className="text-amber-300">\{visibleProjectError\}<\/p>/);
+});
+
+test("generation-frontier waiting state is presented as a calm workflow notice instead of an error", () => {
+  const noticeFormatter = pageSource.slice(
+    pageSource.indexOf("function workflowNoticeForMessage"),
+    pageSource.indexOf("function localizeQualityIssue"),
+  );
+  assert.match(noticeFormatter, /当前生成前沿为 KF/);
+  assert.match(noticeFormatter, /等待前置镜头确认/);
+  assert.match(noticeFormatter, /后续镜头会自动继续生成/);
+  assert.match(pageSource, /const projectWorkflowNotice =/);
+  assert.match(pageSource, /border-sky-300\/15 bg-sky-400\/\[0\.045\]/);
+  assert.match(pageSource, /\{projectWorkflowNotice\.title\}/);
+  assert.match(pageSource, /\{projectWorkflowNotice\.detail\}/);
+  assert.doesNotMatch(pageSource, /projectWorkflowNotice[\s\S]{0,240}text-amber/);
 });
 
 test("keyframe regeneration preserves history and adds one learned candidate at a time", () => {

@@ -8,6 +8,7 @@ import type {
   VideoPlanShot,
   VideoStyleBible,
 } from "./types";
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 
 const DEFAULT_NEGATIVE_PROMPT =
   "watermark, random text, logo distortion, extra fingers, deformed face, low quality, blurry, duplicated body";
@@ -123,7 +124,7 @@ function normalizeReferenceImageUrls(value: unknown): string[] {
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
     .filter((item) => /^https?:\/\//i.test(item))
-    .slice(0, 4);
+    .slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
 }
 
 function styleFromPreset(stylePreset?: string): VideoStyleBible {

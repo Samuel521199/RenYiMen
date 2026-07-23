@@ -1,3 +1,5 @@
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
+
 export const ONE_PROMPT_ROLLOUT_FLAG_NAMES = [
   "ONE_PROMPT_REFERENCE_SELECTOR_V2",
   "ONE_PROMPT_THREE_VIEW_DERIVATION",
@@ -36,7 +38,7 @@ export function createOnePromptRolloutSnapshot(env: EnvLike = process.env, now =
   };
 }
 
-export function legacyReferenceSelection<T extends { hardRequired?: boolean; url?: string }>(candidates: T[], limit = 4): { selected: T[]; candidates: Array<T & { selected: boolean; rejectionReason?: string }> } {
+export function legacyReferenceSelection<T extends { hardRequired?: boolean; url?: string }>(candidates: T[], limit = ONE_PROMPT_MAX_REFERENCE_IMAGES): { selected: T[]; candidates: Array<T & { selected: boolean; rejectionReason?: string }> } {
   const selected = [...candidates.filter((candidate) => candidate.hardRequired), ...candidates.filter((candidate) => !candidate.hardRequired)]
     .filter((candidate, index, values) => Boolean(candidate.url) && values.findIndex((item) => item.url === candidate.url) === index)
     .slice(0, limit);

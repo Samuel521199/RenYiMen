@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import type {
   AnchorStateTimeline,
   ArtifactMetadata,
@@ -1021,7 +1022,7 @@ async function createAliyunStoryboardPlanInternal(
   input: PlanVideoProjectInput,
   options: AliyunStoryboardPlannerOptions,
 ): Promise<OnePromptVideoPlan> {
-  const referenceImageUrls = input.referenceImageUrls.slice(0, 4);
+  const referenceImageUrls = input.referenceImageUrls.slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
   const fallback = createVideoPlan(input);
   const visionModel = referenceImageUrls.length
     ? model("ALIYUN_STORYBOARD_VISION_MODEL", "qwen-vl-max")

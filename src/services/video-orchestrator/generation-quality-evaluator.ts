@@ -2,6 +2,7 @@
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import { logOnePromptVideo } from "./logger";
 import type { GenerationCorrectionAction, GenerationQualityReport } from "./types";
 import { onePromptRolloutEnabled } from "./rollout-flags";
@@ -10,6 +11,8 @@ import { isMotionOnlyStillIssue, reconcileGenerationIssueLedger } from "./visual
 
 const IMAGE_QUALITY_SYSTEM_PROMPT = [
   "You are an evidence-based Visual Quality Assurance Engineer and a Generative Image Repair Specification Engineer for production advertising imagery.",
+  "The image labeled CURRENT OUTPUT is the only image being judged. REFERENCE IMAGE and PREVIOUS OUTPUT images are comparison evidence only. Never report an object, text, count, UI element, score, timer, person, product, or defect as present unless it is visibly present in CURRENT OUTPUT.",
+  "Every input image label defines its role and allowed use. Do not transfer observations between images. A detail visible only in a reference may define the desired target, but it is not evidence that the current output contains that detail.",
   "First judge only what is visibly supported by the current pixels. Then translate confirmed defects into minimal, measurable redraw instructions. Do not preserve an old diagnosis when the new image visibly changed.",
   "Use confirmed only when the defect is clearly visible. If gaze, tiny text, occlusion, or intent cannot be determined reliably, use evidenceStatus=uncertain, confidence below 0.75, priority=recommended, and do not set passed=false solely because of that uncertain finding.",
   "For spatial repairs use normalized image coordinates: top-left=(0,0), bottom-right=(1,1). Coordinates are approximate generation targets, not claims of pixel-perfect measurement.",
@@ -27,6 +30,20 @@ const VIDEO_QUALITY_SYSTEM_PROMPT = [
   "Uncertain findings must use evidenceStatus=uncertain, confidence below 0.75, priority=recommended, and must not alone force passed=false.",
   "Return at most three highest-impact correction actions as strict JSON only.",
 ].join("\n");
+
+interface QualityVisionQueueState {
+  active: number;
+  waiters: Array<() => void>;
+}
+
+const qualityVisionQueueGlobal = globalThis as typeof globalThis & {
+  __onePromptQualityVisionQueue?: QualityVisionQueueState;
+};
+
+const qualityVisionQueue = qualityVisionQueueGlobal.__onePromptQualityVisionQueue ??= {
+  active: 0,
+  waiters: [],
+};
 
 interface BaseEvaluationParams {
   assetId: string;
@@ -56,6 +73,8 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     type: "text",
     text: [
       "Evaluate the actual generated image. Scores must come from visible media content, never prompt length.",
+      "IMAGE LOCALIZATION CONTRACT: CURRENT OUTPUT is the sole subject of observation. Before writing any issue, count, text reading, or resolved/still-open decision, locate its visible evidence in CURRENT OUTPUT itself. Never use pixels from a REFERENCE IMAGE or PREVIOUS OUTPUT as evidence about what the current output contains.",
+      "REFERENCE IMAGES define only the target attributes stated in their individual role notes. Pixels outside a role note are non-authoritative. If a game board, score, timer, logo, person, product, or text appears only in a reference, do not claim it appears in CURRENT OUTPUT.",
       "You are the final visual quality gate. If any required visual evidence, identity lock, authoritative brand content, narrative meaning, anatomy, or composition is materially wrong or missing, return passed=false. The orchestration layer will not override your veto.",
       `Purpose: ${params.purpose}`,
       `Target contract: ${JSON.stringify(params.targetContract)}`,
@@ -83,22 +102,68 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
         : "",
       params.assetCategory ? `Asset category: ${params.assetCategory}` : "",
     ].join("\n"),
-  }, { type: "text", text: "Generated candidate:" }, { type: "image_url", image_url: { url: params.mediaUrl } }];
-  for (const [index, url] of params.selectedReferenceUrls.slice(0, 4).entries()) {
-    content.push({ type: "text", text: `Selected reference ${index + 1}: ${params.referenceUsageNotes[index] ?? "approved reference"}` });
-    content.push({ type: "image_url", image_url: { url } });
+  }, {
+    type: "text",
+    text: "CURRENT OUTPUT — IMAGE UNDER EVALUATION. Only pixels in the next image may support observed defects, counts, text readings, UI presence, and issue-resolution decisions.",
+  }, { type: "image_url", image_url: { url: params.mediaUrl } }];
+  const seenReferenceUrls = new Set<string>([params.mediaUrl, params.previousCandidateUrl ?? ""]);
+  const localizedReferences = params.selectedReferenceUrls
+    .map((url, index) => ({ url, usageNote: params.referenceUsageNotes[index] }))
+    .filter(({ url }) => {
+      if (!url || seenReferenceUrls.has(url)) return false;
+      seenReferenceUrls.add(url);
+      return true;
+    })
+    .slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  for (const [index, reference] of localizedReferences.entries()) {
+    content.push({
+      type: "text",
+      text: [
+        `REFERENCE IMAGE ${index + 1} — NOT CURRENT OUTPUT`,
+        `Role and allowed comparison: ${reference.usageNote?.trim() || "approved reference; compare only attributes explicitly required by the target contract"}`,
+        "Forbidden use: do not report, count, transcribe, or diagnose anything in this reference as if it were visible in CURRENT OUTPUT.",
+      ].join("\n"),
+    });
+    content.push({ type: "image_url", image_url: { url: reference.url } });
   }
   if (params.previousCandidateUrl) {
-    content.push({ type: "text", text: "Previous candidate for delta comparison only:" });
+    content.push({
+      type: "text",
+      text: "PREVIOUS OUTPUT — NOT CURRENT OUTPUT. Use only for before/after delta comparison. Re-check every prior issue against CURRENT OUTPUT pixels; never copy the previous diagnosis or describe previous pixels as current.",
+    });
     content.push({ type: "image_url", image_url: { url: params.previousCandidateUrl } });
   }
+  const evaluationStartedAt = Date.now();
   try {
     const raw = await callVision(content, IMAGE_QUALITY_SYSTEM_PROMPT);
-    return normalizeImageQualityResponse(raw, params);
+    const report = {
+      ...normalizeImageQualityResponse(raw, params),
+      evaluationModel: qualityVisionModel(),
+      evaluationDurationMs: Date.now() - evaluationStartedAt,
+    };
+    await logOnePromptVideo("generation_quality.image_eval_completed", {
+      assetId: params.assetId,
+      candidateId: params.candidateId,
+      model: report.evaluationModel,
+      durationMs: report.evaluationDurationMs,
+      passed: report.passed,
+    });
+    return report;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await logOnePromptVideo("generation_quality.image_eval_failed", { assetId: params.assetId, candidateId: params.candidateId, message }, "error");
-    return evaluationFailure(params, `图片视觉质量评估失败：${message}`, "manual");
+    const durationMs = Date.now() - evaluationStartedAt;
+    await logOnePromptVideo("generation_quality.image_eval_failed", {
+      assetId: params.assetId,
+      candidateId: params.candidateId,
+      model: qualityVisionModel(),
+      durationMs,
+      message,
+    }, "error");
+    return {
+      ...evaluationFailure(params, `图片视觉质量评估失败：${message}`, "manual"),
+      evaluationModel: qualityVisionModel(),
+      evaluationDurationMs: durationMs,
+    };
   }
 }
 
@@ -304,6 +369,7 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     : text(source.retryInstruction ?? source.retry_instruction);
   return {
     policyVersion: "quality-policy-v3",
+    evaluationStatus: "completed",
     assetId: params.assetId,
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
@@ -406,7 +472,35 @@ function concreteRetryInstruction(params: {
 }
 
 function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFromStage: GenerationQualityReport["retryFromStage"]): GenerationQualityReport {
-  return { assetId: params.assetId, candidateId: params.candidateId, candidateNo: params.candidateNo, mediaUrl: params.mediaUrl, identityScore: 0, layoutScore: 0, promptAlignmentScore: 0, continuityScore: 0, artifactIssues: [issue], passed: false, originalPassed: false, contentBased: true, retryInstruction: "Restore visual quality evaluation and evaluate this existing candidate before generating again.", retryFromStage };
+  return {
+    policyVersion: "quality-policy-v3",
+    evaluationStatus: "technical_failed",
+    technicalError: issue,
+    technicalRetryable: true,
+    assetId: params.assetId,
+    candidateId: params.candidateId,
+    candidateNo: params.candidateNo,
+    mediaUrl: params.mediaUrl,
+    identityScore: 0,
+    layoutScore: 0,
+    promptAlignmentScore: 0,
+    continuityScore: 0,
+    artifactIssues: [issue],
+    passed: false,
+    originalPassed: false,
+    contentBased: false,
+    retryInstruction: "Retry visual quality evaluation for this existing candidate. Do not regenerate the media.",
+    retryFromStage,
+  };
+}
+
+export function isTechnicalQualityEvaluationFailure(report: GenerationQualityReport | null | undefined): boolean {
+  if (!report) return false;
+  if (report.evaluationStatus === "technical_failed") return true;
+  if (report.contentBased === false && report.passed === false) return true;
+  return report.artifactIssues.some((issue) =>
+    /视觉质量评估失败|quality evaluation failed|this operation was aborted|aborterror|timed? out|timeout|rate limit|too many requests|fetch failed|network/i.test(issue),
+  );
 }
 
 function legacyQualityFallback(params: BaseEvaluationParams, video: boolean): GenerationQualityReport {
@@ -434,14 +528,54 @@ function legacyQualityFallback(params: BaseEvaluationParams, video: boolean): Ge
 }
 
 async function callVision(content: Array<Record<string, unknown>>, system: string): Promise<unknown> {
+  return withQualityVisionSlot(async () => {
+    const attempts = qualityVisionRequestAttempts();
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await callVisionOnce(content, system);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= attempts || !isRetryableQualityError(error)) throw error;
+        await delay(qualityRetryDelayMs() * attempt);
+      }
+    }
+    throw lastError;
+  });
+}
+
+async function callVisionOnce(content: Array<Record<string, unknown>>, system: string): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), qualityTimeoutMs());
   try {
-    const response = await fetch(`${compatibleBaseUrl()}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey()}` }, body: JSON.stringify({ model: process.env.ALIYUN_GENERATION_QUALITY_VISION_MODEL?.trim() || process.env.ALIYUN_STORYBOARD_VISION_MODEL?.trim() || "qwen-vl-max", messages: [{ role: "system", content: system }, { role: "user", content }], temperature: 0, response_format: { type: "json_object" } }), signal: controller.signal });
+    const response = await fetch(`${compatibleBaseUrl()}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey()}` }, body: JSON.stringify({ model: qualityVisionModel(), messages: [{ role: "system", content: system }, { role: "user", content }], temperature: 0, enable_thinking: false, response_format: { type: "json_object" } }), signal: controller.signal });
     const raw = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new Error(extractError(raw) || `HTTP ${response.status}`);
     return parseContent(raw);
   } finally { clearTimeout(timeout); }
+}
+
+async function withQualityVisionSlot<T>(work: () => Promise<T>): Promise<T> {
+  const limit = qualityVisionConcurrency();
+  if (qualityVisionQueue.active >= limit) {
+    await new Promise<void>((resolve) => qualityVisionQueue.waiters.push(resolve));
+  }
+  qualityVisionQueue.active += 1;
+  try {
+    return await work();
+  } finally {
+    qualityVisionQueue.active = Math.max(0, qualityVisionQueue.active - 1);
+    qualityVisionQueue.waiters.shift()?.();
+  }
+}
+
+function isRetryableQualityError(error: unknown): boolean {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return /abort|timed? out|timeout|fetch failed|network|socket|econn|http 408|http 409|http 425|http 429|http 5\d\d|rate limit|too many requests/i.test(message);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function sampleTimesForDuration(duration: number): number[] { const safe = Math.max(0.2, duration); return [0, safe * 0.25, safe * 0.5, safe * 0.75, Math.max(0, safe - 0.08)]; }
 async function probeVideo(inputPath: string): Promise<{ durationSeconds: number; width: number; height: number; frameRate: number }> { const output = await runCapture(process.env.FFPROBE_PATH?.trim() || "ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate:format=duration", "-of", "json", inputPath]); const data = JSON.parse(output) as Record<string, unknown>; const stream = Array.isArray(data.streams) ? record(data.streams[0]) : {}; const format = record(data.format); return { durationSeconds: Number(format.duration) || 0, width: Number(stream.width) || 0, height: Number(stream.height) || 0, frameRate: frameRate(stream.r_frame_rate) }; }
@@ -449,7 +583,11 @@ async function extractFrame(inputPath: string, outputPath: string, time: number)
 async function download(url: string, outputPath: string): Promise<void> { const response = await fetch(url); if (!response.ok) throw new Error(`download failed HTTP ${response.status}`); await writeFile(outputPath, Buffer.from(await response.arrayBuffer())); }
 async function runCapture(command: string, args: string[]): Promise<string> { return new Promise((resolve, reject) => { const child = spawn(command, args, { windowsHide: true }); let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk) => { stdout += String(chunk); }); child.stderr.on("data", (chunk) => { stderr += String(chunk); }); child.on("error", reject); child.on("close", (code) => code === 0 ? resolve(stdout) : reject(new Error(`${command} exited ${code}: ${stderr.slice(-1600)}`))); }); }
 function qualityVisionEnabled(): boolean { if (process.env.ONE_PROMPT_GENERATION_QUALITY_VISION_EVAL?.trim().toLowerCase() === "false") return false; return Boolean(process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY); }
-function qualityTimeoutMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_TIMEOUT_MS); return Number.isFinite(value) && value >= 5000 ? Math.round(value) : 90000; }
+function qualityVisionModel(): string { return process.env.ALIYUN_GENERATION_QUALITY_VISION_MODEL?.trim() || "qwen3.6-flash"; }
+function qualityTimeoutMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_TIMEOUT_MS); return Number.isFinite(value) && value >= 5000 ? Math.max(60000, Math.round(value)) : 90000; }
+function qualityVisionConcurrency(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_CONCURRENCY); return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 2; }
+function qualityVisionRequestAttempts(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_REQUEST_ATTEMPTS); return Number.isFinite(value) && value >= 1 ? Math.min(3, Math.round(value)) : 2; }
+function qualityRetryDelayMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_RETRY_DELAY_MS); return Number.isFinite(value) && value >= 0 ? Math.min(30000, Math.round(value)) : 1500; }
 function compatibleBaseUrl(): string { return (process.env.DASHSCOPE_COMPATIBLE_BASE_URL || process.env.ALIYUN_COMPATIBLE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1").replace(/\/$/, ""); }
 function requireApiKey(): string { const key = process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY; if (!key) throw new Error("missing DashScope API key"); return key; }
 function parseContent(raw: Record<string, unknown>): unknown { const choices = Array.isArray(raw.choices) ? raw.choices : []; const first = record(choices[0]); const message = record(first.message); const content = message.content; if (typeof content !== "string") return {}; return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }

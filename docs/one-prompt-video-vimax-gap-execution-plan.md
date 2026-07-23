@@ -189,7 +189,7 @@ finalScore =
 3. 先锁定当前帧可见的 hard person/product anchor。
 4. 淘汰超过冲突阈值的候选。
 5. 再按 character、product、space_layout、style_brand 配额补足。
-6. 总数最多四张。
+6. 总数最多九张。
 
 硬规则：
 

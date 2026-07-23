@@ -45,7 +45,7 @@
 
 | 开关 | 关闭后的兼容回退 |
 | --- | --- |
-| `ONE_PROMPT_REFERENCE_SELECTOR_V2` | 使用旧的批准参考图顺序，hard anchor 优先，最多四张 |
+| `ONE_PROMPT_REFERENCE_SELECTOR_V2` | 使用旧的批准参考图顺序，hard anchor 优先，最多九张 |
 | `ONE_PROMPT_THREE_VIEW_DERIVATION` | side/back 恢复独立生成，不等待 front；现有三视图不删除 |
 | `ONE_PROMPT_STRICT_VALIDATION` | 跳过新统一 Validator，保留旧流程约束 |
 | `ONE_PROMPT_VISUAL_QUALITY_EVAL` | 使用旧启发式媒体 URL/prompt 预检，不调用视觉模型 |

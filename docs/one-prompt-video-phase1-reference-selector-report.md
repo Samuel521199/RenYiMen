@@ -9,7 +9,7 @@
 本阶段完成了四项核心改造：
 
 1. Reference Selector 使用统一的正向视角、正向时效和负向冲突评分语义。
-2. hard person/product 先于普通配额入选，高冲突候选先淘汰，最终最多四张。
+2. hard person/product 先于普通配额入选，高冲突候选先淘汰，最终最多九张。
 3. 人物 front 成为主资产，side/back 明确派生自已批准的 front，并通过 Artifact 依赖图传播 dirty 状态。
 4. 增加可选的轻量视觉冲突评估；视觉模型只补充分数和原因，不能绕过后端确定性选择器直接选图。
 

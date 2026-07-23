@@ -22,6 +22,7 @@ function report(): GenerationQualityReport {
         fingerprint: "resolved",
         category: "layout",
         summary: "old layout issue",
+        target: "balanced centered composition",
         severity: "soft",
         applicableStage: "static_image",
         status: "resolved",
@@ -63,12 +64,21 @@ function report(): GenerationQualityReport {
 
 test("fallback display summary is localized, prioritized, and capped at three items", () => {
   const summary = fallbackQualityDisplaySummary(report(), "zh");
+  assert.equal(summary.version, "quality-summary-v2");
   assert.equal(summary.model, "local-fallback");
   assert.equal(summary.items.length, 3);
   assert.deepEqual(summary.items.map((item) => item.status), ["open", "open", "resolved"]);
   assert.match(summary.items[0].text, /游戏界面/);
   assert.match(summary.items[1].text, /品牌文字/);
   assert.ok(summary.items.every((item) => item.text.length <= 32));
+});
+
+test("resolved display text describes only the current achieved state", () => {
+  const summary = fallbackQualityDisplaySummary(report(), "en");
+  const resolved = summary.items.find((item) => item.status === "resolved");
+  assert.ok(resolved);
+  assert.match(resolved.text, /now match/);
+  assert.doesNotMatch(resolved.text, /old layout issue|issue is resolved|previous/i);
 });
 
 test("quality summary cache hash changes with visual findings", () => {

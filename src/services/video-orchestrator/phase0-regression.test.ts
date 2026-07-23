@@ -117,7 +117,8 @@ test("person assets remain front, side, and back views", () => {
 
 test("the latest persisted user image prompt remains authoritative", () => {
   const source = readSource("src/services/video-orchestrator/project-service.ts");
-  assert.match(source, /const sourceImagePrompt = sanitizeGameVisualPromptText\(stripNonStandardPromptSymbols\(keyframe\.imagePrompt\), stylePreset, \{ brandVisual: brandVisualAsset \}\);/);
+  assert.match(source, /const rawSourceImagePrompt = sanitizeGameVisualPromptText\(stripNonStandardPromptSymbols\(keyframe\.imagePrompt\), stylePreset, \{ brandVisual: brandVisualAsset \}\);/);
+  assert.match(source, /const sourceImagePrompt = repairPromptAgainstVisualContract\(rawSourceImagePrompt, visualContract\);/);
   assert.match(source, /source_image_prompt is authoritative for subject count, pose, framing, and background/);
   assert.match(source, /Localized plan fields may[\s\S]*only be fallbacks/);
 });

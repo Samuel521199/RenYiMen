@@ -131,6 +131,22 @@ test("required transition layout evidence cannot be vetoed by generic visual con
   assert.ok(decision.selected.some((candidate) => candidate.artifactId === transition.artifactId));
 });
 
+test("reference selector accepts up to nine images", () => {
+  const candidates = Array.from({ length: 10 }, (_, index): SelectableReferenceCandidate => ({
+    artifactId: `style:${index}`,
+    url: `fixture://style-${index}.png`,
+    sourceType: "style_brand",
+    quotaType: "style_brand",
+    purpose: `reference ${index}`,
+    relevanceScore: 1 - index * 0.01,
+    conflictScore: 0,
+    recencyScore: 1,
+    viewMatchScore: 0.5,
+  }));
+  const decision = selectForOrientation("front", candidates);
+  assert.equal(decision.selected.length, 9);
+});
+
 test("project integration preserves front-first derivation and approved media", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /onePromptRolloutEnabled\("ONE_PROMPT_THREE_VIEW_DERIVATION"\) && category === "person" && view !== "front" \? "derived_from_front" : "primary"/);

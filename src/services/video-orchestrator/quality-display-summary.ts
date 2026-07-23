@@ -12,7 +12,7 @@ import type {
   QualityDisplaySummaryItem,
 } from "./types";
 
-const SUMMARY_VERSION = "quality-summary-v1" as const;
+const SUMMARY_VERSION = "quality-summary-v2" as const;
 const DEFAULT_SUMMARY_MODEL = "qwen-flash";
 const MAX_SUMMARY_ITEMS = 3;
 
@@ -120,6 +120,9 @@ async function summarizeWithQwen(
               "You are a concise UI copy editor for an AI image quality review panel.",
               `Write only in ${lang === "zh" ? "Simplified Chinese" : "English"}.`,
               "Merge duplicates and return at most 3 conclusions total, prioritizing unresolved issues.",
+              "For status=resolved, describe only the positive state visibly achieved in the current candidate. Never repeat, negate, or append the historical defect recorded in observed.",
+              "A resolved sentence must read as a present-state fact, for example '当前已显示两个点赞图标' or 'Two like icons are now visible.' Do not write 'previously', 'used to', 'no longer', or 'the issue was resolved'.",
+              "For status=open, describe only the current remaining gap. For status=deferred, describe what must be checked in video.",
               lang === "zh"
                 ? "每条使用自然、明确的界面短句，12至30个汉字；说明画面哪里不对或已经解决，不复述字段名，不展示模型原文，不写修改步骤。"
                 : "Each item must be a natural 6-18 word UI sentence stating what is wrong or resolved; do not repeat field names, raw output, or correction steps.",
@@ -157,8 +160,9 @@ function summaryInput(report: GenerationQualityReport): Record<string, unknown> 
       status: displayStatus(issue),
       category: issue.category,
       region: issue.region,
-      observed: issue.summary,
-      target: issue.target,
+      ...(issue.status === "resolved"
+        ? { currentAchievedState: issue.target || resolvedCurrentStateText(issue, "en") }
+        : { currentObservation: issue.summary, target: issue.target }),
     })),
     corrections: (report.correctionActions ?? []).slice(0, 8).map((action) => ({
       region: action.region,
@@ -188,20 +192,40 @@ function normalizeSummaryItems(value: unknown, lang: QualityDisplayLanguage): Qu
 function fallbackIssueText(issue: GenerationIssueLedgerEntry, lang: QualityDisplayLanguage): string {
   const category = issue.category;
   const resolved = issue.status === "resolved";
+  if (resolved) return resolvedCurrentStateText(issue, lang);
   if (lang === "zh") {
-    if (category === "text_brand") return resolved ? "品牌文字与标识问题已解决" : "品牌文字或标识与要求不一致";
-    if (category === "game_ui") return resolved ? "游戏界面状态问题已解决" : "游戏界面数值或状态不准确";
-    if (category === "anatomy") return resolved ? "人物肢体形态问题已解决" : "人物肢体或手指形态异常";
-    if (category === "identity") return resolved ? "人物形象一致性问题已解决" : "人物形象与参考设定不一致";
-    if (category === "layout") return resolved ? "画面构图问题已解决" : "画面构图或元素位置有偏差";
-    return resolved ? "该画面问题已解决" : compactText(issue.summary, 32);
+    if (category === "text_brand") return "品牌文字或标识与要求不一致";
+    if (category === "game_ui") return "游戏界面数值或状态不准确";
+    if (category === "anatomy") return "人物肢体或手指形态异常";
+    if (category === "identity") return "人物形象与参考设定不一致";
+    if (category === "layout") return "画面构图或元素位置有偏差";
+    return compactText(issue.summary, 32);
   }
-  if (category === "text_brand") return resolved ? "Brand text and logo issues are resolved." : "Brand text or logo does not match the requirement.";
-  if (category === "game_ui") return resolved ? "The game UI state issue is resolved." : "Game UI values or state are inaccurate.";
-  if (category === "anatomy") return resolved ? "The anatomy issue is resolved." : "The character has malformed limbs or fingers.";
-  if (category === "identity") return resolved ? "Character consistency is restored." : "The character does not match the identity reference.";
-  if (category === "layout") return resolved ? "The composition issue is resolved." : "Composition or element placement is inaccurate.";
-  return resolved ? "This visual issue is resolved." : compactText(issue.summary, 100);
+  if (category === "text_brand") return "Brand text or logo does not match the requirement.";
+  if (category === "game_ui") return "Game UI values or state are inaccurate.";
+  if (category === "anatomy") return "The character has malformed limbs or fingers.";
+  if (category === "identity") return "The character does not match the identity reference.";
+  if (category === "layout") return "Composition or element placement is inaccurate.";
+  return compactText(issue.summary, 100);
+}
+
+function resolvedCurrentStateText(issue: GenerationIssueLedgerEntry, lang: QualityDisplayLanguage): string {
+  if (lang === "zh") {
+    if (issue.category === "text_brand") return "当前品牌文字与标识符合要求";
+    if (issue.category === "game_ui") return "当前游戏界面已达到目标状态";
+    if (issue.category === "anatomy") return "当前人物肢体形态自然完整";
+    if (issue.category === "identity") return "当前人物形象与参考保持一致";
+    if (issue.category === "layout") return "当前构图与元素位置符合要求";
+    if (issue.category === "continuity") return "当前画面连续性符合要求";
+    return "当前画面已达到对应要求";
+  }
+  if (issue.category === "text_brand") return "Brand text and logo now match the requirement.";
+  if (issue.category === "game_ui") return "The game UI now matches the target state.";
+  if (issue.category === "anatomy") return "The character anatomy is now natural and complete.";
+  if (issue.category === "identity") return "The character now matches the identity reference.";
+  if (issue.category === "layout") return "Composition and element placement now match the requirement.";
+  if (issue.category === "continuity") return "The current image now meets continuity requirements.";
+  return "The current image now meets this requirement.";
 }
 
 function issuePriority(issue: GenerationIssueLedgerEntry): number {

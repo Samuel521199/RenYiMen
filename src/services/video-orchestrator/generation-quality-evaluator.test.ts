@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { generationQualityCompositeScore, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
+import { generationQualityCompositeScore, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
 import { nextGenerationCandidateAttempt } from "./project-service.ts";
+import { fitAliyunImagePrompt, prepareAliyunImagePrompt } from "./aliyun-workflow.ts";
 
 const base = {
   assetId: "keyframe:1:image",
@@ -17,6 +18,43 @@ const base = {
   prompt: "short prompt",
   purpose: "boundary_keyframe" as const,
 };
+
+test("image quality evaluation uses a dedicated fast vision model, bounded concurrency, and a realistic timeout", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  assert.match(source, /ALIYUN_GENERATION_QUALITY_VISION_MODEL\?\.trim\(\) \|\| "qwen3\.6-flash"/);
+  assert.doesNotMatch(source, /ALIYUN_GENERATION_QUALITY_VISION_MODEL\?\.trim\(\) \|\| process\.env\.ALIYUN_STORYBOARD_VISION_MODEL/);
+  assert.match(source, /: 90000;/);
+  assert.match(source, /ONE_PROMPT_GENERATION_QUALITY_CONCURRENCY/);
+  assert.match(source, /qualityVisionRequestAttempts/);
+  assert.match(source, /withQualityVisionSlot/);
+  assert.match(source, /enable_thinking: false/);
+  assert.match(source, /evaluationDurationMs: Date\.now\(\) - evaluationStartedAt/);
+});
+
+test("technical evaluator failures are distinct from visual vetoes", () => {
+  assert.equal(isTechnicalQualityEvaluationFailure({
+    assetId: "keyframe:1:image",
+    identityScore: 0,
+    layoutScore: 0,
+    promptAlignmentScore: 0,
+    continuityScore: 0,
+    artifactIssues: ["图片视觉质量评估失败：This operation was aborted"],
+    passed: false,
+    contentBased: false,
+    evaluationStatus: "technical_failed",
+  }), true);
+  assert.equal(isTechnicalQualityEvaluationFailure({
+    assetId: "keyframe:1:image",
+    identityScore: 0,
+    layoutScore: 0,
+    promptAlignmentScore: 0,
+    continuityScore: 0,
+    artifactIssues: ["required logo is visibly missing"],
+    passed: false,
+    contentBased: true,
+    evaluationStatus: "completed",
+  }), false);
+});
 
 test("image quality normalization preserves scores observed by the visual model", () => {
   const report = normalizeImageQualityResponse({
@@ -274,7 +312,8 @@ test("manual acceptance preserves rather than rewrites the visual model's veto",
 
 test("candidate orchestration evaluates all batches, waits for the complete pool, and ranks passing media", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(source, /artifactCandidates\.filter\(\(item\) => item\.status === "succeeded" && !item\.qualityReport && item\.mediaUrl\)/);
+  assert.match(source, /item\.status === "succeeded" && !item\.qualityReport/);
+  assert.match(source, /item\.status !== "quality_retry"/);
   assert.match(source, /allArtifactCandidates\.some\(\(candidate\) => unsettledStatuses\.has\(candidate\.status\)\)/);
   assert.doesNotMatch(source, /latestBatchByArtifact/);
   assert.match(source, /candidate\.passed === true && candidate\.mediaUrl/);
@@ -293,6 +332,75 @@ test("candidate orchestration evaluates all batches, waits for the complete pool
   assert.match(source, /submit\.skip_claimed/);
   assert.match(source, /status: "evaluating"/);
   assert.match(source, /evaluationClaim\.count !== 1/);
+  assert.match(source, /qualityReport: \{ equals: Prisma\.DbNull \}/);
+  assert.match(source, /generation_quality\.duplicate_result_discarded/);
+  assert.match(source, /isTechnicalQualityEvaluationFailure/);
+  assert.match(source, /compositeScore: null/);
+  assert.match(source, /passed: null/);
+  assert.match(source, /status: technicalRetryExhausted \? "quality_failed" : "quality_retry"/);
+  assert.doesNotMatch(source, /wasIncorrectlyPromoted[\s\S]{0,240}evaluateGeneratedImageQuality/);
+});
+
+test("overlength image prompts keep retry corrections ahead of descriptive detail", () => {
+  const prompt = [
+    "Core scene description. ".repeat(180),
+    "MANDATORY RETRY CORRECTION\nAdd exactly two visible like icons and turn the head 10 degrees viewer-left.",
+    "INCREMENTAL CANDIDATE IMPROVEMENT\nDo not repeat the missing logo. Preserve the approved character identity.",
+    "Additional decorative detail. ".repeat(160),
+  ].join("\n\n");
+  const fitted = fitAliyunImagePrompt(prompt);
+  assert.ok(fitted.length <= 5000);
+  assert.ok(fitted.startsWith("CRITICAL GENERATION CONTRACT"));
+  assert.match(fitted, /Add exactly two visible like icons/);
+  assert.match(fitted, /Do not repeat the missing logo/);
+});
+
+test("image generation prompt maps every uploaded reference to a narrow role", () => {
+  const prepared = prepareAliyunImagePrompt(
+    "Render the approved character holding the product.",
+    undefined,
+    ["https://example.test/person.jpg", "https://example.test/layout.jpg"],
+    ["Character identity only; do not copy pose or background.", "Scene layout and lighting only; do not copy people, UI, or text."],
+  );
+  assert.match(prepared, /MULTI-IMAGE INPUT MAP/);
+  assert.match(prepared, /INPUT IMAGE 1[\s\S]*Character identity only/);
+  assert.match(prepared, /INPUT IMAGE 2[\s\S]*Scene layout and lighting only/);
+  assert.match(prepared, /never merge unrelated subjects, text, UI, products, or backgrounds/i);
+  assert.ok(prepared.length <= 5000);
+});
+
+test("nine-image role map survives prompt compaction together with retry corrections", () => {
+  const references = Array.from({ length: 9 }, (_, index) => `https://example.test/reference-${index + 1}.jpg`);
+  const notes = references.map((_, index) => `Reference ${index + 1} role only; preserve attribute ${index + 1} and ignore unrelated pixels.`);
+  const prepared = prepareAliyunImagePrompt(
+    [
+      "Long scene detail. ".repeat(400),
+      "MANDATORY RETRY CORRECTION\nShow exactly two approved like icons in the current output.",
+    ].join("\n\n"),
+    undefined,
+    references,
+    notes,
+  );
+  assert.match(prepared, /INPUT IMAGE 9/);
+  assert.match(prepared, /Show exactly two approved like icons/);
+  assert.ok(prepared.length <= 5000);
+});
+
+test("image evaluator localizes current output and prevents reference-pixel leakage", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  assert.match(source, /CURRENT OUTPUT — IMAGE UNDER EVALUATION/);
+  assert.match(source, /REFERENCE IMAGE \$\{index \+ 1\} — NOT CURRENT OUTPUT/);
+  assert.match(source, /do not report, count, transcribe, or diagnose anything in this reference/);
+  assert.match(source, /PREVIOUS OUTPUT — NOT CURRENT OUTPUT/);
+  assert.match(source, /seenReferenceUrls\.has\(url\)/);
+});
+
+test("candidate learning always uses the latest available candidate as its visual baseline", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(source, /baselineSelectionRule: "latest_available_candidate"/);
+  assert.match(source, /const baselineCandidate = latestWithMedia/);
+  assert.doesNotMatch(source, /const baselineCandidate = strongest\?\.candidate/);
+  assert.doesNotMatch(source, /const baselineUrl = currentImageUrl \|\| selected\?\.mediaUrl/);
 });
 
 test("legacy batches do not consume a new retry cycle", () => {
@@ -350,7 +458,8 @@ test("legacy image quality reports upgrade in place before another paid generati
   assert.match(source, /await upgradeLegacyImageQualityReports\(project\)/);
   assert.match(source, /buildAuthoritativeVisualContract/);
   assert.match(source, /previousQualityReport: previous\?\.report/);
-  assert.match(source, /await evaluateGeneratedImageQuality\(evaluationParams\)/);
+  assert.match(source, /normalizeImageQualityResponse\(existing, evaluationParams\)/);
+  assert.doesNotMatch(source, /wasIncorrectlyPromoted[\s\S]{0,240}evaluateGeneratedImageQuality/);
 });
 
 test("visual veto remains final and stale recovery cannot submit after a candidate becomes ready", () => {

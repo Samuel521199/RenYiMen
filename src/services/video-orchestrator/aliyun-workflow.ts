@@ -1,4 +1,8 @@
 import crypto from "crypto";
+import {
+  ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS,
+  ONE_PROMPT_MAX_REFERENCE_IMAGES,
+} from "@/lib/one-prompt-video-limits";
 import type { VideoAspectRatio } from "./types";
 import { errorForLog, logOnePromptVideo } from "./logger";
 
@@ -69,15 +73,25 @@ export async function submitAliyunImageTask(params: {
   prompt: string;
   negativePrompt?: string;
   referenceImageUrls?: string[];
+  referenceUsageNotes?: string[];
   aspectRatio: VideoAspectRatio;
   seed?: number;
 }): Promise<string> {
   const imageModel = model("ALIYUN_IMAGE_MODEL", "wan2.7-image-pro");
   const supportsNegativePrompt = process.env.ALIYUN_IMAGE_SUPPORTS_NEGATIVE_PROMPT?.trim().toLowerCase() === "true";
-  const referenceImageUrls = (params.referenceImageUrls ?? []).filter(Boolean).slice(0, 4);
+  const referenceImageUrls = (params.referenceImageUrls ?? [])
+    .filter(Boolean)
+    .slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
   const finalPrompt = supportsNegativePrompt || !params.negativePrompt
     ? params.prompt
     : `${params.prompt}\nAvoid: ${params.negativePrompt}`;
+  const fittedPrompt = prepareAliyunImagePrompt(
+    params.prompt,
+    params.negativePrompt,
+    referenceImageUrls,
+    params.referenceUsageNotes,
+  );
+  const fittedPromptWithoutReferences = prepareAliyunImagePrompt(params.prompt, params.negativePrompt);
   const buildBody = (withReferences: boolean) => ({
     model: imageModel,
     input: {
@@ -85,7 +99,7 @@ export async function submitAliyunImageTask(params: {
         {
           role: "user",
           content: [
-            { text: finalPrompt.slice(0, 5000) },
+            { text: withReferences ? fittedPrompt : fittedPromptWithoutReferences },
             ...(withReferences ? referenceImageUrls.map((url) => ({ image: url })) : []),
           ],
         },
@@ -105,6 +119,8 @@ export async function submitAliyunImageTask(params: {
     aspectRatio: params.aspectRatio,
     size: imageSizeFromAspectRatio(params.aspectRatio),
     promptLength: finalPrompt.length,
+    submittedPromptLength: fittedPrompt.length,
+    promptCompacted: fittedPrompt !== finalPrompt,
     negativePromptLength: params.negativePrompt?.length ?? 0,
     referenceImageCount: referenceImageUrls.length,
     supportsNegativePrompt,
@@ -122,6 +138,105 @@ export async function submitAliyunImageTask(params: {
     return submitDashScopeAsync(IMAGE_PATH, buildBody(false), "阿里云万相图片生成");
   }
 }
+
+const PRIORITY_PROMPT_MARKERS = [
+  "MULTI-IMAGE INPUT MAP",
+  "MANDATORY RETRY CORRECTION",
+  "INCREMENTAL CANDIDATE IMPROVEMENT",
+  "AUTHORITATIVE ANCHOR CONTRACTS",
+  "AUTHORITATIVE VISUAL CONTRACT",
+] as const;
+
+function clipAtSentenceBoundary(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const clipped = value.slice(0, Math.max(0, maxLength - 1));
+  const boundary = Math.max(
+    clipped.lastIndexOf("。"),
+    clipped.lastIndexOf(". "),
+    clipped.lastIndexOf("；"),
+    clipped.lastIndexOf("; "),
+    clipped.lastIndexOf("\n"),
+  );
+  return `${clipped.slice(0, boundary >= Math.floor(maxLength * 0.55) ? boundary + 1 : clipped.length).trim()}…`;
+}
+
+function priorityPromptBlocks(prompt: string): string[] {
+  return prompt
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter((block) =>
+      Boolean(block)
+      && (
+        PRIORITY_PROMPT_MARKERS.some((marker) => block.toUpperCase().includes(marker))
+        || /\b(retry instruction|do not repeat|exact corrections?|hard anchor|required visible)\b/i.test(block)
+      )
+    );
+}
+
+/**
+ * Wan2.7 accepts at most 5,000 prompt characters. Preserve actionable retry
+ * and authority contracts first, remove duplicate blocks, and spend the
+ * remaining budget on the original core description.
+ */
+export function fitAliyunImagePrompt(prompt: string): string {
+  const normalized = prompt.trim();
+  if (normalized.length <= ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS) return normalized;
+
+  const priorityBlocks = [...new Set(priorityPromptBlocks(normalized))];
+  const priorityBudget = Math.min(3800, ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS - 1200);
+  const priorityText = clipAtSentenceBoundary(priorityBlocks.join("\n\n"), priorityBudget);
+  const prioritySet = new Set(priorityBlocks);
+  const coreText = normalized
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter((block) => block && !prioritySet.has(block))
+    .join("\n\n");
+  const header = priorityText
+    ? "CRITICAL GENERATION CONTRACT — APPLY BEFORE ALL OTHER DETAILS\n"
+    : "";
+  const used = header.length + priorityText.length + (priorityText ? 2 : 0);
+  const remaining = Math.max(0, ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS - used);
+  return `${header}${priorityText}${priorityText ? "\n\n" : ""}${clipAtSentenceBoundary(coreText, remaining)}`
+    .slice(0, ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS)
+    .trim();
+}
+
+export function buildAliyunReferenceImageMap(
+  referenceImageUrls: string[],
+  referenceUsageNotes: string[] = [],
+): string {
+  const references = referenceImageUrls
+    .filter(Boolean)
+    .slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  if (!references.length) return "";
+  return [
+    "MULTI-IMAGE INPUT MAP — image numbers below exactly match the uploaded image order",
+    "Each input image has a narrow evidence role. Use only the attributes named in its role note. Everything else in that image is non-authoritative and must not be copied, blended, counted, or treated as a target.",
+    ...references.map((_, index) => [
+      `INPUT IMAGE ${index + 1}`,
+      `Role and allowed inheritance: ${(referenceUsageNotes[index]?.trim() || "approved visual reference; use only details explicitly required by the target contract").slice(0, 220)}`,
+      "Scope boundary: inherit nothing outside this role.",
+    ].join("\n")),
+    "Global forbidden inheritance: unrelated people, pose, expression, background, layout, props, product instances, UI, score, timer, logos, text, lighting, and defects outside each stated role.",
+    "Cross-image rule: never merge unrelated subjects, text, UI, products, or backgrounds merely because they appear in an input image. When roles conflict, obey the target contract and the image explicitly assigned to that attribute.",
+  ].join("\n\n");
+}
+
+export function prepareAliyunImagePrompt(
+  prompt: string,
+  negativePrompt?: string,
+  referenceImageUrls: string[] = [],
+  referenceUsageNotes: string[] = [],
+): string {
+  const supportsNegativePrompt = process.env.ALIYUN_IMAGE_SUPPORTS_NEGATIVE_PROMPT?.trim().toLowerCase() === "true";
+  const referenceMap = buildAliyunReferenceImageMap(referenceImageUrls, referenceUsageNotes);
+  const promptWithReferenceMap = referenceMap ? `${referenceMap}\n\n${prompt}` : prompt;
+  const finalPrompt = supportsNegativePrompt || !negativePrompt
+    ? promptWithReferenceMap
+    : `${promptWithReferenceMap}\nAvoid: ${negativePrompt}`;
+  return fitAliyunImagePrompt(finalPrompt);
+}
+
 export interface ImageToVideoProviderCapabilities {
   acceptsFirstFrameImage: true;
   acceptsLastFrameImage: boolean;

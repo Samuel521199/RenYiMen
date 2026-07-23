@@ -7,6 +7,7 @@ import { buildImageGenerationQualityReport, buildVideoGenerationQualityReport } 
 import {
   queryDashScopeTask,
   queryImsComposeJob,
+  prepareAliyunImagePrompt,
   submitAliyunImageTask,
   submitAliyunImageToVideoTask,
 } from "./aliyun-workflow";
@@ -29,10 +30,11 @@ import { readCameraGraph, resolveCameraInheritanceContext } from "./camera-graph
 import { assertPlanValidForGeneration as assertPlanValidForGenerationV2 } from "./plan-validator";
 import { sanitizeGameVisualPromptText, stripNonStandardPromptSymbols } from "./frame-contract";
 import { evaluateEndFrameContinuity } from "./end-frame-continuity";
-import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVideoFrameDataUrls, generationQualityCompositeScore, normalizeImageQualityResponse } from "./generation-quality-evaluator";
+import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVideoFrameDataUrls, generationQualityCompositeScore, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse } from "./generation-quality-evaluator";
 import { createOnePromptRolloutSnapshot, legacyReferenceSelection, onePromptRolloutEnabled } from "./rollout-flags";
 import { hydratePlanArtifactsFromTables, mirrorPlanArtifactsToTables } from "./plan-artifact-store";
 import { buildAuthoritativeVisualContract, repairNegativePromptAgainstVisualContract, repairPromptAgainstVisualContract, type AuthoritativeVisualContract } from "./visual-quality-contract";
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 
 const PROJECT_INCLUDE = {
   shots: { orderBy: { shotNo: "asc" as const } },
@@ -75,9 +77,12 @@ export interface VideoPlanningProgress {
 const planningRuntime = globalThis as typeof globalThis & {
   onePromptVideoPlanningRuns?: Map<string, Promise<void>>;
   onePromptVideoPlanningWorkerId?: string;
+  onePromptVideoMicroShotSubmissionRuns?: Map<string, Promise<void>>;
 };
 const planningRuns = planningRuntime.onePromptVideoPlanningRuns ?? new Map<string, Promise<void>>();
 planningRuntime.onePromptVideoPlanningRuns = planningRuns;
+const microShotSubmissionRuns = planningRuntime.onePromptVideoMicroShotSubmissionRuns ?? new Map<string, Promise<void>>();
+planningRuntime.onePromptVideoMicroShotSubmissionRuns = microShotSubmissionRuns;
 const planningWorkerId = planningRuntime.onePromptVideoPlanningWorkerId ?? randomUUID();
 planningRuntime.onePromptVideoPlanningWorkerId = planningWorkerId;
 const PLANNING_LEASE_MS = 90000;
@@ -481,6 +486,22 @@ function generationMaxRetries(): number {
 
 const QUALITY_EVALUATION_LEASE_MS = 5 * 60 * 1000;
 
+function qualityEvaluationsPerSync(): number {
+  const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_EVALUATIONS_PER_SYNC);
+  return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 2;
+}
+
+function qualityTechnicalRetryCycles(): number {
+  const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_RETRY_CYCLES);
+  return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 2;
+}
+
+function qualityTechnicalRetryDelayMs(attempt: number): number {
+  const base = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_CYCLE_RETRY_DELAY_MS);
+  const safeBase = Number.isFinite(base) && base >= 1000 ? Math.min(60000, Math.round(base)) : 5000;
+  return safeBase * Math.max(1, Math.min(4, attempt));
+}
+
 type CandidateKind = "keyframe_image" | "micro_shot_image" | "segment_video";
 
 type CandidateAttemptRecord = {
@@ -531,21 +552,31 @@ async function createImageCandidateBatch(params: {
     where: { projectId: params.project.id, artifactId: params.artifactId },
   });
   const candidateCount = Math.max(1, Math.min(4, params.candidateCount ?? imageCandidateCount()));
+  const referenceUsageNotes = Array.isArray(params.metadata.referenceUsageNotes)
+    ? params.metadata.referenceUsageNotes.filter((item): item is string => typeof item === "string")
+    : [];
   let firstTaskId = "";
   for (let localCandidateNo = 1; localCandidateNo <= candidateCount; localCandidateNo += 1) {
     const candidateNo = historicalCandidateCount + localCandidateNo;
+    const submittedPrompt = prepareAliyunImagePrompt(
+      params.prompt,
+      params.negativePrompt,
+      params.referenceImageUrls,
+      referenceUsageNotes,
+    );
     try {
       const taskId = await submitAliyunImageTask({
         prompt: params.prompt,
         negativePrompt: params.negativePrompt,
         referenceImageUrls: params.referenceImageUrls,
+        referenceUsageNotes,
         aspectRatio: params.project.aspectRatio as "9:16" | "16:9" | "1:1",
         seed: Math.abs((params.seedBase ?? Date.now()) + candidateNo * 7919) % 2147483647,
       });
       if (!firstTaskId) firstTaskId = taskId;
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, taskId, status: "running", prompt: params.prompt, negativePrompt: params.negativePrompt ?? "", metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount }) } });
+      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, taskId, status: "running", prompt: submittedPrompt, negativePrompt: params.negativePrompt ?? "", metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, sourcePrompt: params.prompt, submittedPromptCompacted: submittedPrompt !== params.prompt }) } });
     } catch (error) {
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, status: "failed", prompt: params.prompt, negativePrompt: params.negativePrompt ?? "", errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount }) } });
+      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, status: "failed", prompt: submittedPrompt, negativePrompt: params.negativePrompt ?? "", errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, sourcePrompt: params.prompt, submittedPromptCompacted: submittedPrompt !== params.prompt }) } });
     }
   }
   if (!firstTaskId) throw new Error("All image candidate submissions failed");
@@ -1446,6 +1477,8 @@ async function saveGenerationQualityReport(projectId: string, report: Generation
     contentBased: report.contentBased,
     retryFromStage: report.retryFromStage,
     userAccepted: report.userAccepted,
+    evaluationModel: report.evaluationModel,
+    evaluationDurationMs: report.evaluationDurationMs,
   }, report.passed ? "info" : "warn");
 }
 
@@ -3117,12 +3150,12 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
 
   const microShotIssues = requiredMicroShotImageIssues(project);
   if (microShotIssues.length) {
-    await submitRequiredMicroShotImageTasks(userId, projectId);
     const updated = await prisma.videoProject.update({
       where: { id: projectId },
       data: { status: VideoProjectStatus.MICRO_SHOT_REVIEW, errorMessage: null },
       include: PROJECT_INCLUDE,
     });
+    queueRequiredMicroShotImageTasks(userId, projectId, { retryFailed: true });
     await logOnePromptVideo("project.resume.micro_shot_review", {
       userId,
       projectId,
@@ -4039,10 +4072,16 @@ function buildImageCandidateLearningSummary(
     if (!candidate.qualityReport || !isRecord(candidate.qualityReport)) return [];
     return [{ candidate, report: candidate.qualityReport as unknown as GenerationQualityReport }];
   });
-  const ranked = [...evaluated].sort((a, b) =>
-    (b.candidate.compositeScore ?? generationQualityCompositeScore(b.report)) -
-    (a.candidate.compositeScore ?? generationQualityCompositeScore(a.report))
-  );
+  const ranked = [...evaluated]
+    .filter(({ candidate }) => Boolean(candidate.mediaUrl))
+    .sort((a, b) => {
+      const scoreDelta =
+        (b.candidate.compositeScore ?? generationQualityCompositeScore(b.report)) -
+        (a.candidate.compositeScore ?? generationQualityCompositeScore(a.report));
+      if (scoreDelta !== 0) return scoreDelta;
+      const createdDelta = b.candidate.createdAt.getTime() - a.candidate.createdAt.getTime();
+      return createdDelta !== 0 ? createdDelta : b.candidate.candidateNo - a.candidate.candidateNo;
+    });
   const strongest = ranked[0];
   const latestEvaluated = [...evaluated].sort((a, b) => b.candidate.candidateNo - a.candidate.candidateNo)[0];
   const activeLedgerIssues = (latestEvaluated?.report.issueLedger ?? []).filter((issue) =>
@@ -4087,8 +4126,14 @@ function buildImageCandidateLearningSummary(
   const suspectedContractConflicts = uniqueStrings(evaluated.flatMap(({ report }) => report.suspectedContractConflicts ?? (report.contractConflictsVerified === true ? [] : report.contractConflicts ?? []))).slice(0, 10);
   const passedCount = evaluated.filter(({ report }) => report.passed).length;
   const acceptedCount = historical.filter((candidate) => candidate.userAccepted).length;
-  const selected = historical.find((candidate) => candidate.selected && candidate.mediaUrl);
-  const baselineUrl = currentImageUrl || selected?.mediaUrl || strongest?.candidate.mediaUrl || "";
+  const latestWithMedia = [...historical]
+    .filter((candidate) => Boolean(candidate.mediaUrl))
+    .sort((a, b) => {
+      const createdDelta = b.createdAt.getTime() - a.createdAt.getTime();
+      return createdDelta !== 0 ? createdDelta : b.candidateNo - a.candidateNo;
+    })[0];
+  const baselineCandidate = latestWithMedia;
+  const baselineUrl = baselineCandidate?.mediaUrl || currentImageUrl || "";
   const sourceCandidateIds = uniqueStrings([
     ...evaluated.map(({ candidate }) => candidate.id),
     ...historical.filter((candidate) => candidate.errorMessage).map((candidate) => candidate.id),
@@ -4116,7 +4161,7 @@ function buildImageCandidateLearningSummary(
     promptAddon,
     referenceImageUrls: baselineUrl ? [baselineUrl] : [],
     referenceUsageNotes: baselineUrl
-      ? ["Historical selected/best candidate is an improvement baseline only. Preserve verified identity/layout strengths, but explicitly correct every accumulated quality issue; never copy defective score, timer, text, lighting, anatomy, or narrative state."]
+      ? ["Latest historical candidate is an improvement baseline only. Preserve its verified strengths and apply the requested delta corrections; never treat its defective score, timer, text, lighting, anatomy, or narrative state as authoritative."]
       : [],
     debugSummary: {
       historicalCandidateCount: historical.length,
@@ -4124,6 +4169,8 @@ function buildImageCandidateLearningSummary(
       passedCandidateCount: passedCount,
       manuallyAcceptedCandidateCount: acceptedCount,
       strongestCandidateId: strongest?.candidate.id,
+      baselineCandidateId: baselineCandidate?.id,
+      baselineSelectionRule: "latest_available_candidate",
       strongDimensions,
       accumulatedFailureIssues: failureIssues,
       accumulatedRetryInstructions: retryInstructions,
@@ -4170,7 +4217,7 @@ export async function regenerateShotImage(
   const learnedReferenceUrls = uniqueStrings([
     ...learning.referenceImageUrls,
     ...(compiled.referenceImageUrls ?? []),
-  ]).slice(0, 4);
+  ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
   const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
     project.planJson,
     readPlanStringArray(readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo), ["usesConsistencyAnchors", "uses_consistency_anchors"]),
@@ -4576,7 +4623,11 @@ export async function rollbackVideoMedia(
   return requireVideoProject(userId, projectId);
 }
 
-async function submitRequiredMicroShotImageTasks(userId: string, projectId: string): Promise<void> {
+async function submitRequiredMicroShotImageTasks(
+  userId: string,
+  projectId: string,
+  options: { retryFailed?: boolean } = {},
+): Promise<void> {
   const project = await requireVideoProject(userId, projectId);
   const planSegments = readPlanSegmentMap(project.planJson);
   for (const segment of project.segments) {
@@ -4584,6 +4635,7 @@ async function submitRequiredMicroShotImageTasks(userId: string, projectId: stri
     for (const microShot of microShots) {
       if (!isMicroShotImageRequired(microShot)) continue;
       if (microShot.imageUrl || (microShot.imageStatus === "running" && microShot.imageTaskId)) continue;
+      if (microShot.imageStatus === "failed" && !options.retryFailed) continue;
       const imagePrompt = localizedMicroShotImagePromptForGeneration(microShot);
       if (!imagePrompt) continue;
       await updatePlanMicroShot(projectId, segment.segmentNo, microShot.microShotNo, {
@@ -4707,6 +4759,44 @@ async function submitRequiredMicroShotImageTasks(userId: string, projectId: stri
   }
 }
 
+function queueRequiredMicroShotImageTasks(
+  userId: string,
+  projectId: string,
+  options: { retryFailed?: boolean } = {},
+): boolean {
+  if (microShotSubmissionRuns.has(projectId)) return false;
+  const run = new Promise<void>((resolve) => setImmediate(resolve))
+    .then(() => submitRequiredMicroShotImageTasks(userId, projectId, options))
+    .catch((error) => logOnePromptVideo("micro_shot.submit.background.error", {
+      userId,
+      projectId,
+      ...errorForLog(error),
+    }, "error"))
+    .finally(() => {
+      if (microShotSubmissionRuns.get(projectId) === run) microShotSubmissionRuns.delete(projectId);
+    });
+  microShotSubmissionRuns.set(projectId, run);
+  void logOnePromptVideo("micro_shot.submit.background.queued", {
+    userId,
+    projectId,
+    retryFailed: Boolean(options.retryFailed),
+  });
+  return true;
+}
+
+function hasSubmittableRequiredMicroShotImage(project: VideoProjectWithShots): boolean {
+  const planSegments = readPlanSegmentMap(project.planJson);
+  return project.segments.some((segment) =>
+    readPlanMicroShots(planSegments.get(segment.segmentNo)).some((microShot) =>
+      isMicroShotImageRequired(microShot)
+      && Boolean(localizedMicroShotImagePromptForGeneration(microShot))
+      && !microShot.imageUrl
+      && microShot.imageStatus !== "failed"
+      && !(microShot.imageStatus === "running" && microShot.imageTaskId),
+    ),
+  );
+}
+
 function requiredMicroShotImageIssues(project: VideoProjectWithShots): string[] {
   const planSegments = readPlanSegmentMap(project.planJson);
   return project.segments.flatMap((segment) => {
@@ -4768,7 +4858,6 @@ export async function approveShotImages(userId: string, projectId: string): Prom
     "approved",
     { retryFromStage: "generation" },
   );
-  await submitRequiredMicroShotImageTasks(userId, projectId);
 
   const updated = await prisma.videoProject.update({
     where: { id: projectId },
@@ -4778,13 +4867,14 @@ export async function approveShotImages(userId: string, projectId: string): Prom
     },
     include: PROJECT_INCLUDE,
   });
+  queueRequiredMicroShotImageTasks(userId, projectId);
   await logOnePromptVideo("micro_shot.review.ready", { userId, projectId, status: updated.status });
   await appendProjectStageLog({
     projectId,
     title: updated.title,
     stage: "micro_shots",
-    event: "Micro-shot references approved",
-    summary: "All required micro-shot reference images are ready for clip generation.",
+    event: "Micro-shot review opened",
+    summary: "The review opened immediately; required micro-shot reference images are being submitted in the background.",
     data: {
       userId,
       status: updated.status,
@@ -5367,6 +5457,9 @@ export async function syncVideoProject(userId: string, projectId: string): Promi
   if (project.status === VideoProjectStatus.IMAGE_GENERATING) {
     await syncImageTasks(project);
   }
+  if (project.status === VideoProjectStatus.MICRO_SHOT_REVIEW && hasSubmittableRequiredMicroShotImage(project)) {
+    queueRequiredMicroShotImageTasks(userId, projectId);
+  }
   await syncMicroShotImageTasks(project);
   if (project.status === VideoProjectStatus.CLIP_GENERATING) {
     await syncClipTasks(project);
@@ -5869,39 +5962,30 @@ async function upgradeLegacyImageQualityReports(project: VideoProjectWithShots):
       previousQualityReport: previous?.report,
       previousCandidateUrl: previous?.mediaUrl,
     } as const;
-    const wasIncorrectlyPromoted = existing.originalPassed === false && existing.passed === true;
     const previousStatus = candidate.status;
-    if (wasIncorrectlyPromoted) {
-      const claim = await prisma.videoGenerationCandidate.updateMany({
-        where: { id: candidate.id, status: previousStatus },
-        data: { status: "evaluating", errorMessage: null },
-      });
-      if (claim.count !== 1) continue;
-    }
-    let report: GenerationQualityReport;
-    try {
-      report = wasIncorrectlyPromoted
-        ? await evaluateGeneratedImageQuality(evaluationParams)
-        : normalizeImageQualityResponse(existing, evaluationParams);
-    } catch (error) {
-      if (wasIncorrectlyPromoted) {
-        await prisma.videoGenerationCandidate.update({
-          where: { id: candidate.id },
-          data: { status: previousStatus, errorMessage: error instanceof Error ? error.message : String(error) },
-        });
-      }
-      continue;
-    }
-    await prisma.videoGenerationCandidate.update({
-      where: { id: candidate.id },
-      data: {
+    const normalized = normalizeImageQualityResponse(existing, evaluationParams);
+    const report: GenerationQualityReport = existing.originalPassed === false
+      ? {
+          ...normalized,
+          passed: false,
+          originalPassed: false,
+          userAccepted: existing.userAccepted === true,
+        }
+      : normalized;
+    const upgraded = await prisma.videoGenerationCandidate.updateMany({
+      where: {
+        id: candidate.id,
         status: previousStatus,
+        qualityReport: { equals: cleanInputJson(existing as unknown as Record<string, unknown>) },
+      },
+      data: {
         qualityReport: cleanInputJson(report as unknown as Record<string, unknown>),
         compositeScore: generationQualityCompositeScore(report),
         passed: report.passed,
         retryInstruction: report.retryInstruction ?? null,
       },
     });
+    if (upgraded.count !== 1) continue;
     await saveGenerationQualityReport(project.id, report);
     previousByArtifact.set(candidate.artifactId, { report, mediaUrl: candidate.mediaUrl ?? undefined });
     changed = true;
@@ -5945,20 +6029,65 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     }
   }
 
-  const fresh = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, kind: { in: [...coreKinds] } }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
+  let fresh = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, kind: { in: [...coreKinds] } }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
+  let requeuedHistoricalTechnicalFailures = false;
+  for (const candidate of fresh) {
+    if (!candidate.mediaUrl || !candidate.qualityReport || !isRecord(candidate.qualityReport)) continue;
+    const report = candidate.qualityReport as unknown as GenerationQualityReport;
+    if (!isTechnicalQualityEvaluationFailure(report) || candidate.status === "quality_retry" || candidate.status === "quality_failed") continue;
+    const metadata = candidateMetadata(candidate.metadata);
+    const requeued = await prisma.videoGenerationCandidate.updateMany({
+      where: { id: candidate.id, status: candidate.status },
+      data: {
+        status: "quality_retry",
+        compositeScore: null,
+        passed: null,
+        retryInstruction: null,
+        metadata: cleanInputJson({
+          ...metadata,
+          qualityTechnicalAttempts: 0,
+          qualityNextRetryAt: new Date().toISOString(),
+        }),
+      },
+    });
+    requeuedHistoricalTechnicalFailures ||= requeued.count === 1;
+  }
+  if (requeuedHistoricalTechnicalFailures) {
+    fresh = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, kind: { in: [...coreKinds] } }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
+  }
   const artifactIds = [...new Set(fresh.map((candidate) => candidate.artifactId))];
+  let evaluationsStarted = 0;
   for (const artifactId of artifactIds) {
     const artifactCandidates = fresh.filter((candidate) => candidate.artifactId === artifactId);
 
     // Evaluate every successful return across every batch. An older task may
     // finish after a retry batch was submitted; its paid result still belongs
     // in the quality pool and must not remain permanently at `succeeded`.
-    for (const candidate of artifactCandidates.filter((item) => item.status === "succeeded" && !item.qualityReport && item.mediaUrl)) {
-      const evaluationClaim = await prisma.videoGenerationCandidate.updateMany({
-        where: { id: candidate.id, status: "succeeded" },
-        data: { status: "evaluating", errorMessage: null },
-      });
+    const qualityWorkItems = artifactCandidates.filter((item) => {
+      if (!item.mediaUrl) return false;
+      if (item.status === "succeeded" && !item.qualityReport) return true;
+      if (item.status !== "quality_retry") return false;
+      const metadata = candidateMetadata(item.metadata);
+      const nextRetryAt = Date.parse(String(metadata.qualityNextRetryAt || ""));
+      return !Number.isFinite(nextRetryAt) || nextRetryAt <= Date.now();
+    });
+    for (const candidate of qualityWorkItems) {
+      if (evaluationsStarted >= qualityEvaluationsPerSync()) break;
+      const evaluationClaim = candidate.status === "quality_retry"
+        ? await prisma.videoGenerationCandidate.updateMany({
+            where: { id: candidate.id, status: "quality_retry" },
+            data: { status: "evaluating", errorMessage: null },
+          })
+        : await prisma.videoGenerationCandidate.updateMany({
+            where: {
+              id: candidate.id,
+              status: "succeeded",
+              qualityReport: { equals: Prisma.DbNull },
+            },
+            data: { status: "evaluating", errorMessage: null },
+          });
       if (evaluationClaim.count !== 1) continue;
+      evaluationsStarted += 1;
       const metadata = candidateMetadata(candidate.metadata);
       const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
       const visualContract = isRecord(metadata.visualContract)
@@ -6005,12 +6134,47 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
               assetCategory: assetCategory || undefined,
               requiresExactBrandText: brandVisualAsset,
             });
-        const compositeScore = generationQualityCompositeScore(report);
-        await prisma.videoGenerationCandidate.updateMany({
-          where: { id: candidate.id, status: "evaluating" },
-          data: { qualityReport: cleanInputJson(report as unknown as Record<string, unknown>), compositeScore, passed: report.passed, retryInstruction: report.retryInstruction ?? null, status: "evaluated" },
+        const technicalFailure = isTechnicalQualityEvaluationFailure(report);
+        const compositeScore = technicalFailure ? null : generationQualityCompositeScore(report);
+        const technicalAttempts = Math.max(0, Number(metadata.qualityTechnicalAttempts) || 0) + 1;
+        const technicalRetryExhausted = technicalAttempts >= qualityTechnicalRetryCycles();
+        const technicalMetadata = cleanInputJson({
+          ...metadata,
+          qualityTechnicalAttempts: technicalAttempts,
+          qualityNextRetryAt: new Date(Date.now() + qualityTechnicalRetryDelayMs(technicalAttempts)).toISOString(),
+        }) as Prisma.InputJsonValue;
+        const persistedEvaluation = await prisma.videoGenerationCandidate.updateMany({
+          where: {
+            id: candidate.id,
+            status: "evaluating",
+            qualityReport: { equals: Prisma.DbNull },
+          },
+          data: technicalFailure
+            ? {
+                qualityReport: cleanInputJson(report as unknown as Record<string, unknown>),
+                compositeScore: null,
+                passed: null,
+                retryInstruction: null,
+                status: technicalRetryExhausted ? "quality_failed" : "quality_retry",
+                metadata: technicalMetadata,
+              }
+            : {
+                qualityReport: cleanInputJson(report as unknown as Record<string, unknown>),
+                compositeScore,
+                passed: report.passed,
+                retryInstruction: report.retryInstruction ?? null,
+                status: "evaluated",
+              },
         });
-        await saveGenerationQualityReport(project.id, report);
+        if (persistedEvaluation.count !== 1) {
+          await logOnePromptVideo("generation_quality.duplicate_result_discarded", {
+            projectId: project.id,
+            artifactId,
+            candidateId: candidate.id,
+          }, "warn");
+          continue;
+        }
+        if (!technicalFailure) await saveGenerationQualityReport(project.id, report);
       } catch (error) {
         await prisma.videoGenerationCandidate.updateMany({
           where: { id: candidate.id, status: "evaluating" },
@@ -6056,7 +6220,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     allArtifactCandidates = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, artifactId }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
     // Do not rank a partial pool or start another paid retry while any submitted
     // task is still generating, persisting, or waiting for visual evaluation.
-    const unsettledStatuses = new Set(["running", "pending", "succeeded", "evaluating"]);
+    const unsettledStatuses = new Set(["running", "pending", "succeeded", "evaluating", "quality_retry"]);
     if (allArtifactCandidates.some((candidate) => unsettledStatuses.has(candidate.status))) continue;
 
     const passing = allArtifactCandidates.filter((candidate) => candidate.passed === true && candidate.mediaUrl).sort((a, b) => (b.compositeScore ?? 0) - (a.compositeScore ?? 0));
@@ -6735,7 +6899,7 @@ async function submitNextImageTask(params: {
       const learnedReferenceUrls = uniqueStrings([
         ...learning.referenceImageUrls,
         ...(compiled.referenceImageUrls ?? []),
-      ]).slice(0, 4);
+      ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
       const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
         project.planJson,
         readPlanStringArray(readPlanKeyframeMap(project.planJson).get(nextKeyframe.keyframeNo), ["usesConsistencyAnchors", "uses_consistency_anchors"]),

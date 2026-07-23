@@ -4,9 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { zoomViewAtPoint } from "@/lib/zoomable-image-math";
+import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   CircleHelp,
   Clapperboard,
@@ -466,11 +469,16 @@ interface ArtifactMetadata {
   invalidatedByArtifactIds?: string[];
   parentRevisionIds?: string[];
   userAccepted?: boolean;
+  evaluationModel?: string;
+  evaluationDurationMs?: number;
   [key: string]: unknown;
 }
 
 interface GenerationQualityReport {
   policyVersion?: "quality-policy-v2" | "quality-policy-v3";
+  evaluationStatus?: "completed" | "technical_failed";
+  technicalError?: string;
+  technicalRetryable?: boolean;
   assetId: string;
   identityScore: number;
   layoutScore: number;
@@ -514,7 +522,7 @@ interface GenerationQualityReport {
 }
 
 interface QualityDisplaySummary {
-  version: "quality-summary-v1";
+  version: "quality-summary-v1" | "quality-summary-v2";
   lang: PageLang;
   model: string;
   sourceHash: string;
@@ -686,7 +694,7 @@ const TEXT: Record<PageLang, Copy> = {
     referenceImages: "\u8f85\u52a9\u53c2\u8003\u56fe",
     uploadReference: "\u4e0a\u4f20\u53c2\u8003\u56fe",
     uploadingReference: "\u4e0a\u4f20\u4e2d",
-    referenceImageHint: "\u53ef\u4e0a\u4f20\u4ea7\u54c1\u3001\u4eba\u7269\u3001\u573a\u666f\u6216\u98ce\u683c\u53c2\u8003\u56fe\uff0c\u6700\u591a 4 \u5f20\uff0c\u751f\u6210\u5206\u955c\u65f6\u4f1a\u4e00\u8d77\u7ed9\u5927\u6a21\u578b\u7406\u89e3\u3002",
+    referenceImageHint: "\u53ef\u4e0a\u4f20\u4ea7\u54c1\u3001\u4eba\u7269\u3001\u573a\u666f\u6216\u98ce\u683c\u53c2\u8003\u56fe\uff0c\u6700\u591a 9 \u5f20\uff0c\u751f\u6210\u5206\u955c\u65f6\u4f1a\u4e00\u8d77\u7ed9\u5927\u6a21\u578b\u7406\u89e3\u3002",
     removeReference: "\u79fb\u9664\u53c2\u8003\u56fe",
     renameProject: "\u91cd\u547d\u540d",
     deleteProject: "\u5220\u9664",
@@ -864,7 +872,7 @@ const TEXT: Record<PageLang, Copy> = {
     referenceImages: "Reference images",
     uploadReference: "Upload references",
     uploadingReference: "Uploading",
-    referenceImageHint: "Upload product, character, scene, or style references. Up to 4 images will be passed to the storyboard model.",
+    referenceImageHint: "Upload product, character, scene, or style references. Up to 9 images will be passed to the storyboard model.",
     removeReference: "Remove reference",
     renameProject: "Rename",
     deleteProject: "Delete",
@@ -1139,6 +1147,26 @@ function localizeWorkflowError(message: string, lang: PageLang): string {
   return normalized;
 }
 
+function workflowNoticeForMessage(message: string, lang: PageLang): { title: string; detail: string } | null {
+  const frontierMatch = message.match(/当前生成前沿为 KF(\d+)(?:，依赖 KF(\d+))?/);
+  if (!frontierMatch) return null;
+  const frontier = `KF${Number(frontierMatch[1])}`;
+  const dependency = frontierMatch[2] ? `KF${Number(frontierMatch[2])}` : "";
+  return lang === "zh"
+    ? {
+        title: "等待前置镜头确认",
+        detail: dependency
+          ? `${frontier} 正在等待 ${dependency} 的当前版本通过质检或由你确认。确认后，后续镜头会自动继续生成。`
+          : `${frontier} 正在等待前置镜头确认。确认后，后续镜头会自动继续生成。`,
+      }
+    : {
+        title: "Waiting for an earlier shot",
+        detail: dependency
+          ? `${frontier} is waiting for the current ${dependency} version to pass quality review or be accepted by you. Generation will continue automatically afterward.`
+          : `${frontier} is waiting for its preceding shot to be confirmed. Generation will continue automatically afterward.`,
+      };
+}
+
 function localizeQualityIssue(issue: string, lang: PageLang): string {
   const normalized = issue.trim();
   if (!normalized) return "";
@@ -1273,6 +1301,14 @@ export default function OnePromptVideoPage() {
     () => [...boundaryKeyframes].sort((a, b) => a.keyframeNo - b.keyframeNo),
     [boundaryKeyframes],
   );
+  const previewKeyframeSequence = (previewKeyframe?.keyframeNo ?? 0) < 0
+    ? orderedAssetKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl))
+    : orderedBoundaryKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl));
+  const previewKeyframeIndex = previewKeyframeSequence.findIndex((keyframe) => keyframe.id === previewKeyframeId);
+  const previousPreviewKeyframe = previewKeyframeIndex > 0 ? previewKeyframeSequence[previewKeyframeIndex - 1] : undefined;
+  const nextPreviewKeyframe = previewKeyframeIndex >= 0 && previewKeyframeIndex < previewKeyframeSequence.length - 1
+    ? previewKeyframeSequence[previewKeyframeIndex + 1]
+    : undefined;
   const keyframeTotal = project?.keyframes?.length || project?.shots.length || 0;
   const assetTotal = assetKeyframes.length;
   const boundaryTotal = boundaryKeyframes.length || project?.shots.length || 0;
@@ -1377,7 +1413,8 @@ export default function OnePromptVideoPage() {
     ? project.errorMessage
     : null;
   const localizedActionError = error ? localizeWorkflowError(error, pageLang) : null;
-  const localizedProjectError = visibleProjectError ? localizeWorkflowError(visibleProjectError, pageLang) : null;
+  const projectWorkflowNotice = visibleProjectError ? workflowNoticeForMessage(visibleProjectError, pageLang) : null;
+  const localizedProjectError = visibleProjectError && !projectWorkflowNotice ? localizeWorkflowError(visibleProjectError, pageLang) : null;
 
   useEffect(() => {
     setPrompt((current) => (DEFAULT_PROMPTS.includes(current) ? copy.defaultPrompt : current));
@@ -1493,11 +1530,19 @@ export default function OnePromptVideoPage() {
   useEffect(() => {
     if (!previewKeyframeId) return;
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setPreviewKeyframeId("");
+      if (event.key === "Escape") {
+        setPreviewKeyframeId("");
+      } else if (event.key === "ArrowLeft" && previousPreviewKeyframe) {
+        event.preventDefault();
+        setPreviewKeyframeId(previousPreviewKeyframe.id);
+      } else if (event.key === "ArrowRight" && nextPreviewKeyframe) {
+        event.preventDefault();
+        setPreviewKeyframeId(nextPreviewKeyframe.id);
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [previewKeyframeId]);
+  }, [nextPreviewKeyframe, previewKeyframeId, previousPreviewKeyframe]);
 
   useEffect(() => {
     if (!previewMicroShot) return;
@@ -1743,7 +1788,7 @@ export default function OnePromptVideoPage() {
 
   async function uploadReferenceImages(files: FileList | null) {
     if (!files?.length) return;
-    const remaining = Math.max(0, 4 - referenceImageUrls.length);
+    const remaining = Math.max(0, ONE_PROMPT_MAX_REFERENCE_IMAGES - referenceImageUrls.length);
     const images = Array.from(files).filter((file) => file.type.startsWith("image/")).slice(0, remaining);
     if (!images.length) return;
     setUploadingReferences(true);
@@ -1754,7 +1799,7 @@ export default function OnePromptVideoPage() {
       for (const file of images) {
         uploaded.push(await uploadReferenceImage(file));
       }
-      setReferenceImageUrls((current) => [...current, ...uploaded].slice(0, 4));
+      setReferenceImageUrls((current) => [...current, ...uploaded].slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES));
     } catch (err) {
       setError(err instanceof Error ? err.message : copy.uploadReferenceFailed);
     } finally {
@@ -2652,7 +2697,7 @@ export default function OnePromptVideoPage() {
                 <p className="text-sm font-medium text-slate-200">{copy.referenceImages}</p>
                 <p className="mt-1 text-xs text-slate-500">{copy.referenceImageHint}</p>
               </div>
-              <label className={`inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 hover:border-cyan-400/30 hover:bg-white/[0.08] ${referenceImageUrls.length >= 4 || uploadingReferences ? "pointer-events-none opacity-50" : "bg-white/[0.04]"}`}>
+              <label className={`inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-sm font-medium text-slate-200 hover:border-cyan-400/30 hover:bg-white/[0.08] ${referenceImageUrls.length >= ONE_PROMPT_MAX_REFERENCE_IMAGES || uploadingReferences ? "pointer-events-none opacity-50" : "bg-white/[0.04]"}`}>
                 {uploadingReferences ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageIcon className="h-4 w-4" />}
                 {uploadingReferences ? copy.uploadingReference : copy.uploadReference}
                 <input
@@ -2660,7 +2705,7 @@ export default function OnePromptVideoPage() {
                   accept="image/*"
                   multiple
                   className="hidden"
-                  disabled={referenceImageUrls.length >= 4 || uploadingReferences}
+                  disabled={referenceImageUrls.length >= ONE_PROMPT_MAX_REFERENCE_IMAGES || uploadingReferences}
                   onChange={(event) => {
                     void uploadReferenceImages(event.target.files);
                     event.currentTarget.value = "";
@@ -2738,10 +2783,27 @@ export default function OnePromptVideoPage() {
           </section>
         )}
 
-        {(error || visibleProjectError) && (
-          <div className="rounded-md border border-white/10 bg-slate-900 px-4 py-3 text-sm">
-            {localizedActionError && <p className="text-red-300">{localizedActionError}</p>}
-            {localizedProjectError && visibleProjectError !== error && <p className="text-amber-300">{localizedProjectError}</p>}
+        {localizedActionError && (
+          <div className="rounded-md border border-red-300/15 bg-red-400/[0.06] px-4 py-3 text-sm text-red-200">
+            {localizedActionError}
+          </div>
+        )}
+
+        {projectWorkflowNotice && (
+          <div className="flex items-start gap-3 rounded-lg border border-sky-300/15 bg-sky-400/[0.045] px-4 py-3 shadow-[0_10px_30px_rgba(2,132,199,0.04)]">
+            <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-sky-300/10 text-sky-200">
+              <CircleHelp className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-slate-100">{projectWorkflowNotice.title}</p>
+              <p className="mt-1 text-xs leading-5 text-slate-400">{projectWorkflowNotice.detail}</p>
+            </div>
+          </div>
+        )}
+
+        {localizedProjectError && visibleProjectError !== error && (
+          <div className="rounded-md border border-rose-300/15 bg-rose-400/[0.06] px-4 py-3 text-sm text-rose-200">
+            {localizedProjectError}
           </div>
         )}
 
@@ -3010,6 +3072,8 @@ export default function OnePromptVideoPage() {
                     role="button"
                     tabIndex={0}
                     onClick={() => selectShot(shot.id)}
+                    onDoubleClick={() => openShotEditor(shot.id)}
+                    title={pageLang === "zh" ? "双击编辑镜头" : "Double-click to edit shot"}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
@@ -3144,29 +3208,6 @@ export default function OnePromptVideoPage() {
                       </div>
                     );
                   })}
-                </div>
-                <div className="space-y-2 rounded-md border border-white/10 bg-slate-950/50 p-3">
-                  <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span>{copy.assetLibrary}</span>
-                    <span>{completeAssets}/{assetTotal}</span>
-                  </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-                    <div className="h-full rounded-full bg-emerald-400" style={{ width: `${assetTotal ? (completeAssets / assetTotal) * 100 : 0}%` }} />
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span>{copy.frames}</span>
-                    <span>{completeBoundaryImages}/{boundaryTotal}</span>
-                  </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-                    <div className="h-full rounded-full bg-cyan-400" style={{ width: `${boundaryTotal ? (completeBoundaryImages / boundaryTotal) * 100 : 0}%` }} />
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span>{copy.shots}</span>
-                    <span>{completeClips}/{segmentTotal}</span>
-                  </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-                    <div className="h-full rounded-full bg-emerald-400" style={{ width: `${segmentTotal ? (completeClips / segmentTotal) * 100 : 0}%` }} />
-                  </div>
                 </div>
               </div>
               {selectedKeyframe ? (
@@ -3852,12 +3893,34 @@ export default function OnePromptVideoPage() {
               </button>
             </div>
             <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <ZoomableImage
-                src={previewImageSrc(previewKeyframe.imageUrl)}
-                alt={safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)}
-                lang={pageLang}
-                className="h-[78vh]"
-              />
+              <div className="relative min-h-0">
+                <ZoomableImage
+                  src={previewImageSrc(previewKeyframe.imageUrl)}
+                  alt={safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)}
+                  lang={pageLang}
+                  className="h-[78vh]"
+                />
+                <button
+                  type="button"
+                  disabled={!previousPreviewKeyframe}
+                  onClick={() => previousPreviewKeyframe && setPreviewKeyframeId(previousPreviewKeyframe.id)}
+                  aria-label={pageLang === "zh" ? "查看上一个镜头" : "View previous shot"}
+                  title={pageLang === "zh" ? "上一个镜头（←）" : "Previous shot (←)"}
+                  className="absolute left-3 top-1/2 z-20 inline-flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-slate-950/75 text-white shadow-xl backdrop-blur transition hover:border-cyan-300/40 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-20"
+                >
+                  <ChevronLeft className="h-6 w-6" />
+                </button>
+                <button
+                  type="button"
+                  disabled={!nextPreviewKeyframe}
+                  onClick={() => nextPreviewKeyframe && setPreviewKeyframeId(nextPreviewKeyframe.id)}
+                  aria-label={pageLang === "zh" ? "查看下一个镜头" : "View next shot"}
+                  title={pageLang === "zh" ? "下一个镜头（→）" : "Next shot (→)"}
+                  className="absolute right-3 top-1/2 z-20 inline-flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-slate-950/75 text-white shadow-xl backdrop-blur transition hover:border-cyan-300/40 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-20"
+                >
+                  <ChevronRight className="h-6 w-6" />
+                </button>
+              </div>
               <aside className="subtle-scrollbar max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
                 <p className="text-xs font-medium text-slate-500">{copy.imagePrompt}</p>
                 <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{localizedKeyframeImagePrompt(previewKeyframe, pageLang)}</p>
@@ -4008,7 +4071,8 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
 
   const requestQualitySummary = useCallback(async (candidate: GenerationCandidate) => {
     const cacheKey = `${candidate.id}:${lang}`;
-    if (qualitySummaryOverrides[cacheKey] || candidate.qualityReport?.displaySummaries?.[lang] || qualitySummaryRequestsRef.current.has(cacheKey)) return;
+    const storedSummary = candidate.qualityReport?.displaySummaries?.[lang];
+    if (qualitySummaryOverrides[cacheKey] || storedSummary?.version === "quality-summary-v2" || qualitySummaryRequestsRef.current.has(cacheKey)) return;
     qualitySummaryRequestsRef.current.add(cacheKey);
     setQualitySummaryLoadingIds((current) => new Set(current).add(cacheKey));
     try {
@@ -4047,10 +4111,15 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
       <div className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-2.5">
         {candidates.map((candidate) => {
           const report = candidate.qualityReport;
+          const technicalQualityFailure = isTechnicalQualityReport(report);
           const isVideo = candidate.kind === "segment_video";
           const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
           const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v3";
-          const statusText = needsPolicyRecheck
+          const statusText = technicalQualityFailure
+            ? candidate.status === "quality_failed"
+              ? (lang === "zh" ? "质检暂不可用" : "Review unavailable")
+              : (lang === "zh" ? "等待重新质检" : "Awaiting re-review")
+            : needsPolicyRecheck
             ? (lang === "zh" ? "待新版质检" : "Awaiting updated review")
             : candidate.userAccepted && candidate.passed === false
             ? (lang === "zh" ? "系统未通过 · 人工保留" : "System failed · kept manually")
@@ -4060,8 +4129,12 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                 : (lang === "zh" ? "质检通过" : "Quality passed")
               : candidate.passed === false
                 ? (lang === "zh" ? "系统未通过" : "System failed")
-                : candidate.selected ? (lang === "zh" ? "当前采用" : "Selected") : candidate.status;
-          const statusClass = needsPolicyRecheck
+                : candidate.status === "evaluating"
+                  ? (lang === "zh" ? "快速质检中" : "Quick review")
+                  : candidate.selected ? (lang === "zh" ? "当前采用" : "Selected") : candidate.status;
+          const statusClass = technicalQualityFailure
+            ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            : needsPolicyRecheck
             ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
             : candidate.userAccepted && candidate.passed === false
             ? "border-violet-300/15 bg-violet-300/10 text-violet-100"
@@ -4070,7 +4143,7 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
               : candidate.passed === false
                 ? "border-rose-300/15 bg-rose-300/[0.08] text-rose-100/85"
                 : "border-white/10 bg-white/[0.04] text-slate-400";
-          const qualityMetrics = report ? [
+          const qualityMetrics = report && !technicalQualityFailure ? [
             [lang === "zh" ? "身份" : "Identity", report.identityScore],
             [lang === "zh" ? "构图" : "Layout", report.layoutScore],
             [lang === "zh" ? "提示" : "Prompt", report.promptAlignmentScore],
@@ -4082,7 +4155,9 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           const deferredIssues = issueLedger.filter((issue) => issue.status === "invalid_for_stage");
           const issueDetailsExpanded = expandedIssueCandidateIds.has(candidate.id);
           const qualitySummaryKey = `${candidate.id}:${lang}`;
-          const qualitySummary = qualitySummaryOverrides[qualitySummaryKey] ?? report?.displaySummaries?.[lang];
+          const storedQualitySummary = report?.displaySummaries?.[lang];
+          const qualitySummary = qualitySummaryOverrides[qualitySummaryKey]
+            ?? (storedQualitySummary?.version === "quality-summary-v2" ? storedQualitySummary : undefined);
           const qualitySummaryLoading = qualitySummaryLoadingIds.has(qualitySummaryKey);
           return (
             <div key={candidate.id} className={`group/card overflow-hidden rounded-lg border bg-slate-950/75 transition duration-200 ${candidate.selected ? "border-cyan-300/50 shadow-[0_0_0_1px_rgba(103,232,249,0.08),0_12px_30px_rgba(8,145,178,0.08)]" : "border-white/[0.09] hover:border-white/20"}`}>
@@ -4111,18 +4186,22 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <p className="text-[9px] uppercase tracking-[0.16em] text-slate-600">{lang === "zh" ? "综合评分" : "Overall"}</p>
-                    <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-100">{candidate.compositeScore == null ? "—" : candidate.compositeScore.toFixed(1)}</p>
+                    <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-100">{technicalQualityFailure || candidate.compositeScore == null ? "—" : candidate.compositeScore.toFixed(1)}</p>
                   </div>
                   <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${statusClass}`}>{statusText}</span>
                 </div>
-                {report && <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-white/[0.06] bg-white/[0.06]">
+                {report && !technicalQualityFailure && <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-white/[0.06] bg-white/[0.06]">
                   {qualityMetrics.map(([label, value]) => <div key={label} className="bg-slate-950/90 px-2 py-1.5">
                     <span className="block text-[9px] text-slate-600">{label}</span>
                     <span className="mt-0.5 block text-[11px] font-medium tabular-nums text-slate-300">{formatQualityScore(value)}</span>
                   </div>)}
                   {typeof report.singleTakeScore === "number" && <div className="col-span-2 flex items-center justify-between bg-slate-950/90 px-2 py-1.5 text-[10px]"><span className="text-slate-600">Single-take</span><span className="font-medium tabular-nums text-slate-300">{formatQualityScore(report.singleTakeScore)}</span></div>}
                 </div>}
-                {issueLedger.length ? <button
+                {technicalQualityFailure ? <p className="rounded-md border border-amber-300/10 bg-amber-300/[0.05] px-2 py-1.5 text-[10px] leading-4 text-amber-100/80">
+                  {candidate.status === "quality_failed"
+                    ? (lang === "zh" ? "视觉质检服务连续失败，原图已保留，请稍后重新质检。" : "Visual review failed repeatedly. The original media is preserved; retry the review later.")
+                    : (lang === "zh" ? "视觉质检超时，系统将使用原图自动重试，不会重新生成。" : "Visual review timed out. The original media will be rechecked automatically without regeneration.")}
+                </p> : issueLedger.length ? <button
                   type="button"
                   aria-expanded={issueDetailsExpanded}
                   title={lang === "zh" ? "点击查看具体问题" : "Click to view issue details"}
@@ -4167,11 +4246,11 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                     {lang === "zh" ? "摘要暂未生成，点击重试" : "Summary unavailable. Click to retry."}
                   </button>}
                 </div> : null}
-                {!candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
+                {!technicalQualityFailure && !candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
                   <Check className="h-3 w-3" />{lang === "zh" ? "人工采用" : "Use manually"}
                 </button> : null}
                 {candidate.selected && <div className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-cyan-300/10 bg-cyan-300/[0.05] text-[11px] font-medium text-cyan-100/75"><Check className="h-3 w-3" />{lang === "zh" ? "正在使用" : "In use"}</div>}
-                {report?.retryInstruction && onRetry ? <button type="button" disabled={loading} aria-busy={retrying} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
+                {!technicalQualityFailure && report?.retryInstruction && onRetry ? <button type="button" disabled={loading} aria-busy={retrying} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
                 {candidate.userAccepted ? <p className="rounded-md bg-violet-300/[0.06] px-2 py-1.5 text-[10px] leading-4 text-violet-100/70">{lang === "zh" ? "系统质检未通过，已按你的选择保留" : "Kept by your choice despite the quality check"}</p> : null}
               </div>
             </div>
@@ -4272,6 +4351,15 @@ function ZoomableImage({ src, alt, lang, className = "" }: { src: string; alt: s
 
 function formatQualityScore(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "-";
+}
+
+function isTechnicalQualityReport(report: GenerationQualityReport | null | undefined): boolean {
+  if (!report) return false;
+  if (report.evaluationStatus === "technical_failed") return true;
+  if (report.contentBased === false && report.passed === false) return true;
+  return report.artifactIssues.some((issue) =>
+    /视觉质量评估失败|quality evaluation failed|this operation was aborted|aborterror|timed? out|timeout|rate limit|too many requests|fetch failed|network/i.test(issue),
+  );
 }
 
 function Field({
@@ -6045,7 +6133,11 @@ function rollbackStageOrder(status: ProjectStatus, assetsApproved: boolean): num
 }
 
 function hasRunningMicroShotImage(project: VideoProject): boolean {
-  return project.shots.some((shot) => shot.microShots?.some((item) => item.imageStatus === "running" && Boolean(item.imageTaskId)));
+  return project.shots.some((shot) => shot.microShots?.some((item) => {
+    const required = item.referenceType === "image_prompt" || item.referenceType === "mixed";
+    if (!required || item.imageUrl || item.imageStatus === "failed") return false;
+    return item.imageStatus === "running" || item.imageStatus === "pending" || !item.imageStatus || item.imageStatus === "idle";
+  }));
 }
 
 function microShotImageProgress(project: VideoProject): { required: number; ready: number; running: number; failed: number; missing: number } {

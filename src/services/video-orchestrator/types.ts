@@ -868,6 +868,9 @@ export interface RollbackVideoMediaInput {
 
 export interface GenerationQualityReport {
   policyVersion?: "quality-policy-v2" | "quality-policy-v3";
+  evaluationStatus?: "completed" | "technical_failed";
+  technicalError?: string;
+  technicalRetryable?: boolean;
   assetId: string;
   candidateId?: string;
   candidateNo?: number;
@@ -904,6 +907,8 @@ export interface GenerationQualityReport {
   userAccepted?: boolean;
   originalPassed?: boolean;
   retryFromStage?: "stage2b" | "stage3" | "generation" | "manual";
+  evaluationModel?: string;
+  evaluationDurationMs?: number;
   displaySummaries?: Partial<Record<QualityDisplayLanguage, QualityDisplaySummary>>;
 }
 
@@ -915,7 +920,7 @@ export interface QualityDisplaySummaryItem {
 }
 
 export interface QualityDisplaySummary {
-  version: "quality-summary-v1";
+  version: "quality-summary-v1" | "quality-summary-v2";
   lang: QualityDisplayLanguage;
   model: string;
   sourceHash: string;
