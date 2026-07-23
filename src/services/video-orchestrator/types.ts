@@ -871,6 +871,8 @@ export interface GenerationQualityReport {
   evaluationStatus?: "completed" | "technical_failed";
   technicalError?: string;
   technicalRetryable?: boolean;
+  /** Video review may be informative only and must not veto or auto-regenerate media. */
+  advisoryOnly?: boolean;
   assetId: string;
   candidateId?: string;
   candidateNo?: number;

@@ -225,6 +225,56 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
   }
 }
 
+export interface VideoTechnicalInspection {
+  valid: boolean;
+  durationSeconds: number;
+  width: number;
+  height: number;
+  frameRate: number;
+  errorMessage?: string;
+}
+
+/**
+ * Deterministic gate for generated video files. This checks that the stored
+ * MP4 downloads, has sane video metadata, and can decode a real frame. It does
+ * not make any aesthetic or semantic judgement.
+ */
+export async function inspectGeneratedVideoTechnicalQuality(mediaUrl: string): Promise<VideoTechnicalInspection> {
+  const workDir = path.join(os.tmpdir(), `one-prompt-video-technical-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const clipPath = path.join(workDir, "candidate.mp4");
+  const framePath = path.join(workDir, "decode-check.png");
+  await mkdir(workDir, { recursive: true });
+  try {
+    await download(mediaUrl, clipPath);
+    const metadata = await probeVideo(clipPath);
+    if (
+      metadata.durationSeconds <= 0
+      || metadata.width <= 0
+      || metadata.height <= 0
+      || metadata.frameRate <= 0
+    ) {
+      return { valid: false, ...metadata, errorMessage: "视频时长、尺寸或帧率元数据无效。" };
+    }
+    await extractFrame(clipPath, framePath, Math.min(metadata.durationSeconds * 0.5, Math.max(0, metadata.durationSeconds - 0.08)));
+    const frame = await readFile(framePath);
+    if (frame.byteLength < 1024) {
+      return { valid: false, ...metadata, errorMessage: "视频可解码，但抽取的检测帧为空或损坏。" };
+    }
+    return { valid: true, ...metadata };
+  } catch (error) {
+    return {
+      valid: false,
+      durationSeconds: 0,
+      width: 0,
+      height: 0,
+      frameRate: 0,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await removeWorkDir(workDir);
+  }
+}
+
 export function normalizeImageQualityResponse(value: unknown, params: BaseEvaluationParams): GenerationQualityReport {
   const report = normalizeReport(value, params);
   // Stage 2B owns shot/motion decomposition. It cannot repair a generated

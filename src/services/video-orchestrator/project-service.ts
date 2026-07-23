@@ -30,7 +30,7 @@ import { readCameraGraph, resolveCameraInheritanceContext } from "./camera-graph
 import { assertPlanValidForGeneration as assertPlanValidForGenerationV2 } from "./plan-validator";
 import { sanitizeGameVisualPromptText, stripNonStandardPromptSymbols } from "./frame-contract";
 import { evaluateEndFrameContinuity } from "./end-frame-continuity";
-import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVideoFrameDataUrls, generationQualityCompositeScore, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse } from "./generation-quality-evaluator";
+import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVideoFrameDataUrls, generationQualityCompositeScore, inspectGeneratedVideoTechnicalQuality, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse } from "./generation-quality-evaluator";
 import { createOnePromptRolloutSnapshot, legacyReferenceSelection, onePromptRolloutEnabled } from "./rollout-flags";
 import { hydratePlanArtifactsFromTables, mirrorPlanArtifactsToTables } from "./plan-artifact-store";
 import { buildAuthoritativeVisualContract, repairNegativePromptAgainstVisualContract, repairPromptAgainstVisualContract, type AuthoritativeVisualContract } from "./visual-quality-contract";
@@ -6142,7 +6142,31 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
             segmentNo: Number(metadata.segmentNo),
             microShotNo: Number(metadata.microShotNo),
           });
-      await prisma.videoGenerationCandidate.update({ where: { id: candidate.id }, data: { mediaUrl, status: "succeeded", errorMessage: null } });
+      if (candidate.kind === "segment_video") {
+        const technical = await inspectGeneratedVideoTechnicalQuality(mediaUrl);
+        await prisma.videoGenerationCandidate.update({
+          where: { id: candidate.id },
+          data: technical.valid
+            ? {
+                mediaUrl,
+                status: "review_ready",
+                errorMessage: null,
+                metadata: cleanInputJson({
+                  ...metadata,
+                  technicalInspection: technical,
+                  advisoryNextEvalAt: new Date(Date.now() + 2000).toISOString(),
+                }),
+              }
+            : {
+                mediaUrl,
+                status: "failed",
+                errorMessage: `视频文件技术检查失败：${technical.errorMessage || "无法解码视频"}`,
+                metadata: cleanInputJson({ ...metadata, technicalInspection: technical }),
+              },
+        });
+      } else {
+        await prisma.videoGenerationCandidate.update({ where: { id: candidate.id }, data: { mediaUrl, status: "succeeded", errorMessage: null } });
+      }
     } else if (result.status === "failed") {
       await prisma.videoGenerationCandidate.update({ where: { id: candidate.id }, data: { status: "failed", errorMessage: result.errorMessage || "Upstream generation failed" } });
     }
@@ -6197,6 +6221,11 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     // in the quality pool and must not remain permanently at `succeeded`.
     const qualityWorkItems = artifactCandidates.filter((item) => {
       if (!item.mediaUrl) return false;
+      if (item.kind === "segment_video" && item.status === "review_ready" && !item.qualityReport) {
+        const metadata = candidateMetadata(item.metadata);
+        const advisoryNextEvalAt = Date.parse(String(metadata.advisoryNextEvalAt || ""));
+        return !Number.isFinite(advisoryNextEvalAt) || advisoryNextEvalAt <= Date.now();
+      }
       if (item.status === "succeeded" && !item.qualityReport) return true;
       if (item.status !== "quality_retry") return false;
       const metadata = candidateMetadata(item.metadata);
@@ -6210,7 +6239,16 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
             where: { id: candidate.id, status: "quality_retry" },
             data: { status: "evaluating", errorMessage: null },
           })
-        : await prisma.videoGenerationCandidate.updateMany({
+        : candidate.status === "review_ready"
+          ? await prisma.videoGenerationCandidate.updateMany({
+              where: {
+                id: candidate.id,
+                status: "review_ready",
+                qualityReport: { equals: Prisma.DbNull },
+              },
+              data: { status: "evaluating", errorMessage: null },
+            })
+          : await prisma.videoGenerationCandidate.updateMany({
             where: {
               id: candidate.id,
               status: "succeeded",
@@ -6266,7 +6304,11 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
               assetCategory: assetCategory || undefined,
               requiresExactBrandText: brandVisualAsset,
             });
-        const technicalFailure = isTechnicalQualityEvaluationFailure(report);
+        const videoAdvisoryOnly = candidate.kind === "segment_video";
+        const effectiveReport: GenerationQualityReport = videoAdvisoryOnly
+          ? { ...report, advisoryOnly: true }
+          : report;
+        const technicalFailure = isTechnicalQualityEvaluationFailure(effectiveReport);
         const compositeScore = technicalFailure ? null : generationQualityCompositeScore(report);
         const technicalAttempts = Math.max(0, Number(metadata.qualityTechnicalAttempts) || 0) + 1;
         const technicalRetryExhausted = technicalAttempts >= qualityTechnicalRetryCycles();
@@ -6286,9 +6328,17 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
                 status: "evaluating",
                 qualityReport: { equals: Prisma.DbNull },
               },
-          data: technicalFailure
+          data: videoAdvisoryOnly
             ? {
-                qualityReport: cleanInputJson(report as unknown as Record<string, unknown>),
+                qualityReport: cleanInputJson(effectiveReport as unknown as Record<string, unknown>),
+                compositeScore,
+                passed: null,
+                retryInstruction: effectiveReport.retryInstruction ?? null,
+                status: "evaluated",
+              }
+            : technicalFailure
+            ? {
+                qualityReport: cleanInputJson(effectiveReport as unknown as Record<string, unknown>),
                 compositeScore: null,
                 passed: null,
                 retryInstruction: null,
@@ -6296,7 +6346,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
                 metadata: technicalMetadata,
               }
             : {
-                qualityReport: cleanInputJson(report as unknown as Record<string, unknown>),
+                qualityReport: cleanInputJson(effectiveReport as unknown as Record<string, unknown>),
                 compositeScore,
                 passed: report.passed,
                 retryInstruction: report.retryInstruction ?? null,
@@ -6311,8 +6361,16 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
           }, "warn");
           continue;
         }
-        if (!technicalFailure) {
-          await saveGenerationQualityReport(project.id, report);
+        if (videoAdvisoryOnly) {
+          await logOnePromptVideo("generation_quality.video_advisory_ready", {
+            projectId: project.id,
+            artifactId,
+            candidateId: candidate.id,
+            modelPassed: report.passed,
+            technicalFailure,
+          });
+        } else if (!technicalFailure) {
+          await saveGenerationQualityReport(project.id, effectiveReport);
         } else {
           const issue = report.artifactIssues.join("；") || "画面质检服务暂不可用";
           await updateGenerationTargetForTechnicalQualityRetry(project, candidate, technicalRetryExhausted, issue);
@@ -6371,8 +6429,51 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     allArtifactCandidates = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, artifactId }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
     // Do not rank a partial pool or start another paid retry while any submitted
     // task is still generating, persisting, or waiting for visual evaluation.
-    const unsettledStatuses = new Set(["running", "pending", "succeeded", "evaluating", "quality_retry"]);
+    const unsettledStatuses = new Set(["running", "pending", "succeeded", "review_ready", "evaluating", "quality_retry"]);
     if (allArtifactCandidates.some((candidate) => unsettledStatuses.has(candidate.status))) continue;
+
+    if (allArtifactCandidates[0]?.kind === "segment_video") {
+      const usableCandidates = allArtifactCandidates.filter((candidate) =>
+        Boolean(candidate.mediaUrl)
+        && candidate.status !== "failed"
+      );
+      const segment = project.segments.find((item) => item.id === allArtifactCandidates[0]?.targetId);
+      if (segment && usableCandidates.length > 0) {
+        await prisma.videoSegment.update({
+          where: { id: segment.id },
+          data: { status: VideoShotStatus.CLIP_RUNNING, errorMessage: null },
+        });
+        await prisma.videoProject.update({
+          where: { id: project.id },
+          data: { status: VideoProjectStatus.CLIP_REVIEW, errorMessage: null },
+        });
+        await updateProjectArtifactStatus(project.id, [artifactId], "generating", {
+          dirtyReason: "Video candidates are ready for user review; automated visual analysis is advisory only.",
+          retryFromStage: "manual",
+        });
+      } else if (segment) {
+        const technicalErrors = allArtifactCandidates
+          .map((candidate) => candidate.errorMessage)
+          .filter((value): value is string => Boolean(value));
+        await prisma.videoSegment.update({
+          where: { id: segment.id },
+          data: {
+            status: VideoShotStatus.FAILED,
+            clipTaskId: null,
+            errorMessage: technicalErrors.join("；") || "所有视频候选均未通过文件技术检查，请修改提示词或素材后手动重新生成。",
+          },
+        });
+        await prisma.videoProject.update({
+          where: { id: project.id },
+          data: { status: VideoProjectStatus.CLIP_REVIEW, errorMessage: null },
+        });
+        await updateProjectArtifactStatus(project.id, [artifactId], "failed", {
+          dirtyReason: technicalErrors.join("；") || "All video candidates failed deterministic file validation.",
+          retryFromStage: "manual",
+        });
+      }
+      continue;
+    }
 
     const passing = allArtifactCandidates.filter((candidate) => candidate.passed === true && candidate.mediaUrl).sort((a, b) => (b.compositeScore ?? 0) - (a.compositeScore ?? 0));
     const selected = passing[0];
@@ -6574,7 +6675,12 @@ async function applySelectedGenerationCandidate(
   const candidate = await prisma.videoGenerationCandidate.findUnique({ where: { id: candidateId } });
   if (!candidate || candidate.projectId !== project.id || !candidate.mediaUrl) throw new Error("Generation candidate is unavailable");
   const report = candidate.qualityReport && isRecord(candidate.qualityReport) ? candidate.qualityReport as unknown as GenerationQualityReport : undefined;
-  if (candidate.passed !== true && !userAccepted) throw new Error("Candidate did not pass visual quality evaluation");
+  if (candidate.kind !== "segment_video" && candidate.passed !== true && !userAccepted) {
+    throw new Error("Candidate did not pass visual quality evaluation");
+  }
+  if (candidate.kind === "segment_video" && candidate.status === "failed") {
+    throw new Error("Video candidate failed deterministic technical validation");
+  }
   const acceptedReport = report ? { ...report, userAccepted: candidate.passed !== true && userAccepted, originalPassed: report.originalPassed ?? report.passed } : undefined;
   const metadata = candidateMetadata(candidate.metadata);
   const dependencyRevisionIds = activeDependencyRevisionIds(project, candidate.kind, candidate.targetId, metadata);
@@ -6665,8 +6771,10 @@ export async function selectGenerationCandidate(userId: string, projectId: strin
   const project = await requireVideoProject(userId, projectId);
   const candidate = project.generationCandidates.find((item) => item.id === candidateId);
   if (!candidate) throw new Error("Generation candidate not found");
-  if (!candidate.mediaUrl || !candidate.qualityReport) throw new Error("Candidate has not finished visual quality evaluation");
-  if (candidate.passed !== true && !acceptFailed) throw new Error("This candidate failed quality evaluation; explicit acceptance is required");
+  if (!candidate.mediaUrl) throw new Error("Candidate media is not ready");
+  if (candidate.kind !== "segment_video" && !candidate.qualityReport) throw new Error("Candidate has not finished visual quality evaluation");
+  if (candidate.kind !== "segment_video" && candidate.passed !== true && !acceptFailed) throw new Error("This candidate failed quality evaluation; explicit acceptance is required");
+  if (candidate.kind === "segment_video" && candidate.status === "failed") throw new Error("Video candidate failed deterministic technical validation");
   const parentRevisionIds: string[] = [];
   if (candidate.kind === "keyframe_image") {
     const keyframe = project.keyframes.find((item) => item.id === candidate.targetId);

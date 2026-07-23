@@ -66,6 +66,17 @@ test("video frame extraction uses PNG and cleanup cannot overwrite a valid evalu
   assert.match(source, /Cleanup must never overwrite an otherwise valid visual-evaluation result/);
 });
 
+test("video candidates use deterministic technical validation while visual review remains advisory", () => {
+  const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(evaluator, /inspectGeneratedVideoTechnicalQuality/);
+  assert.match(evaluator, /does not make any aesthetic or semantic judgement/);
+  assert.match(service, /videoAdvisoryOnly = candidate\.kind === "segment_video"/);
+  assert.match(service, /advisoryOnly: true/);
+  assert.match(service, /Video candidates are ready for user review; automated visual analysis is advisory only/);
+  assert.match(service, /candidate\.kind !== "segment_video" && candidate\.passed !== true/);
+});
+
 test("image quality normalization preserves scores observed by the visual model", () => {
   const report = normalizeImageQualityResponse({
     identityScore: 91,

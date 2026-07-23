@@ -479,6 +479,7 @@ interface GenerationQualityReport {
   evaluationStatus?: "completed" | "technical_failed";
   technicalError?: string;
   technicalRetryable?: boolean;
+  advisoryOnly?: boolean;
   assetId: string;
   identityScore: number;
   layoutScore: number;
@@ -2377,7 +2378,7 @@ export default function OnePromptVideoPage() {
 
   async function chooseGenerationCandidate(candidate: GenerationCandidate) {
     if (!project) return;
-    const acceptFailed = candidate.passed !== true;
+    const acceptFailed = candidate.kind !== "segment_video" && candidate.passed !== true;
     if (acceptFailed && typeof window !== "undefined" && !window.confirm(pageLang === "zh" ? "该候选未通过视觉质量检查。仍要人工接受并切换到它吗？原始 passed=false 会保留。" : "This candidate failed visual quality review. Accept it manually and switch anyway? The original passed=false will be retained.")) return;
     setSelectingCandidateId(candidate.id);
     const selectionController = new AbortController();
@@ -4264,6 +4265,13 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
           const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v3";
           const statusText = technicalQualityFailure
+            && isVideo
+            ? (lang === "zh" ? "可采用 · 分析暂不可用" : "Usable · analysis unavailable")
+            : isVideo && report
+              ? (lang === "zh" ? "可采用 · 有分析建议" : "Usable · analysis available")
+              : isVideo && candidate.mediaUrl
+                ? (lang === "zh" ? "可预览 · 分析中" : "Preview ready · analyzing")
+                : technicalQualityFailure
             ? candidate.status === "quality_failed"
               ? (lang === "zh" ? "质检暂不可用" : "Review unavailable")
               : (lang === "zh" ? "等待重新质检" : "Awaiting re-review")
@@ -4281,6 +4289,11 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                   ? (lang === "zh" ? "快速质检中" : "Quick review")
                   : candidate.selected ? (lang === "zh" ? "当前采用" : "Selected") : candidate.status;
           const statusClass = technicalQualityFailure
+            && isVideo
+            ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            : isVideo
+              ? "border-cyan-300/15 bg-cyan-300/[0.07] text-cyan-100/85"
+              : technicalQualityFailure
             ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
             : needsPolicyRecheck
             ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
@@ -4394,22 +4407,24 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                     {lang === "zh" ? "摘要暂未生成，点击重试" : "Summary unavailable. Click to retry."}
                   </button>}
                 </div> : null}
-                {!candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
+                {!candidate.selected && candidate.mediaUrl && (report || isVideo) && candidate.status !== "failed" ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
                   {selectingCandidateId === candidate.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
                   {selectingCandidateId === candidate.id
                     ? (lang === "zh" ? "正在采用" : "Accepting")
+                    : isVideo
+                    ? (lang === "zh" ? "采用这个视频" : "Use this video")
                     : technicalQualityFailure
                     ? (lang === "zh" ? "人工采用这张原图" : "Use this original")
                     : (lang === "zh" ? "人工采用" : "Use manually")}
                 </button> : null}
-                {technicalQualityFailure && candidate.mediaUrl && onRecheck ? <button type="button" disabled={loading || candidate.status === "evaluating"} onClick={() => onRecheck(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-amber-300/15 bg-amber-300/[0.04] text-[11px] text-amber-100/80 transition hover:border-amber-300/30 hover:bg-amber-300/[0.08] disabled:opacity-50">
+                {technicalQualityFailure && !isVideo && candidate.mediaUrl && onRecheck ? <button type="button" disabled={loading || candidate.status === "evaluating"} onClick={() => onRecheck(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-amber-300/15 bg-amber-300/[0.04] text-[11px] text-amber-100/80 transition hover:border-amber-300/30 hover:bg-amber-300/[0.08] disabled:opacity-50">
                   <RefreshCw className={`h-3 w-3 ${candidate.status === "evaluating" ? "animate-spin" : ""}`} />
                   {candidate.status === "evaluating"
                     ? (lang === "zh" ? "正在重新质检" : "Rechecking")
                     : (lang === "zh" ? "重新质检原图" : "Recheck original")}
                 </button> : null}
                 {candidate.selected && <div className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-cyan-300/10 bg-cyan-300/[0.05] text-[11px] font-medium text-cyan-100/75"><Check className="h-3 w-3" />{lang === "zh" ? "正在使用" : "In use"}</div>}
-                {!technicalQualityFailure && report?.retryInstruction && onRetry ? <button type="button" disabled={loading} aria-busy={retrying} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
+                {!technicalQualityFailure && report?.retryInstruction && onRetry ? <button type="button" disabled={loading} aria-busy={retrying} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> {isVideo ? (lang === "zh" ? "修改提示词后重生成" : "Edit prompt and regenerate") : (lang === "zh" ? "重新优化" : "Improve")}</button> : null}
                 {candidate.userAccepted ? <p className="rounded-md bg-violet-300/[0.06] px-2 py-1.5 text-[10px] leading-4 text-violet-100/70">{lang === "zh" ? "系统质检未通过，已按你的选择保留" : "Kept by your choice despite the quality check"}</p> : null}
               </div>
             </div>
