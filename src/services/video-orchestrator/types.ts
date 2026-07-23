@@ -867,7 +867,7 @@ export interface RollbackVideoMediaInput {
 }
 
 export interface GenerationQualityReport {
-  policyVersion?: "quality-policy-v2";
+  policyVersion?: "quality-policy-v2" | "quality-policy-v3";
   assetId: string;
   candidateId?: string;
   candidateNo?: number;
@@ -904,6 +904,22 @@ export interface GenerationQualityReport {
   userAccepted?: boolean;
   originalPassed?: boolean;
   retryFromStage?: "stage2b" | "stage3" | "generation" | "manual";
+  displaySummaries?: Partial<Record<QualityDisplayLanguage, QualityDisplaySummary>>;
+}
+
+export type QualityDisplayLanguage = "zh" | "en";
+
+export interface QualityDisplaySummaryItem {
+  status: "open" | "resolved" | "deferred";
+  text: string;
+}
+
+export interface QualityDisplaySummary {
+  version: "quality-summary-v1";
+  lang: QualityDisplayLanguage;
+  model: string;
+  sourceHash: string;
+  items: QualityDisplaySummaryItem[];
 }
 
 export interface GenerationIssueLedgerEntry {
@@ -927,6 +943,20 @@ export interface GenerationCorrectionAction {
   observed: string;
   target: string;
   instruction: string;
+  evidenceStatus?: "confirmed" | "uncertain";
+  confidence?: number;
+  normalizedRegion?: {
+    xMin: number;
+    yMin: number;
+    xMax: number;
+    yMax: number;
+  };
+  targetPoint?: {
+    x: number;
+    y: number;
+  };
+  executionParameters?: Record<string, unknown>;
+  tolerance?: string;
   priority?: "required" | "recommended";
   sourceConstraint?: string;
   preserve?: string[];

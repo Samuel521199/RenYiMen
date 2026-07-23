@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
+import { zoomViewAtPoint } from "@/lib/zoomable-image-math";
 import {
   Check,
   ChevronDown,
@@ -469,6 +470,7 @@ interface ArtifactMetadata {
 }
 
 interface GenerationQualityReport {
+  policyVersion?: "quality-policy-v2" | "quality-policy-v3";
   assetId: string;
   identityScore: number;
   layoutScore: number;
@@ -477,6 +479,7 @@ interface GenerationQualityReport {
   singleTakeScore?: number;
   artifactIssues: string[];
   passed: boolean;
+  originalPassed?: boolean;
   contentBased?: boolean;
   userAccepted?: boolean;
   wrongTextDetected?: boolean;
@@ -506,7 +509,19 @@ interface GenerationQualityReport {
     status: "open" | "resolved" | "regressed" | "invalid_for_stage";
     occurrenceCount?: number;
   }>;
+  displaySummaries?: Partial<Record<PageLang, QualityDisplaySummary>>;
   retryInstruction?: string;
+}
+
+interface QualityDisplaySummary {
+  version: "quality-summary-v1";
+  lang: PageLang;
+  model: string;
+  sourceHash: string;
+  items: Array<{
+    status: "open" | "resolved" | "deferred";
+    text: string;
+  }>;
 }
 
 type DebugTab = "events" | "anchors" | "states" | "references" | "prompts" | "audit";
@@ -569,7 +584,6 @@ type Copy = {
   assetLibrary: string;
   assetLibraryHint: string;
   frames: string;
-  boundaryFrameHint: string;
   autoShotPlan: string;
   segmentDurationPolicy: string;
   totalDuration: string;
@@ -607,7 +621,6 @@ type Copy = {
   videoPrompt: string;
   negativePrompt: string;
   clipPreview: string;
-  keyframePreview: string;
   finalVideo: string;
   preview: string;
   previewSize: string;
@@ -708,7 +721,6 @@ const TEXT: Record<PageLang, Copy> = {
     assetLibrary: "资产库",
     assetLibraryHint: "人物、场景、产品等固定资产先在这里确认；人物资产包含正面、侧面和背面视角。",
     frames: "\u8fb9\u754c\u53c2\u8003\u5e27",
-    boundaryFrameHint: "\u9759\u6001\u9996\u5c3e\u5e27\u53c2\u8003\u56fe\uff0c\u4e0d\u662f\u89c6\u9891\u65f6\u957f",
     autoShotPlan: "AI \u81ea\u52a8\u62c6\u955c",
     segmentDurationPolicy: "\u6bcf\u6bb5 3-15s",
     totalDuration: "\u603b\u65f6\u957f",
@@ -746,7 +758,6 @@ const TEXT: Record<PageLang, Copy> = {
     videoPrompt: "\u89c6\u9891 Prompt",
     negativePrompt: "\u53cd\u5411\u63d0\u793a\u8bcd\uff08\u907f\u514d\u51fa\u73b0\uff09",
     clipPreview: "\u5206\u955c\u7247\u6bb5",
-    keyframePreview: "\u8fb9\u754c\u53c2\u8003\u5e27",
     finalVideo: "\u6700\u7ec8\u6210\u7247",
     preview: "\u9884\u89c8",
     previewSize: "\u9884\u89c8\u5927\u5c0f",
@@ -888,7 +899,6 @@ const TEXT: Record<PageLang, Copy> = {
     assetLibrary: "Asset library",
     assetLibraryHint: "Confirm fixed people, scenes, products, and props here first. Person assets include front, side, and back views.",
     frames: "boundary frames",
-    boundaryFrameHint: "Static first/end-frame reference images, not video durations",
     autoShotPlan: "AI decides shots",
     segmentDurationPolicy: "3-15s per clip",
     totalDuration: "Total duration",
@@ -926,7 +936,6 @@ const TEXT: Record<PageLang, Copy> = {
     videoPrompt: "Video prompt",
     negativePrompt: "Negative prompt",
     clipPreview: "Clip preview",
-    keyframePreview: "Boundary frame",
     finalVideo: "Final video",
     preview: "Preview",
     previewSize: "Preview size",
@@ -1133,11 +1142,7 @@ function localizeWorkflowError(message: string, lang: PageLang): string {
 function localizeQualityIssue(issue: string, lang: PageLang): string {
   const normalized = issue.trim();
   if (!normalized) return "";
-  if (lang === "en") {
-    return /[\u3400-\u9fff]/u.test(normalized)
-      ? "An additional visual quality issue was detected."
-      : normalized;
-  }
+  if (lang === "en") return normalized;
   if (/[\u3400-\u9fff]/u.test(normalized)) return normalized;
   if (/timer shows ['"]?0:0|score is ['"]?100/i.test(normalized)) return "游戏计时器与分数显示可能存在状态异常。";
   if (/lighting appears.*brighter|slightly dimmed lighting/i.test(normalized)) return "画面光线比要求略亮，削弱了紧张氛围。";
@@ -1146,7 +1151,9 @@ function localizeQualityIssue(issue: string, lang: PageLang): string {
   if (/hand|finger|face.*deform|body.*deform/i.test(normalized)) return "人物肢体或面部存在形态异常。";
   if (/identity|character consistency/i.test(normalized)) return "人物身份或外观一致性不足。";
   if (/layout|composition|background/i.test(normalized)) return "画面布局、构图或背景与要求存在偏差。";
-  return "检测到其他画面质量问题。";
+  // Unknown model findings must remain visible. Replacing them with a generic
+  // localized sentence hides the evidence the user needs to judge a candidate.
+  return normalized;
 }
 
 function shotStatusLabel(status: ShotStatus, errorMessage: string | null | undefined, copy: Copy): string {
@@ -1182,6 +1189,7 @@ export default function OnePromptVideoPage() {
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
   const [loading, setLoading] = useState(false);
+  const [regeneratingImageIds, setRegeneratingImageIds] = useState<string[]>([]);
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [planningProjectIds, setPlanningProjectIds] = useState<string[]>([]);
   const [uploadingReferences, setUploadingReferences] = useState(false);
@@ -2209,19 +2217,28 @@ export default function OnePromptVideoPage() {
       const targetId = selectedKeyframe.keyframeNo < 0 ? `consistency_reference:${selectedKeyframe.keyframeNo}` : `keyframe:${selectedKeyframe.keyframeNo}`;
       if (!confirmArtifactImpact(project, [`${targetId}:prompt`, `${targetId}:image`], pageLang)) return;
     }
-    await runAction(async () => {
-      if (selectedKeyframe?.id === shotId && hasUnsavedKeyframeChanges) {
-        const saved = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}`, copy, {
-          method: "PATCH",
-          body: JSON.stringify({ ...keyframeDraft, locale: pageLang }),
-        });
-        if (!saved.project) throw new Error(copy.saveFailed);
-      }
-      const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}/image`, copy, { method: "POST" });
-      if (!res.project) throw new Error(copy.regenerateFailed);
-      rememberProject(res.project);
-      setMessage(copy.keyframeRegenerated);
-    });
+    setRegeneratingImageIds((current) => current.includes(shotId) ? current : [...current, shotId]);
+    try {
+      await runAction(async () => {
+        if (selectedKeyframe?.id === shotId && hasUnsavedKeyframeChanges) {
+          const saved = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}`, copy, {
+            method: "PATCH",
+            body: JSON.stringify({ ...keyframeDraft, locale: pageLang }),
+          });
+          if (!saved.project) throw new Error(copy.saveFailed);
+        }
+        const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}/image`, copy, { method: "POST" });
+        if (!res.project) throw new Error(copy.regenerateFailed);
+        rememberProject(res.project);
+        setMessage(copy.keyframeRegenerated);
+      });
+    } finally {
+      setRegeneratingImageIds((current) => current.filter((id) => id !== shotId));
+    }
+  }
+
+  function isRegeneratingImage(keyframe: VideoKeyframe): boolean {
+    return regeneratingImageIds.includes(keyframe.id);
   }
 
   async function regenerateClip(shotId: string) {
@@ -2904,8 +2921,8 @@ export default function OnePromptVideoPage() {
                               <Check className="h-3.5 w-3.5" /> {copy.approveReference}
                             </button>
                           )}
-                          <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || Boolean(personDerivedViewWaitReason(keyframe, orderedAssetKeyframes, pageLang))} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
-                            <RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}
+                          <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || isRegeneratingImage(keyframe) || Boolean(personDerivedViewWaitReason(keyframe, orderedAssetKeyframes, pageLang))} aria-busy={isRegeneratingImage(keyframe)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
+                            <RefreshCw className={`h-3.5 w-3.5 ${isRegeneratingImage(keyframe) ? "animate-spin" : ""}`} /> {copy.regenerate}
                           </button>
                           {hasMediaRevision(project, "keyframe_image", keyframe.id) && (
                             <button type="button" onClick={() => rollbackMedia("keyframe_image", keyframe.id)} disabled={loading} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-amber-300/25 bg-amber-300/5 text-xs text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
@@ -2923,7 +2940,6 @@ export default function OnePromptVideoPage() {
                 <section className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <h3 className="text-sm font-semibold text-slate-200">{copy.frames} {completeBoundaryImages}/{boundaryTotal}</h3>
-                    <span className="text-xs text-slate-500">{copy.boundaryFrameHint}</span>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                     {orderedBoundaryKeyframes.map((keyframe) => (
@@ -2967,8 +2983,8 @@ export default function OnePromptVideoPage() {
                               <Check className="h-3.5 w-3.5" /> {copy.approveReference}
                             </button>
                           )}
-                          <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
-                            <RefreshCw className="h-3.5 w-3.5" /> {copy.regenerate}
+                          <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || isRegeneratingImage(keyframe)} aria-busy={isRegeneratingImage(keyframe)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
+                            <RefreshCw className={`h-3.5 w-3.5 ${isRegeneratingImage(keyframe) ? "animate-spin" : ""}`} /> {copy.regenerate}
                           </button>
                           {hasMediaRevision(project, "keyframe_image", keyframe.id) && (
                             <button type="button" onClick={() => rollbackMedia("keyframe_image", keyframe.id)} disabled={loading} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-amber-300/25 bg-amber-300/5 text-xs text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
@@ -3160,8 +3176,7 @@ export default function OnePromptVideoPage() {
                     <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedKeyframe.status, selectedKeyframe.errorMessage, copy)}</span>
                   </div>
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-xs font-medium text-slate-500">{copy.keyframePreview}</p>
+                    <div className="flex items-center justify-end gap-3">
                       <PreviewSizeControl
                         label={copy.previewSize}
                         value={detailPreviewHeight}
@@ -3178,12 +3193,14 @@ export default function OnePromptVideoPage() {
                         <div className="flex h-full items-center justify-center text-sm text-slate-600">{safeBoundaryFrameShortLabel(selectedKeyframe, project.durationSeconds, pageLang)}</div>
                       )}
                     </div>
-                    <p className="text-xs text-slate-500">{selectedKeyframe.keyframeNo < 0 ? copy.assetLibraryHint : copy.boundaryFrameHint}</p>
+                    {selectedKeyframe.keyframeNo < 0 && <p className="text-xs text-slate-500">{copy.assetLibraryHint}</p>}
                   </div>
                   <GenerationCandidatePicker
+                    projectId={project.id}
                     candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedKeyframe.id && candidate.kind === "keyframe_image")}
                     lang={pageLang}
-                    loading={loading}
+                    loading={loading || isRegeneratingImage(selectedKeyframe)}
+                    retrying={isRegeneratingImage(selectedKeyframe)}
                     onSelect={chooseGenerationCandidate}
                     onRetry={() => regenerateImage(selectedKeyframe.id)}
                   />
@@ -3224,7 +3241,7 @@ export default function OnePromptVideoPage() {
                       {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                       {copy.saveKeyframe}
                     </button>
-                    <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || Boolean(personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang))} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className="h-4 w-4" /></button>
+                    <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || isRegeneratingImage(selectedKeyframe) || Boolean(personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang))} aria-busy={isRegeneratingImage(selectedKeyframe)} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${isRegeneratingImage(selectedKeyframe) ? "animate-spin" : ""}`} /></button>
                   </div>
                   {personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang) && (
                     <p className="rounded-md border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs leading-5 text-amber-100">{personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang)}</p>
@@ -3257,6 +3274,7 @@ export default function OnePromptVideoPage() {
                     )}
                   </div>
                   <GenerationCandidatePicker
+                    projectId={project.id}
                     candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "segment_video")}
                     lang={pageLang}
                     loading={loading}
@@ -3485,7 +3503,7 @@ export default function OnePromptVideoPage() {
                               {item.imageStatus === "failed" && (
                                 <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>
                               )}
-                              <GenerationCandidatePicker candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
+                              <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
                               {item.imageUrl && (
                                 <button
                                   type="button"
@@ -3781,7 +3799,7 @@ export default function OnePromptVideoPage() {
                             </div>
                             {item.imageStatus === "running" && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
                             {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>}
-                            <GenerationCandidatePicker candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
+                            <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
                             {item.imageUrl && (
                               <button
                                 type="button"
@@ -3953,15 +3971,20 @@ function LegacyNarrativeSkeletonJsonReview({
   );
 }
 
-function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetry }: {
+function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, onSelect, onRetry }: {
+  projectId: string;
   candidates: GenerationCandidate[];
   lang: "zh" | "en";
   loading: boolean;
+  retrying?: boolean;
   onSelect: (candidate: GenerationCandidate) => void;
   onRetry?: (retryInstruction: string) => void;
 }) {
   const [previewCandidate, setPreviewCandidate] = useState<GenerationCandidate | null>(null);
   const [expandedIssueCandidateIds, setExpandedIssueCandidateIds] = useState<Set<string>>(() => new Set());
+  const [qualitySummaryOverrides, setQualitySummaryOverrides] = useState<Record<string, QualityDisplaySummary>>({});
+  const [qualitySummaryLoadingIds, setQualitySummaryLoadingIds] = useState<Set<string>>(() => new Set());
+  const qualitySummaryRequestsRef = useRef<Set<string>>(new Set());
   const candidateOrdinals = useMemo(() => {
     const fallbackOrder = new Map(candidates.map((candidate, index) => [candidate.id, candidates.length - index]));
     const chronological = [...candidates].sort((a, b) => {
@@ -3983,6 +4006,31 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [previewCandidate]);
 
+  const requestQualitySummary = useCallback(async (candidate: GenerationCandidate) => {
+    const cacheKey = `${candidate.id}:${lang}`;
+    if (qualitySummaryOverrides[cacheKey] || candidate.qualityReport?.displaySummaries?.[lang] || qualitySummaryRequestsRef.current.has(cacheKey)) return;
+    qualitySummaryRequestsRef.current.add(cacheKey);
+    setQualitySummaryLoadingIds((current) => new Set(current).add(cacheKey));
+    try {
+      const response = await fetch(`/api/video-projects/${projectId}/generation-candidates/${candidate.id}/quality-summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lang }),
+      });
+      const payload = await response.json() as { ok?: boolean; summary?: QualityDisplaySummary };
+      if (response.ok && payload.ok && payload.summary) {
+        setQualitySummaryOverrides((current) => ({ ...current, [cacheKey]: payload.summary! }));
+      }
+    } finally {
+      qualitySummaryRequestsRef.current.delete(cacheKey);
+      setQualitySummaryLoadingIds((current) => {
+        const next = new Set(current);
+        next.delete(cacheKey);
+        return next;
+      });
+    }
+  }, [lang, projectId, qualitySummaryOverrides]);
+
   if (!candidates.length) return null;
   return (
     <>
@@ -4001,14 +4049,21 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
           const report = candidate.qualityReport;
           const isVideo = candidate.kind === "segment_video";
           const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
-          const statusText = candidate.userAccepted && candidate.passed === false
+          const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v3";
+          const statusText = needsPolicyRecheck
+            ? (lang === "zh" ? "待新版质检" : "Awaiting updated review")
+            : candidate.userAccepted && candidate.passed === false
             ? (lang === "zh" ? "系统未通过 · 人工保留" : "System failed · kept manually")
             : candidate.passed === true
-              ? (lang === "zh" ? "质检通过" : "Quality passed")
+              ? report?.qualityDecision === "recommended"
+                ? (lang === "zh" ? "质检通过 · 有建议" : "Passed · suggestions")
+                : (lang === "zh" ? "质检通过" : "Quality passed")
               : candidate.passed === false
                 ? (lang === "zh" ? "系统未通过" : "System failed")
                 : candidate.selected ? (lang === "zh" ? "当前采用" : "Selected") : candidate.status;
-          const statusClass = candidate.userAccepted && candidate.passed === false
+          const statusClass = needsPolicyRecheck
+            ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            : candidate.userAccepted && candidate.passed === false
             ? "border-violet-300/15 bg-violet-300/10 text-violet-100"
             : candidate.passed === true
               ? "border-emerald-300/15 bg-emerald-300/10 text-emerald-100"
@@ -4026,6 +4081,9 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
           const openIssues = issueLedger.filter((issue) => issue.status === "open" || issue.status === "regressed");
           const deferredIssues = issueLedger.filter((issue) => issue.status === "invalid_for_stage");
           const issueDetailsExpanded = expandedIssueCandidateIds.has(candidate.id);
+          const qualitySummaryKey = `${candidate.id}:${lang}`;
+          const qualitySummary = qualitySummaryOverrides[qualitySummaryKey] ?? report?.displaySummaries?.[lang];
+          const qualitySummaryLoading = qualitySummaryLoadingIds.has(qualitySummaryKey);
           return (
             <div key={candidate.id} className={`group/card overflow-hidden rounded-lg border bg-slate-950/75 transition duration-200 ${candidate.selected ? "border-cyan-300/50 shadow-[0_0_0_1px_rgba(103,232,249,0.08),0_12px_30px_rgba(8,145,178,0.08)]" : "border-white/[0.09] hover:border-white/20"}`}>
               <div className="relative aspect-[4/5] overflow-hidden bg-black/25">
@@ -4068,12 +4126,16 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
                   type="button"
                   aria-expanded={issueDetailsExpanded}
                   title={lang === "zh" ? "点击查看具体问题" : "Click to view issue details"}
-                  onClick={() => setExpandedIssueCandidateIds((current) => {
-                    const next = new Set(current);
-                    if (next.has(candidate.id)) next.delete(candidate.id);
-                    else next.add(candidate.id);
-                    return next;
-                  })}
+                  onClick={() => {
+                    const willExpand = !expandedIssueCandidateIds.has(candidate.id);
+                    setExpandedIssueCandidateIds((current) => {
+                      const next = new Set(current);
+                      if (willExpand) next.add(candidate.id);
+                      else next.delete(candidate.id);
+                      return next;
+                    });
+                    if (willExpand) void requestQualitySummary(candidate);
+                  }}
                   className="w-full rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-1.5 text-left text-[10px] leading-4 text-slate-400 transition hover:border-white/15 hover:bg-white/[0.045]"
                 >
                   <span className="text-emerald-200/80">{lang === "zh" ? "已解决" : "Resolved"} {resolvedIssues.length}</span>
@@ -4082,30 +4144,34 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
                   <span className="mx-1.5 text-slate-700">·</span>
                   <span>{lang === "zh" ? "转视频检查" : "Deferred to video"} {deferredIssues.length}</span>
                 </button> : null}
-                {issueDetailsExpanded && issueLedger.length ? <div className="space-y-2 rounded-md border border-white/[0.07] bg-black/20 p-2 text-[10px] leading-4">
-                  {[
-                    { key: "open", title: lang === "zh" ? "待改进" : "Needs improvement", items: openIssues, dotClass: "bg-rose-300", textClass: "text-rose-100/85" },
-                    { key: "resolved", title: lang === "zh" ? "已解决" : "Resolved", items: resolvedIssues, dotClass: "bg-emerald-300", textClass: "text-emerald-100/80" },
-                    { key: "deferred", title: lang === "zh" ? "转视频阶段检查" : "Deferred to video stage", items: deferredIssues, dotClass: "bg-slate-400", textClass: "text-slate-300" },
-                  ].filter((group) => group.items.length > 0).map((group) => <div key={group.key}>
-                    <p className={`mb-1 font-medium ${group.textClass}`}>{group.title} · {group.items.length}</p>
-                    <ul className="space-y-1.5">
-                      {group.items.map((issue) => <li key={issue.issueId} className="flex gap-2 text-slate-400">
-                        <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${group.dotClass}`} />
-                        <span>
-                          {issue.status === "regressed" && <span className="mr-1 text-rose-200/80">{lang === "zh" ? "再次出现：" : "Regressed: "}</span>}
-                          {localizeQualityIssue(issue.summary, lang)}
-                          {issue.target ? <span className="mt-0.5 block text-slate-500">{lang === "zh" ? "目标：" : "Target: "}{localizeQualityIssue(issue.target, lang)}</span> : null}
+                {issueDetailsExpanded && issueLedger.length ? <div className="rounded-md border border-white/[0.07] bg-black/20 p-2.5 text-[10px] leading-4">
+                  {qualitySummaryLoading && !qualitySummary ? <div className="flex items-center gap-2 text-slate-500">
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    {lang === "zh" ? "正在整理质检结论…" : "Summarizing quality findings…"}
+                  </div> : qualitySummary?.items.length ? <ul className="space-y-2">
+                    {qualitySummary.items.map((item, index) => {
+                      const tone = item.status === "resolved"
+                        ? { dot: "bg-emerald-300", label: lang === "zh" ? "已解决" : "Resolved", labelClass: "text-emerald-200/80" }
+                        : item.status === "deferred"
+                          ? { dot: "bg-slate-400", label: lang === "zh" ? "视频检查" : "Video check", labelClass: "text-slate-400" }
+                          : { dot: "bg-rose-300", label: lang === "zh" ? "待改进" : "Improve", labelClass: "text-rose-200/80" };
+                      return <li key={`${item.status}:${index}`} className="flex gap-2">
+                        <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${tone.dot}`} />
+                        <span className="min-w-0 text-slate-300">
+                          <span className={`mr-1.5 font-medium ${tone.labelClass}`}>{tone.label}</span>
+                          {item.text}
                         </span>
-                      </li>)}
-                    </ul>
-                  </div>)}
+                      </li>;
+                    })}
+                  </ul> : <button type="button" onClick={() => void requestQualitySummary(candidate)} className="text-slate-500 transition hover:text-cyan-100">
+                    {lang === "zh" ? "摘要暂未生成，点击重试" : "Summary unavailable. Click to retry."}
+                  </button>}
                 </div> : null}
                 {!candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
                   <Check className="h-3 w-3" />{lang === "zh" ? "人工采用" : "Use manually"}
                 </button> : null}
                 {candidate.selected && <div className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-cyan-300/10 bg-cyan-300/[0.05] text-[11px] font-medium text-cyan-100/75"><Check className="h-3 w-3" />{lang === "zh" ? "正在使用" : "In use"}</div>}
-                {report?.retryInstruction && onRetry ? <button type="button" disabled={loading} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className="h-3 w-3" /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
+                {report?.retryInstruction && onRetry ? <button type="button" disabled={loading} aria-busy={retrying} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
                 {candidate.userAccepted ? <p className="rounded-md bg-violet-300/[0.06] px-2 py-1.5 text-[10px] leading-4 text-violet-100/70">{lang === "zh" ? "系统质检未通过，已按你的选择保留" : "Kept by your choice despite the quality check"}</p> : null}
               </div>
             </div>
@@ -4123,10 +4189,7 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
       >
         <div className="flex max-h-[94vh] max-w-[94vw] flex-col overflow-hidden rounded-xl border border-white/15 bg-slate-950 shadow-2xl" onClick={(event) => event.stopPropagation()}>
           <div className="flex items-center justify-between gap-4 border-b border-white/10 px-4 py-3">
-            <div>
-              <p className="text-sm font-semibold text-white">{lang === "zh" ? `候选图 #${previewCandidateNo}` : `Candidate #${previewCandidateNo}`}</p>
-              <p className="text-xs text-slate-400">{lang === "zh" ? "点击遮罩或按 Esc 关闭" : "Click outside or press Esc to close"}</p>
-            </div>
+            <p className="text-sm font-semibold text-white">{lang === "zh" ? `候选图 #${previewCandidateNo}` : `Candidate #${previewCandidateNo}`}</p>
             <button type="button" onClick={() => setPreviewCandidate(null)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/10 hover:text-white" aria-label={lang === "zh" ? "关闭大图" : "Close preview"}>
               <X className="h-4 w-4" />
             </button>
@@ -4143,33 +4206,19 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
 }
 
 function ZoomableImage({ src, alt, lang, className = "" }: { src: string; alt: string; lang: PageLang; className?: string }) {
-  const [scale, setScale] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const { scale, x: panX, y: panY } = view;
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
 
   const reset = useCallback(() => {
-    setScale(1);
-    setPan({ x: 0, y: 0 });
+    setView({ scale: 1, x: 0, y: 0 });
     dragRef.current = null;
   }, []);
 
   useEffect(() => reset(), [reset, src]);
 
-  const zoomTo = useCallback((nextScale: number, focusX = 0, focusY = 0) => {
-    const clamped = Math.min(6, Math.max(1, nextScale));
-    setScale((currentScale) => {
-      if (clamped === currentScale) return currentScale;
-      if (clamped === 1) {
-        setPan({ x: 0, y: 0 });
-      } else {
-        const ratio = clamped / currentScale;
-        setPan((currentPan) => ({
-          x: focusX - (focusX - currentPan.x) * ratio,
-          y: focusY - (focusY - currentPan.y) * ratio,
-        }));
-      }
-      return clamped;
-    });
+  const zoomBy = useCallback((factor: number, focusX = 0, focusY = 0) => {
+    setView((current) => zoomViewAtPoint(current, factor, { x: focusX, y: focusY }));
   }, []);
 
   return (
@@ -4180,18 +4229,22 @@ function ZoomableImage({ src, alt, lang, className = "" }: { src: string; alt: s
         const rect = event.currentTarget.getBoundingClientRect();
         const focusX = event.clientX - rect.left - rect.width / 2;
         const focusY = event.clientY - rect.top - rect.height / 2;
-        zoomTo(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18), focusX, focusY);
+        zoomBy(event.deltaY < 0 ? 1.18 : 1 / 1.18, focusX, focusY);
       }}
       onDoubleClick={reset}
       onPointerDown={(event) => {
         if (scale <= 1 || event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
-        dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y };
+        dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX, panY };
       }}
       onPointerMove={(event) => {
         const drag = dragRef.current;
         if (!drag || drag.pointerId !== event.pointerId) return;
-        setPan({ x: drag.panX + event.clientX - drag.startX, y: drag.panY + event.clientY - drag.startY });
+        setView((current) => ({
+          ...current,
+          x: drag.panX + event.clientX - drag.startX,
+          y: drag.panY + event.clientY - drag.startY,
+        }));
       }}
       onPointerUp={(event) => {
         if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
@@ -4205,17 +4258,14 @@ function ZoomableImage({ src, alt, lang, className = "" }: { src: string; alt: s
           alt={alt}
           draggable={false}
           className="max-h-full max-w-full object-contain will-change-transform"
-          style={{ transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${scale})` }}
+          style={{ transform: `translate3d(${panX}px, ${panY}px, 0) scale(${scale})`, transformOrigin: "center center" }}
         />
       </div>
       <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-white/10 bg-slate-950/80 p-1 shadow-xl backdrop-blur">
-        <button type="button" onClick={(event) => { event.stopPropagation(); zoomTo(scale / 1.25); }} disabled={scale <= 1} aria-label={lang === "zh" ? "缩小" : "Zoom out"} className="inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-200 hover:bg-white/10 disabled:opacity-30">−</button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); zoomBy(1 / 1.25); }} disabled={scale <= 1} aria-label={lang === "zh" ? "缩小" : "Zoom out"} className="inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-200 hover:bg-white/10 disabled:opacity-30">−</button>
         <button type="button" onClick={(event) => { event.stopPropagation(); reset(); }} className="min-w-14 rounded px-2 py-1 text-[11px] tabular-nums text-slate-300 hover:bg-white/10" title={lang === "zh" ? "恢复原始大小" : "Reset zoom"}>{Math.round(scale * 100)}%</button>
-        <button type="button" onClick={(event) => { event.stopPropagation(); zoomTo(scale * 1.25); }} disabled={scale >= 6} aria-label={lang === "zh" ? "放大" : "Zoom in"} className="inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-200 hover:bg-white/10 disabled:opacity-30">+</button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); zoomBy(1.25); }} disabled={scale >= 6} aria-label={lang === "zh" ? "放大" : "Zoom in"} className="inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-200 hover:bg-white/10 disabled:opacity-30">+</button>
       </div>
-      <p className="pointer-events-none absolute left-3 top-3 rounded-md bg-slate-950/70 px-2 py-1 text-[10px] text-slate-300/80 backdrop-blur">
-        {lang === "zh" ? "滚轮缩放 · 拖动查看 · 双击复位" : "Wheel to zoom · Drag to pan · Double-click to reset"}
-      </p>
     </div>
   );
 }

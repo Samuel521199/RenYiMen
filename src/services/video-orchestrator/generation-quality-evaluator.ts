@@ -8,6 +8,26 @@ import { onePromptRolloutEnabled } from "./rollout-flags";
 import type { AuthoritativeVisualContract } from "./visual-quality-contract";
 import { isMotionOnlyStillIssue, reconcileGenerationIssueLedger } from "./visual-quality-contract";
 
+const IMAGE_QUALITY_SYSTEM_PROMPT = [
+  "You are an evidence-based Visual Quality Assurance Engineer and a Generative Image Repair Specification Engineer for production advertising imagery.",
+  "First judge only what is visibly supported by the current pixels. Then translate confirmed defects into minimal, measurable redraw instructions. Do not preserve an old diagnosis when the new image visibly changed.",
+  "Use confirmed only when the defect is clearly visible. If gaze, tiny text, occlusion, or intent cannot be determined reliably, use evidenceStatus=uncertain, confidence below 0.75, priority=recommended, and do not set passed=false solely because of that uncertain finding.",
+  "For spatial repairs use normalized image coordinates: top-left=(0,0), bottom-right=(1,1). Coordinates are approximate generation targets, not claims of pixel-perfect measurement.",
+  "Describe every direction from the viewer/image perspective only: viewer-left, viewer-right, up, or down. Never write ambiguous phrases such as 'character right (viewer left)'.",
+  "For head or eye direction, specify a viewer-relative direction, an approximate yaw/pitch range when useful, and a normalized gaze target point. A turned head is not automatically a failed gaze; cite visible pupil/head evidence.",
+  "For countable UI or product elements, specify an exact count, normalized placement, spacing or size tolerance, and the surrounding elements that must remain unchanged.",
+  "Return at most three highest-impact correction actions. Avoid false precision and never invent geometry unsupported by the contract or visible image.",
+  "Output strict JSON only.",
+].join("\n");
+
+const VIDEO_QUALITY_SYSTEM_PROMPT = [
+  "You are an evidence-based Video Quality Assurance Engineer and a Generative Video Repair Specification Engineer for production advertising imagery.",
+  "Judge ordered sampled frames and metadata only from visible evidence. Separate confirmed defects from uncertain interpretations, and never carry an old diagnosis forward when later frames visibly resolve it.",
+  "Use normalized frame coordinates with top-left=(0,0), bottom-right=(1,1), viewer-relative directions only, explicit time ranges, counts, target states, tolerances, and preserved surroundings.",
+  "Uncertain findings must use evidenceStatus=uncertain, confidence below 0.75, priority=recommended, and must not alone force passed=false.",
+  "Return at most three highest-impact correction actions as strict JSON only.",
+].join("\n");
+
 interface BaseEvaluationParams {
   assetId: string;
   candidateId?: string;
@@ -36,6 +56,7 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     type: "text",
     text: [
       "Evaluate the actual generated image. Scores must come from visible media content, never prompt length.",
+      "You are the final visual quality gate. If any required visual evidence, identity lock, authoritative brand content, narrative meaning, anatomy, or composition is materially wrong or missing, return passed=false. The orchestration layer will not override your veto.",
       `Purpose: ${params.purpose}`,
       `Target contract: ${JSON.stringify(params.targetContract)}`,
       `Generation prompt: ${params.prompt.slice(0, 2400)}`,
@@ -44,12 +65,18 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       params.visualContract ? `Authoritative visual contract: ${JSON.stringify(params.visualContract)}` : "",
       params.previousQualityReport ? `Previous issue ledger to compare and close: ${JSON.stringify(params.previousQualityReport.issueLedger ?? [])}` : "",
       "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
-      "For EVERY failed issue, correctionActions must contain one executable object: {region, element, observed, target, instruction, priority, sourceConstraint, preserve[]}. region must identify a concrete visual location (for example bottom-center HUD, upper-left background, character's right hand). observed states exactly what is visibly wrong. target states one concrete desired result, including exact value/count/format/color/pose/size when the contract supports it. instruction must be imperative and ready to paste into the next generation prompt; never merely repeat the diagnosis.",
+      "For EVERY confirmed failed issue, correctionActions must contain one executable object: {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. evidenceStatus is confirmed|uncertain and confidence is 0..1. normalizedRegion is {xMin,yMin,xMax,yMax} in the top-left-origin 0..1 coordinate system; targetPoint is {x,y} in the same system. executionParameters contains only contract-supported measurable controls such as viewerRelativeDirection, yawDegrees, pitchDegrees, exactCount, spacingRatio, sizeRatio, color, or textValue. tolerance states the acceptable visible range.",
+      "region must identify a concrete visual location. observed states exactly what is visibly wrong and cites visible evidence rather than inferred intent. target states one concrete desired result, including exact value/count/format/color/pose/size when the contract supports it. instruction must be imperative and ready to paste into the next generation prompt; never merely repeat the diagnosis.",
       "retryInstruction must consolidate correctionActions into a precise redraw specification: say WHAT to change, WHERE to change it, the exact TARGET state, and what nearby/strong-scoring content must remain unchanged. Prefer concrete renderable values over vague words such as improve, fix, proper, near, appropriate, or more accurate.",
+      "Direction rule: use viewer-left/viewer-right only. For gaze, distinguish head yaw from pupil direction and give a normalized target point. If the current head or eyes visibly moved toward the requested side, acknowledge that delta instead of repeating 'looks forward'.",
+      "Evidence rule: uncertain observations may be returned as recommended correctionActions, but they must not appear as definite artifactIssues and must not alone cause passed=false.",
       "Before proposing corrections, check Target contract, Generation prompt, Negative prompt, and reference notes for possible contradictions. The target contract and explicit required-visible evidence outrank generic negative-prompt defaults. Never infer that unlisted logo text is forbidden when an approved visual anchor contains it. Put possible contradictions in contractConflicts[] as advisory evidence only; the compiler, not this visual evaluator, owns stage-3 routing.",
+      "Authority rule for exact appearance and text: an approved reference image outranks planner-written descriptions. Compare the generated logo, UI, product, and character directly with the corresponding approved reference. Do not invent forbidden or required wording that is absent from the authoritative source.",
+      "Game-ad rule: authorized logo text, game title, score, timer, multiplier, buttons, and contract-required UI are allowed and often required. Fail only for missing required content, wrong spelling/value/state, gibberish, unauthorized extra copy, subtitles, or watermarks—not merely because text or UI exists.",
       "For anchors prioritize isolated identity accuracy. For boundary keyframes prioritize contract/layout/identity. For motion checkpoints prioritize same-path state and continuity.",
       "For a still image, never fail because motion itself is not visible. A static score, timer, glow, or pose may represent one instant; motion, jumping digits, countdown change, and animation belong to later video evaluation.",
       "Compare against the previous issue ledger when provided. For each prior issue, explicitly decide resolved, still_open, regressed, or invalid_for_stage. Do not silently repeat old feedback.",
+      "A prior issue is resolved only when the current pixels visibly fix it. If the shot's core purpose or requiredVisibleEvidence is absent (for example social feedback in a social-feedback shot), that is a blocking failure even when numeric scores are high.",
       "For an anchor reference image, use retryFromStage=generation for visible output defects such as extra people, unwanted backgrounds/decorations, wrong centering, bad proportions, malformed text, or missing requested elements. Stage2b is only for an impossible/contradictory shot contract and does not repair an anchor image.",
       params.requiresExactBrandText
         ? "This is a brand/logo/UI lock asset. Required brand text in the prompt is intentional. Set wrongTextDetected=true ONLY when visible text is misspelled, missing required lock wording, or random gibberish — NOT merely because readable brand/UI text is present."
@@ -66,7 +93,7 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     content.push({ type: "image_url", image_url: { url: params.previousCandidateUrl } });
   }
   try {
-    const raw = await callVision(content, "Evaluate generated image quality and output strict JSON.");
+    const raw = await callVision(content, IMAGE_QUALITY_SYSTEM_PROMPT);
     return normalizeImageQualityResponse(raw, params);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -106,7 +133,7 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
         `Motion checkpoints in required order: ${JSON.stringify(params.motionCheckpoints)}`,
         `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
         "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], correctionActions[], contractConflicts[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
-        "For every failure, correctionActions[] must specify {region, element, observed, target, instruction, priority, sourceConstraint, preserve[]}. Make each action spatially precise and directly renderable in the next attempt. Include exact state/value/count/timing/pose when supported by the contract, and state which successful content must remain unchanged.",
+        "For every confirmed failure, correctionActions[] must specify {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. Make each action spatially and temporally precise and directly renderable in the next attempt. Include exact state/value/count/timing/viewer-relative direction/pose when supported by the contract, and state which successful content must remain unchanged.",
         "retryInstruction must be a consolidated shot-level modification plan, not a diagnosis. Resolve requirements using target contract and explicit visible evidence above generic negative defaults. List possible contradictions in contractConflicts[] as advisory evidence; only the compiler can authorize stage-3 routing.",
         "Detect identity drift, abnormal duplicate instances, spatial layout drift, jump cuts, teleportation, melting, scene replacement, out-of-order checkpoints, first-frame mismatch and ending-state mismatch.",
         "Use retryFromStage=stage2b for physically unreachable or structural motion; stage3 for prompt/compiler repair; generation for ordinary visual defects.",
@@ -122,7 +149,7 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
       content.push({ type: "text", text: `Identity/layout reference ${index + 1}: ${params.referenceUsageNotes[index] ?? "approved reference"}` });
       content.push({ type: "image_url", image_url: { url } });
     }
-    const raw = await callVision(content, "Evaluate multi-frame video generation quality and output strict JSON.");
+    const raw = await callVision(content, VIDEO_QUALITY_SYSTEM_PROMPT);
     return normalizeVideoQualityResponse(raw, params, metadata);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -214,9 +241,7 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   // A visual model may misread an approved reference and invent a contract
   // (for example, treating an existing logo word as forbidden). Do not feed
   // correction actions derived from an unverified conflict back into redraws.
-  const rawCorrectionActions = suspectedContractConflicts.length && !contractConflictsVerified
-    ? []
-    : normalizeCorrectionActions(source.correctionActions ?? source.correction_actions);
+  const rawCorrectionActions = normalizeCorrectionActions(source.correctionActions ?? source.correction_actions);
   const rawArtifactIssues = strings(source.artifactIssues ?? source.artifact_issues);
   const invalidForStageIssues = params.visualContract?.mediaStage === "static_image"
     ? rawArtifactIssues.filter(isMotionOnlyStillIssue)
@@ -251,7 +276,9 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     wrongTextDetected && exactTextHardGate ? "authoritative locked text is visibly wrong" : "",
     params.requiresExactBrandText && !brandVisualGatePassed ? "isolated brand asset failed its deterministic identity/layout/text gate" : "",
   ]);
-  const passed = scoreGatePassed && hardFailureReasons.length === 0;
+  // The visual model is the final semantic quality gate. Deterministic checks
+  // may add failures, but a high score must never reverse passed=false.
+  const passed = originalPassed && scoreGatePassed && hardFailureReasons.length === 0;
   const issueLedger = reconcileGenerationIssueLedger({
     previous: params.previousQualityReport,
     candidateNo: params.candidateNo,
@@ -276,7 +303,7 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     ? ""
     : text(source.retryInstruction ?? source.retry_instruction);
   return {
-    policyVersion: "quality-policy-v2",
+    policyVersion: "quality-policy-v3",
     assetId: params.assetId,
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
@@ -316,18 +343,30 @@ function normalizeCorrectionActions(value: unknown): GenerationCorrectionAction[
     const instruction = text(source.instruction ?? source.action ?? source.exactInstruction ?? source.exact_instruction);
     const target = text(source.target ?? source.desired ?? source.desiredState ?? source.desired_state);
     if (!instruction && !target) return [];
+    const evidenceValue = text(source.evidenceStatus ?? source.evidence_status).toLowerCase();
+    const evidenceStatus = evidenceValue === "uncertain" ? "uncertain" as const : "confirmed" as const;
+    const confidence = unitNumber(source.confidence);
     const priorityValue = text(source.priority).toLowerCase();
+    const normalizedRegion = normalizedBox(source.normalizedRegion ?? source.normalized_region ?? source.boundingBox ?? source.bounding_box);
+    const targetPoint = normalizedPoint(source.targetPoint ?? source.target_point ?? source.gazeTarget ?? source.gaze_target);
+    const executionParameters = record(source.executionParameters ?? source.execution_parameters ?? source.parameters);
     return [{
       region: text(source.region ?? source.location ?? source.position) || "specified visual region",
       element: text(source.element ?? source.object ?? source.subject) || "affected visual element",
       observed: text(source.observed ?? source.current ?? source.currentObservation ?? source.current_observation) || "does not match the contract",
       target: target || instruction,
       instruction: instruction || `Render ${target}`,
-      priority: priorityValue === "recommended" ? "recommended" as const : "required" as const,
+      evidenceStatus,
+      confidence,
+      normalizedRegion,
+      targetPoint,
+      executionParameters: Object.keys(executionParameters).length ? executionParameters : undefined,
+      tolerance: text(source.tolerance ?? source.acceptanceTolerance ?? source.acceptance_tolerance) || undefined,
+      priority: evidenceStatus === "uncertain" || priorityValue === "recommended" ? "recommended" as const : "required" as const,
       sourceConstraint: text(source.sourceConstraint ?? source.source_constraint ?? source.contractSource ?? source.contract_source) || undefined,
       preserve: strings(source.preserve ?? source.keepUnchanged ?? source.keep_unchanged),
     }];
-  }).slice(0, 16);
+  }).slice(0, 3);
 }
 
 function concreteRetryInstruction(params: {
@@ -344,11 +383,24 @@ function concreteRetryInstruction(params: {
   }
   if (params.correctionActions.length) {
     const actions = params.correctionActions.map((action, index) => {
+      const evidence = action.evidenceStatus || typeof action.confidence === "number"
+        ? ` Evidence: ${action.evidenceStatus ?? "confirmed"}${typeof action.confidence === "number" ? `, confidence ${action.confidence.toFixed(2)}` : ""}.`
+        : "";
+      const normalizedRegion = action.normalizedRegion
+        ? ` Normalized region (top-left origin): x ${action.normalizedRegion.xMin.toFixed(2)}..${action.normalizedRegion.xMax.toFixed(2)}, y ${action.normalizedRegion.yMin.toFixed(2)}..${action.normalizedRegion.yMax.toFixed(2)}.`
+        : "";
+      const targetPoint = action.targetPoint
+        ? ` Normalized target point: (${action.targetPoint.x.toFixed(2)}, ${action.targetPoint.y.toFixed(2)}).`
+        : "";
+      const executionParameters = action.executionParameters && Object.keys(action.executionParameters).length
+        ? ` Execution parameters: ${JSON.stringify(action.executionParameters)}.`
+        : "";
+      const tolerance = action.tolerance ? ` Acceptance tolerance: ${action.tolerance}.` : "";
       const preserve = action.preserve?.length ? ` Preserve unchanged: ${action.preserve.join(", ")}.` : "";
       const source = action.sourceConstraint ? ` Contract source: ${action.sourceConstraint}.` : "";
-      return `${index + 1}) [${action.region}] ${action.element}: observed ${action.observed}; target ${action.target}. ${action.instruction}.${preserve}${source}`;
+      return `${index + 1}) [${action.region}] ${action.element}: observed ${action.observed}; target ${action.target}. ${action.instruction}.${evidence}${normalizedRegion}${targetPoint}${executionParameters}${tolerance}${preserve}${source}`;
     });
-    return `Apply these exact corrections in the next generation:\n${actions.join("\n")}\nKeep all unlisted high-scoring identity, layout, clothing, scene, and continuity details unchanged.`;
+    return `Apply these exact corrections in the next generation:\n${actions.join("\n")}\nKeep all unlisted high-scoring identity, layout, clothing, scene, and continuity details unchanged. Treat every direction as viewer-relative; normalized coordinates use top-left=(0,0), bottom-right=(1,1).`;
   }
   return params.suppliedRetryInstruction || `Regenerate with a concrete correction plan for identity ${params.identityScore}, layout ${params.layoutScore}, prompt alignment ${params.promptAlignmentScore}, and continuity ${params.continuityScore}; specify the exact region, element, target state, and preserved content for every failed issue.`;
 }
@@ -410,3 +462,23 @@ function strings(value: unknown): string[] { return Array.isArray(value) ? uniqu
 function uniqueStrings(value: unknown[]): string[] { return [...new Set(value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()))]; }
 function score(value: unknown): number { const n = Number(value); return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 0; }
 function count(value: unknown): number { const n = Number(value); return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0; }
+function unitNumber(value: unknown): number | undefined {
+  if (value == null || value === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, Math.round(n * 1000) / 1000)) : undefined;
+}
+function normalizedPoint(value: unknown): { x: number; y: number } | undefined {
+  const source = record(value);
+  const x = unitNumber(source.x);
+  const y = unitNumber(source.y);
+  return x == null || y == null ? undefined : { x, y };
+}
+function normalizedBox(value: unknown): { xMin: number; yMin: number; xMax: number; yMax: number } | undefined {
+  const source = record(value);
+  const xMin = unitNumber(source.xMin ?? source.x_min);
+  const yMin = unitNumber(source.yMin ?? source.y_min);
+  const xMax = unitNumber(source.xMax ?? source.x_max);
+  const yMax = unitNumber(source.yMax ?? source.y_max);
+  if (xMin == null || yMin == null || xMax == null || yMax == null || xMin >= xMax || yMin >= yMax) return undefined;
+  return { xMin, yMin, xMax, yMax };
+}

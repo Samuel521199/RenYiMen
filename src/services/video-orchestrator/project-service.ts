@@ -2899,7 +2899,7 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
         keyframeNo: failedBoundaryKeyframe.keyframeNo,
         reason: "failed boundary recovery takes priority over unrelated running candidates",
       });
-      return regenerateShotImage(userId, projectId, failedBoundaryKeyframe.id);
+      return regenerateShotImage(userId, projectId, failedBoundaryKeyframe.id, { recovery: true });
     }
   }
   const hasRunningImageWork = Boolean(
@@ -2957,7 +2957,7 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
   );
   if (dirtyKeyframe) {
     await logOnePromptVideo("project.resume.dirty_keyframe", { userId, projectId, keyframeNo: dirtyKeyframe.keyframeNo, retryFromStage: recoveryMetadata[imageArtifactIdForKeyframeNo(dirtyKeyframe.keyframeNo)]?.retryFromStage });
-    return regenerateShotImage(userId, projectId, dirtyKeyframe.id);
+    return regenerateShotImage(userId, projectId, dirtyKeyframe.id, { recovery: true });
   }
   for (const segment of project.segments) {
     const microShots = readPlanMicroShots(readPlanSegmentMap(project.planJson).get(segment.segmentNo));
@@ -4067,9 +4067,22 @@ function buildImageCandidateLearningSummary(
     .map(({ report }) => clipText(report.retryInstruction as string, 520)))
     .slice(0, 6);
   const correctionActions = uniqueStrings(evaluated.flatMap(({ candidate, report }) => candidate.id !== latestEvaluated?.candidate.id || (report.contractConflicts?.length && report.contractConflictsVerified !== true) ? [] : (report.correctionActions ?? []).map((action) => {
+    const evidence = action.evidenceStatus || typeof action.confidence === "number"
+      ? ` Evidence: ${action.evidenceStatus ?? "confirmed"}${typeof action.confidence === "number" ? `, confidence ${action.confidence.toFixed(2)}` : ""}.`
+      : "";
+    const normalizedRegion = action.normalizedRegion
+      ? ` Region x=${action.normalizedRegion.xMin.toFixed(2)}..${action.normalizedRegion.xMax.toFixed(2)}, y=${action.normalizedRegion.yMin.toFixed(2)}..${action.normalizedRegion.yMax.toFixed(2)} in normalized top-left-origin coordinates.`
+      : "";
+    const targetPoint = action.targetPoint
+      ? ` Target point=(${action.targetPoint.x.toFixed(2)},${action.targetPoint.y.toFixed(2)}).`
+      : "";
+    const executionParameters = action.executionParameters && Object.keys(action.executionParameters).length
+      ? ` Parameters=${JSON.stringify(action.executionParameters)}.`
+      : "";
+    const tolerance = action.tolerance ? ` Tolerance: ${action.tolerance}.` : "";
     const preserve = action.preserve?.length ? ` Preserve: ${action.preserve.join(", ")}.` : "";
-    return `[${action.region}] ${action.element}: change ${action.observed} to ${action.target}. ${action.instruction}.${preserve}`;
-  }))).slice(0, 16);
+    return `[${action.region}] ${action.element}: change ${action.observed} to ${action.target}. ${action.instruction}.${evidence}${normalizedRegion}${targetPoint}${executionParameters}${tolerance}${preserve}`;
+  }))).slice(0, 3);
   const contractConflicts = uniqueStrings(evaluated.flatMap(({ report }) => report.contractConflictsVerified === true ? report.contractConflicts ?? [] : [])).slice(0, 10);
   const suspectedContractConflicts = uniqueStrings(evaluated.flatMap(({ report }) => report.suspectedContractConflicts ?? (report.contractConflictsVerified === true ? [] : report.contractConflicts ?? []))).slice(0, 10);
   const passedCount = evaluated.filter(({ report }) => report.passed).length;
@@ -4090,7 +4103,7 @@ function buildImageCandidateLearningSummary(
     failureIssues.length ? "Do not repeat these observed failures:\n" + failureIssues.map((issue) => `- ${issue}`).join("\n") : "",
     correctionActions.length ? "Execute these accumulated, spatially precise corrections:\n" + correctionActions.map((action) => `- ${action}`).join("\n") : "",
     retryInstructions.length ? "Apply the accumulated visual-judge corrections:\n" + retryInstructions.map((instruction) => `- ${instruction}`).join("\n") : "",
-    "Concretize any older vague feedback before rendering: turn words such as near, proper, improve, fix, or more accurate into one exact visible target supported by the authoritative frame contract. Specify the region, element, value/count/format/pose/color, and keep-unmodified surroundings; never invent a target that conflicts with the contract.",
+    "Concretize any older vague feedback before rendering: turn words such as near, proper, improve, fix, or more accurate into one exact visible target supported by the authoritative frame contract. Use viewer-left/viewer-right only, never character-relative direction; normalized coordinates use top-left=(0,0), bottom-right=(1,1). Specify the region, target point, angle range/count/format/pose/color, tolerance, and keep-unmodified surroundings; never invent a target that conflicts with the contract.",
     contractConflicts.length ? "Previously detected contract conflicts must be resolved using the authoritative frame contract before rendering; never obey both sides:\n" + contractConflicts.map((conflict) => `- ${conflict}`).join("\n") : "",
     baselineUrl
       ? "The historical baseline image is provided only for its successful identity, composition, and scene structure. Correct its known logic, text, timer, score, lighting, anatomy, and artifact defects instead of copying them."
@@ -4126,12 +4139,16 @@ export async function regenerateShotImage(
   userId: string,
   projectId: string,
   shotId: string,
+  options: { recovery?: boolean } = {},
 ): Promise<VideoProjectWithShots> {
   const project = await requireVideoProject(userId, projectId);
   const segment = project.segments.find((item) => item.id === shotId);
   const keyframe = project.keyframes.find((item) => item.id === shotId) ??
     (segment ? project.keyframes.find((item) => item.keyframeNo === segment.startKeyframeNo) : undefined);
   if (!keyframe) throw new Error("Keyframe not found");
+  if (options.recovery && keyframe.imageUrl && (keyframe.status === VideoShotStatus.IMAGE_READY || keyframe.status === VideoShotStatus.IMAGE_APPROVED)) {
+    return project;
+  }
 
   await logOnePromptVideo("image.regenerate.start", {
     userId,
@@ -4179,6 +4196,21 @@ export async function regenerateShotImage(
     finalPrompt: learnedPrompt,
     rules: uniqueStrings([...compiled.debugArtifact.rules, "incremental_candidate_learning", "preserve_candidate_history"]),
   });
+  if (options.recovery) {
+    const claim = await prisma.videoKeyframe.updateMany({
+      where: {
+        id: keyframe.id,
+        imageTaskId: null,
+        imageUrl: keyframe.imageUrl,
+        status: { in: [VideoShotStatus.FAILED, VideoShotStatus.IMAGE_PENDING] },
+      },
+      data: { status: VideoShotStatus.IMAGE_RUNNING, errorMessage: null },
+    });
+    if (claim.count !== 1) {
+      await logOnePromptVideo("image.regenerate.skip_stale_recovery", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo });
+      return requireVideoProject(userId, projectId);
+    }
+  }
   const taskId = await createImageCandidateBatch({
     project,
     artifactId,
@@ -5799,7 +5831,7 @@ async function upgradeLegacyImageQualityReports(project: VideoProjectWithShots):
   let changed = false;
   for (const candidate of candidates) {
     const existing = candidate.qualityReport as unknown as GenerationQualityReport;
-    if (existing.policyVersion === "quality-policy-v2") {
+    if (existing.policyVersion === "quality-policy-v3") {
       previousByArtifact.set(candidate.artifactId, { report: existing, mediaUrl: candidate.mediaUrl ?? undefined });
       continue;
     }
@@ -5817,7 +5849,7 @@ async function upgradeLegacyImageQualityReports(project: VideoProjectWithShots):
     });
     const previous = previousByArtifact.get(candidate.artifactId);
     const assetCategory = readPlanShotString(targetContract, ["assetCategory", "asset_category", "kind"]);
-    const report = normalizeImageQualityResponse(existing, {
+    const evaluationParams = {
       assetId: candidate.artifactId,
       candidateId: candidate.id,
       candidateNo: candidate.candidateNo,
@@ -5836,10 +5868,34 @@ async function upgradeLegacyImageQualityReports(project: VideoProjectWithShots):
       authoritativeContractConflicts: visualContract.verifiedConflicts,
       previousQualityReport: previous?.report,
       previousCandidateUrl: previous?.mediaUrl,
-    });
+    } as const;
+    const wasIncorrectlyPromoted = existing.originalPassed === false && existing.passed === true;
+    const previousStatus = candidate.status;
+    if (wasIncorrectlyPromoted) {
+      const claim = await prisma.videoGenerationCandidate.updateMany({
+        where: { id: candidate.id, status: previousStatus },
+        data: { status: "evaluating", errorMessage: null },
+      });
+      if (claim.count !== 1) continue;
+    }
+    let report: GenerationQualityReport;
+    try {
+      report = wasIncorrectlyPromoted
+        ? await evaluateGeneratedImageQuality(evaluationParams)
+        : normalizeImageQualityResponse(existing, evaluationParams);
+    } catch (error) {
+      if (wasIncorrectlyPromoted) {
+        await prisma.videoGenerationCandidate.update({
+          where: { id: candidate.id },
+          data: { status: previousStatus, errorMessage: error instanceof Error ? error.message : String(error) },
+        });
+      }
+      continue;
+    }
     await prisma.videoGenerationCandidate.update({
       where: { id: candidate.id },
       data: {
+        status: previousStatus,
         qualityReport: cleanInputJson(report as unknown as Record<string, unknown>),
         compositeScore: generationQualityCompositeScore(report),
         passed: report.passed,

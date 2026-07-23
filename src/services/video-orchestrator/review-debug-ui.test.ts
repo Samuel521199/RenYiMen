@@ -60,6 +60,8 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.match(picker, /const issueLedger = report\?\.issueLedger \?\? \[\]/);
   assert.match(picker, /issueLedger\.filter/);
   assert.match(picker, /转视频检查/);
+  assert.match(picker, /待新版质检/);
+  assert.match(picker, /质检通过 · 有建议/);
   assert.match(picker, /cursor-zoom-in/);
   assert.match(picker, /role="dialog"/);
   assert.match(picker, /event\.key === "Escape"/);
@@ -87,11 +89,13 @@ test("all enlarged image previews share wheel zoom, drag pan, and reset controls
   assert.match(zoomViewer, /setPointerCapture/);
   assert.match(zoomViewer, /onDoubleClick=\{reset\}/);
   assert.match(zoomViewer, /Math\.round\(scale \* 100\)/);
-  assert.match(zoomViewer, /Math\.min\(6, Math\.max\(1, nextScale\)\)/);
+  assert.match(zoomViewer, /zoomViewAtPoint\(current, factor, \{ x: focusX, y: focusY \}\)/);
+  assert.match(zoomViewer, /event\.clientX - rect\.left - rect\.width \/ 2/);
+  assert.match(zoomViewer, /transformOrigin: "center center"/);
   assert.equal((pageSource.match(/<ZoomableImage/g) ?? []).length, 3);
 });
 
-test("candidate issue summary keeps its compact default and expands into categorized details", () => {
+test("candidate issue summary stays compact and loads localized copy without blocking generation", () => {
   const picker = pageSource.slice(
     pageSource.indexOf("function GenerationCandidatePicker"),
     pageSource.indexOf("function ZoomableImage"),
@@ -102,9 +106,15 @@ test("candidate issue summary keeps its compact default and expands into categor
   assert.match(picker, /issue\.status === "open" \|\| issue\.status === "regressed"/);
   assert.match(picker, /issue\.status === "resolved"/);
   assert.match(picker, /issue\.status === "invalid_for_stage"/);
-  assert.match(picker, /再次出现：/);
-  assert.match(picker, /localizeQualityIssue\(issue\.summary, lang\)/);
-  assert.match(picker, /localizeQualityIssue\(issue\.target, lang\)/);
+  assert.match(picker, /requestQualitySummary/);
+  assert.match(picker, /\/quality-summary/);
+  assert.match(picker, /qualitySummaryLoading/);
+  assert.match(picker, /qualitySummary\.items\.map/);
+  assert.match(picker, /正在整理质检结论/);
+  assert.doesNotMatch(picker, /模型原文：/);
+  assert.doesNotMatch(picker, /修改建议：/);
+  assert.doesNotMatch(picker, /correction\.preserve\.join/);
+  assert.doesNotMatch(pageSource, /return "检测到其他画面质量问题。"/);
 });
 
 test("asset progress counts approvals and keeps approval available after a recoverable failure", () => {
@@ -211,4 +221,20 @@ test("keyframe regeneration preserves history and adds one learned candidate at 
   assert.match(sequentialSubmission, /buildImageCandidateLearningSummary\(project, artifactId/);
   assert.match(sequentialSubmission, /candidateCount: 1/);
   assert.match(sequentialSubmission, /incremental candidate #/);
+});
+
+test("keyframe regeneration gives immediate target-level progress feedback", () => {
+  const regeneration = pageSource.slice(
+    pageSource.indexOf("async function regenerateImage"),
+    pageSource.indexOf("async function regenerateClip"),
+  );
+  assert.match(pageSource, /const \[regeneratingImageIds, setRegeneratingImageIds\] = useState<string\[\]>\(\[\]\)/);
+  assert.match(regeneration, /setRegeneratingImageIds/);
+  assert.match(regeneration, /function isRegeneratingImage/);
+  assert.match(regeneration, /return regeneratingImageIds\.includes\(keyframe\.id\)/);
+  assert.doesNotMatch(regeneration, /keyframe\.status === "IMAGE_RUNNING"/);
+  assert.doesNotMatch(regeneration, /\["pending", "running", "succeeded", "evaluating"\]/);
+  assert.match(pageSource, /aria-busy=\{isRegeneratingImage\(keyframe\)\}/);
+  assert.match(pageSource, /isRegeneratingImage\(keyframe\) \? "animate-spin" : ""/);
+  assert.match(pageSource, /retrying=\{isRegeneratingImage\(selectedKeyframe\)\}/);
 });

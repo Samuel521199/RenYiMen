@@ -53,6 +53,12 @@ test("failed visual evaluations produce a spatially precise next-generation corr
       observed: "a single score of 0",
       target: "player 12, opponent 24",
       instruction: "Render one score row reading 12–24 with the player visibly behind",
+      evidenceStatus: "confirmed",
+      confidence: 0.96,
+      normalizedRegion: { xMin: 0.35, yMin: 0.82, xMax: 0.65, yMax: 0.94 },
+      targetPoint: { x: 0.5, y: 0.88 },
+      executionParameters: { exactCount: 2, textValue: "12–24", viewerRelativeDirection: "center" },
+      tolerance: "score row remains within ±0.04 normalized position",
       sourceConstraint: "narrative state: imminent failure",
       preserve: ["character face", "board layout"],
     }],
@@ -62,26 +68,69 @@ test("failed visual evaluations produce a spatially precise next-generation corr
   assert.equal(report.correctionActions?.[0]?.region, "bottom-center HUD");
   assert.match(report.retryInstruction ?? "", /bottom-center HUD/);
   assert.match(report.retryInstruction ?? "", /player 12, opponent 24/);
+  assert.equal(report.correctionActions?.[0]?.evidenceStatus, "confirmed");
+  assert.equal(report.correctionActions?.[0]?.confidence, 0.96);
+  assert.deepEqual(report.correctionActions?.[0]?.targetPoint, { x: 0.5, y: 0.88 });
+  assert.match(report.retryInstruction ?? "", /Normalized region \(top-left origin\): x 0\.35\.\.0\.65, y 0\.82\.\.0\.94/);
+  assert.match(report.retryInstruction ?? "", /Execution parameters: \{"exactCount":2,"textValue":"12–24","viewerRelativeDirection":"center"\}/);
+  assert.match(report.retryInstruction ?? "", /Acceptance tolerance:/);
   assert.match(report.retryInstruction ?? "", /Preserve unchanged: character face, board layout/);
   assert.doesNotMatch(report.retryInstruction ?? "", /^fix the score$/);
 });
 
-test("visual-model contract suspicions cannot unilaterally route work back to the compiler", () => {
+test("uncertain visual findings become recommended rather than required corrections", () => {
+  const report = normalizeImageQualityResponse({
+    identityScore: 92,
+    layoutScore: 90,
+    promptAlignmentScore: 88,
+    continuityScore: 91,
+    passed: true,
+    correctionActions: [{
+      region: "character eyes",
+      element: "pupil direction",
+      observed: "pupil direction is partly occluded",
+      target: "viewer-left gaze",
+      instruction: "Keep the current head turn and move both pupils toward viewer-left",
+      evidenceStatus: "uncertain",
+      confidence: 0.61,
+      priority: "required",
+      targetPoint: { x: 0.2, y: 0.3 },
+    }],
+  }, base);
+  assert.equal(report.passed, true);
+  assert.equal(report.qualityDecision, "recommended");
+  assert.equal(report.correctionActions?.[0]?.priority, "recommended");
+  assert.match(report.retryInstruction ?? "", /Evidence: uncertain, confidence 0\.61/);
+  assert.match(report.retryInstruction ?? "", /viewer-relative/);
+});
+
+test("visual evaluator prompt defines evidence-based QA and normalized repair coordinates", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  assert.match(source, /evidence-based Visual Quality Assurance Engineer/);
+  assert.match(source, /Generative Image Repair Specification Engineer/);
+  assert.match(source, /top-left=\(0,0\), bottom-right=\(1,1\)/);
+  assert.match(source, /viewer-left, viewer-right/);
+  assert.match(source, /evidenceStatus=uncertain/);
+  assert.match(source, /do not set passed=false solely/);
+  assert.match(source, /A turned head is not automatically a failed gaze/);
+});
+
+test("visual-model contract suspicions keep the image veto while staying in generation repair", () => {
   const report = normalizeImageQualityResponse({
     identityScore: 95,
     layoutScore: 90,
     promptAlignmentScore: 85,
     continuityScore: 88,
-    passed: true,
+    passed: false,
     contractConflicts: ["logo is both required and forbidden"],
     retryFromStage: "generation",
   }, base);
-  assert.equal(report.passed, true);
+  assert.equal(report.passed, false);
   assert.equal(report.retryFromStage, "generation");
   assert.deepEqual(report.contractConflicts, []);
   assert.deepEqual(report.suspectedContractConflicts, ["logo is both required and forbidden"]);
   assert.equal(report.contractConflictsVerified, false);
-  assert.equal(report.qualityDecision, "recommended");
+  assert.equal(report.qualityDecision, "retry");
 });
 
 test("motion-only criticism is deferred from still-image quality to video quality", () => {
@@ -108,8 +157,8 @@ test("motion-only criticism is deferred from still-image quality to video qualit
     verifiedConflicts: [],
     warnings: [],
   } });
-  assert.equal(report.passed, true);
-  assert.equal(report.qualityDecision, "recommended");
+  assert.equal(report.passed, false);
+  assert.equal(report.qualityDecision, "retry");
   assert.deepEqual(report.artifactIssues, []);
   assert.equal(report.issueLedger?.[0]?.status, "invalid_for_stage");
 });
@@ -171,7 +220,7 @@ test("exact brand logo assets fail when the evaluator detects wrong text", () =>
   assert.equal(report.wrongTextDetected, true);
 });
 
-test("high-scoring brand logo passes despite an overly strict model boolean", () => {
+test("high scores never override the visual model's brand-logo veto", () => {
   const report = normalizeImageQualityResponse({
     identityScore: 95,
     layoutScore: 85,
@@ -183,7 +232,7 @@ test("high-scoring brand logo passes despite an overly strict model boolean", ()
     passed: false,
     retryFromStage: "generation",
   }, { ...base, purpose: "anchor_reference_image", requiresExactBrandText: true, assetCategory: "brand_visual" });
-  assert.equal(report.passed, true);
+  assert.equal(report.passed, false);
   assert.equal(report.originalPassed, false);
 });
 
@@ -214,11 +263,11 @@ test("anchor image defects stay in generation retry instead of rolling back shot
   assert.equal(report.retryFromStage, "generation");
 });
 
-test("deterministic recommendation and manual acceptance preserve the model's original boolean", () => {
+test("manual acceptance preserves rather than rewrites the visual model's veto", () => {
   const report = normalizeImageQualityResponse({ identityScore: 65, layoutScore: 70, promptAlignmentScore: 72, continuityScore: 68, passed: false }, base);
   const accepted = { ...report, userAccepted: true, originalPassed: report.originalPassed ?? report.passed };
-  assert.equal(accepted.passed, true);
-  assert.equal(accepted.qualityDecision, "recommended");
+  assert.equal(accepted.passed, false);
+  assert.equal(accepted.qualityDecision, "retry");
   assert.equal(accepted.originalPassed, false);
   assert.equal(accepted.userAccepted, true);
 });
@@ -297,10 +346,21 @@ test("sync immediately schedules recoverable candidate failures without a user c
 test("legacy image quality reports upgrade in place before another paid generation", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /async function upgradeLegacyImageQualityReports/);
-  assert.match(source, /existing\.policyVersion === "quality-policy-v2"/);
+  assert.match(source, /existing\.policyVersion === "quality-policy-v3"/);
   assert.match(source, /await upgradeLegacyImageQualityReports\(project\)/);
   assert.match(source, /buildAuthoritativeVisualContract/);
   assert.match(source, /previousQualityReport: previous\?\.report/);
+  assert.match(source, /await evaluateGeneratedImageQuality\(evaluationParams\)/);
+});
+
+test("visual veto remains final and stale recovery cannot submit after a candidate becomes ready", () => {
+  const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(evaluator, /const passed = originalPassed && scoreGatePassed && hardFailureReasons\.length === 0/);
+  assert.match(evaluator, /You are the final visual quality gate/);
+  assert.match(service, /options: \{ recovery\?: boolean \} = \{\}/);
+  assert.match(service, /image\.regenerate\.skip_stale_recovery/);
+  assert.match(service, /imageUrl: keyframe\.imageUrl,[\s\S]{0,120}status: \{ in: \[VideoShotStatus\.FAILED, VideoShotStatus\.IMAGE_PENDING\] \}/);
 });
 
 test("failed-candidate acceptance is explicit and keeps passed unchanged", () => {
