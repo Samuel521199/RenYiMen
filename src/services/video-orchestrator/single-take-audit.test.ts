@@ -66,17 +66,19 @@ test("end-frame evaluator maps small gap, prompt-fixable gap and unreachable gap
   assert.equal(blocked.decision, "return_stage_2b");
 });
 
-test("HappyHorse uses one hard first frame and no segment-level pasted end-frame dissolve", () => {
+test("HappyHorse uses a hard first frame and a mandatory end-state prompt without pasted end-frame dissolve", () => {
   const root = process.cwd();
   const workflow = readFileSync(path.join(root, "src/services/video-orchestrator/aliyun-workflow.ts"), "utf8");
   const service = readFileSync(path.join(root, "src/services/video-orchestrator/project-service.ts"), "utf8");
   const compose = readFileSync(path.join(root, "src/services/video-orchestrator/local-compose.ts"), "utf8");
   assert.match(workflow, /acceptsLastFrameImage: false/);
   assert.match(workflow, /media: \[\{ type: "first_frame", url: params\.imageUrl \}\]/);
+  assert.match(service, /MANDATORY FINAL-FRAME CONTRACT/);
+  assert.match(service, /endFramePromptEnforced: true/);
   assert.doesNotMatch(service, /enforceSegmentEndFrameLocally|deterministic_exact_end_frame_postprocess|stripVideoForbiddenTerms/);
   assert.doesNotMatch(compose, /one-prompt-boundary|approved-end-frame|clip\.boundary_enforce/);
   assert.match(compose, /item\?\.visualMode \?\? "hard_cut"/);
-  assert.match(service, /endFrameSemanticMode: "soft_prompt_target_and_visual_check"/);
+  assert.match(service, /endFrameSemanticMode: "strong_prompt_target_and_visual_check"/);
 });
 
 test("planning, runtime validator and failure recovery share the audit service", () => {

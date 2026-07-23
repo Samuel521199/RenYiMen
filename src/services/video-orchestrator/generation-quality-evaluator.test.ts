@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { generationQualityCompositeScore, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
-import { nextGenerationCandidateAttempt } from "./project-service.ts";
+import { generationQualityAttemptsUsed, generationTransportAttemptsUsed, nextGenerationCandidateAttempt } from "./project-service.ts";
+import { mediaKeyMatchingContentType } from "./oss-media.ts";
 import { fitAliyunImagePrompt, prepareAliyunImagePrompt } from "./aliyun-workflow.ts";
 
 const base = {
@@ -54,6 +55,15 @@ test("technical evaluator failures are distinct from visual vetoes", () => {
     contentBased: true,
     evaluationStatus: "completed",
   }), false);
+});
+
+test("video frame extraction uses PNG and cleanup cannot overwrite a valid evaluation", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  assert.match(source, /`frame-\$\{index\}\.png`/);
+  assert.match(source, /format=rgb24/);
+  assert.match(source, /"-c:v",\s*"png"/);
+  assert.match(source, /await removeWorkDir\(workDir\)/);
+  assert.match(source, /Cleanup must never overwrite an otherwise valid visual-evaluation result/);
 });
 
 test("image quality normalization preserves scores observed by the visual model", () => {
@@ -338,6 +348,8 @@ test("candidate orchestration evaluates all batches, waits for the complete pool
   assert.match(source, /compositeScore: null/);
   assert.match(source, /passed: null/);
   assert.match(source, /status: technicalRetryExhausted \? "quality_failed" : "quality_retry"/);
+  assert.match(source, /where: candidate\.status === "quality_retry"/);
+  assert.match(source, /id: candidate\.id,[\s\S]{0,80}status: "evaluating"/);
   assert.doesNotMatch(source, /wasIncorrectlyPromoted[\s\S]{0,240}evaluateGeneratedImageQuality/);
 });
 
@@ -426,6 +438,70 @@ test("automatic retries stay in one cycle while manual retries start a fresh cyc
   assert.deepEqual(nextGenerationCandidateAttempt(current as never, "keyframe:2:image", "cycle-b"), { attempt: 1, retryCycleId: "cycle-b" });
 });
 
+test("technical quality failures and upstream transport failures do not consume visual retry budget", () => {
+  const candidates = [
+    {
+      artifactId: "segment:1:micro_shot:1:image",
+      batchId: "batch-1",
+      status: "quality_retry",
+      mediaUrl: "https://example.test/one.png",
+      metadata: { attempt: 1, retryCycleId: "cycle-a" },
+      qualityReport: {
+        identityScore: 0,
+        layoutScore: 0,
+        promptAlignmentScore: 0,
+        continuityScore: 0,
+        passed: false,
+        artifactIssues: ["图片视觉质量评估失败：This operation was aborted"],
+      },
+    },
+    {
+      artifactId: "segment:1:micro_shot:1:image",
+      batchId: "batch-2",
+      status: "failed",
+      mediaUrl: null,
+      metadata: { attempt: 2, retryCycleId: "cycle-a" },
+      qualityReport: null,
+    },
+    {
+      artifactId: "segment:1:micro_shot:1:image",
+      batchId: "batch-3",
+      status: "evaluated",
+      mediaUrl: "https://example.test/three.png",
+      metadata: { attempt: 3, retryCycleId: "cycle-a" },
+      qualityReport: {
+        identityScore: 70,
+        layoutScore: 70,
+        promptAlignmentScore: 70,
+        continuityScore: 70,
+        passed: false,
+        artifactIssues: ["visible identity drift"],
+      },
+    },
+  ];
+  assert.equal(generationQualityAttemptsUsed(candidates as never), 1);
+  assert.equal(generationTransportAttemptsUsed(candidates as never), 1);
+});
+
+test("a technical failure can requeue the same preserved candidate without paid regeneration", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const retry = source.slice(
+    source.indexOf("export async function retryGenerationCandidateQuality"),
+    source.indexOf("async function syncImageTasks"),
+  );
+  assert.match(retry, /status: "quality_retry"/);
+  assert.match(retry, /qualityTechnicalAttempts: 0/);
+  assert.match(retry, /qualityNextRetryAt: new Date\(\)\.toISOString\(\)/);
+  assert.match(retry, /updateGenerationTargetForTechnicalQualityRetry/);
+  assert.doesNotMatch(retry, /submitAliyunImageTask|createImageCandidateBatch/);
+});
+
+test("persisted media key extension follows the actual response content type", () => {
+  assert.equal(mediaKeyMatchingContentType("one-prompt/frame.jpg", "image/png"), "one-prompt/frame.png");
+  assert.equal(mediaKeyMatchingContentType("one-prompt/frame.png", "image/jpeg"), "one-prompt/frame.jpg");
+  assert.equal(mediaKeyMatchingContentType("one-prompt/clip.mp4", "video/mp4"), "one-prompt/clip.mp4");
+});
+
 test("resume repairs failed artifacts before waiting for unrelated candidate review", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   const dirtyKeyframeCheck = source.indexOf("const dirtyKeyframe =");
@@ -490,4 +566,6 @@ test("manual boundary candidate acceptance immediately continues the next frame"
   assert.match(selection, /status: VideoProjectStatus\.IMAGE_GENERATING/);
   assert.match(selection, /submitNextImageTask\(\{/);
   assert.match(selection, /image\.continue_after_manual_candidate_selection/);
+  assert.match(selection, /micro_shot\.manual_candidate\.auto_continue/);
+  assert.match(selection, /requiredMicroShotImageIssues\(selectedProject\)\.length === 0/);
 });

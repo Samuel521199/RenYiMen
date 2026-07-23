@@ -1217,6 +1217,9 @@ export default function OnePromptVideoPage() {
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
   const [loading, setLoading] = useState(false);
+  const [selectingCandidateId, setSelectingCandidateId] = useState("");
+  const [rollingBackTarget, setRollingBackTarget] = useState<RollbackTarget | "">("");
+  const candidateSelectionAbortControllerRef = useRef<AbortController | null>(null);
   const [regeneratingImageIds, setRegeneratingImageIds] = useState<string[]>([]);
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [planningProjectIds, setPlanningProjectIds] = useState<string[]>([]);
@@ -1232,6 +1235,7 @@ export default function OnePromptVideoPage() {
   const [workflowProgressCollapsed, setWorkflowProgressCollapsed] = useState(false);
   const [shotEditorOpen, setShotEditorOpen] = useState(false);
   const [microShotHelpOpen, setMicroShotHelpOpen] = useState<"detail" | "modal" | null>(null);
+  const [expandedMicroShotKeys, setExpandedMicroShotKeys] = useState<Set<string>>(() => new Set());
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [debugTab, setDebugTab] = useState<DebugTab>("events");
   const [debugDraft, setDebugDraft] = useState<Record<EditableDebugSection, string>>({
@@ -1239,6 +1243,14 @@ export default function OnePromptVideoPage() {
     anchors: "[]",
     states: "[]",
   });
+  const toggleMicroShotExpanded = useCallback((key: string) => {
+    setExpandedMicroShotKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
   const [detailPanelWidth, setDetailPanelWidth] = useState(360);
   const [detailPreviewHeight, setDetailPreviewHeight] = useState(360);
   const [resizingDetailPanel, setResizingDetailPanel] = useState(false);
@@ -1579,7 +1591,10 @@ export default function OnePromptVideoPage() {
       durationSeconds: selectedShot.durationSeconds,
       microShots: selectedShot.microShots ?? [],
     });
-  }, [selectedShot, pageLang]);
+    // Project polling replaces the shot object even while the user is editing
+    // this same shot. Do not let that overwrite unsaved draft changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedShot?.id, pageLang]);
 
   useEffect(() => {
     if (!selectedKeyframe) return;
@@ -2081,8 +2096,9 @@ export default function OnePromptVideoPage() {
       const items = [...((current.microShots as MicroShot[] | undefined) ?? [])];
       const duration = Number(current.durationSeconds ?? selectedShot?.durationSeconds ?? 3);
       const localTimeSeconds = Math.max(0, Math.min(duration, items.length ? Math.round(duration / 2) : 0));
+      const nextMicroShotNo = Math.max(0, ...items.map((item) => Number(item.microShotNo) || 0)) + 1;
       items.push({
-        microShotNo: items.length + 1,
+        microShotNo: nextMicroShotNo,
         localTimeSeconds,
         absoluteTimeSeconds: (selectedShot?.startTimeSeconds ?? 0) + localTimeSeconds,
         purpose: "",
@@ -2101,9 +2117,24 @@ export default function OnePromptVideoPage() {
     setDraft((current) => ({
       ...current,
       microShots: ((current.microShots as MicroShot[] | undefined) ?? [])
-        .filter((_, itemIndex) => itemIndex !== index)
-        .map((item, itemIndex) => ({ ...item, microShotNo: itemIndex + 1 })),
+        .filter((_, itemIndex) => itemIndex !== index),
     }));
+  }
+
+  function confirmRemoveDraftMicroShot(index: number) {
+    const item = ((draft.microShots as MicroShot[] | undefined) ?? [])[index];
+    if (!item) return;
+    const label = `${copy.microShot} ${String(item.microShotNo).padStart(2, "0")}`;
+    if (
+      typeof window !== "undefined"
+      && !window.confirm(pageLang === "zh"
+        ? `确定删除${label}吗？删除后请点击“保存镜头”提交更改。`
+        : `Delete ${label}? Click “Save shot” afterward to commit the change.`)
+    ) return;
+    removeDraftMicroShot(index);
+    setMessage(pageLang === "zh"
+      ? `${label}已从草稿中删除；点击“保存镜头”后生效`
+      : `${label} was removed from the draft; click “Save shot” to apply`);
   }
 
   async function saveShot() {
@@ -2120,12 +2151,27 @@ export default function OnePromptVideoPage() {
           negativePrompt: draft.negativePrompt,
           subtitle: draft.subtitle,
           durationSeconds: draft.durationSeconds,
-          microShots: draft.microShots,
+          microShots: ((draft.microShots as MicroShot[] | undefined) ?? [])
+            .map((item, itemIndex) => ({ ...item, microShotNo: itemIndex + 1 })),
           locale: pageLang,
         }),
       });
       if (!res.project) throw new Error(copy.saveFailed);
       rememberProject(res.project);
+      const savedShot = res.project.shots.find((shot: VideoShot) => shot.id === selectedShot.id);
+      if (savedShot) {
+        setDraft({
+          purpose: localizedShotPurpose(savedShot, pageLang),
+          camera: savedShot.camera,
+          action: savedShot.action,
+          imagePrompt: localizedShotPrompt(savedShot, "image", pageLang),
+          videoPrompt: localizedShotPrompt(savedShot, "video", pageLang),
+          negativePrompt: localizedShotNegativePrompt(savedShot, pageLang),
+          subtitle: savedShot.subtitle,
+          durationSeconds: savedShot.durationSeconds,
+          microShots: savedShot.microShots ?? [],
+        });
+      }
       setMessage(copy.saved(selectedShot.shotNo));
     });
   }
@@ -2136,7 +2182,7 @@ export default function OnePromptVideoPage() {
     if (!microShot) return;
     await runAction(async () => {
       const res = await fetchJson(
-        `/api/video-projects/${project.id}/shots/${selectedShot.id}/micro-shots/${index + 1}/image`,
+        `/api/video-projects/${project.id}/shots/${selectedShot.id}/micro-shots/${microShot.microShotNo}/image`,
         copy,
         {
           method: "POST",
@@ -2333,17 +2379,62 @@ export default function OnePromptVideoPage() {
     if (!project) return;
     const acceptFailed = candidate.passed !== true;
     if (acceptFailed && typeof window !== "undefined" && !window.confirm(pageLang === "zh" ? "该候选未通过视觉质量检查。仍要人工接受并切换到它吗？原始 passed=false 会保留。" : "This candidate failed visual quality review. Accept it manually and switch anyway? The original passed=false will be retained.")) return;
-    await runAction(async () => {
-      const res = await fetchJson(`/api/video-projects/${project.id}/generation-candidates/${candidate.id}/select`, copy, {
-        method: "POST",
-        body: JSON.stringify({ acceptFailed }),
+    setSelectingCandidateId(candidate.id);
+    const selectionController = new AbortController();
+    candidateSelectionAbortControllerRef.current?.abort();
+    candidateSelectionAbortControllerRef.current = selectionController;
+    const selectionTimeout = window.setTimeout(() => selectionController.abort(), 30_000);
+    try {
+      await runAction(async () => {
+        const res = await fetchJson(`/api/video-projects/${project.id}/generation-candidates/${candidate.id}/select`, copy, {
+          method: "POST",
+          body: JSON.stringify({ acceptFailed }),
+          signal: selectionController.signal,
+        });
+        if (!res.project) throw new Error(copy.actionFailed);
+        rememberProject(res.project);
+        if (candidate.kind === "micro_shot_image") {
+          const progress = microShotImageProgress(res.project);
+          const unresolved = Math.max(0, progress.required - progress.ready);
+          if (res.project.status === "CLIP_GENERATING" || res.project.status === "CLIP_REVIEW") {
+            setProjectView("clips");
+            setMessage(pageLang === "zh"
+              ? "已采用最后一张子分镜原图，正在生成视频片段"
+              : "The last micro-shot original was accepted; clip generation has started");
+          } else {
+            setMessage(pageLang === "zh"
+              ? `已采用这张原图；还有 ${unresolved} 个必需子分镜尚未完成，请继续处理其余候选`
+              : `Original accepted; ${unresolved} required micro-shot${unresolved === 1 ? "" : "s"} still need attention`);
+          }
+          return;
+        }
+        const hasMoreBoundaryFrames = candidate.kind === "keyframe_image" && (res.project.keyframes ?? []).some((item: VideoKeyframe) => item.keyframeNo > 0 && !item.imageUrl);
+        setMessage(hasMoreBoundaryFrames
+          ? (pageLang === "zh" ? "已采用该画面，正在自动生成下一帧" : "Image accepted; generating the next frame automatically")
+          : (pageLang === "zh" ? "已切换生成候选" : "Generation candidate selected"));
       });
+    } finally {
+      window.clearTimeout(selectionTimeout);
+      if (candidateSelectionAbortControllerRef.current === selectionController) {
+        candidateSelectionAbortControllerRef.current = null;
+      }
+      setSelectingCandidateId("");
+    }
+  }
+
+  async function recheckGenerationCandidate(candidate: GenerationCandidate) {
+    if (!project) return;
+    await runAction(async () => {
+      const res = await fetchJson(
+        `/api/video-projects/${project.id}/generation-candidates/${candidate.id}/retry-quality`,
+        copy,
+        { method: "POST" },
+      );
       if (!res.project) throw new Error(copy.actionFailed);
       rememberProject(res.project);
-      const hasMoreBoundaryFrames = candidate.kind === "keyframe_image" && (res.project.keyframes ?? []).some((item: VideoKeyframe) => item.keyframeNo > 0 && !item.imageUrl);
-      setMessage(hasMoreBoundaryFrames
-        ? (pageLang === "zh" ? "已采用该画面，正在自动生成下一帧" : "Image accepted; generating the next frame automatically")
-        : (pageLang === "zh" ? "已切换生成候选" : "Generation candidate selected"));
+      setMessage(pageLang === "zh"
+        ? "已提交现有候选重新质检，不会重新生成图片"
+        : "The existing candidate was queued for re-review without regenerating it");
     });
   }
 
@@ -2426,10 +2517,15 @@ export default function OnePromptVideoPage() {
   async function rollbackProject(targetStatus: RollbackTarget) {
     if (!project || !rollbackOptions.includes(targetStatus)) return;
     if (!window.confirm(`${copy.rollbackConfirm}\n\n${copy.rollbackTo}: ${copy.rollbackTargets[targetStatus]}`)) return;
-    await runAction(async () => {
+    candidateSelectionAbortControllerRef.current?.abort();
+    setRollingBackTarget(targetStatus);
+    setError("");
+    setMessage("");
+    try {
       const res = await fetchJson(`/api/video-projects/${project.id}/rollback`, copy, {
         method: "POST",
         body: JSON.stringify({ targetStatus }),
+        signal: AbortSignal.timeout(30_000),
       });
       if (!res.project) throw new Error(copy.approveFailed);
       rememberProject(res.project);
@@ -2437,7 +2533,11 @@ export default function OnePromptVideoPage() {
       setSelectedShotId(res.project.shots[0]?.id ?? "");
       setSelectedKeyframeId(res.project.keyframes?.[0]?.id ?? "");
       setMessage(copy.rollbackDone);
-    });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.actionFailed);
+    } finally {
+      setRollingBackTarget("");
+    }
   }
 
   async function runAction(action: () => Promise<void>) {
@@ -3194,11 +3294,16 @@ export default function OnePromptVideoPage() {
                           key={stage.key}
                           type="button"
                           onClick={() => rollbackProject(rollbackTargetForStage)}
-                          disabled={loading}
+                          disabled={Boolean(rollingBackTarget)}
                           title={`${copy.rollbackTo}: ${copy.rollbackTargets[rollbackTargetForStage]}`}
                           className={`${stageClass} disabled:cursor-not-allowed disabled:opacity-50`}
                         >
-                          {stageContent}
+                          {rollingBackTarget === rollbackTargetForStage ? (
+                            <>
+                              <Loader2 className="mb-1 h-4 w-4 animate-spin" />
+                              <span>{pageLang === "zh" ? "回退中" : "Rolling back"}</span>
+                            </>
+                          ) : stageContent}
                         </button>
                       );
                     }
@@ -3242,8 +3347,10 @@ export default function OnePromptVideoPage() {
                     lang={pageLang}
                     loading={loading || isRegeneratingImage(selectedKeyframe)}
                     retrying={isRegeneratingImage(selectedKeyframe)}
+                    selectingCandidateId={selectingCandidateId}
                     onSelect={chooseGenerationCandidate}
                     onRetry={() => regenerateImage(selectedKeyframe.id)}
+                    onRecheck={recheckGenerationCandidate}
                   />
                   <Field label={copy.purpose} onUndo={() => undoKeyframeField("purpose")} canUndo={keyframeFieldChanged("purpose")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={5} value={String(keyframeDraft.purpose ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, purpose: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.imagePrompt} onUndo={() => undoKeyframeField("imagePrompt")} canUndo={keyframeFieldChanged("imagePrompt")} undoLabel={copy.undo}><AutoResizeTextarea minRows={3} maxRows={10} value={String(keyframeDraft.imagePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, imagePrompt: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
@@ -3319,8 +3426,10 @@ export default function OnePromptVideoPage() {
                     candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "segment_video")}
                     lang={pageLang}
                     loading={loading}
+                    selectingCandidateId={selectingCandidateId}
                     onSelect={chooseGenerationCandidate}
                     onRetry={() => regenerateClip(selectedShot!.id)}
+                    onRecheck={recheckGenerationCandidate}
                   />
                   <p className="text-sm leading-6 text-slate-300">{localizedShotPurpose(selectedShot!, pageLang)}</p>
                   <button
@@ -3471,19 +3580,31 @@ export default function OnePromptVideoPage() {
                       </button>
                     </div>
                     <div className="space-y-3">
-                      {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => (
-                        <div key={`${item.microShotNo}-${index}`} className="space-y-2 rounded-md border border-white/10 bg-slate-950/60 p-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-xs font-semibold text-slate-200">{copy.microShot} {String(index + 1).padStart(2, "0")}</p>
-                            <div className="flex items-center gap-1">
+                      {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => {
+                        const expansionKey = `detail:${selectedShot.id}:${item.microShotNo}:${index}`;
+                        const expanded = expandedMicroShotKeys.has(expansionKey);
+                        return <div key={`${item.microShotNo}-${index}`} className="rounded-md border border-white/10 bg-slate-950/60">
+                          <div className="sticky top-0 z-30 flex items-center justify-between gap-2 rounded-t-md border-b border-white/10 bg-slate-950/95 p-3 shadow-[0_8px_18px_rgba(0,0,0,0.28)] backdrop-blur">
+                            <button
+                              type="button"
+                              aria-expanded={expanded}
+                              onClick={() => toggleMicroShotExpanded(expansionKey)}
+                              className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-md px-1 py-1 text-left text-xs font-semibold text-slate-200 transition hover:bg-white/[0.05]"
+                            >
+                              <span>{copy.microShot} {String(item.microShotNo).padStart(2, "0")}</span>
+                              {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-500" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" />}
+                            </button>
+                            {expanded && <div className="flex items-center gap-1">
                               <button type="button" onClick={() => undoDraftMicroShot(index)} disabled={!microShotChanged(index)} title={copy.undoChanges} className="inline-flex h-7 items-center gap-1 rounded-md border border-white/10 px-2 text-[11px] text-slate-300 hover:bg-white/[0.06] disabled:pointer-events-none disabled:opacity-30">
                                 <Undo2 className="h-3 w-3" /> {copy.undo}
                               </button>
-                              <button type="button" onClick={() => removeDraftMicroShot(index)} className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-400 hover:bg-white/[0.06]">
-                                <X className="h-3.5 w-3.5" />
+                              <button type="button" onClick={() => confirmRemoveDraftMicroShot(index)} title={pageLang === "zh" ? "删除子分镜" : "Delete micro-shot"} className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-rose-300/20 bg-rose-300/[0.04] px-2 text-[11px] text-rose-100/80 hover:bg-rose-300/[0.1]">
+                                <Trash2 className="h-3.5 w-3.5" />
+                                {pageLang === "zh" ? "删除" : "Delete"}
                               </button>
-                            </div>
+                            </div>}
                           </div>
+                          {expanded && <div className="space-y-2 p-3 pt-2">
                           <div className="grid grid-cols-[minmax(140px,0.5fr)_minmax(0,1fr)] gap-2">
                             <label className="space-y-1">
                               <span className="text-[11px] text-slate-500">{copy.microShotTime}</span>
@@ -3544,18 +3665,18 @@ export default function OnePromptVideoPage() {
                               {item.imageStatus === "failed" && (
                                 <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>
                               )}
-                              <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
+                              <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} selectingCandidateId={selectingCandidateId} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} onRecheck={recheckGenerationCandidate} />
                               {item.imageUrl && (
                                 <button
                                   type="button"
                                   onClick={() => setPreviewMicroShot({
-                                    title: `${copy.microShot} ${index + 1}`,
+                                    title: `${copy.microShot} ${item.microShotNo}`,
                                     imageUrl: item.imageUrl!,
                                     imagePrompt: localizedMicroShotImagePrompt(item, pageLang),
                                   })}
                                   className="block w-full overflow-hidden rounded-md border border-white/10 bg-slate-950 outline-none transition hover:border-cyan-300/45 focus-visible:ring-2 focus-visible:ring-cyan-300/60"
                                 >
-                                  <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${index + 1}`} className="max-h-52 w-full object-contain" />
+                                  <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${item.microShotNo}`} className="max-h-52 w-full object-contain" />
                                 </button>
                               )}
                             </div>
@@ -3564,8 +3685,9 @@ export default function OnePromptVideoPage() {
                           <Field label={copy.scene}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotScene(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { sceneEn: event.target.value, scene: event.target.value } : { sceneZh: event.target.value, scene: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                           <Field label={copy.action}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotAction(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { actionEn: event.target.value, action: event.target.value } : { actionZh: event.target.value, action: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                           <Field label={copy.imagePrompt}><AutoResizeTextarea minRows={2} maxRows={7} value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                          </div>}
                         </div>
-                      ))}
+                      })}
                     </div>
                   </section>
                   <Field label={`${copy.duration} (${copy.segmentDurationPolicy})`} onUndo={() => undoShotField("durationSeconds")} canUndo={shotFieldChanged("durationSeconds")} undoLabel={copy.undo}>
@@ -3622,6 +3744,17 @@ export default function OnePromptVideoPage() {
                 <X className="h-4 w-4" />
               </button>
             </div>
+            {(selectingCandidateId || message || error) && (
+              <div className={`border-b px-4 py-2 text-xs ${
+                error
+                  ? "border-rose-300/15 bg-rose-300/[0.08] text-rose-100"
+                  : "border-cyan-300/15 bg-cyan-300/[0.06] text-cyan-100"
+              }`}>
+                {selectingCandidateId
+                  ? (pageLang === "zh" ? "正在采用候选并保存，请稍候…" : "Accepting and saving the candidate…")
+                  : error || message}
+              </div>
+            )}
 
             <div className="grid min-h-0 flex-1 overflow-hidden lg:grid-cols-[380px_minmax(0,1fr)]">
               <aside className="subtle-scrollbar min-h-0 overflow-y-auto border-b border-white/10 bg-slate-950/70 p-4 lg:border-b-0 lg:border-r">
@@ -3775,19 +3908,31 @@ export default function OnePromptVideoPage() {
                     </button>
                   </div>
                   <div className="grid gap-3 xl:grid-cols-2">
-                    {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => (
-                      <div key={`${item.microShotNo}-${index}`} className="space-y-2 rounded-md border border-white/10 bg-slate-950/60 p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-xs font-semibold text-slate-200">{copy.microShot} {String(index + 1).padStart(2, "0")}</p>
-                          <div className="flex items-center gap-1">
+                    {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => {
+                      const expansionKey = `modal:${selectedShot.id}:${item.microShotNo}:${index}`;
+                      const expanded = expandedMicroShotKeys.has(expansionKey);
+                      return <div key={`${item.microShotNo}-${index}`} className={`rounded-md border border-white/10 bg-slate-950/60 ${expanded ? "xl:col-span-2" : ""}`}>
+                        <div className="sticky top-0 z-30 flex items-center justify-between gap-2 rounded-t-md border-b border-white/10 bg-slate-950/95 p-3 shadow-[0_8px_18px_rgba(0,0,0,0.28)] backdrop-blur">
+                          <button
+                            type="button"
+                            aria-expanded={expanded}
+                            onClick={() => toggleMicroShotExpanded(expansionKey)}
+                            className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-md px-1 py-1 text-left text-xs font-semibold text-slate-200 transition hover:bg-white/[0.05]"
+                          >
+                            <span>{copy.microShot} {String(item.microShotNo).padStart(2, "0")}</span>
+                            {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-500" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" />}
+                          </button>
+                          {expanded && <div className="flex items-center gap-1">
                             <button type="button" onClick={() => undoDraftMicroShot(index)} disabled={!microShotChanged(index)} title={copy.undoChanges} className="inline-flex h-7 items-center gap-1 rounded-md border border-white/10 px-2 text-[11px] text-slate-300 hover:bg-white/[0.06] disabled:pointer-events-none disabled:opacity-30">
                               <Undo2 className="h-3 w-3" /> {copy.undo}
                             </button>
-                            <button type="button" onClick={() => removeDraftMicroShot(index)} className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-400 hover:bg-white/[0.06]">
-                              <X className="h-3.5 w-3.5" />
+                            <button type="button" onClick={() => confirmRemoveDraftMicroShot(index)} title={pageLang === "zh" ? "删除子分镜" : "Delete micro-shot"} className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-rose-300/20 bg-rose-300/[0.04] px-2 text-[11px] text-rose-100/80 hover:bg-rose-300/[0.1]">
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {pageLang === "zh" ? "删除" : "Delete"}
                             </button>
-                          </div>
+                          </div>}
                         </div>
+                        {expanded && <div className="space-y-2 p-3 pt-2">
                         <div className="grid grid-cols-[minmax(140px,0.5fr)_minmax(0,1fr)] gap-2">
                           <label className="space-y-1">
                             <span className="text-[11px] text-slate-500">{copy.microShotTime}</span>
@@ -3840,18 +3985,18 @@ export default function OnePromptVideoPage() {
                             </div>
                             {item.imageStatus === "running" && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
                             {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>}
-                            <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
+                            <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} selectingCandidateId={selectingCandidateId} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} onRecheck={recheckGenerationCandidate} />
                             {item.imageUrl && (
                               <button
                                 type="button"
                                 onClick={() => setPreviewMicroShot({
-                                  title: `${copy.microShot} ${index + 1}`,
+                                  title: `${copy.microShot} ${item.microShotNo}`,
                                   imageUrl: item.imageUrl!,
                                   imagePrompt: localizedMicroShotImagePrompt(item, pageLang),
                                 })}
                                 className="block w-full overflow-hidden rounded-md border border-white/10 bg-slate-950 outline-none transition hover:border-cyan-300/45 focus-visible:ring-2 focus-visible:ring-cyan-300/60"
                               >
-                                <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${index + 1}`} className="max-h-52 w-full object-contain" />
+                                <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${item.microShotNo}`} className="max-h-52 w-full object-contain" />
                               </button>
                             )}
                           </div>
@@ -3860,8 +4005,9 @@ export default function OnePromptVideoPage() {
                         <Field label={copy.scene}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotScene(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { sceneEn: event.target.value, scene: event.target.value } : { sceneZh: event.target.value, scene: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                         <Field label={copy.action}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotAction(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { actionEn: event.target.value, action: event.target.value } : { actionZh: event.target.value, action: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                         <Field label={copy.imagePrompt}><AutoResizeTextarea minRows={2} maxRows={7} value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        </div>}
                       </div>
-                    ))}
+                    })}
                   </div>
                 </section>
 
@@ -4034,14 +4180,16 @@ function LegacyNarrativeSkeletonJsonReview({
   );
 }
 
-function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, onSelect, onRetry }: {
+function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, selectingCandidateId = "", onSelect, onRetry, onRecheck }: {
   projectId: string;
   candidates: GenerationCandidate[];
   lang: "zh" | "en";
   loading: boolean;
   retrying?: boolean;
+  selectingCandidateId?: string;
   onSelect: (candidate: GenerationCandidate) => void;
   onRetry?: (retryInstruction: string) => void;
+  onRecheck?: (candidate: GenerationCandidate) => void;
 }) {
   const [previewCandidate, setPreviewCandidate] = useState<GenerationCandidate | null>(null);
   const [expandedIssueCandidateIds, setExpandedIssueCandidateIds] = useState<Set<string>>(() => new Set());
@@ -4246,8 +4394,19 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                     {lang === "zh" ? "摘要暂未生成，点击重试" : "Summary unavailable. Click to retry."}
                   </button>}
                 </div> : null}
-                {!technicalQualityFailure && !candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
-                  <Check className="h-3 w-3" />{lang === "zh" ? "人工采用" : "Use manually"}
+                {!candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
+                  {selectingCandidateId === candidate.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                  {selectingCandidateId === candidate.id
+                    ? (lang === "zh" ? "正在采用" : "Accepting")
+                    : technicalQualityFailure
+                    ? (lang === "zh" ? "人工采用这张原图" : "Use this original")
+                    : (lang === "zh" ? "人工采用" : "Use manually")}
+                </button> : null}
+                {technicalQualityFailure && candidate.mediaUrl && onRecheck ? <button type="button" disabled={loading || candidate.status === "evaluating"} onClick={() => onRecheck(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-amber-300/15 bg-amber-300/[0.04] text-[11px] text-amber-100/80 transition hover:border-amber-300/30 hover:bg-amber-300/[0.08] disabled:opacity-50">
+                  <RefreshCw className={`h-3 w-3 ${candidate.status === "evaluating" ? "animate-spin" : ""}`} />
+                  {candidate.status === "evaluating"
+                    ? (lang === "zh" ? "正在重新质检" : "Rechecking")
+                    : (lang === "zh" ? "重新质检原图" : "Recheck original")}
                 </button> : null}
                 {candidate.selected && <div className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-cyan-300/10 bg-cyan-300/[0.05] text-[11px] font-medium text-cyan-100/75"><Check className="h-3 w-3" />{lang === "zh" ? "正在使用" : "In use"}</div>}
                 {!technicalQualityFailure && report?.retryInstruction && onRetry ? <button type="button" disabled={loading} aria-busy={retrying} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
@@ -6141,10 +6300,20 @@ function hasRunningMicroShotImage(project: VideoProject): boolean {
 }
 
 function microShotImageProgress(project: VideoProject): { required: number; ready: number; running: number; failed: number; missing: number } {
-  const items = project.shots.flatMap((shot) => shot.microShots ?? []).filter((item) => item.referenceType === "image_prompt" || item.referenceType === "mixed");
-  const ready = items.filter((item) => Boolean(item.imageUrl)).length;
-  const running = items.filter((item) => item.imageStatus === "running" && Boolean(item.imageTaskId)).length;
-  const failed = items.filter((item) => item.imageStatus === "failed").length;
+  const items = project.shots.flatMap((shot) =>
+    (shot.microShots ?? [])
+      .filter((item) => item.referenceType === "image_prompt" || item.referenceType === "mixed")
+      .map((item) => {
+        const artifactId = `segment:${shot.shotNo}:micro_shot:${item.microShotNo}:image`;
+        const selectedCandidate = (project.generationCandidates ?? []).find((candidate) =>
+          candidate.artifactId === artifactId && candidate.selected && Boolean(candidate.mediaUrl)
+        );
+        return { item, ready: Boolean(item.imageUrl || selectedCandidate?.mediaUrl) };
+      })
+  );
+  const ready = items.filter((entry) => entry.ready).length;
+  const running = items.filter((entry) => !entry.ready && entry.item.imageStatus === "running" && Boolean(entry.item.imageTaskId)).length;
+  const failed = items.filter((entry) => !entry.ready && entry.item.imageStatus === "failed").length;
   return {
     required: items.length,
     ready,

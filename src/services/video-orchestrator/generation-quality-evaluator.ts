@@ -183,9 +183,9 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
     const metadata = await probeVideo(clipPath);
     const sampleTimes = sampleTimesForDuration(metadata.durationSeconds || params.durationSeconds);
     const frames = await Promise.all(sampleTimes.map(async (time, index) => {
-      const outputPath = path.join(workDir, `frame-${index}.jpg`);
+      const outputPath = path.join(workDir, `frame-${index}.png`);
       await extractFrame(clipPath, outputPath, time);
-      return `data:image/jpeg;base64,${(await readFile(outputPath)).toString("base64")}`;
+      return `data:image/png;base64,${(await readFile(outputPath)).toString("base64")}`;
     }));
     const content: Array<Record<string, unknown>> = [{
       type: "text",
@@ -221,7 +221,7 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
     await logOnePromptVideo("generation_quality.video_eval_failed", { assetId: params.assetId, candidateId: params.candidateId, message }, "error");
     return evaluationFailure(params, `视频多帧视觉质量评估失败：${message}`, "manual");
   } finally {
-    await rm(workDir, { recursive: true, force: true });
+    await removeWorkDir(workDir);
   }
 }
 
@@ -275,12 +275,12 @@ export async function extractVideoFrameDataUrls(mediaUrl: string, fractions = [0
     if (metadata.durationSeconds <= 0) throw new Error("Transition reference video has invalid duration metadata");
     const safeFractions = fractions.map((value) => Math.max(0, Math.min(0.98, value)));
     return Promise.all(safeFractions.map(async (fraction, index) => {
-      const outputPath = path.join(workDir, `candidate-${index + 1}.jpg`);
+      const outputPath = path.join(workDir, `candidate-${index + 1}.png`);
       await extractFrame(clipPath, outputPath, metadata.durationSeconds * fraction);
-      return { fraction, dataUrl: `data:image/jpeg;base64,${(await readFile(outputPath)).toString("base64")}` };
+      return { fraction, dataUrl: `data:image/png;base64,${(await readFile(outputPath)).toString("base64")}` };
     }));
   } finally {
-    await rm(workDir, { recursive: true, force: true });
+    await removeWorkDir(workDir);
   }
 }
 
@@ -579,9 +579,38 @@ function delay(ms: number): Promise<void> {
 }
 function sampleTimesForDuration(duration: number): number[] { const safe = Math.max(0.2, duration); return [0, safe * 0.25, safe * 0.5, safe * 0.75, Math.max(0, safe - 0.08)]; }
 async function probeVideo(inputPath: string): Promise<{ durationSeconds: number; width: number; height: number; frameRate: number }> { const output = await runCapture(process.env.FFPROBE_PATH?.trim() || "ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate:format=duration", "-of", "json", inputPath]); const data = JSON.parse(output) as Record<string, unknown>; const stream = Array.isArray(data.streams) ? record(data.streams[0]) : {}; const format = record(data.format); return { durationSeconds: Number(format.duration) || 0, width: Number(stream.width) || 0, height: Number(stream.height) || 0, frameRate: frameRate(stream.r_frame_rate) }; }
-async function extractFrame(inputPath: string, outputPath: string, time: number): Promise<void> { await runCapture(process.env.FFMPEG_PATH?.trim() || "ffmpeg", ["-y", "-ss", time.toFixed(3), "-i", inputPath, "-frames:v", "1", "-vf", "scale=1024:-2:force_original_aspect_ratio=decrease", "-q:v", "3", outputPath]); }
+async function extractFrame(inputPath: string, outputPath: string, time: number): Promise<void> {
+  await runCapture(process.env.FFMPEG_PATH?.trim() || "ffmpeg", [
+    "-y",
+    "-ss",
+    time.toFixed(3),
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=1024:-2:force_original_aspect_ratio=decrease,format=rgb24",
+    "-c:v",
+    "png",
+    "-threads",
+    "1",
+    outputPath,
+  ]);
+}
 async function download(url: string, outputPath: string): Promise<void> { const response = await fetch(url); if (!response.ok) throw new Error(`download failed HTTP ${response.status}`); await writeFile(outputPath, Buffer.from(await response.arrayBuffer())); }
 async function runCapture(command: string, args: string[]): Promise<string> { return new Promise((resolve, reject) => { const child = spawn(command, args, { windowsHide: true }); let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk) => { stdout += String(chunk); }); child.stderr.on("data", (chunk) => { stderr += String(chunk); }); child.on("error", reject); child.on("close", (code) => code === 0 ? resolve(stdout) : reject(new Error(`${command} exited ${code}: ${stderr.slice(-1600)}`))); }); }
+async function removeWorkDir(workDir: string): Promise<void> {
+  try {
+    await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+  } catch (error) {
+    // Windows antivirus/indexing can briefly retain an ffmpeg input handle.
+    // Cleanup must never overwrite an otherwise valid visual-evaluation result.
+    await logOnePromptVideo("generation_quality.cleanup_deferred", {
+      workDir,
+      message: error instanceof Error ? error.message : String(error),
+    }, "warn");
+  }
+}
 function qualityVisionEnabled(): boolean { if (process.env.ONE_PROMPT_GENERATION_QUALITY_VISION_EVAL?.trim().toLowerCase() === "false") return false; return Boolean(process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY); }
 function qualityVisionModel(): string { return process.env.ALIYUN_GENERATION_QUALITY_VISION_MODEL?.trim() || "qwen3.6-flash"; }
 function qualityTimeoutMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_TIMEOUT_MS); return Number.isFinite(value) && value >= 5000 ? Math.max(60000, Math.round(value)) : 90000; }

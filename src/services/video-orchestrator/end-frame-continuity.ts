@@ -25,23 +25,24 @@ export async function evaluateEndFrameContinuity(params: {
   }
   const workDir = path.join(os.tmpdir(), `one-prompt-end-check-${params.projectId}-${params.segmentNo}-${Date.now()}`);
   const clipPath = path.join(workDir, "clip.mp4");
-  const sampledPath = path.join(workDir, "last-frame.jpg");
+  const sampledPath = path.join(workDir, "last-frame.png");
   await mkdir(workDir, { recursive: true });
   try {
     await download(params.clipUrl, clipPath);
     await extractLastFrame(clipPath, sampledPath);
-    const sampledFrameDataUrl = `data:image/jpeg;base64,${(await readFile(sampledPath)).toString("base64")}`;
+    const sampledFrameDataUrl = `data:image/png;base64,${(await readFile(sampledPath)).toString("base64")}`;
     const content: Array<Record<string, unknown>> = [
       {
         type: "text",
         text: [
           "Compare the generated video's last sampled frame with the approved end-frame reference and ending-state contract.",
-          "The approved end frame is a soft semantic target, not a hard pixel-perfect requirement.",
+          "The approved end frame was compiled into the generator prompt as a mandatory terminal-state contract.",
+          "Do not require pixel-for-pixel identity, but treat failure to arrive at the same visible terminal state as a generation failure.",
           `Segment: ${params.segmentNo}`,
           `End-frame contract: ${JSON.stringify(params.endFrameContract ?? {})}`,
           `Motion contract: ${JSON.stringify(params.motionContract ?? {})}`,
           "Return strict JSON: similarityScore 0..1, motionReachability reachable|prompt_fixable|unreachable, reasons[], retryInstruction, passed.",
-          "passed=true only when identity, subject/product state, composition direction, location/layout, lighting intent and final action state are acceptably close.",
+          "passed=true only when identity, subject/product state, composition and camera direction, location/layout, lighting state and final action state all visibly match the approved terminal frame.",
           "Use unreachable only when the requested motion or state transition is structurally impossible in one continuous take; do not recommend blind retries in that case.",
         ].join("\n"),
       },
@@ -88,7 +89,15 @@ export async function evaluateEndFrameContinuity(params: {
     await logOnePromptVideo("clip.end_frame_continuity.failed", { projectId: params.projectId, segmentNo: params.segmentNo, message }, "error");
     return failure(`端帧视觉检查失败：${message}`, "Retry end-frame continuity evaluation after checking FFmpeg, media URL access, and the vision service; do not regenerate blindly.");
   } finally {
-    await rm(workDir, { recursive: true, force: true });
+    try {
+      await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch (error) {
+      await logOnePromptVideo("clip.end_frame_continuity.cleanup_deferred", {
+        projectId: params.projectId,
+        segmentNo: params.segmentNo,
+        message: error instanceof Error ? error.message : String(error),
+      }, "warn");
+    }
   }
 }
 
@@ -96,7 +105,7 @@ export function normalizeEndFrameContinuityResponse(value: unknown, sampledFrame
   const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const similarityScore = clamp01(Number(source.similarityScore ?? source.similarity_score));
   const reachability = String(source.motionReachability ?? source.motion_reachability ?? "").toLowerCase();
-  const passed = source.passed === true && similarityScore >= 0.72;
+  const passed = source.passed === true && similarityScore >= 0.8;
   const reasons = uniqueStrings(Array.isArray(source.reasons) ? source.reasons : []);
   const modelRetry = typeof source.retryInstruction === "string" ? source.retryInstruction.trim() : typeof source.retry_instruction === "string" ? source.retry_instruction.trim() : "";
   if (passed) return { decision: "pass", similarityScore, reasons, sampledFrameDataUrl };
@@ -120,7 +129,24 @@ export function normalizeEndFrameContinuityResponse(value: unknown, sampledFrame
 
 function failure(reason: string, retryInstruction: string): EndFrameContinuityResult { return { decision: "evaluation_failed", similarityScore: 0, reasons: [reason], retryInstruction }; }
 async function download(url: string, outputPath: string): Promise<void> { const response = await fetch(url); if (!response.ok) throw new Error(`download failed HTTP ${response.status}`); await writeFile(outputPath, Buffer.from(await response.arrayBuffer())); }
-async function extractLastFrame(inputPath: string, outputPath: string): Promise<void> { await run(process.env.FFMPEG_PATH?.trim() || "ffmpeg", ["-y", "-sseof", "-0.12", "-i", inputPath, "-frames:v", "1", "-q:v", "2", outputPath]); }
+async function extractLastFrame(inputPath: string, outputPath: string): Promise<void> {
+  await run(process.env.FFMPEG_PATH?.trim() || "ffmpeg", [
+    "-y",
+    "-sseof",
+    "-0.12",
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "format=rgb24",
+    "-c:v",
+    "png",
+    "-threads",
+    "1",
+    outputPath,
+  ]);
+}
 async function run(command: string, args: string[]): Promise<void> { await new Promise<void>((resolve, reject) => { const child = spawn(command, args, { windowsHide: true }); let stderr = ""; child.stderr.on("data", (chunk) => { stderr += String(chunk); }); child.on("error", reject); child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`${command} exited ${code}: ${stderr.slice(-1200)}`))); }); }
 function continuityVisionEnabled(): boolean { if (process.env.ONE_PROMPT_END_FRAME_VISION_EVAL?.trim().toLowerCase() === "false") return false; return Boolean(process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY); }
 function continuityTimeoutMs(): number { const value = Number(process.env.ONE_PROMPT_END_FRAME_VISION_TIMEOUT_MS); return Number.isFinite(value) && value >= 5000 ? Math.round(value) : 45000; }

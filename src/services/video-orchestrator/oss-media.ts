@@ -58,7 +58,11 @@ export async function persistRemoteMediaToOss(params: {
   if (body.byteLength > MAX_REMOTE_MEDIA_BYTES) {
     throw new Error(`Remote media too large: ${body.byteLength}`);
   }
-  const contentType = res.headers.get("content-type") ?? params.fallbackContentType ?? contentTypeFromKey(params.key);
+  const contentType = (res.headers.get("content-type") ?? params.fallbackContentType ?? contentTypeFromKey(params.key))
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  const resolvedKey = mediaKeyMatchingContentType(params.key, contentType);
   const client = new S3Client({
     region: cfg.region,
     ...(cfg.endpoint ? { endpoint: cfg.endpoint } : {}),
@@ -71,12 +75,28 @@ export async function persistRemoteMediaToOss(params: {
   });
   await client.send(new PutObjectCommand({
     Bucket: cfg.bucket,
-    Key: params.key,
+    Key: resolvedKey,
     Body: body,
     ContentLength: body.length,
     ContentType: contentType,
   }));
-  return buildPublicUrl(cfg.publicDomain, params.key);
+  return buildPublicUrl(cfg.publicDomain, resolvedKey);
+}
+
+export function mediaKeyMatchingContentType(key: string, contentType: string): string {
+  const extension = contentType === "image/png"
+    ? ".png"
+    : contentType === "image/webp"
+      ? ".webp"
+      : contentType === "image/gif"
+        ? ".gif"
+        : contentType === "image/jpeg" || contentType === "image/jpg"
+          ? ".jpg"
+          : "";
+  if (!extension) return key;
+  return /\.[a-z0-9]+$/i.test(key)
+    ? key.replace(/\.[a-z0-9]+$/i, extension)
+    : `${key}${extension}`;
 }
 
 function readOssConfig(): OssConfig {

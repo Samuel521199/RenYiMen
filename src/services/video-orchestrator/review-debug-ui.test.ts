@@ -7,6 +7,10 @@ const pageSource = readFileSync(
   path.join(process.cwd(), "src/app/(platform)/workbench/workflows/one-prompt-video/page.tsx"),
   "utf8",
 );
+const projectServiceSource = readFileSync(
+  path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"),
+  "utf8",
+);
 
 test("three-view review keeps independent cards and front-view generation gating without debug decorations", () => {
   assert.match(pageSource, /orderedAssetKeyframes\.map\(\(keyframe\)/);
@@ -53,6 +57,19 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.doesNotMatch(picker, /bg-cyan-400 text-slate-950/);
   assert.match(picker, /report\.retryInstruction/);
   assert.match(picker, /onRetry\(report\.retryInstruction!/);
+  assert.match(picker, /onRecheck\(candidate\)/);
+  assert.match(picker, /人工采用这张原图/);
+  assert.match(pageSource, /已采用这张原图；还有/);
+  assert.match(pageSource, /res\.project\.status === "CLIP_GENERATING"/);
+  assert.match(pageSource, /正在采用候选并保存，请稍候/);
+  assert.match(pageSource, /signal: selectionController\.signal/);
+  assert.match(pageSource, /candidateSelectionAbortControllerRef\.current\?\.abort\(\)/);
+  assert.match(picker, /selectingCandidateId === candidate\.id/);
+  assert.match(picker, /重新质检原图/);
+  assert.doesNotMatch(picker, /!technicalQualityFailure && !candidate\.selected && candidate\.mediaUrl/);
+  assert.doesNotMatch(pageSource, /adoptAvailableMicroShotsAndContinue/);
+  assert.doesNotMatch(pageSource, /采用现有最佳原图并继续/);
+  assert.match(pageSource, /const acceptFailed = candidate\.passed !== true/);
   assert.match(picker, /identityScore/);
   assert.match(picker, /singleTakeScore/);
   assert.match(picker, /repeat\(auto-fill,minmax\(9\.5rem,1fr\)\)/);
@@ -135,6 +152,57 @@ test("double-clicking a shot card opens the existing shot editor", () => {
   assert.match(pageSource, /function openShotEditor\(shotId: string\) \{\s*selectShot\(shotId\);\s*setShotEditorOpen\(true\);/);
 });
 
+test("micro-shot editors are collapsed by default and expand one item on demand", () => {
+  assert.match(pageSource, /useState<Set<string>>\(\(\) => new Set\(\)\)/);
+  assert.match(pageSource, /toggleMicroShotExpanded/);
+  assert.match(pageSource, /`detail:\$\{selectedShot\.id\}:\$\{item\.microShotNo\}:\$\{index\}`/);
+  assert.match(pageSource, /`modal:\$\{selectedShot\.id\}:\$\{item\.microShotNo\}:\$\{index\}`/);
+  assert.match(pageSource, /aria-expanded=\{expanded\}/);
+  assert.match(pageSource, /\{expanded && <div className="space-y-2 p-3 pt-2">/);
+  assert.match(pageSource, /expanded \? "xl:col-span-2" : ""/);
+  assert.equal(
+    [...pageSource.matchAll(/sticky top-0 z-30 flex items-center justify-between gap-2 rounded-t-md/g)].length,
+    2,
+  );
+  assert.match(pageSource, /function confirmRemoveDraftMicroShot/);
+  assert.match(pageSource, /确定删除\$\{label\}吗/);
+  assert.equal([...pageSource.matchAll(/onClick=\{\(\) => confirmRemoveDraftMicroShot\(index\)\}/g)].length, 2);
+  assert.equal([...pageSource.matchAll(/<Trash2 className="h-3\.5 w-3\.5" \/>/g)].length >= 2, true);
+  assert.match(pageSource, /点击“保存镜头”后生效/);
+  const removeDraft = pageSource.slice(
+    pageSource.indexOf("function removeDraftMicroShot"),
+    pageSource.indexOf("function confirmRemoveDraftMicroShot"),
+  );
+  assert.match(removeDraft, /\.filter\(\(_, itemIndex\) => itemIndex !== index\)/);
+  assert.doesNotMatch(removeDraft, /\.map\(\(item, itemIndex\)/);
+  assert.match(pageSource, /const nextMicroShotNo = Math\.max\(0, \.\.\.items\.map/);
+  assert.match(pageSource, /microShots: \(\(draft\.microShots[\s\S]{0,180}\.map\(\(item, itemIndex\) => \(\{ \.\.\.item, microShotNo: itemIndex \+ 1 \}\)\)/);
+  assert.equal([...pageSource.matchAll(/String\(item\.microShotNo\)\.padStart\(2, "0"\)/g)].length >= 3, true);
+  assert.match(pageSource, /micro-shots\/\$\{microShot\.microShotNo\}\/image/);
+  assert.match(pageSource, /\}, \[selectedShot\?\.id, pageLang\]\);/);
+  assert.match(pageSource, /const savedShot = res\.project\.shots\.find/);
+});
+
+test("late candidate updates cannot recreate a micro-shot deleted by the user", () => {
+  const updateCollection = projectServiceSource.slice(
+    projectServiceSource.indexOf("function updatePlanMicroShotCollection"),
+    projectServiceSource.indexOf("async function syncPlanJsonFromShots"),
+  );
+  assert.doesNotMatch(updateCollection, /nextMicroShots\.push/);
+  assert.match(updateCollection, /must never recreate an item that the user removed/);
+  assert.match(projectServiceSource, /localizedUpdate\?\.shotId === shot\.id && Array\.isArray\(localizedUpdate\.microShots\)/);
+  assert.match(projectServiceSource, /previousMicroShots\.length !== input\.microShots\.length/);
+  assert.match(projectServiceSource, /videoGenerationCandidate\.deleteMany/);
+});
+
+test("selected micro-shot candidates count as ready across serialization, progress and approval", () => {
+  assert.match(projectServiceSource, /const selectedMicroShotCandidates = new Map/);
+  assert.match(projectServiceSource, /hasSelectedCandidate/);
+  assert.match(projectServiceSource, /selectedArtifactIds\.has\(imageArtifactIdForMicroShot/);
+  assert.match(pageSource, /candidate\.artifactId === artifactId && candidate\.selected && Boolean\(candidate\.mediaUrl\)/);
+  assert.match(pageSource, /Boolean\(item\.imageUrl \|\| selectedCandidate\?\.mediaUrl\)/);
+});
+
 test("candidate issue summary stays compact and loads localized copy without blocking generation", () => {
   const picker = pageSource.slice(
     pageSource.indexOf("function GenerationCandidatePicker"),
@@ -180,6 +248,27 @@ test("text undo and media rollback remain available", () => {
   assert.match(pageSource, /onUndo=\{\(\) => undoShotField/);
   assert.match(pageSource, /rollbackMedia\("keyframe_image"/);
   assert.match(pageSource, /rollbackMedia\("segment_clip"/);
+});
+
+test("stage rollback remains actionable while another request is stuck and cancels later-stage work", () => {
+  const serviceSource = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(pageSource, /const \[rollingBackTarget, setRollingBackTarget\]/);
+  assert.match(pageSource, /disabled=\{Boolean\(rollingBackTarget\)\}/);
+  assert.match(pageSource, /回退中/);
+  assert.match(pageSource, /signal: AbortSignal\.timeout\(30_000\)/);
+  assert.match(serviceSource, /Cancelled by rollback to \$\{target\}/);
+  assert.match(serviceSource, /target === "IMAGE_REVIEW"[\s\S]{0,180}\["micro_shot_image", "segment_video"\]/);
+  assert.match(serviceSource, /cancelledCandidateCount: rollbackResult\.cancelledCandidateCount/);
+  const boundaryRollback = serviceSource.slice(
+    serviceSource.indexOf('} else if (target === "IMAGE_REVIEW")'),
+    serviceSource.indexOf('} else if (target === "MICRO_SHOT_REVIEW")'),
+  );
+  assert.match(boundaryRollback, /keyframeNo: \{ lt: 0 \}[\s\S]{0,220}status: VideoShotStatus\.IMAGE_APPROVED/);
+  assert.match(boundaryRollback, /keyframeNo: \{ gt: 0 \}[\s\S]{0,220}status: VideoShotStatus\.IMAGE_READY/);
+  assert.match(boundaryRollback, /rollbackPlanToBoundaryReview/);
+  assert.match(serviceSource, /setPlanArtifactStatus\(plan, assetArtifactIds, "approved"/);
+  assert.match(serviceSource, /setPlanArtifactStatus\(plan, boundaryArtifactIds, "ready"/);
+  assert.match(serviceSource, /repairingCurrentBoundaryReview/);
 });
 
 test("stopping generation requires explicit user and API confirmation", () => {
