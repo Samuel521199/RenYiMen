@@ -78,7 +78,7 @@ test("resume and regeneration preserve active media until explicit candidate sel
   const imageRegeneration = source.slice(source.indexOf("export async function regenerateShotImage"), source.indexOf("export async function regenerateMicroShotImage"));
   const clipRegeneration = source.slice(source.indexOf("export async function regenerateShotClip"), source.indexOf("export async function rollbackVideoMedia"));
   assert.match(source, /isRegeneration: Boolean\(keyframe\.imageUrl\)/);
-  assert.match(source, /status: "recommended"/);
+  assert.match(source, /selected: true, status: "selected"/);
   assert.match(source, /running tasks are synchronized instead of resubmitted/);
   assert.match(source, /!item\.userAccepted/);
   assert.doesNotMatch(imageRegeneration, /imageUrl: null/);

@@ -8,6 +8,8 @@ const MAX_BYTES_IMAGE = 25 * 1024 * 1024;
 /** 视频结果通常大于单张图；仍由服务端一次性缓冲，超大文件可后续改为流式透传。 */
 const MAX_BYTES_VIDEO = 200 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 45_000;
+const IMAGE_PREVIEW_CACHE_CONTROL = "private, max-age=604800, stale-while-revalidate=86400, immutable";
+const NO_STORE_CACHE_CONTROL = "private, no-store";
 
 function isBlockedHostname(hostname: string): boolean {
   const h = hostname.toLowerCase();
@@ -43,7 +45,7 @@ export async function GET(req: Request) {
   }
 
   const mediaKindRaw = searchParams.get("mediaKind")?.trim().toLowerCase() ?? "image";
-  return proxyExternalMedia(url, mediaKindRaw);
+  return proxyExternalMedia(url, mediaKindRaw, { cachePreview: mediaKindRaw !== "video" });
 }
 
 /**
@@ -71,12 +73,19 @@ export async function POST(req: Request) {
   }
 
   const mediaKindRaw = typeof rec?.mediaKind === "string" ? rec.mediaKind.trim().toLowerCase() : "image";
-  return proxyExternalMedia(url, mediaKindRaw);
+  return proxyExternalMedia(url, mediaKindRaw, { cachePreview: false });
 }
 
-async function proxyExternalMedia(url: string, mediaKindRaw: string) {
+async function proxyExternalMedia(
+  url: string,
+  mediaKindRaw: string,
+  options: { cachePreview: boolean },
+) {
   const isVideo = mediaKindRaw === "video";
   const maxBytes = isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
+  const cacheControl = options.cachePreview && !isVideo
+    ? IMAGE_PREVIEW_CACHE_CONTROL
+    : NO_STORE_CACHE_CONTROL;
 
   // ── data: URI（如 gpt-image-2 的 b64_json 结果）直接解码返回 ────────────
   if (url.startsWith("data:")) {
@@ -103,7 +112,8 @@ async function proxyExternalMedia(url: string, mediaKindRaw: string) {
       status: 200,
       headers: {
         "Content-Type": contentType || "image/png",
-        "Cache-Control": "no-store",
+        "Cache-Control": cacheControl,
+        "X-Content-Type-Options": "nosniff",
       },
     });
   }
@@ -158,7 +168,8 @@ async function proxyExternalMedia(url: string, mediaKindRaw: string) {
       status: 200,
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": "no-store",
+        "Cache-Control": cacheControl,
+        "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (e) {

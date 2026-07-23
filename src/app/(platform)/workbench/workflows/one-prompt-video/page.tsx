@@ -267,6 +267,7 @@ interface GenerationCandidate {
   retryInstruction?: string | null;
   qualityReport?: GenerationQualityReport | null;
   metadata?: { segmentNo?: number; microShotNo?: number; [key: string]: unknown } | null;
+  createdAt?: string;
 }
 
 interface PlanDebugData {
@@ -479,6 +480,32 @@ interface GenerationQualityReport {
   contentBased?: boolean;
   userAccepted?: boolean;
   wrongTextDetected?: boolean;
+  correctionActions?: Array<{
+    region: string;
+    element: string;
+    observed: string;
+    target: string;
+    instruction: string;
+    priority?: "required" | "recommended";
+    sourceConstraint?: string;
+    preserve?: string[];
+  }>;
+  contractConflicts?: string[];
+  qualityDecision?: "pass" | "recommended" | "retry" | "blocked";
+  resolvedIssueIds?: string[];
+  openHardIssueIds?: string[];
+  softSuggestions?: string[];
+  issueLedger?: Array<{
+    issueId: string;
+    summary: string;
+    category?: string;
+    region?: string;
+    target?: string;
+    severity: "hard" | "soft" | "advisory";
+    applicableStage: "static_image" | "video";
+    status: "open" | "resolved" | "regressed" | "invalid_for_stage";
+    occurrenceCount?: number;
+  }>;
   retryInstruction?: string;
 }
 
@@ -520,6 +547,7 @@ type Copy = {
   generatePlan: string;
   generating: string;
   stopGeneration: string;
+  stopGenerationConfirm: string;
   stoppingGeneration: string;
   generationStopped: string;
   resumeGeneration: string;
@@ -658,6 +686,7 @@ const TEXT: Record<PageLang, Copy> = {
     generatePlan: "\u751f\u6210\u5206\u955c\u8ba1\u5212",
     generating: "\u751f\u6210\u4e2d",
     stopGeneration: "\u505c\u6b62\u751f\u6210",
+    stopGenerationConfirm: "\u786e\u5b9a\u8981\u505c\u6b62\u5f53\u524d\u751f\u6210\u5417\uff1f\u5df2\u5b8c\u6210\u7684\u5185\u5bb9\u4f1a\u4fdd\u7559\u3002",
     stoppingGeneration: "停止中",
     generationStopped: "已停止生成",
     resumeGeneration: "\u7ee7\u7eed\u751f\u6210",
@@ -837,6 +866,7 @@ const TEXT: Record<PageLang, Copy> = {
     generatePlan: "Generate plan",
     generating: "Generating",
     stopGeneration: "Stop generation",
+    stopGenerationConfirm: "Stop the current generation? Completed work will be preserved.",
     stoppingGeneration: "Stopping",
     generationStopped: "Generation stopped",
     resumeGeneration: "Resume generation",
@@ -1035,6 +1065,88 @@ function isManualStopError(errorMessage?: string | null): boolean {
 
 function isManualStopProject(project?: Pick<VideoProject, "status" | "errorMessage"> | null): boolean {
   return Boolean(project && project.status === "FAILED" && isManualStopError(project.errorMessage));
+}
+
+function localizeWorkflowError(message: string, lang: PageLang): string {
+  const normalized = message.trim();
+  if (!normalized) return "";
+
+  const transitionMatch = normalized.match(/Required transition scene-layout reference was not selected:\s*transition_reference:camera_(\d+):(\d+)/i);
+  if (transitionMatch) {
+    const cameraNo = String(Number(transitionMatch[1])).padStart(2, "0");
+    const segmentNo = Number(transitionMatch[2]);
+    return lang === "zh"
+      ? `继续生成前，请先为机位 ${cameraNo} 选择并确认场景布局参考图（第 ${segmentNo} 段）。`
+      : `Before continuing, select and confirm the scene-layout reference for camera ${cameraNo} (segment ${segmentNo}).`;
+  }
+
+  const isQualityFailure = normalized.includes("画面质检未通过")
+    || normalized.startsWith("画面质检发现")
+    || /visual quality (?:check|evaluation).*(?:failed|did not pass)/i.test(normalized);
+  if (isQualityFailure) {
+    const isBudgetExhausted = normalized.includes("自动重试预算已用完") || /automatic retr(?:y|ies).*(?:budget|exhausted)/i.test(normalized);
+    const summary = lang === "zh"
+      ? isBudgetExhausted
+        ? "画面质量未通过，并且当前版本链的自动重试预算确实已经用完。请查看候选图，然后重新生成或手动采用合适的结果。"
+        : normalized.startsWith("画面质检发现经编译器确认的提示合同冲突")
+          ? "画面质量检查发现了经编译器确认的生成要求冲突，系统已暂停继续抽图，请先修正生成要求。"
+          : normalized.startsWith("画面质检发现镜头结构或叙事状态不可达")
+            ? "当前镜头结构或叙事状态无法通过单纯重抽解决，请先调整分镜结构。"
+            : "画面质量检查未能可靠完成，自动生成已暂停，请查看诊断后重试。"
+      : isBudgetExhausted
+        ? "Visual quality checks did not pass, and this revision chain has exhausted its automatic retry budget. Review the candidates, then regenerate or accept a suitable result manually."
+        : normalized.startsWith("画面质检发现经编译器确认的提示合同冲突")
+          ? "A compiler-verified generation-contract conflict paused further attempts. Correct the generation contract first."
+          : normalized.startsWith("画面质检发现镜头结构或叙事状态不可达")
+            ? "The shot structure or narrative state is unreachable by redrawing alone. Revise the storyboard structure first."
+            : "Visual quality evaluation could not complete reliably. Automatic generation is paused; review the diagnosis and retry.";
+    if (lang === "en") {
+      const englishDetails = normalized.match(/(?:Game interface|Lighting appears|Character is|Image is|The (?:image|character|background|layout|lighting))[^\u3400-\u9fff]+$/i)?.[0]?.trim();
+      return englishDetails ? `${summary} ${englishDetails}` : summary;
+    }
+    const details: string[] = [];
+    if (/timer shows ['"]?0:0|score is ['"]?100/i.test(normalized)) {
+      details.push("游戏界面的计时器显示为“0:0”，但分数为“100”，画面状态可能存在重置或异常。");
+    }
+    if (/lighting appears.*brighter|slightly dimmed lighting/i.test(normalized)) {
+      details.push("画面光线比要求略亮，削弱了紧张氛围。");
+    }
+    return [summary, ...details].join(" ");
+  }
+
+  if (lang === "zh") {
+    if (/rate limit|too many requests/i.test(normalized)) return "当前生成请求较多，请稍后再试。";
+    if (/timeout|timed out/i.test(normalized)) return "生成服务响应超时，请稍后重试。";
+    if (/fetch failed|network/i.test(normalized)) return "网络连接异常，请检查连接后重试。";
+    if (!/[\u3400-\u9fff]/u.test(normalized)) return "生成失败，请稍后重试；如果问题持续，请查看任务日志。";
+    if (/[A-Za-z]{3,}/.test(normalized)) return "生成过程中遇到问题，请检查当前阶段的内容后重试。";
+    return normalized;
+  }
+
+  if (/[\u3400-\u9fff]/u.test(normalized)) {
+    if (normalized.includes("等待上一张")) return "The next reference frame is waiting for the previous selected image to pass quality review or be accepted manually.";
+    return "Generation failed. Please retry; if the problem persists, check the task logs for technical details.";
+  }
+  return normalized;
+}
+
+function localizeQualityIssue(issue: string, lang: PageLang): string {
+  const normalized = issue.trim();
+  if (!normalized) return "";
+  if (lang === "en") {
+    return /[\u3400-\u9fff]/u.test(normalized)
+      ? "An additional visual quality issue was detected."
+      : normalized;
+  }
+  if (/[\u3400-\u9fff]/u.test(normalized)) return normalized;
+  if (/timer shows ['"]?0:0|score is ['"]?100/i.test(normalized)) return "游戏计时器与分数显示可能存在状态异常。";
+  if (/lighting appears.*brighter|slightly dimmed lighting/i.test(normalized)) return "画面光线比要求略亮，削弱了紧张氛围。";
+  if (/cropped|missing full-body|full-body view/i.test(normalized)) return "人物构图不完整，未按要求展示完整身体。";
+  if (/wrong text|typography|caption|watermark/i.test(normalized)) return "画面中存在不符合要求的文字或排版。";
+  if (/hand|finger|face.*deform|body.*deform/i.test(normalized)) return "人物肢体或面部存在形态异常。";
+  if (/identity|character consistency/i.test(normalized)) return "人物身份或外观一致性不足。";
+  if (/layout|composition|background/i.test(normalized)) return "画面布局、构图或背景与要求存在偏差。";
+  return "检测到其他画面质量问题。";
 }
 
 function shotStatusLabel(status: ShotStatus, errorMessage: string | null | undefined, copy: Copy): string {
@@ -1244,6 +1356,20 @@ export default function OnePromptVideoPage() {
       : workflowProgress?.tone === "success"
         ? "border-emerald-400/25 bg-emerald-400/10"
         : "border-cyan-400/25 bg-cyan-400/10";
+  const generationRecoveryActive = Boolean(
+    project && (
+      generationProjectId === project.id ||
+      optimisticProgress?.active ||
+      RUNNING_PROJECT_STATUSES.includes(project.status) ||
+      project.plannerProgress?.status === "queued" ||
+      project.plannerProgress?.status === "running"
+    ),
+  );
+  const visibleProjectError = project?.errorMessage && !isManualStopProject(project) && !generationRecoveryActive
+    ? project.errorMessage
+    : null;
+  const localizedActionError = error ? localizeWorkflowError(error, pageLang) : null;
+  const localizedProjectError = visibleProjectError ? localizeWorkflowError(visibleProjectError, pageLang) : null;
 
   useEffect(() => {
     setPrompt((current) => (DEFAULT_PROMPTS.includes(current) ? copy.defaultPrompt : current));
@@ -1705,16 +1831,30 @@ export default function OnePromptVideoPage() {
     }
   }
 
-  async function stopGeneration() {
+  async function stopGeneration(event: { isTrusted: boolean }) {
+    // Reject synthetic/programmatic clicks. A stop must originate from a real
+    // browser interaction and then pass the explicit confirmation dialog.
+    if (!event.isTrusted) return;
     const projectId = project?.id || generationProjectId || "";
     if (!projectId) return;
+    if (typeof window !== "undefined" && !window.confirm(copy.stopGenerationConfirm)) return;
+    const cancelIntentId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setStoppingGeneration(true);
     if (generationProjectId === projectId) generationAbortController?.abort();
     setOptimisticProgress(null);
     setPlanningProjectIds((current) => current.filter((id) => id !== projectId));
     try {
       if (projectId) {
-        const res = await fetchJson(`/api/video-projects/${projectId}/cancel`, copy, { method: "POST" });
+        const res = await fetchJson(`/api/video-projects/${projectId}/cancel`, copy, {
+          method: "POST",
+          body: JSON.stringify({
+            confirmation: "stop-generation",
+            cancelIntentId,
+            confirmedAt: new Date().toISOString(),
+          }),
+        });
         if (res.project) {
           rememberProject(res.project);
           if (project?.id === res.project.id || selectedProjectId === res.project.id || generationProjectId === res.project.id) activateProject(res.project);
@@ -2138,7 +2278,10 @@ export default function OnePromptVideoPage() {
       });
       if (!res.project) throw new Error(copy.actionFailed);
       rememberProject(res.project);
-      setMessage(pageLang === "zh" ? "已切换生成候选" : "Generation candidate selected");
+      const hasMoreBoundaryFrames = candidate.kind === "keyframe_image" && (res.project.keyframes ?? []).some((item: VideoKeyframe) => item.keyframeNo > 0 && !item.imageUrl);
+      setMessage(hasMoreBoundaryFrames
+        ? (pageLang === "zh" ? "已采用该画面，正在自动生成下一帧" : "Image accepted; generating the next frame automatically")
+        : (pageLang === "zh" ? "已切换生成候选" : "Generation candidate selected"));
     });
   }
 
@@ -2578,10 +2721,10 @@ export default function OnePromptVideoPage() {
           </section>
         )}
 
-        {(error || (project?.errorMessage && !isManualStopProject(project))) && (
+        {(error || visibleProjectError) && (
           <div className="rounded-md border border-white/10 bg-slate-900 px-4 py-3 text-sm">
-            {error && <p className="text-red-300">{error}</p>}
-            {project?.errorMessage && project.errorMessage !== error && !isManualStopProject(project) && <p className="text-amber-300">{project.errorMessage}</p>}
+            {localizedActionError && <p className="text-red-300">{localizedActionError}</p>}
+            {localizedProjectError && visibleProjectError !== error && <p className="text-amber-300">{localizedProjectError}</p>}
           </div>
         )}
 
@@ -2674,7 +2817,7 @@ export default function OnePromptVideoPage() {
                   dirtyArtifacts={currentDirtyArtifacts}
                   qualityReports={currentQualityReports}
                   selectedSegmentDescription={debugContext.segmentDescription}
-                  projectError={project.errorMessage}
+                  projectError={localizedProjectError}
                   loading={loading}
                 />
               )}
@@ -3340,7 +3483,7 @@ export default function OnePromptVideoPage() {
                                 <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>
                               )}
                               {item.imageStatus === "failed" && (
-                                <p className="text-xs text-rose-200">{item.errorMessage || copy.microShotImageFailed}</p>
+                                <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>
                               )}
                               <GenerationCandidatePicker candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
                               {item.imageUrl && (
@@ -3637,7 +3780,7 @@ export default function OnePromptVideoPage() {
                               </button>
                             </div>
                             {item.imageStatus === "running" && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
-                            {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage || copy.microShotImageFailed}</p>}
+                            {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>}
                             <GenerationCandidatePicker candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} />
                             {item.imageUrl && (
                               <button
@@ -3691,9 +3834,12 @@ export default function OnePromptVideoPage() {
               </button>
             </div>
             <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <div className="flex min-h-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black">
-                <img src={previewImageSrc(previewKeyframe.imageUrl)} alt={safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)} className="max-h-[78vh] max-w-full object-contain" />
-              </div>
+              <ZoomableImage
+                src={previewImageSrc(previewKeyframe.imageUrl)}
+                alt={safeBoundaryFrameLabel(previewKeyframe, previewTotalDuration, pageLang)}
+                lang={pageLang}
+                className="h-[78vh]"
+              />
               <aside className="subtle-scrollbar max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
                 <p className="text-xs font-medium text-slate-500">{copy.imagePrompt}</p>
                 <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{localizedKeyframeImagePrompt(previewKeyframe, pageLang)}</p>
@@ -3723,9 +3869,7 @@ export default function OnePromptVideoPage() {
               </button>
             </div>
             <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-              <div className="flex min-h-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-black">
-                <img src={previewImageSrc(previewMicroShot.imageUrl)} alt={previewMicroShot.title} className="max-h-[78vh] max-w-full object-contain" />
-              </div>
+              <ZoomableImage src={previewImageSrc(previewMicroShot.imageUrl)} alt={previewMicroShot.title} lang={pageLang} className="h-[78vh]" />
               <aside className="subtle-scrollbar max-h-[78vh] overflow-y-auto rounded-md border border-white/10 bg-slate-950/95 p-3">
                 <p className="text-xs font-medium text-slate-500">{copy.imagePrompt}</p>
                 <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{previewMicroShot.imagePrompt}</p>
@@ -3816,52 +3960,262 @@ function GenerationCandidatePicker({ candidates, lang, loading, onSelect, onRetr
   onSelect: (candidate: GenerationCandidate) => void;
   onRetry?: (retryInstruction: string) => void;
 }) {
+  const [previewCandidate, setPreviewCandidate] = useState<GenerationCandidate | null>(null);
+  const [expandedIssueCandidateIds, setExpandedIssueCandidateIds] = useState<Set<string>>(() => new Set());
+  const candidateOrdinals = useMemo(() => {
+    const fallbackOrder = new Map(candidates.map((candidate, index) => [candidate.id, candidates.length - index]));
+    const chronological = [...candidates].sort((a, b) => {
+      const aTime = a.createdAt ? Date.parse(a.createdAt) : Number.NaN;
+      const bTime = b.createdAt ? Date.parse(b.createdAt) : Number.NaN;
+      if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return aTime - bTime;
+      return (fallbackOrder.get(a.id) ?? 0) - (fallbackOrder.get(b.id) ?? 0);
+    });
+    return new Map(chronological.map((candidate, index) => [candidate.id, index + 1]));
+  }, [candidates]);
+  const previewCandidateNo = previewCandidate ? candidateOrdinals.get(previewCandidate.id) ?? previewCandidate.candidateNo : 0;
+
+  useEffect(() => {
+    if (!previewCandidate) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewCandidate(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewCandidate]);
+
   if (!candidates.length) return null;
   return (
-    <div className="space-y-2 rounded-md border border-cyan-400/15 bg-cyan-400/[0.03] p-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs font-semibold text-cyan-100">{lang === "zh" ? "生成候选与质量择优" : "Generation candidates and quality"}</p>
-        <span className="text-[11px] text-slate-500">{lang === "zh" ? "系统择优，用户可改选" : "Auto-selected; manual override available"}</span>
+    <>
+    <div className="space-y-3 rounded-xl border border-white/[0.08] bg-slate-950/45 p-3 shadow-[0_18px_50px_rgba(2,6,23,0.18)]">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
+        <div>
+          <p className="text-xs font-semibold tracking-wide text-slate-100">{lang === "zh" ? "候选版本" : "Candidate versions"}</p>
+          <p className="mt-1 text-[11px] text-slate-500">{lang === "zh" ? "已按画面质量排序，你可以随时改选" : "Ranked by visual quality; you can switch anytime"}</p>
+        </div>
+        <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.07] px-2.5 py-1 text-[10px] font-medium text-cyan-100/80">
+          {lang === "zh" ? `${candidates.length} 个版本` : `${candidates.length} versions`}
+        </span>
       </div>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(6.75rem,1fr))] gap-2">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-2.5">
         {candidates.map((candidate) => {
           const report = candidate.qualityReport;
           const isVideo = candidate.kind === "segment_video";
+          const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
           const statusText = candidate.userAccepted && candidate.passed === false
-            ? (lang === "zh" ? "系统未通过 · 用户接受" : "System failed · user accepted")
+            ? (lang === "zh" ? "系统未通过 · 人工保留" : "System failed · kept manually")
             : candidate.passed === true
-              ? (lang === "zh" ? "系统通过" : "System passed")
+              ? (lang === "zh" ? "质检通过" : "Quality passed")
               : candidate.passed === false
                 ? (lang === "zh" ? "系统未通过" : "System failed")
-                : candidate.selected ? (lang === "zh" ? "当前候选" : "Selected") : candidate.status;
+                : candidate.selected ? (lang === "zh" ? "当前采用" : "Selected") : candidate.status;
+          const statusClass = candidate.userAccepted && candidate.passed === false
+            ? "border-violet-300/15 bg-violet-300/10 text-violet-100"
+            : candidate.passed === true
+              ? "border-emerald-300/15 bg-emerald-300/10 text-emerald-100"
+              : candidate.passed === false
+                ? "border-rose-300/15 bg-rose-300/[0.08] text-rose-100/85"
+                : "border-white/10 bg-white/[0.04] text-slate-400";
+          const qualityMetrics = report ? [
+            [lang === "zh" ? "身份" : "Identity", report.identityScore],
+            [lang === "zh" ? "构图" : "Layout", report.layoutScore],
+            [lang === "zh" ? "提示" : "Prompt", report.promptAlignmentScore],
+            [lang === "zh" ? "连续" : "Continuity", report.continuityScore],
+          ] as const : [];
+          const issueLedger = report?.issueLedger ?? [];
+          const resolvedIssues = issueLedger.filter((issue) => issue.status === "resolved");
+          const openIssues = issueLedger.filter((issue) => issue.status === "open" || issue.status === "regressed");
+          const deferredIssues = issueLedger.filter((issue) => issue.status === "invalid_for_stage");
+          const issueDetailsExpanded = expandedIssueCandidateIds.has(candidate.id);
           return (
-            <div key={candidate.id} className={`overflow-hidden rounded-md border ${candidate.selected ? "border-emerald-400/60" : candidate.passed === false ? "border-rose-400/20" : "border-white/10"} bg-slate-950/70`}>
-              <div className="aspect-[9/12] bg-black/30">
+            <div key={candidate.id} className={`group/card overflow-hidden rounded-lg border bg-slate-950/75 transition duration-200 ${candidate.selected ? "border-cyan-300/50 shadow-[0_0_0_1px_rgba(103,232,249,0.08),0_12px_30px_rgba(8,145,178,0.08)]" : "border-white/[0.09] hover:border-white/20"}`}>
+              <div className="relative aspect-[4/5] overflow-hidden bg-black/25">
                 {candidate.mediaUrl ? (isVideo
                   ? <video src={candidate.mediaUrl} controls playsInline preload="metadata" className="h-full w-full object-contain" />
-                  : <img src={previewImageSrc(candidate.mediaUrl)} alt={`candidate ${candidate.candidateNo}`} className="h-full w-full object-contain" />
-                ) : <div className="flex h-full items-center justify-center text-xs text-slate-600">{candidate.status}</div>}
-              </div>
-              <div className="space-y-1.5 p-2">
-                <div className="flex items-center justify-between gap-2 text-[11px]">
-                  <span className="text-slate-300">#{candidate.candidateNo} · {candidate.compositeScore == null ? "—" : candidate.compositeScore.toFixed(1)}</span>
-                  <span className={candidate.passed === true ? "text-emerald-300" : candidate.passed === false ? "text-amber-300" : "text-slate-500"}>{statusText}</span>
+                  : <button
+                      type="button"
+                      onClick={() => setPreviewCandidate(candidate)}
+                      title={lang === "zh" ? "点击查看大图" : "Click to enlarge"}
+                      aria-label={lang === "zh" ? `查看候选图 ${displayCandidateNo}` : `Preview candidate ${displayCandidateNo}`}
+                      className="group relative h-full w-full cursor-zoom-in"
+                    >
+                      <img src={previewImageSrc(candidate.mediaUrl)} alt={`candidate ${displayCandidateNo}`} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02] group-hover:brightness-75" />
+                      <span className="pointer-events-none absolute inset-x-3 bottom-3 rounded-md bg-slate-950/75 px-2 py-1.5 text-center text-[10px] text-white opacity-0 backdrop-blur transition group-hover:opacity-100">
+                        {lang === "zh" ? "点击放大" : "Enlarge"}
+                      </span>
+                    </button>
+                ) : <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-600"><ImageIcon className="h-5 w-5 opacity-50" /><span className="text-[11px]">{candidate.status === "failed" ? (lang === "zh" ? "生成失败" : "Generation failed") : candidate.status}</span></div>}
+                <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5">
+                  <span className="rounded-md border border-white/10 bg-slate-950/75 px-1.5 py-0.5 text-[10px] font-semibold text-slate-200 backdrop-blur">#{displayCandidateNo}</span>
+                  {candidate.selected && <span className="inline-flex items-center gap-1 rounded-md border border-cyan-200/20 bg-cyan-950/75 px-1.5 py-0.5 text-[10px] font-medium text-cyan-100 backdrop-blur"><Check className="h-2.5 w-2.5" />{lang === "zh" ? "当前" : "Active"}</span>}
                 </div>
-                {report && <div className="grid grid-cols-2 gap-x-2 gap-y-1 rounded border border-white/5 bg-black/15 p-1.5 text-[10px] text-slate-400">
-                  <span>identity {formatQualityScore(report.identityScore)}</span><span>layout {formatQualityScore(report.layoutScore)}</span>
-                  <span>prompt {formatQualityScore(report.promptAlignmentScore)}</span><span>continuity {formatQualityScore(report.continuityScore)}</span>
-                  {typeof report.singleTakeScore === "number" && <span>single-take {formatQualityScore(report.singleTakeScore)}</span>}
+              </div>
+              <div className="space-y-2.5 p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-[9px] uppercase tracking-[0.16em] text-slate-600">{lang === "zh" ? "综合评分" : "Overall"}</p>
+                    <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-100">{candidate.compositeScore == null ? "—" : candidate.compositeScore.toFixed(1)}</p>
+                  </div>
+                  <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${statusClass}`}>{statusText}</span>
+                </div>
+                {report && <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-white/[0.06] bg-white/[0.06]">
+                  {qualityMetrics.map(([label, value]) => <div key={label} className="bg-slate-950/90 px-2 py-1.5">
+                    <span className="block text-[9px] text-slate-600">{label}</span>
+                    <span className="mt-0.5 block text-[11px] font-medium tabular-nums text-slate-300">{formatQualityScore(value)}</span>
+                  </div>)}
+                  {typeof report.singleTakeScore === "number" && <div className="col-span-2 flex items-center justify-between bg-slate-950/90 px-2 py-1.5 text-[10px]"><span className="text-slate-600">Single-take</span><span className="font-medium tabular-nums text-slate-300">{formatQualityScore(report.singleTakeScore)}</span></div>}
                 </div>}
-                {!candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className={`h-7 w-full rounded text-[11px] disabled:opacity-50 ${candidate.passed === true ? "bg-cyan-500 text-slate-950" : "border border-amber-300/25 text-amber-100"}`}>
-                  {candidate.passed === true ? (lang === "zh" ? "采用" : "Use") : (lang === "zh" ? "仍然采用" : "Use anyway")}
+                {issueLedger.length ? <button
+                  type="button"
+                  aria-expanded={issueDetailsExpanded}
+                  title={lang === "zh" ? "点击查看具体问题" : "Click to view issue details"}
+                  onClick={() => setExpandedIssueCandidateIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(candidate.id)) next.delete(candidate.id);
+                    else next.add(candidate.id);
+                    return next;
+                  })}
+                  className="w-full rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-1.5 text-left text-[10px] leading-4 text-slate-400 transition hover:border-white/15 hover:bg-white/[0.045]"
+                >
+                  <span className="text-emerald-200/80">{lang === "zh" ? "已解决" : "Resolved"} {resolvedIssues.length}</span>
+                  <span className="mx-1.5 text-slate-700">·</span>
+                  <span className="text-amber-100/80">{lang === "zh" ? "待改进" : "Open"} {openIssues.length}</span>
+                  <span className="mx-1.5 text-slate-700">·</span>
+                  <span>{lang === "zh" ? "转视频检查" : "Deferred to video"} {deferredIssues.length}</span>
                 </button> : null}
-                {report?.retryInstruction && onRetry ? <button type="button" disabled={loading} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-7 w-full items-center justify-center gap-1.5 rounded border border-cyan-300/20 text-[11px] text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-50"><RefreshCw className="h-3 w-3" /> {lang === "zh" ? "优化重试" : "Retry"}</button> : null}
-                {candidate.userAccepted ? <p className="text-[10px] text-amber-300">{lang === "zh" ? "已保留原始 passed=false，仅记录 userAccepted=true" : "Original passed=false is preserved; userAccepted=true recorded"}</p> : null}
+                {issueDetailsExpanded && issueLedger.length ? <div className="space-y-2 rounded-md border border-white/[0.07] bg-black/20 p-2 text-[10px] leading-4">
+                  {[
+                    { key: "open", title: lang === "zh" ? "待改进" : "Needs improvement", items: openIssues, dotClass: "bg-rose-300", textClass: "text-rose-100/85" },
+                    { key: "resolved", title: lang === "zh" ? "已解决" : "Resolved", items: resolvedIssues, dotClass: "bg-emerald-300", textClass: "text-emerald-100/80" },
+                    { key: "deferred", title: lang === "zh" ? "转视频阶段检查" : "Deferred to video stage", items: deferredIssues, dotClass: "bg-slate-400", textClass: "text-slate-300" },
+                  ].filter((group) => group.items.length > 0).map((group) => <div key={group.key}>
+                    <p className={`mb-1 font-medium ${group.textClass}`}>{group.title} · {group.items.length}</p>
+                    <ul className="space-y-1.5">
+                      {group.items.map((issue) => <li key={issue.issueId} className="flex gap-2 text-slate-400">
+                        <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${group.dotClass}`} />
+                        <span>
+                          {issue.status === "regressed" && <span className="mr-1 text-rose-200/80">{lang === "zh" ? "再次出现：" : "Regressed: "}</span>}
+                          {localizeQualityIssue(issue.summary, lang)}
+                          {issue.target ? <span className="mt-0.5 block text-slate-500">{lang === "zh" ? "目标：" : "Target: "}{localizeQualityIssue(issue.target, lang)}</span> : null}
+                        </span>
+                      </li>)}
+                    </ul>
+                  </div>)}
+                </div> : null}
+                {!candidate.selected && candidate.mediaUrl && report ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
+                  <Check className="h-3 w-3" />{lang === "zh" ? "人工采用" : "Use manually"}
+                </button> : null}
+                {candidate.selected && <div className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-cyan-300/10 bg-cyan-300/[0.05] text-[11px] font-medium text-cyan-100/75"><Check className="h-3 w-3" />{lang === "zh" ? "正在使用" : "In use"}</div>}
+                {report?.retryInstruction && onRetry ? <button type="button" disabled={loading} onClick={() => onRetry(report.retryInstruction!)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.08] text-[11px] text-slate-400 transition hover:border-cyan-300/15 hover:bg-cyan-300/[0.05] hover:text-cyan-100 disabled:opacity-50"><RefreshCw className="h-3 w-3" /> {lang === "zh" ? "重新优化" : "Improve"}</button> : null}
+                {candidate.userAccepted ? <p className="rounded-md bg-violet-300/[0.06] px-2 py-1.5 text-[10px] leading-4 text-violet-100/70">{lang === "zh" ? "系统质检未通过，已按你的选择保留" : "Kept by your choice despite the quality check"}</p> : null}
               </div>
             </div>
           );
         })}
       </div>
+    </div>
+    {previewCandidate?.mediaUrl && previewCandidate.kind !== "segment_video" && typeof document !== "undefined" ? createPortal(
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={lang === "zh" ? `候选图 ${previewCandidateNo} 大图预览` : `Candidate ${previewCandidateNo} preview`}
+        className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
+        onClick={() => setPreviewCandidate(null)}
+      >
+        <div className="flex max-h-[94vh] max-w-[94vw] flex-col overflow-hidden rounded-xl border border-white/15 bg-slate-950 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+          <div className="flex items-center justify-between gap-4 border-b border-white/10 px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-white">{lang === "zh" ? `候选图 #${previewCandidateNo}` : `Candidate #${previewCandidateNo}`}</p>
+              <p className="text-xs text-slate-400">{lang === "zh" ? "点击遮罩或按 Esc 关闭" : "Click outside or press Esc to close"}</p>
+            </div>
+            <button type="button" onClick={() => setPreviewCandidate(null)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/10 hover:text-white" aria-label={lang === "zh" ? "关闭大图" : "Close preview"}>
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="min-h-0 bg-black/50 p-2">
+            <ZoomableImage src={previewImageSrc(previewCandidate.mediaUrl)} alt={`candidate ${previewCandidateNo}`} lang={lang} className="h-[80vh] w-[90vw] max-w-6xl" />
+          </div>
+        </div>
+      </div>,
+      document.body,
+    ) : null}
+    </>
+  );
+}
+
+function ZoomableImage({ src, alt, lang, className = "" }: { src: string; alt: string; lang: PageLang; className?: string }) {
+  const [scale, setScale] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
+
+  const reset = useCallback(() => {
+    setScale(1);
+    setPan({ x: 0, y: 0 });
+    dragRef.current = null;
+  }, []);
+
+  useEffect(() => reset(), [reset, src]);
+
+  const zoomTo = useCallback((nextScale: number, focusX = 0, focusY = 0) => {
+    const clamped = Math.min(6, Math.max(1, nextScale));
+    setScale((currentScale) => {
+      if (clamped === currentScale) return currentScale;
+      if (clamped === 1) {
+        setPan({ x: 0, y: 0 });
+      } else {
+        const ratio = clamped / currentScale;
+        setPan((currentPan) => ({
+          x: focusX - (focusX - currentPan.x) * ratio,
+          y: focusY - (focusY - currentPan.y) * ratio,
+        }));
+      }
+      return clamped;
+    });
+  }, []);
+
+  return (
+    <div
+      className={`relative min-h-0 select-none overflow-hidden rounded-md border border-white/10 bg-black ${scale > 1 ? "cursor-grab active:cursor-grabbing" : "cursor-zoom-in"} ${className}`}
+      onWheel={(event) => {
+        event.preventDefault();
+        const rect = event.currentTarget.getBoundingClientRect();
+        const focusX = event.clientX - rect.left - rect.width / 2;
+        const focusY = event.clientY - rect.top - rect.height / 2;
+        zoomTo(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18), focusX, focusY);
+      }}
+      onDoubleClick={reset}
+      onPointerDown={(event) => {
+        if (scale <= 1 || event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y };
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        setPan({ x: drag.panX + event.clientX - drag.startX, y: drag.panY + event.clientY - drag.startY });
+      }}
+      onPointerUp={(event) => {
+        if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+      }}
+      onPointerCancel={() => { dragRef.current = null; }}
+      style={{ touchAction: "none" }}
+    >
+      <div className="absolute inset-0 flex items-center justify-center">
+        <img
+          src={src}
+          alt={alt}
+          draggable={false}
+          className="max-h-full max-w-full object-contain will-change-transform"
+          style={{ transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${scale})` }}
+        />
+      </div>
+      <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-white/10 bg-slate-950/80 p-1 shadow-xl backdrop-blur">
+        <button type="button" onClick={(event) => { event.stopPropagation(); zoomTo(scale / 1.25); }} disabled={scale <= 1} aria-label={lang === "zh" ? "缩小" : "Zoom out"} className="inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-200 hover:bg-white/10 disabled:opacity-30">−</button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); reset(); }} className="min-w-14 rounded px-2 py-1 text-[11px] tabular-nums text-slate-300 hover:bg-white/10" title={lang === "zh" ? "恢复原始大小" : "Reset zoom"}>{Math.round(scale * 100)}%</button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); zoomTo(scale * 1.25); }} disabled={scale >= 6} aria-label={lang === "zh" ? "放大" : "Zoom in"} className="inline-flex h-7 w-7 items-center justify-center rounded text-sm text-slate-200 hover:bg-white/10 disabled:opacity-30">+</button>
+      </div>
+      <p className="pointer-events-none absolute left-3 top-3 rounded-md bg-slate-950/70 px-2 py-1 text-[10px] text-slate-300/80 backdrop-blur">
+        {lang === "zh" ? "滚轮缩放 · 拖动查看 · 双击复位" : "Wheel to zoom · Drag to pan · Double-click to reset"}
+      </p>
     </div>
   );
 }
@@ -4583,8 +4937,8 @@ function PlanDebugPanel({
                         identity {report.identityScore} / layout {report.layoutScore} / prompt {report.promptAlignmentScore} / continuity {report.continuityScore}
                         {typeof report.singleTakeScore === "number" ? ` / single-take ${report.singleTakeScore}` : ""}
                       </p>
-                      {report.artifactIssues.length > 0 && <p className="mt-1 leading-5 text-slate-300">{report.artifactIssues.join("; ")}</p>}
-                      {report.retryInstruction && <p className="mt-1 leading-5 text-amber-100/80">{report.retryInstruction}</p>}
+                      {report.artifactIssues.length > 0 && <p className="mt-1 leading-5 text-slate-300">{report.artifactIssues.map((issue) => localizeQualityIssue(issue, lang)).join(lang === "zh" ? "；" : "; ")}</p>}
+                      {report.retryInstruction && <p className="mt-1 leading-5 text-amber-100/80">{localizeWorkflowError(report.retryInstruction, lang)}</p>}
                     </div>
                   ))}
                 </div>

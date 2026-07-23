@@ -30,11 +30,17 @@ test("full transition chain extracts, evaluates, reviews and locks frames", () =
   assert.match(evaluator, /fractions = \[0\.2, 0\.4, 0\.6, 0\.8\]/);
 });
 
-test("short mode inherits layout from an approved or current quality-passed parent keyframe", () => {
+test("short mode inherits layout from an approved, quality-passed, or manually accepted parent keyframe", () => {
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(service, /item\.mode === "short"/);
   assert.match(service, /isUsableTransitionParentKeyframe\(project, keyframe\)/);
-  assert.match(service, /report\?\.passed === true && report\.mediaUrl === keyframe\.imageUrl/);
+  assert.match(service, /candidate\.selected/);
+  assert.match(service, /candidate\.mediaUrl === keyframe\.imageUrl/);
+  assert.match(service, /generationQualityReportForActiveMedia/);
+  assert.match(service, /report\?\.passed === true \|\| report\?\.userAccepted === true/);
+  assert.match(service, /report\.mediaUrl === keyframe\.imageUrl/);
+  assert.match(service, /repairAcceptedShortTransitionReferences\(project\)/);
+  assert.match(service, /reconcileTransitionReferencesForAcceptedParent/);
   assert.match(service, /SCENE-LAYOUT ONLY/);
   assert.match(service, /Never inherit person\/product identity, logos, typography, accidental text/);
   assert.match(service, /Required transition scene-layout reference was not selected/);
@@ -45,6 +51,9 @@ test("boundary reference selection scopes transition candidates to its resolved 
   assert.match(service, /collectTransitionReferenceCandidates\(params\.project, targetSegmentNo\)/);
   assert.doesNotMatch(service, /collectTransitionReferenceCandidates\(params\.project, params\.segment\?\.segmentNo\)/);
   assert.match(service, /blockedBoundaryKeyframeNos/);
+  assert.match(service, /const frontier = \[\.\.\.blockedBoundaryKeyframes\]/);
+  assert.match(service, /当前生成前沿为 KF/);
+  assert.doesNotMatch(service, /下一张边界参考图正在等待上一张已选画面通过质检或人工确认/);
 });
 
 test("URL deduplication preserves a mandatory transition alias over its parent-camera alias", () => {
@@ -85,8 +94,10 @@ test("transition and bridge revisions are independently addressable", () => {
 
 test("upstream media changes invalidate approvals without deleting revisions", () => {
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(service, /invalidateTransitionReferencesForParent\(project\.id, keyframe\.keyframeNo/);
-  assert.match(service, /Parent-camera keyframe candidate changed; transition reference approval must be renewed/);
+  assert.match(service, /reconcileTransitionReferencesForAcceptedParent\(project\.id, keyframe\.keyframeNo, candidate\.mediaUrl\)/);
+  assert.match(service, /status: "approved" as const,[\s\S]{0,100}locked: true/);
+  assert.match(service, /Parent-camera keyframe changed; regenerate and approve this full transition reference/);
+  assert.match(service, /invalidateTransitionReferencesForParent\(projectId, unlockedParentKeyframeNo/);
   assert.match(service, /invalidateGeneratedBridgesForSegment\(project\.id, segment\.segmentNo/);
   assert.match(service, /Adjacent segment candidate changed; generated bridge approval must be renewed/);
   assert.match(service, /status: parentKeyframeNo !== undefined \? "waiting_parent" : "planned"/);

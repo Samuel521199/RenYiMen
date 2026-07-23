@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { generationQualityCompositeScore, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
+import { nextGenerationCandidateAttempt } from "./project-service.ts";
 
 const base = {
   assetId: "keyframe:1:image",
@@ -36,6 +37,97 @@ test("image quality normalization preserves scores observed by the visual model"
   assert.equal(report.candidateId, "candidate-2");
   assert.equal(report.productInstanceCount, 1);
   assert.equal(report.passed, true);
+});
+
+test("failed visual evaluations produce a spatially precise next-generation correction plan", () => {
+  const report = normalizeImageQualityResponse({
+    identityScore: 95,
+    layoutScore: 90,
+    promptAlignmentScore: 85,
+    continuityScore: 88,
+    passed: false,
+    artifactIssues: ["score does not show the intended losing state"],
+    correctionActions: [{
+      region: "bottom-center HUD",
+      element: "player and opponent score",
+      observed: "a single score of 0",
+      target: "player 12, opponent 24",
+      instruction: "Render one score row reading 12–24 with the player visibly behind",
+      sourceConstraint: "narrative state: imminent failure",
+      preserve: ["character face", "board layout"],
+    }],
+    retryInstruction: "fix the score",
+    retryFromStage: "generation",
+  }, base);
+  assert.equal(report.correctionActions?.[0]?.region, "bottom-center HUD");
+  assert.match(report.retryInstruction ?? "", /bottom-center HUD/);
+  assert.match(report.retryInstruction ?? "", /player 12, opponent 24/);
+  assert.match(report.retryInstruction ?? "", /Preserve unchanged: character face, board layout/);
+  assert.doesNotMatch(report.retryInstruction ?? "", /^fix the score$/);
+});
+
+test("visual-model contract suspicions cannot unilaterally route work back to the compiler", () => {
+  const report = normalizeImageQualityResponse({
+    identityScore: 95,
+    layoutScore: 90,
+    promptAlignmentScore: 85,
+    continuityScore: 88,
+    passed: true,
+    contractConflicts: ["logo is both required and forbidden"],
+    retryFromStage: "generation",
+  }, base);
+  assert.equal(report.passed, true);
+  assert.equal(report.retryFromStage, "generation");
+  assert.deepEqual(report.contractConflicts, []);
+  assert.deepEqual(report.suspectedContractConflicts, ["logo is both required and forbidden"]);
+  assert.equal(report.contractConflictsVerified, false);
+  assert.equal(report.qualityDecision, "recommended");
+});
+
+test("motion-only criticism is deferred from still-image quality to video quality", () => {
+  const report = normalizeImageQualityResponse({
+    identityScore: 95,
+    layoutScore: 90,
+    promptAlignmentScore: 85,
+    continuityScore: 92,
+    passed: false,
+    artifactIssues: ["Timer is static and lacks dynamic animation cues"],
+    retryFromStage: "generation",
+  }, { ...base, visualContract: {
+    version: "visual-contract-v1",
+    mediaStage: "static_image",
+    sourcePriority: [],
+    requiredText: [],
+    allowedText: [],
+    forbiddenText: [],
+    exactTextAuthority: "none",
+    allowGameUi: true,
+    allowBrandText: false,
+    staticRequirements: [],
+    deferredVideoChecks: ["timer changes"],
+    verifiedConflicts: [],
+    warnings: [],
+  } });
+  assert.equal(report.passed, true);
+  assert.equal(report.qualityDecision, "recommended");
+  assert.deepEqual(report.artifactIssues, []);
+  assert.equal(report.issueLedger?.[0]?.status, "invalid_for_stage");
+});
+
+test("only compiler-verified contract conflicts route work back to stage 3", () => {
+  const report = normalizeImageQualityResponse({
+    identityScore: 95,
+    layoutScore: 90,
+    promptAlignmentScore: 85,
+    continuityScore: 88,
+    passed: true,
+    contractConflicts: ["visual evaluator suspicion"],
+  }, { ...base, authoritativeContractConflicts: ["logo is both required and forbidden"] });
+  assert.equal(report.passed, false);
+  assert.equal(report.retryFromStage, "stage3");
+  assert.deepEqual(report.contractConflicts, ["logo is both required and forbidden"]);
+  assert.equal(report.contractConflictsVerified, true);
+  assert.match(report.retryInstruction ?? "", /Do not regenerate until/);
 });
 
 test("prompt length does not change a normalized actual-media score", () => {
@@ -122,25 +214,59 @@ test("anchor image defects stay in generation retry instead of rolling back shot
   assert.equal(report.retryFromStage, "generation");
 });
 
-test("manual acceptance fields do not rewrite original passed=false", () => {
+test("deterministic recommendation and manual acceptance preserve the model's original boolean", () => {
   const report = normalizeImageQualityResponse({ identityScore: 65, layoutScore: 70, promptAlignmentScore: 72, continuityScore: 68, passed: false }, base);
   const accepted = { ...report, userAccepted: true, originalPassed: report.originalPassed ?? report.passed };
-  assert.equal(accepted.passed, false);
+  assert.equal(accepted.passed, true);
+  assert.equal(accepted.qualityDecision, "recommended");
   assert.equal(accepted.originalPassed, false);
   assert.equal(accepted.userAccepted, true);
 });
 
-test("candidate orchestration waits for the complete batch and ranks passing media", () => {
+test("candidate orchestration evaluates all batches, waits for the complete pool, and ranks passing media", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(source, /batch\.some\(\(candidate\) => candidate\.status === "running" \|\| candidate\.status === "pending"\)/);
+  assert.match(source, /artifactCandidates\.filter\(\(item\) => item\.status === "succeeded" && !item\.qualityReport && item\.mediaUrl\)/);
+  assert.match(source, /allArtifactCandidates\.some\(\(candidate\) => unsettledStatuses\.has\(candidate\.status\)\)/);
+  assert.doesNotMatch(source, /latestBatchByArtifact/);
   assert.match(source, /candidate\.passed === true && candidate\.mediaUrl/);
   assert.match(source, /sort\(\(a, b\) => \(b\.compositeScore \?\? 0\) - \(a\.compositeScore \?\? 0\)\)/);
   assert.doesNotMatch(source, /passing\[0\][\s\S]{0,80}createdAt/);
+  assert.match(source, /userProtectedSelection/);
+  assert.match(source, /targetKeyframe\?\.locked/);
+  assert.match(source, /targetSegment\?\.locked/);
+  assert.match(source, /protectLockedSelection/);
+  assert.match(source, /selected: true, userAccepted: true/);
+  assert.match(source, /locked: false, NOT: \{ status: VideoShotStatus\.IMAGE_APPROVED \}/);
   assert.match(source, /ONE_PROMPT_IMAGE_CANDIDATE_COUNT", 1/);
   const claimIndex = source.indexOf("const claim = await prisma.videoKeyframe.updateMany");
   const submitIndex = source.indexOf("const taskId = await createImageCandidateBatch", claimIndex);
   assert.ok(claimIndex >= 0 && submitIndex > claimIndex);
   assert.match(source, /submit\.skip_claimed/);
+  assert.match(source, /status: "evaluating"/);
+  assert.match(source, /evaluationClaim\.count !== 1/);
+});
+
+test("legacy batches do not consume a new retry cycle", () => {
+  const legacy = Array.from({ length: 7 }, (_, index) => ({
+    artifactId: "keyframe:2:image",
+    batchId: `old-${7 - index}`,
+    status: "evaluated",
+    metadata: { attempt: 7 - index },
+  }));
+  const next = nextGenerationCandidateAttempt(legacy as never, "keyframe:2:image");
+  assert.equal(next.attempt, 1);
+  assert.ok(next.retryCycleId);
+});
+
+test("automatic retries stay in one cycle while manual retries start a fresh cycle", () => {
+  const current = [{
+    artifactId: "keyframe:2:image",
+    batchId: "current-batch",
+    status: "evaluated",
+    metadata: { attempt: 2, retryCycleId: "cycle-a" },
+  }];
+  assert.deepEqual(nextGenerationCandidateAttempt(current as never, "keyframe:2:image"), { attempt: 3, retryCycleId: "cycle-a" });
+  assert.deepEqual(nextGenerationCandidateAttempt(current as never, "keyframe:2:image", "cycle-b"), { attempt: 1, retryCycleId: "cycle-b" });
 });
 
 test("resume repairs failed artifacts before waiting for unrelated candidate review", () => {
@@ -153,13 +279,28 @@ test("resume repairs failed artifacts before waiting for unrelated candidate rev
   assert.match(source, /!segment\.locked && segment\.status !== VideoShotStatus\.CLIP_APPROVED/);
   assert.match(source, /project\.resume\.approve_ready_asset_library/);
   assert.match(source, /return approveAssetLibrary\(userId, projectId\)/);
+  const failedBoundaryRecovery = source.indexOf("project.resume.failed_boundary_new_retry_cycle");
+  const runningWorkCheck = source.indexOf("const hasRunningImageWork");
+  assert.ok(failedBoundaryRecovery >= 0 && failedBoundaryRecovery < runningWorkCheck);
 });
 
 test("sync immediately schedules recoverable candidate failures without a user click", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /anchorImageMisclassifiedAsStage2b/);
   assert.match(source, /status: VideoProjectStatus\.IMAGE_GENERATING, errorMessage: null/);
+  assert.match(source, /unverifiedEvaluatorConflict/);
+  assert.match(source, /retryBudgetExhausted/);
+  assert.match(source, /经编译器确认的提示合同冲突/);
   assert.match(source, /syncGenerationCandidates\(project\);[\s\S]{0,400}project = await requireVideoProject\(userId, projectId\);[\s\S]{0,200}syncImageTasks\(project\)/);
+});
+
+test("legacy image quality reports upgrade in place before another paid generation", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(source, /async function upgradeLegacyImageQualityReports/);
+  assert.match(source, /existing\.policyVersion === "quality-policy-v2"/);
+  assert.match(source, /await upgradeLegacyImageQualityReports\(project\)/);
+  assert.match(source, /buildAuthoritativeVisualContract/);
+  assert.match(source, /previousQualityReport: previous\?\.report/);
 });
 
 test("failed-candidate acceptance is explicit and keeps passed unchanged", () => {
@@ -168,4 +309,16 @@ test("failed-candidate acceptance is explicit and keeps passed unchanged", () =>
   assert.match(source, /userAccepted: candidate\.passed !== true && userAccepted/);
   assert.match(source, /originalPassed: report\.originalPassed \?\? report\.passed/);
   assert.doesNotMatch(source, /passed:\s*userAccepted/);
+});
+
+test("manual boundary candidate acceptance immediately continues the next frame", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const selection = source.slice(
+    source.indexOf("export async function selectGenerationCandidate"),
+    source.indexOf("async function syncImageTasks"),
+  );
+  assert.match(selection, /missingBoundaryFrames/);
+  assert.match(selection, /status: VideoProjectStatus\.IMAGE_GENERATING/);
+  assert.match(selection, /submitNextImageTask\(\{/);
+  assert.match(selection, /image\.continue_after_manual_candidate_selection/);
 });

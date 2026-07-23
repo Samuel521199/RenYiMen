@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { logOnePromptVideo } from "./logger";
-import type { GenerationQualityReport } from "./types";
+import type { GenerationCorrectionAction, GenerationQualityReport } from "./types";
 import { onePromptRolloutEnabled } from "./rollout-flags";
+import type { AuthoritativeVisualContract } from "./visual-quality-contract";
+import { isMotionOnlyStillIssue, reconcileGenerationIssueLedger } from "./visual-quality-contract";
 
 interface BaseEvaluationParams {
   assetId: string;
@@ -15,10 +17,16 @@ interface BaseEvaluationParams {
   selectedReferenceUrls: string[];
   referenceUsageNotes: string[];
   prompt: string;
+  negativePrompt?: string;
   purpose: "anchor_reference_image" | "boundary_keyframe" | "motion_checkpoint_image" | "transition_reference_frame" | "video_segment" | "generated_bridge";
   assetCategory?: string;
   /** Brand/logo/UI lock assets require exact readable text; do not fail merely because text is visible. */
   requiresExactBrandText?: boolean;
+  /** Only compiler/preflight-verified contradictions may route work back to stage 3. */
+  authoritativeContractConflicts?: string[];
+  visualContract?: AuthoritativeVisualContract;
+  previousQualityReport?: GenerationQualityReport;
+  previousCandidateUrl?: string;
 }
 
 export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams): Promise<GenerationQualityReport> {
@@ -31,9 +39,17 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       `Purpose: ${params.purpose}`,
       `Target contract: ${JSON.stringify(params.targetContract)}`,
       `Generation prompt: ${params.prompt.slice(0, 2400)}`,
+      `Negative prompt: ${(params.negativePrompt ?? "").slice(0, 1200)}`,
       `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
-      "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+      params.visualContract ? `Authoritative visual contract: ${JSON.stringify(params.visualContract)}` : "",
+      params.previousQualityReport ? `Previous issue ledger to compare and close: ${JSON.stringify(params.previousQualityReport.issueLedger ?? [])}` : "",
+      "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+      "For EVERY failed issue, correctionActions must contain one executable object: {region, element, observed, target, instruction, priority, sourceConstraint, preserve[]}. region must identify a concrete visual location (for example bottom-center HUD, upper-left background, character's right hand). observed states exactly what is visibly wrong. target states one concrete desired result, including exact value/count/format/color/pose/size when the contract supports it. instruction must be imperative and ready to paste into the next generation prompt; never merely repeat the diagnosis.",
+      "retryInstruction must consolidate correctionActions into a precise redraw specification: say WHAT to change, WHERE to change it, the exact TARGET state, and what nearby/strong-scoring content must remain unchanged. Prefer concrete renderable values over vague words such as improve, fix, proper, near, appropriate, or more accurate.",
+      "Before proposing corrections, check Target contract, Generation prompt, Negative prompt, and reference notes for possible contradictions. The target contract and explicit required-visible evidence outrank generic negative-prompt defaults. Never infer that unlisted logo text is forbidden when an approved visual anchor contains it. Put possible contradictions in contractConflicts[] as advisory evidence only; the compiler, not this visual evaluator, owns stage-3 routing.",
       "For anchors prioritize isolated identity accuracy. For boundary keyframes prioritize contract/layout/identity. For motion checkpoints prioritize same-path state and continuity.",
+      "For a still image, never fail because motion itself is not visible. A static score, timer, glow, or pose may represent one instant; motion, jumping digits, countdown change, and animation belong to later video evaluation.",
+      "Compare against the previous issue ledger when provided. For each prior issue, explicitly decide resolved, still_open, regressed, or invalid_for_stage. Do not silently repeat old feedback.",
       "For an anchor reference image, use retryFromStage=generation for visible output defects such as extra people, unwanted backgrounds/decorations, wrong centering, bad proportions, malformed text, or missing requested elements. Stage2b is only for an impossible/contradictory shot contract and does not repair an anchor image.",
       params.requiresExactBrandText
         ? "This is a brand/logo/UI lock asset. Required brand text in the prompt is intentional. Set wrongTextDetected=true ONLY when visible text is misspelled, missing required lock wording, or random gibberish — NOT merely because readable brand/UI text is present."
@@ -44,6 +60,10 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
   for (const [index, url] of params.selectedReferenceUrls.slice(0, 4).entries()) {
     content.push({ type: "text", text: `Selected reference ${index + 1}: ${params.referenceUsageNotes[index] ?? "approved reference"}` });
     content.push({ type: "image_url", image_url: { url } });
+  }
+  if (params.previousCandidateUrl) {
+    content.push({ type: "text", text: "Previous candidate for delta comparison only:" });
+    content.push({ type: "image_url", image_url: { url: params.previousCandidateUrl } });
   }
   try {
     const raw = await callVision(content, "Evaluate generated image quality and output strict JSON.");
@@ -81,9 +101,13 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
         "Evaluate the actual generated video from five ordered sampled frames and metadata. Scores must come from visible content, never prompt length.",
         `Metadata: ${JSON.stringify(metadata)}`,
         `Target contract: ${JSON.stringify(params.targetContract)}`,
+        `Generation prompt: ${params.prompt.slice(0, 2400)}`,
+        `Negative prompt: ${(params.negativePrompt ?? "").slice(0, 1200)}`,
         `Motion checkpoints in required order: ${JSON.stringify(params.motionCheckpoints)}`,
         `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
-        "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+        "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], correctionActions[], contractConflicts[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+        "For every failure, correctionActions[] must specify {region, element, observed, target, instruction, priority, sourceConstraint, preserve[]}. Make each action spatially precise and directly renderable in the next attempt. Include exact state/value/count/timing/pose when supported by the contract, and state which successful content must remain unchanged.",
+        "retryInstruction must be a consolidated shot-level modification plan, not a diagnosis. Resolve requirements using target contract and explicit visible evidence above generic negative defaults. List possible contradictions in contractConflicts[] as advisory evidence; only the compiler can authorize stage-3 routing.",
         "Detect identity drift, abnormal duplicate instances, spatial layout drift, jump cuts, teleportation, melting, scene replacement, out-of-order checkpoints, first-frame mismatch and ending-state mismatch.",
         "Use retryFromStage=stage2b for physically unreachable or structural motion; stage3 for prompt/compiler repair; generation for ordinary visual defects.",
       ].join("\n"),
@@ -178,6 +202,32 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   const wrongTextDetected = source.wrongTextDetected === true || source.wrong_text_detected === true;
   const productInstanceCount = count(source.productInstanceCount ?? source.product_instance_count);
   const personInstanceCount = count(source.personInstanceCount ?? source.person_instance_count);
+  const suspectedContractConflicts = uniqueStrings([
+    ...strings(source.contractConflicts ?? source.contract_conflicts),
+    ...strings(source.suspectedContractConflicts ?? source.suspected_contract_conflicts),
+  ]);
+  const contractConflicts = uniqueStrings([
+    ...(params.authoritativeContractConflicts ?? []),
+    ...(params.visualContract?.verifiedConflicts ?? []),
+  ]);
+  const contractConflictsVerified = contractConflicts.length > 0;
+  // A visual model may misread an approved reference and invent a contract
+  // (for example, treating an existing logo word as forbidden). Do not feed
+  // correction actions derived from an unverified conflict back into redraws.
+  const rawCorrectionActions = suspectedContractConflicts.length && !contractConflictsVerified
+    ? []
+    : normalizeCorrectionActions(source.correctionActions ?? source.correction_actions);
+  const rawArtifactIssues = strings(source.artifactIssues ?? source.artifact_issues);
+  const invalidForStageIssues = params.visualContract?.mediaStage === "static_image"
+    ? rawArtifactIssues.filter(isMotionOnlyStillIssue)
+    : [];
+  const correctionActions = params.visualContract?.mediaStage === "static_image"
+    ? rawCorrectionActions.filter((action) => !isMotionOnlyStillIssue(`${action.observed} ${action.target} ${action.instruction}`))
+    : rawCorrectionActions;
+  const artifactIssues = uniqueStrings([
+    ...rawArtifactIssues.filter((issue) => !invalidForStageIssues.includes(issue)),
+    ...suspectedContractConflicts.map((item) => `Unverified evaluator contract suspicion: ${item}`),
+  ]);
   const scoreGatePassed = identityScore >= 65 && layoutScore >= 60 && promptAlignmentScore >= 65 && continuityScore >= 60;
   // The vision model's boolean is advisory. For exact brand/logo lock assets,
   // use explicit deterministic gates so minor decorative/layout comments do
@@ -189,10 +239,44 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     && continuityScore >= 70
     && !wrongTextDetected
     && personInstanceCount === 0;
-  const passed = params.requiresExactBrandText
-    ? brandVisualGatePassed
-    : originalPassed && scoreGatePassed && !wrongTextDetected;
+  const exactTextHardGate = params.requiresExactBrandText
+    || !params.visualContract
+    || params.visualContract.exactTextAuthority !== "none";
+  const hardFailureReasons = uniqueStrings([
+    ...contractConflicts,
+    identityScore < 65 ? `identity score ${identityScore} is below 65` : "",
+    layoutScore < 60 ? `layout score ${layoutScore} is below 60` : "",
+    promptAlignmentScore < 65 ? `prompt alignment score ${promptAlignmentScore} is below 65` : "",
+    continuityScore < 60 ? `continuity score ${continuityScore} is below 60` : "",
+    wrongTextDetected && exactTextHardGate ? "authoritative locked text is visibly wrong" : "",
+    params.requiresExactBrandText && !brandVisualGatePassed ? "isolated brand asset failed its deterministic identity/layout/text gate" : "",
+  ]);
+  const passed = scoreGatePassed && hardFailureReasons.length === 0;
+  const issueLedger = reconcileGenerationIssueLedger({
+    previous: params.previousQualityReport,
+    candidateNo: params.candidateNo,
+    artifactIssues: [...artifactIssues, ...invalidForStageIssues],
+    correctionActions,
+    invalidIssueTexts: invalidForStageIssues,
+  });
+  const openHardIssueIds = issueLedger.filter((item) => (item.status === "open" || item.status === "regressed") && item.severity === "hard" && item.applicableStage === params.visualContract?.mediaStage).map((item) => item.issueId);
+  const resolvedIssueIds = issueLedger.filter((item) => item.status === "resolved").map((item) => item.issueId);
+  const softSuggestions = issueLedger.filter((item) => (item.status === "open" || item.status === "regressed") && item.severity !== "hard").map((item) => item.summary);
+  const qualityDecision = contractConflictsVerified
+    ? "blocked" as const
+    : passed
+      ? originalPassed && softSuggestions.length === 0 ? "pass" as const : "recommended" as const
+      : "retry" as const;
+  const retryFromStage = contractConflictsVerified
+    ? "stage3" as const
+    : suspectedContractConflicts.length
+      ? "generation" as const
+      : retryStage(source.retryFromStage ?? source.retry_from_stage);
+  const suppliedRetryInstruction = suspectedContractConflicts.length && !contractConflictsVerified
+    ? ""
+    : text(source.retryInstruction ?? source.retry_instruction);
   return {
+    policyVersion: "quality-policy-v2",
     assetId: params.assetId,
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
@@ -204,13 +288,69 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     productInstanceCount,
     personInstanceCount,
     wrongTextDetected,
-    artifactIssues: strings(source.artifactIssues ?? source.artifact_issues),
+    artifactIssues,
+    correctionActions,
+    contractConflicts,
+    suspectedContractConflicts,
+    contractConflictsVerified,
+    issueLedger,
+    resolvedIssueIds,
+    openHardIssueIds,
+    qualityDecision,
+    hardFailureReasons,
+    softSuggestions,
     passed,
     originalPassed,
-    retryInstruction: text(source.retryInstruction ?? source.retry_instruction) || (!passed ? `Regenerate to improve visible identity (${identityScore}), layout (${layoutScore}), prompt alignment (${promptAlignmentScore}) and continuity (${continuityScore}); remove any incorrect text.` : undefined),
-    retryFromStage: retryStage(source.retryFromStage ?? source.retry_from_stage),
+    retryInstruction: !passed || correctionActions.length > 0
+      ? concreteRetryInstruction({ correctionActions, contractConflicts, suppliedRetryInstruction, identityScore, layoutScore, promptAlignmentScore, continuityScore })
+      : suppliedRetryInstruction || undefined,
+    retryFromStage,
     contentBased: true,
   };
+}
+
+function normalizeCorrectionActions(value: unknown): GenerationCorrectionAction[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const source = record(item);
+    const instruction = text(source.instruction ?? source.action ?? source.exactInstruction ?? source.exact_instruction);
+    const target = text(source.target ?? source.desired ?? source.desiredState ?? source.desired_state);
+    if (!instruction && !target) return [];
+    const priorityValue = text(source.priority).toLowerCase();
+    return [{
+      region: text(source.region ?? source.location ?? source.position) || "specified visual region",
+      element: text(source.element ?? source.object ?? source.subject) || "affected visual element",
+      observed: text(source.observed ?? source.current ?? source.currentObservation ?? source.current_observation) || "does not match the contract",
+      target: target || instruction,
+      instruction: instruction || `Render ${target}`,
+      priority: priorityValue === "recommended" ? "recommended" as const : "required" as const,
+      sourceConstraint: text(source.sourceConstraint ?? source.source_constraint ?? source.contractSource ?? source.contract_source) || undefined,
+      preserve: strings(source.preserve ?? source.keepUnchanged ?? source.keep_unchanged),
+    }];
+  }).slice(0, 16);
+}
+
+function concreteRetryInstruction(params: {
+  correctionActions: GenerationCorrectionAction[];
+  contractConflicts: string[];
+  suppliedRetryInstruction: string;
+  identityScore: number;
+  layoutScore: number;
+  promptAlignmentScore: number;
+  continuityScore: number;
+}): string {
+  if (params.contractConflicts.length) {
+    return `Do not regenerate until these prompt-contract conflicts are resolved: ${params.contractConflicts.join("; ")}. Keep the target contract and explicit required-visible evidence authoritative over generic negative defaults.`;
+  }
+  if (params.correctionActions.length) {
+    const actions = params.correctionActions.map((action, index) => {
+      const preserve = action.preserve?.length ? ` Preserve unchanged: ${action.preserve.join(", ")}.` : "";
+      const source = action.sourceConstraint ? ` Contract source: ${action.sourceConstraint}.` : "";
+      return `${index + 1}) [${action.region}] ${action.element}: observed ${action.observed}; target ${action.target}. ${action.instruction}.${preserve}${source}`;
+    });
+    return `Apply these exact corrections in the next generation:\n${actions.join("\n")}\nKeep all unlisted high-scoring identity, layout, clothing, scene, and continuity details unchanged.`;
+  }
+  return params.suppliedRetryInstruction || `Regenerate with a concrete correction plan for identity ${params.identityScore}, layout ${params.layoutScore}, prompt alignment ${params.promptAlignmentScore}, and continuity ${params.continuityScore}; specify the exact region, element, target state, and preserved content for every failed issue.`;
 }
 
 function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFromStage: GenerationQualityReport["retryFromStage"]): GenerationQualityReport {

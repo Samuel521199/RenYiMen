@@ -867,6 +867,7 @@ export interface RollbackVideoMediaInput {
 }
 
 export interface GenerationQualityReport {
+  policyVersion?: "quality-policy-v2";
   assetId: string;
   candidateId?: string;
   candidateNo?: number;
@@ -887,12 +888,48 @@ export interface GenerationQualityReport {
   productInstanceCount?: number;
   personInstanceCount?: number;
   wrongTextDetected?: boolean;
+  correctionActions?: GenerationCorrectionAction[];
+  contractConflicts?: string[];
+  suspectedContractConflicts?: string[];
+  contractConflictsVerified?: boolean;
+  issueLedger?: GenerationIssueLedgerEntry[];
+  resolvedIssueIds?: string[];
+  openHardIssueIds?: string[];
+  qualityDecision?: "pass" | "recommended" | "retry" | "blocked";
+  hardFailureReasons?: string[];
+  softSuggestions?: string[];
   firstFrameConsistencyScore?: number;
   checkpointOrderScore?: number;
   metadataIssues?: string[];
   userAccepted?: boolean;
   originalPassed?: boolean;
   retryFromStage?: "stage2b" | "stage3" | "generation" | "manual";
+}
+
+export interface GenerationIssueLedgerEntry {
+  issueId: string;
+  fingerprint: string;
+  category: "text_brand" | "game_ui" | "anatomy" | "identity" | "layout" | "continuity" | "artifact";
+  region?: string;
+  summary: string;
+  target?: string;
+  severity: "hard" | "soft" | "advisory";
+  applicableStage: "static_image" | "video";
+  status: "open" | "resolved" | "regressed" | "invalid_for_stage";
+  firstSeenCandidateNo?: number;
+  lastSeenCandidateNo?: number;
+  occurrenceCount: number;
+}
+
+export interface GenerationCorrectionAction {
+  region: string;
+  element: string;
+  observed: string;
+  target: string;
+  instruction: string;
+  priority?: "required" | "recommended";
+  sourceConstraint?: string;
+  preserve?: string[];
 }
 
 export interface PromptDebugArtifact {
