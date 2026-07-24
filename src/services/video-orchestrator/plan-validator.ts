@@ -110,6 +110,14 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
   }
   for (const keyframe of keyframes) validateAnchorReferences(issues, strings(keyframe.usesConsistencyAnchors ?? keyframe.uses_consistency_anchors), anchorIds, `keyframe:${number(keyframe.keyframeNo ?? keyframe.keyframe_no)}`);
   for (const segment of segments) validateAnchorReferences(issues, strings(segment.usesConsistencyAnchors ?? segment.uses_consistency_anchors), anchorIds, `segment:${number(segment.segmentNo ?? segment.segment_no)}`);
+  for (const keyframe of keyframes) validateAnchorCoverage(issues, keyframe, `keyframe:${number(keyframe.keyframeNo ?? keyframe.keyframe_no)}`);
+  for (const segment of segments) {
+    const segmentNo = number(segment.segmentNo ?? segment.segment_no);
+    validateAnchorCoverage(issues, segment, `segment:${segmentNo}`);
+    for (const microShot of arrayRecords(segment.microShots ?? segment.micro_shots)) {
+      validateAnchorCoverage(issues, microShot, `segment:${segmentNo}:micro_shot:${number(microShot.microShotNo ?? microShot.micro_shot_no)}`);
+    }
+  }
   for (const edge of graph.relations) {
     if (!cameraIds.has(edge.fromCameraId) || !cameraIds.has(edge.toCameraId)) error(issues, "MISSING_CAMERA_RELATION_NODE", `camera:${edge.toCameraId}`, `Camera Graph relation 引用了不存在的机位。`, "stage_2a_storyboard");
   }
@@ -144,7 +152,41 @@ function validateHardAnchors(context: PlanValidationContext, issues: PlanValidat
   const selected = new Set(context.selectedHardAnchorIds ?? []);
   for (const anchorId of required) {
     if (!approved.has(anchorId)) error(issues, "HARD_ANCHOR_IMAGE_MISSING", context.targetArtifactId, `可见 hard anchor ${anchorId} 没有已批准参考图。`, "asset_review");
-    if (context.selectedHardAnchorIds && !selected.has(anchorId)) error(issues, "HARD_ANCHOR_NOT_SELECTED", context.targetArtifactId, `hard anchor ${anchorId} 的批准图片没有进入最终 reference selection。`, "reference_selection");
+    if (context.selectedHardAnchorIds && !selected.has(anchorId)) {
+      error(issues, "HARD_ANCHOR_NOT_SELECTED", context.targetArtifactId, `hard anchor ${anchorId} 的批准图片没有进入最终 reference selection。`, "reference_selection");
+      error(issues, "ANCHOR_REFERENCE_NOT_COMPARABLE", context.targetArtifactId, `锚点 ${anchorId} 缺少最终可比对参考图，身份或产品一致性评分不可信。`, "reference_selection");
+    }
+  }
+}
+
+function validateAnchorCoverage(issues: PlanValidationIssue[], source: Record<string, unknown>, artifactId: string): void {
+  const hasContractFields = [
+    "declaredAnchorIds", "declared_anchor_ids", "derivedAnchorIds", "derived_anchor_ids",
+    "effectiveRequiredAnchorIds", "effective_required_anchor_ids", "excludedAnchors", "anchor_exclusions",
+  ].some((key) => key in source);
+  if (!hasContractFields) return;
+  const declared = new Set(strings(source.declaredAnchorIds ?? source.declared_anchor_ids));
+  const derived = new Set(strings(source.derivedAnchorIds ?? source.derived_anchor_ids));
+  const effective = new Set(strings(source.effectiveRequiredAnchorIds ?? source.effective_required_anchor_ids));
+  const actual = new Set(strings(source.usesConsistencyAnchors ?? source.uses_consistency_anchors ?? source.requiredAnchorIds ?? source.required_anchor_ids));
+  const exclusions = arrayRecords(source.excludedAnchors ?? source.anchor_exclusions);
+  const validExcluded = new Set<string>();
+  for (const exclusion of exclusions) {
+    const anchorId = text(exclusion.anchorId ?? exclusion.anchor_id);
+    if (exclusion.valid !== true) {
+      error(issues, "UNJUSTIFIED_ANCHOR_EXCLUSION", artifactId, `锚点 ${anchorId || "未知"} 被排除，但没有有效的不可见理由。`, "stage_2a_storyboard");
+      continue;
+    }
+    validExcluded.add(anchorId);
+    if (actual.has(anchorId) || effective.has(anchorId)) {
+      error(issues, "ANCHOR_VISIBILITY_CONFLICT", artifactId, `锚点 ${anchorId} 同时被标记为不可见和必须可见。`, "stage_2a_storyboard");
+    }
+  }
+  const expected = new Set([...derived, ...declared].filter((anchorId) => !validExcluded.has(anchorId)));
+  for (const anchorId of expected) {
+    if (!effective.has(anchorId) || !actual.has(anchorId)) {
+      error(issues, "REQUIRED_ANCHOR_COVERAGE_MISSING", artifactId, `语义上必须可见的锚点 ${anchorId} 没有进入有效锚点集合。`, "stage_2a_storyboard");
+    }
   }
 }
 

@@ -57,3 +57,24 @@ test("planning UI reads backend progress instead of an elapsed-time curve", () =
   assert.match(page, /真实进度：已完成/);
   assert.match(page, /剩余 \$\{remaining\} 步/);
 });
+
+test("segment planning is a dependency pipeline instead of two global barriers", () => {
+  assert.match(planner, /PROMPT_DETAILER_SEGMENT_SYSTEM_PROMPT/);
+  assert.match(planner, /prompt_detailer_s\$\{segment\.segmentNo\}/);
+  assert.match(planner, /expectedSegmentNos:\s*\[segment\.segmentNo\]/);
+  assert.match(planner, /approvedShotDecomposerSegmentPlans/);
+  assert.match(planner, /promptDetailSegmentPlans/);
+  assert.match(planner, /segmentResults\.reduce<VideoPromptDetailPlan>/);
+  assert.match(planner, /repair_scope:\s*"target_segments_only"/);
+  assert.match(planner, /Never regenerate, alter, or repeat already approved segments/);
+  assert.match(planner, /owned_keyframe_nos/);
+  assert.match(planner, /buildSplitRepairContent/);
+  assert.match(planner, /segments:\s*params\.planningManifest\.timelineBlueprint\.segments\.filter/);
+});
+
+test("segment pipeline bounds slow calls and serializes concurrent checkpoint writes", () => {
+  assert.match(planner, /ONE_PROMPT_VIDEO_SEGMENT_STAGE_STREAM_MAX_TIMEOUT_MS/);
+  assert.match(planner, /return Math\.max\(jsonStageTimeoutMs\(\), 240000\)/);
+  assert.match(planner, /serializePlannerCheckpointWriter/);
+  assert.match(planner, /pending\.catch\(\(\) => undefined\)\.then\(\(\) => writer\(snapshot\)\)/);
+});

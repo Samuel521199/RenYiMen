@@ -82,7 +82,7 @@ interface WorkflowProgressView {
 interface PlannerProgress {
   taskId: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
-  stage: "queued" | "planning_architect" | "storyboard_artist" | "shot_decomposer" | "single_take_audit" | "split_repair" | "json_repair" | "prompt_detailer" | "story_quality_gate" | "complete" | "failed";
+  stage: "queued" | "reference_fact_extractor" | "planning_architect" | "storyboard_artist" | "story_contract_gate" | "story_contract_repair" | "shot_decomposer" | "single_take_audit" | "split_repair" | "json_repair" | "prompt_detailer" | "story_quality_gate" | "complete" | "failed";
   completedSteps: number;
   totalSteps: number;
   currentSegmentNo?: number;
@@ -98,6 +98,8 @@ interface PlannerProgress {
     jsonRepairDurationMs: number;
     singleTakeRepairCount: number;
     singleTakeRepairDurationMs: number;
+    storyContractRepairCount: number;
+    storyContractRepairDurationMs: number;
   };
 }
 
@@ -476,9 +478,16 @@ interface ArtifactMetadata {
 
 interface GenerationQualityReport {
   policyVersion?: "quality-policy-v2" | "quality-policy-v3";
-  evaluationStatus?: "completed" | "technical_failed";
+  evaluationStatus?: "completed" | "technical_failed" | "reference_missing";
   technicalError?: string;
   technicalRetryable?: boolean;
+  referenceComparable?: boolean;
+  identityScoreApplicable?: boolean;
+  productConsistencyScoreApplicable?: boolean;
+  expectedAnchorIds?: string[];
+  selectedReferenceCount?: number;
+  missingReferenceAnchorIds?: string[];
+  comparableChecks?: string[];
   advisoryOnly?: boolean;
   assetId: string;
   identityScore: number;
@@ -4293,10 +4302,13 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
         {candidates.map((candidate) => {
           const report = candidate.qualityReport;
           const technicalQualityFailure = isTechnicalQualityReport(report);
+          const referenceMissing = report?.evaluationStatus === "reference_missing" || report?.referenceComparable === false;
           const isVideo = candidate.kind === "segment_video";
           const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
           const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v3";
-          const statusText = technicalQualityFailure
+          const statusText = referenceMissing
+            ? (lang === "zh" ? "缺少可比参考" : "Reference required")
+            : technicalQualityFailure
             && isVideo
             ? (lang === "zh" ? "可采用 · 分析暂不可用" : "Usable · analysis unavailable")
             : isVideo && report
@@ -4320,7 +4332,9 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                 : candidate.status === "evaluating"
                   ? (lang === "zh" ? "快速质检中" : "Quick review")
                   : candidate.selected ? (lang === "zh" ? "当前采用" : "Selected") : candidate.status;
-          const statusClass = technicalQualityFailure
+          const statusClass = referenceMissing
+            ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            : technicalQualityFailure
             && isVideo
             ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
             : isVideo
@@ -4336,8 +4350,8 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
               : candidate.passed === false
                 ? "border-rose-300/15 bg-rose-300/[0.08] text-rose-100/85"
                 : "border-white/10 bg-white/[0.04] text-slate-400";
-          const qualityMetrics = report && !technicalQualityFailure ? [
-            [lang === "zh" ? "身份" : "Identity", report.identityScore],
+          const qualityMetrics = report && !technicalQualityFailure && !referenceMissing ? [
+            [lang === "zh" ? "身份" : "Identity", report.identityScoreApplicable === false ? undefined : report.identityScore],
             [lang === "zh" ? "构图" : "Layout", report.layoutScore],
             [lang === "zh" ? "提示" : "Prompt", report.promptAlignmentScore],
             [lang === "zh" ? "连续" : "Continuity", report.continuityScore],
@@ -4379,18 +4393,29 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <p className="text-[9px] uppercase tracking-[0.16em] text-slate-600">{lang === "zh" ? "综合评分" : "Overall"}</p>
-                    <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-100">{technicalQualityFailure || candidate.compositeScore == null ? "—" : candidate.compositeScore.toFixed(1)}</p>
+                    <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-100">{technicalQualityFailure || referenceMissing || candidate.compositeScore == null ? "—" : candidate.compositeScore.toFixed(1)}</p>
                   </div>
                   <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${statusClass}`}>{statusText}</span>
                 </div>
-                {report && !technicalQualityFailure && <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-white/[0.06] bg-white/[0.06]">
+                {report && !technicalQualityFailure && !referenceMissing && <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-white/[0.06] bg-white/[0.06]">
                   {qualityMetrics.map(([label, value]) => <div key={label} className="bg-slate-950/90 px-2 py-1.5">
                     <span className="block text-[9px] text-slate-600">{label}</span>
                     <span className="mt-0.5 block text-[11px] font-medium tabular-nums text-slate-300">{formatQualityScore(value)}</span>
                   </div>)}
                   {typeof report.singleTakeScore === "number" && <div className="col-span-2 flex items-center justify-between bg-slate-950/90 px-2 py-1.5 text-[10px]"><span className="text-slate-600">Single-take</span><span className="font-medium tabular-nums text-slate-300">{formatQualityScore(report.singleTakeScore)}</span></div>}
                 </div>}
-                {technicalQualityFailure ? <p className="rounded-md border border-amber-300/10 bg-amber-300/[0.05] px-2 py-1.5 text-[10px] leading-4 text-amber-100/80">
+                {report && (report.expectedAnchorIds?.length || report.selectedReferenceCount || report.comparableChecks?.length) ? <p className="rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-1.5 text-[10px] leading-4 text-slate-400">
+                  {lang === "zh" ? "资产" : "Assets"}：{report.expectedAnchorIds?.join("、") || (lang === "zh" ? "无强制项" : "none")}
+                  <span className="mx-1.5 text-slate-700">·</span>
+                  {lang === "zh" ? `参考 ${report.selectedReferenceCount ?? 0}` : `${report.selectedReferenceCount ?? 0} refs`}
+                  <span className="mx-1.5 text-slate-700">·</span>
+                  {lang === "zh" ? "可比" : "Checks"}：{report.comparableChecks?.map((item) => item === "identity" ? (lang === "zh" ? "身份" : "identity") : item === "product" ? (lang === "zh" ? "产品" : "product") : (lang === "zh" ? "布局" : "layout")).join("、") || "—"}
+                </p> : null}
+                {referenceMissing ? <p className="rounded-md border border-amber-300/10 bg-amber-300/[0.05] px-2 py-1.5 text-[10px] leading-4 text-amber-100/80">
+                  {lang === "zh"
+                    ? "当前候选已保留。请先补齐并确认资产参考，再重新质检；不会消耗抽图重试次数。"
+                    : "Candidate preserved. Confirm the required asset references, then re-run review without spending a redraw attempt."}
+                </p> : technicalQualityFailure ? <p className="rounded-md border border-amber-300/10 bg-amber-300/[0.05] px-2 py-1.5 text-[10px] leading-4 text-amber-100/80">
                   {isVideo
                     ? (lang === "zh"
                         ? "自动分析暂不可用，不影响预览或采用；你也可以修改提示词后重新生成。"
@@ -6125,8 +6150,11 @@ function plannerWorkflowProgressView(progress: PlannerProgress | undefined, lang
     : Math.min(98, 5 + (completed / total) * 90);
   const titles: Record<PlannerProgress["stage"], { zh: string; en: string }> = {
     queued: { zh: "剧本规划任务已入队", en: "Planning job queued" },
+    reference_fact_extractor: { zh: "正在提取参考图客观事实", en: "Extracting objective reference facts" },
     planning_architect: { zh: "正在理解创意与规划时间轴", en: "Understanding the brief and timeline" },
     storyboard_artist: { zh: "正在设计剧情节拍与广告因果", en: "Designing story beats and ad causality" },
+    story_contract_gate: { zh: "正在校验剧情合同", en: "Validating the story contract" },
+    story_contract_repair: { zh: "正在定向修复剧情合同", en: "Repairing the story contract" },
     shot_decomposer: { zh: "正在拆解可执行视频片段", en: "Decomposing executable video segments" },
     single_take_audit: { zh: "正在执行一镜到底审计", en: "Running single-take audit" },
     split_repair: { zh: "正在修复高风险镜头结构", en: "Repairing high-risk shot structure" },
@@ -6146,6 +6174,9 @@ function plannerWorkflowProgressView(progress: PlannerProgress | undefined, lang
       : "",
     progress.metrics.singleTakeRepairCount > 0
       ? (lang === "en" ? `single-take repairs: ${progress.metrics.singleTakeRepairCount}` : `一镜到底修复：${progress.metrics.singleTakeRepairCount} 次`)
+      : "",
+    progress.metrics.storyContractRepairCount > 0
+      ? (lang === "en" ? `story-contract repairs: ${progress.metrics.storyContractRepairCount}` : `剧情合同修复：${progress.metrics.storyContractRepairCount} 次`)
       : "",
   ].filter(Boolean);
   return {

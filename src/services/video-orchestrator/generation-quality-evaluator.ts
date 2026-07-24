@@ -67,6 +67,8 @@ interface BaseEvaluationParams {
 }
 
 export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams): Promise<GenerationQualityReport> {
+  const referenceGate = missingReferenceQualityReport(params);
+  if (referenceGate) return referenceGate;
   if (!onePromptRolloutEnabled("ONE_PROMPT_VISUAL_QUALITY_EVAL")) return legacyQualityFallback(params, false);
   if (!qualityVisionEnabled()) return evaluationFailure(params, "真实图片视觉质量评估未启用或缺少 DashScope API Key。", "manual");
   const content: Array<Record<string, unknown>> = [{
@@ -431,9 +433,25 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   const suppliedRetryInstruction = suspectedContractConflicts.length && !contractConflictsVerified
     ? ""
     : text(source.retryInstruction ?? source.retry_instruction);
+  const expectedAnchorIds = contractAnchorIds(params.targetContract);
+  const selectedReferenceCount = params.selectedReferenceUrls.filter((url) => Boolean(url?.trim())).length;
+  const referenceComparable = expectedAnchorIds.length === 0 || selectedReferenceCount > 0;
+  const referenceText = `${expectedAnchorIds.join(" ")} ${params.referenceUsageNotes.join(" ")}`.toLowerCase();
+  const comparableChecks = uniqueStrings([
+    selectedReferenceCount > 0 ? "layout" : "",
+    expectedAnchorIds.length > 0 && selectedReferenceCount > 0 ? "identity" : "",
+    /product|logo|brand|ui|产品|品牌|界面/.test(referenceText) && selectedReferenceCount > 0 ? "product" : "",
+  ]);
   return {
     policyVersion: "quality-policy-v3",
     evaluationStatus: "completed",
+    referenceComparable,
+    identityScoreApplicable: expectedAnchorIds.length > 0 && selectedReferenceCount > 0,
+    productConsistencyScoreApplicable: comparableChecks.includes("product"),
+    expectedAnchorIds,
+    selectedReferenceCount,
+    missingReferenceAnchorIds: [],
+    comparableChecks,
     assetId: params.assetId,
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
@@ -558,8 +576,58 @@ function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFro
   };
 }
 
+function contractAnchorIds(targetContract: Record<string, unknown>): string[] {
+  const source =
+    targetContract.effectiveRequiredAnchorIds
+    ?? targetContract.effective_required_anchor_ids
+    ?? targetContract.requiredAnchorIds
+    ?? targetContract.required_anchor_ids
+    ?? targetContract.usesConsistencyAnchors
+    ?? targetContract.uses_consistency_anchors;
+  return [...new Set(strings(source))];
+}
+
+function missingReferenceQualityReport(params: BaseEvaluationParams): GenerationQualityReport | undefined {
+  if (params.purpose === "anchor_reference_image") return undefined;
+  const expectedAnchorIds = contractAnchorIds(params.targetContract);
+  if (expectedAnchorIds.length === 0 || params.selectedReferenceUrls.some((url) => Boolean(url?.trim()))) return undefined;
+  const issue = `缺少资产合同要求的可比参考图：${expectedAnchorIds.join("、")}`;
+  return {
+    policyVersion: "quality-policy-v3",
+    evaluationStatus: "reference_missing",
+    technicalRetryable: false,
+    referenceComparable: false,
+    identityScoreApplicable: false,
+    productConsistencyScoreApplicable: false,
+    expectedAnchorIds,
+    selectedReferenceCount: 0,
+    missingReferenceAnchorIds: expectedAnchorIds,
+    comparableChecks: [],
+    assetId: params.assetId,
+    candidateId: params.candidateId,
+    candidateNo: params.candidateNo,
+    mediaUrl: params.mediaUrl,
+    identityScore: 0,
+    layoutScore: 0,
+    promptAlignmentScore: 0,
+    continuityScore: 0,
+    artifactIssues: [issue],
+    passed: false,
+    originalPassed: false,
+    contentBased: false,
+    qualityDecision: "blocked",
+    retryInstruction: "先回到资产参考选择，补齐合同要求的已批准参考图，再对当前候选重新质检；不要重新生成媒体。",
+    retryFromStage: "reference_selector",
+  };
+}
+
+export function isReferenceMissingQualityEvaluation(report: GenerationQualityReport | null | undefined): boolean {
+  return report?.evaluationStatus === "reference_missing" || report?.referenceComparable === false;
+}
+
 export function isTechnicalQualityEvaluationFailure(report: GenerationQualityReport | null | undefined): boolean {
   if (!report) return false;
+  if (isReferenceMissingQualityEvaluation(report)) return false;
   if (report.evaluationStatus === "technical_failed") return true;
   if (report.contentBased === false && report.passed === false) return true;
   return report.artifactIssues.some((issue) =>

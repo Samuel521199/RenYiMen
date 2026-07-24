@@ -82,13 +82,23 @@ test("planner checkpoints are reused only when the input fingerprint matches", (
       ...initial,
       planningRaw: { ok: true },
       shotDecomposerSegmentPlans: { "4": { segment: 4 } },
+      approvedShotDecomposerSegmentPlans: { "4": { approved: true } },
+      promptDetailSegmentPlans: {
+        "4": {
+          segmentVideoPrompts: [{ segmentNo: 4, videoPromptZh: "连续镜头" }],
+        },
+      },
     },
   };
   const resumed = normalizeAliyunStoryboardPlannerCheckpoint(stored, input);
   assert.deepEqual(resumed.planningRaw, { ok: true });
   assert.deepEqual(resumed.shotDecomposerSegmentPlans?.["4"], { segment: 4 });
+  assert.deepEqual(resumed.approvedShotDecomposerSegmentPlans?.["4"], { approved: true });
+  assert.equal(resumed.promptDetailSegmentPlans?.["4"]?.segmentVideoPrompts?.[0]?.segmentNo, 4);
 
   const changed = normalizeAliyunStoryboardPlannerCheckpoint(stored, { ...input, userPrompt: "修改后的游戏广告" });
   assert.equal(changed.planningRaw, undefined);
   assert.deepEqual(changed.shotDecomposerSegmentPlans, {});
+  assert.deepEqual(changed.approvedShotDecomposerSegmentPlans, {});
+  assert.deepEqual(changed.promptDetailSegmentPlans, {});
 });

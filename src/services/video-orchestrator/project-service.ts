@@ -30,7 +30,7 @@ import { readCameraGraph, resolveCameraInheritanceContext } from "./camera-graph
 import { assertPlanValidForGeneration as assertPlanValidForGenerationV2 } from "./plan-validator";
 import { sanitizeGameVisualPromptText, stripNonStandardPromptSymbols } from "./frame-contract";
 import { evaluateEndFrameContinuity } from "./end-frame-continuity";
-import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVideoFrameDataUrls, generationQualityCompositeScore, inspectGeneratedVideoTechnicalQuality, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse } from "./generation-quality-evaluator";
+import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVideoFrameDataUrls, generationQualityCompositeScore, inspectGeneratedVideoTechnicalQuality, isReferenceMissingQualityEvaluation, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse } from "./generation-quality-evaluator";
 import { createOnePromptRolloutSnapshot, legacyReferenceSelection, onePromptRolloutEnabled } from "./rollout-flags";
 import { hydratePlanArtifactsFromTables, mirrorPlanArtifactsToTables } from "./plan-artifact-store";
 import { buildAuthoritativeVisualContract, repairNegativePromptAgainstVisualContract, repairPromptAgainstVisualContract, type AuthoritativeVisualContract } from "./visual-quality-contract";
@@ -71,6 +71,8 @@ export interface VideoPlanningProgress {
     jsonRepairDurationMs: number;
     singleTakeRepairCount: number;
     singleTakeRepairDurationMs: number;
+    storyContractRepairCount: number;
+    storyContractRepairDurationMs: number;
   };
 }
 
@@ -287,6 +289,8 @@ function readVideoPlanningProgress(planJson: Prisma.JsonValue | null | undefined
       jsonRepairDurationMs: Math.max(0, planningNumber(metrics.jsonRepairDurationMs)),
       singleTakeRepairCount: Math.max(0, planningNumber(metrics.singleTakeRepairCount)),
       singleTakeRepairDurationMs: Math.max(0, planningNumber(metrics.singleTakeRepairDurationMs)),
+      storyContractRepairCount: Math.max(0, planningNumber(metrics.storyContractRepairCount)),
+      storyContractRepairDurationMs: Math.max(0, planningNumber(metrics.storyContractRepairDurationMs)),
     },
   };
 }
@@ -1484,12 +1488,15 @@ async function saveGenerationQualityReport(projectId: string, report: Generation
   ].slice(-160);
   delete plan.generation_quality_reports;
   const technicalFailure = isTechnicalQualityEvaluationFailure(report);
-  setPlanArtifactStatus(plan, [report.assetId], technicalFailure ? "generating" : report.passed ? "ready" : "failed", {
+  const referenceMissing = isReferenceMissingQualityEvaluation(report);
+  setPlanArtifactStatus(plan, [report.assetId], technicalFailure ? "generating" : referenceMissing ? "dirty" : report.passed ? "ready" : "failed", {
     dirtyReason: report.passed || technicalFailure ? undefined : report.retryInstruction || report.artifactIssues.join("; "),
     retryFromStage: report.retryFromStage === "stage2b"
       ? "stage2b"
       : report.retryFromStage === "stage3"
         ? "stage3"
+        : report.retryFromStage === "reference_selector"
+          ? "reference_selector"
         : report.retryFromStage === "manual"
           ? "manual"
           : report.endFrameDecision === "return_stage_2b"
@@ -1801,7 +1808,7 @@ function keyframesFromPlan(plan: Record<string, unknown>): Array<{ keyframeNo: n
     if (!Number.isInteger(keyframeNo)) return [];
     return [{
       keyframeNo,
-      anchorIds: readPlanStringArray(keyframe, ["usesConsistencyAnchors", "uses_consistency_anchors", "requiredAnchorIds", "required_anchor_ids"]),
+      anchorIds: effectiveRequiredAnchorIds(keyframe),
     }];
   });
 }
@@ -1814,7 +1821,7 @@ function segmentsFromPlan(plan: Record<string, unknown>): Array<{ segmentNo: num
     if (!Number.isInteger(segmentNo) || segmentNo <= 0) return [];
     const startKeyframeNo = Number(segment.startKeyframeNo ?? segment.start_keyframe_no);
     const endKeyframeNo = Number(segment.endKeyframeNo ?? segment.end_keyframe_no);
-    const anchorIds = readPlanStringArray(segment, ["usesConsistencyAnchors", "uses_consistency_anchors", "requiredAnchorIds", "required_anchor_ids"]);
+    const anchorIds = effectiveRequiredAnchorIds(segment);
     const microShots = readPlanMicroShots(segment).map((microShot) => ({
       microShotNo: microShot.microShotNo,
       anchorIds: microShot.usesConsistencyAnchors ?? [],
@@ -2129,7 +2136,7 @@ function readPlanMicroShots(shot: Record<string, unknown> | undefined): VideoMic
     const imageTaskId = readPlanShotString(item, ["imageTaskId", "image_task_id"]);
     const errorMessage = readPlanShotString(item, ["errorMessage", "error_message"]);
     const imageStatusValue = readPlanShotString(item, ["imageStatus", "image_status", "status"]);
-    const usesConsistencyAnchors = readPlanStringArray(item, ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+    const usesConsistencyAnchors = effectiveRequiredAnchorIds(item);
     const imageStatus = imageStatusValue === "idle" || imageStatusValue === "pending" || imageStatusValue === "running" || imageStatusValue === "ready" || imageStatusValue === "failed"
       ? imageStatusValue
       : imageUrl
@@ -3360,6 +3367,8 @@ export async function queueVideoProjectPlanning(
           jsonRepairDurationMs: 0,
           singleTakeRepairCount: 0,
           singleTakeRepairDurationMs: 0,
+          storyContractRepairCount: 0,
+          storyContractRepairDurationMs: 0,
         },
       };
 
@@ -3551,6 +3560,8 @@ export async function planVideoProject(
         jsonRepairDurationMs: 0,
         singleTakeRepairCount: 0,
         singleTakeRepairDurationMs: 0,
+        storyContractRepairCount: 0,
+        storyContractRepairDurationMs: 0,
       },
     };
     const delta = update.metricsDelta ?? {};
@@ -3575,6 +3586,8 @@ export async function planVideoProject(
         jsonRepairDurationMs: previous.metrics.jsonRepairDurationMs + (delta.jsonRepairDurationMs ?? 0),
         singleTakeRepairCount: previous.metrics.singleTakeRepairCount + (delta.singleTakeRepairCount ?? 0),
         singleTakeRepairDurationMs: previous.metrics.singleTakeRepairDurationMs + (delta.singleTakeRepairDurationMs ?? 0),
+        storyContractRepairCount: previous.metrics.storyContractRepairCount + (delta.storyContractRepairCount ?? 0),
+        storyContractRepairDurationMs: previous.metrics.storyContractRepairDurationMs + (delta.storyContractRepairDurationMs ?? 0),
       },
     };
     return writePlanningEnvelope({ plannerProgress }).then(() => logOnePromptVideo("project.plan.progress", {
@@ -4274,6 +4287,14 @@ function buildImageCandidateLearningSummary(
   };
 }
 
+function effectiveRequiredAnchorIds(source: Record<string, unknown> | undefined): string[] {
+  if (!source) return [];
+  if ("effectiveRequiredAnchorIds" in source || "effective_required_anchor_ids" in source) {
+    return readPlanStringArray(source, ["effectiveRequiredAnchorIds", "effective_required_anchor_ids"]);
+  }
+  return readPlanStringArray(source, ["usesConsistencyAnchors", "uses_consistency_anchors", "requiredAnchorIds", "required_anchor_ids"]);
+}
+
 export async function regenerateShotImage(
   userId: string,
   projectId: string,
@@ -4312,7 +4333,7 @@ export async function regenerateShotImage(
   ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
   const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
     project.planJson,
-    readPlanStringArray(readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo), ["usesConsistencyAnchors", "uses_consistency_anchors"]),
+    effectiveRequiredAnchorIds(readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo)),
   );
   const learnedReferenceUsageNotes = uniqueStrings([
     ...learning.referenceUsageNotes,
@@ -6522,6 +6543,34 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
       continue;
     }
 
+    const referenceMissingCandidate = allArtifactCandidates.find((candidate) =>
+      candidate.qualityReport
+      && isRecord(candidate.qualityReport)
+      && isReferenceMissingQualityEvaluation(candidate.qualityReport as unknown as GenerationQualityReport)
+    );
+    if (referenceMissingCandidate?.qualityReport && isRecord(referenceMissingCandidate.qualityReport)) {
+      const report = referenceMissingCandidate.qualityReport as unknown as GenerationQualityReport;
+      await saveGenerationQualityReport(project.id, report);
+      const metadata = candidateMetadata(referenceMissingCandidate.metadata);
+      if (referenceMissingCandidate.kind === "keyframe_image") {
+        await prisma.videoKeyframe.update({
+          where: { id: referenceMissingCandidate.targetId },
+          data: { imageTaskId: null, status: VideoShotStatus.IMAGE_PENDING, errorMessage: report.retryInstruction ?? null },
+        });
+      } else if (referenceMissingCandidate.kind === "micro_shot_image") {
+        await updatePlanMicroShot(project.id, Number(metadata.segmentNo), Number(metadata.microShotNo), {
+          imageTaskId: "",
+          imageStatus: "idle",
+          errorMessage: report.retryInstruction ?? "",
+        });
+      }
+      await updateProjectArtifactStatus(project.id, [artifactId], "dirty", {
+        dirtyReason: report.retryInstruction || report.artifactIssues.join("；"),
+        retryFromStage: "reference_selector",
+      });
+      continue;
+    }
+
     const passing = allArtifactCandidates.filter((candidate) => candidate.passed === true && candidate.mediaUrl).sort((a, b) => (b.compositeScore ?? 0) - (a.compositeScore ?? 0));
     const selected = passing[0];
     const currentSelection = allArtifactCandidates.find((candidate) => candidate.selected);
@@ -7441,7 +7490,7 @@ async function submitNextImageTask(params: {
       ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
       const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
         project.planJson,
-        readPlanStringArray(readPlanKeyframeMap(project.planJson).get(nextKeyframe.keyframeNo), ["usesConsistencyAnchors", "uses_consistency_anchors"]),
+        effectiveRequiredAnchorIds(readPlanKeyframeMap(project.planJson).get(nextKeyframe.keyframeNo)),
       );
       const learnedReferenceUsageNotes = uniqueStrings([
         ...learning.referenceUsageNotes,
@@ -8114,7 +8163,7 @@ function generationPromptForKeyframe(
   const toneLock = colorToneLockForPrompt(project.planJson);
   const anchorLock = consistencyAnchorLocksForPrompt(
     project.planJson,
-    readPlanStringArray(planKeyframe, ["usesConsistencyAnchors", "uses_consistency_anchors"]),
+    effectiveRequiredAnchorIds(planKeyframe),
   );
   const base = fallback;
   return [
@@ -8172,7 +8221,7 @@ function narrativePromptContextForSegment(planJson: Prisma.JsonValue | null, seg
     ...linkedBeats.flatMap((beat) => readPlanStringArray(beat, ["keyEvidenceIds", "key_evidence_ids"])),
   ]);
   const requiredAnchorIds = uniqueStrings([
-    ...readPlanStringArray(planSegment, ["usesConsistencyAnchors", "uses_consistency_anchors"]),
+    ...effectiveRequiredAnchorIds(planSegment),
     ...linkedBeats.flatMap((beat) => readPlanStringArray(beat, ["requiredAnchorIds", "required_anchor_ids"])),
   ]);
   const storyFunction = readPlanShotString(planSegment, ["storyFunction", "story_function"]) ||
@@ -8384,7 +8433,7 @@ function compileVideoPromptForSegment(
   const visibleAnchorIds = readPlanStringArray(renderDescription, ["visibleAnchorIds", "visible_anchor_ids"]);
   const segmentAnchorIds = visibleAnchorIds.length
     ? visibleAnchorIds
-    : readPlanStringArray(planSegment, ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+    : effectiveRequiredAnchorIds(planSegment);
   const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, segmentAnchorIds);
   const cameraInheritance = resolveCameraInheritanceContext(planRecord(project.planJson), segment.segmentNo);
   const previousQualityReport = latestGenerationQualityReport(project.planJson, videoArtifactIdForSegmentNo(segment.segmentNo));
@@ -8535,7 +8584,7 @@ function compileImagePromptForKeyframe(
   const isConsistencyReference = isConsistencyKeyframeNo(keyframe.keyframeNo);
   const stylePreset = readStylePresetFromPlan(project.planJson);
   const targetArtifactId = isConsistencyReference ? "consistency_reference:" + keyframe.keyframeNo : "keyframe:" + keyframe.keyframeNo;
-  const visibleAnchorIds = readPlanStringArray(planKeyframe, ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+  const visibleAnchorIds = effectiveRequiredAnchorIds(planKeyframe);
   const assetCategory = readPlanShotString(planKeyframe, ["assetCategory", "asset_category"]);
   const assetView = readPlanShotString(planKeyframe, ["assetView", "asset_view"]);
   const consistencyKind = isConsistencyReference
@@ -8832,7 +8881,7 @@ async function selectReferenceImagesForKeyframe(
   );
   const targetAnchorId = anchorIdForConsistencyReference(planKeyframe);
   const requiredAnchorIds = uniqueStrings([
-    ...readPlanStringArray(planKeyframe, ["usesConsistencyAnchors", "uses_consistency_anchors"]),
+    ...effectiveRequiredAnchorIds(planKeyframe),
     ...(isConsistencyKeyframeNo(keyframe.keyframeNo) && targetAnchorId ? [targetAnchorId] : []),
   ]);
   const hardAnchorIds = hardReferenceAnchorIds(project.planJson);
@@ -9397,7 +9446,7 @@ function generationPromptForSegment(
   const toneLock = colorToneLockForPrompt(project.planJson);
   const anchorLock = consistencyAnchorLocksForPrompt(
     project.planJson,
-    readPlanStringArray(planSegment, ["usesConsistencyAnchors", "uses_consistency_anchors"]),
+    effectiveRequiredAnchorIds(planSegment),
   );
   const negativePrompt = generationNegativePromptForSegment(project, segment);
   const base = segment.videoPrompt;
@@ -9531,9 +9580,9 @@ async function selectReferenceImagesForMicroShot(
   finalTextPrompt: string,
 ): Promise<{ urls: string[]; output: ReferenceSelectionOutput }> {
   assertFullTransitionReferenceReady(project, segment.segmentNo);
-  const requiredAnchorIds = microShot.usesConsistencyAnchors?.length
-    ? microShot.usesConsistencyAnchors
-    : readPlanStringArray(readPlanSegmentMap(project.planJson).get(segment.segmentNo), ["usesConsistencyAnchors", "uses_consistency_anchors"]);
+  const requiredAnchorIds = microShot.effectiveRequiredAnchorIds
+    ?? microShot.usesConsistencyAnchors
+    ?? effectiveRequiredAnchorIds(readPlanSegmentMap(project.planJson).get(segment.segmentNo));
   const missingHardAnchorWarnings = requiredAnchorIds.length
     ? missingHardAnchorWarningsForTarget(project, requiredAnchorIds)
     : [];

@@ -240,18 +240,17 @@ test("planner routes video categories to template-specific minimum beat structur
   }
 });
 
-test("story quality auto rewrite is wired before plan review persistence", () => {
+test("story contract hard gate runs before shot decomposition and late gate is review-only", () => {
   const plannerSource = readSource("src/services/video-orchestrator/three-stage-planner.ts");
   const serviceSource = readSource("src/services/video-orchestrator/project-service.ts");
 
-  assert.match(plannerSource, /const MAX_STORY_QUALITY_REWRITES = 2;/);
   assert.match(plannerSource, /readStoryRolloutConfig/);
-  assert.match(plannerSource, /shouldAttemptStoryRewrite/);
   assert.match(plannerSource, /shouldRequireStoryQualityReview/);
-  assert.match(plannerSource, /STORY_QUALITY_REWRITE_SYSTEM_PROMPT/);
-  assert.match(plannerSource, /rewriteStoryPlanUntilQualityPass/);
-  assert.match(plannerSource, /story_quality_rewrite\.decision/);
+  assert.match(plannerSource, /ensureStoryboardStoryContract/);
+  assert.match(plannerSource, /STORY_CONTRACT_REPAIR_SYSTEM_PROMPT/);
+  assert.match(plannerSource, /story_quality_rewrite\.deferred_to_pre_shot_contract/);
   assert.match(plannerSource, /markStoryRewriteRequired/);
+  assert.ok(plannerSource.indexOf("ensureStoryboardStoryContract({") < plannerSource.indexOf("createShotDecomposerPlan({"));
   assert.match(serviceSource, /storyGateMode: storyRolloutConfig\.storyGateMode/);
   assert.match(serviceSource, /rewriteRequired: plan\.storyQualityReport\?\.rewriteRequired/);
   assert.match(serviceSource, /autoRewriteAttempts: plan\.storyQualityReport\?\.autoRewriteAttempts/);

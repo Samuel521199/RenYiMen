@@ -67,6 +67,49 @@ export interface VideoTimelineBlueprintSegment {
   boundaryModeHint?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
 }
 
+export interface VideoAssetContractExclusion {
+  anchorId: string;
+  reason: string;
+  visibility?: string;
+  valid: boolean;
+}
+
+export interface VideoAssetContractTarget {
+  targetType: "beat" | "segment" | "keyframe" | "micro_shot";
+  targetId: string;
+  segmentNo?: number;
+  keyframeNo?: number;
+  microShotNo?: number;
+  declaredAnchorIds: string[];
+  derivedAnchorIds: string[];
+  effectiveRequiredAnchorIds: string[];
+  excludedAnchors: VideoAssetContractExclusion[];
+  expectedVisibleEntities: string[];
+  derivationReasons: string[];
+}
+
+export interface VideoAssetContract {
+  version: "asset-contract-v1";
+  beatTargets: VideoAssetContractTarget[];
+  segmentTargets: VideoAssetContractTarget[];
+  boundaryTargets: VideoAssetContractTarget[];
+  microShotTargets?: VideoAssetContractTarget[];
+  referenceFactFingerprint?: string;
+  issues: Array<{
+    code: "UNJUSTIFIED_ANCHOR_EXCLUSION" | "REQUIRED_ANCHOR_COVERAGE_MISSING" | "ANCHOR_VISIBILITY_CONFLICT";
+    targetId: string;
+    anchorId?: string;
+    messageZh: string;
+  }>;
+}
+
+export interface VideoAssetDependencyFields {
+  declaredAnchorIds?: string[];
+  derivedAnchorIds?: string[];
+  effectiveRequiredAnchorIds?: string[];
+  excludedAnchors?: VideoAssetContractExclusion[];
+}
+
 export interface VideoSubtitlePolicy {
   needed: boolean;
   reasonZh?: string;
@@ -148,7 +191,7 @@ export interface VideoPromptDetailPlan {
   generationNotes?: string[];
 }
 
-export interface VideoPlanKeyframe {
+export interface VideoPlanKeyframe extends VideoAssetDependencyFields {
   keyframeNo: number;
   frameId?: string;
   frameRole?: "video_start" | "segment_start" | "segment_end" | "shared_boundary" | "video_end" | "internal_reference";
@@ -308,7 +351,7 @@ export interface VideoTimedPrompt {
   promptEn?: string;
 }
 
-export interface VideoMicroShot {
+export interface VideoMicroShot extends VideoAssetDependencyFields {
   microShotNo: number;
   localTimeSeconds: number;
   endSeconds?: number;
@@ -352,7 +395,7 @@ export interface VideoAudioPlan {
   rationale?: string;
 }
 
-export interface VideoPlanSegment {
+export interface VideoPlanSegment extends VideoAssetDependencyFields {
   segmentNo: number;
   startKeyframeNo: number;
   endKeyframeNo: number;
@@ -381,6 +424,9 @@ export interface VideoPlanSegment {
   effect?: string;
   informationUnit?: string;
   keyEvidenceIds?: string[];
+  dependsOnBeatIds?: string[];
+  evidenceFromBeatIds?: string[];
+  resolvesConflictBeatId?: string;
   actionContinuity?: VideoStoryTraceFields["actionContinuity"];
   reactionBeat?: string;
   powerShift?: string;
@@ -394,7 +440,7 @@ export interface VideoPlanSegment {
   usesConsistencyAnchors?: string[];
 }
 
-export interface VideoPlanShot {
+export interface VideoPlanShot extends VideoAssetDependencyFields {
   shotNo: number;
   durationSeconds: number;
   boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
@@ -419,6 +465,9 @@ export interface VideoPlanShot {
   effect?: string;
   informationUnit?: string;
   keyEvidenceIds?: string[];
+  dependsOnBeatIds?: string[];
+  evidenceFromBeatIds?: string[];
+  resolvesConflictBeatId?: string;
   actionContinuity?: VideoStoryTraceFields["actionContinuity"];
   reactionBeat?: string;
   powerShift?: string;
@@ -531,6 +580,9 @@ export interface VideoStoryTraceFields {
   effect?: string;
   informationUnit?: string;
   keyEvidenceIds?: string[];
+  dependsOnBeatIds?: string[];
+  evidenceFromBeatIds?: string[];
+  resolvesConflictBeatId?: string;
   actionContinuity?: {
     motivationOrPreparation?: string;
     execution?: string;
@@ -540,7 +592,7 @@ export interface VideoStoryTraceFields {
   powerShift?: string;
 }
 
-export interface VideoStoryBeat {
+export interface VideoStoryBeat extends VideoAssetDependencyFields {
   beatId: string;
   order: number;
   title?: string;
@@ -554,6 +606,9 @@ export interface VideoStoryBeat {
   effect?: string;
   informationUnit?: string;
   keyEvidenceIds?: string[];
+  dependsOnBeatIds?: string[];
+  evidenceFromBeatIds?: string[];
+  resolvesConflictBeatId?: string;
   requiredAnchorIds?: string[];
   sourceEventIds?: string[];
   targetSegmentNos?: number[];
@@ -566,6 +621,14 @@ export interface VideoStoryBeat {
   reactionBeat?: string;
   powerShift?: string;
   notes?: string[];
+}
+
+export interface VideoStoryEvidence {
+  evidenceId: string;
+  description?: string;
+  introducedByBeatId: string;
+  visibleInSegmentNos: number[];
+  anchorIds?: string[];
 }
 
 export interface VideoNarrativeMicroRules {
@@ -868,9 +931,17 @@ export interface RollbackVideoMediaInput {
 
 export interface GenerationQualityReport {
   policyVersion?: "quality-policy-v2" | "quality-policy-v3";
-  evaluationStatus?: "completed" | "technical_failed";
+  evaluationStatus?: "completed" | "technical_failed" | "reference_missing";
   technicalError?: string;
   technicalRetryable?: boolean;
+  /** Whether identity/product scores have an authoritative approved reference to compare against. */
+  referenceComparable?: boolean;
+  identityScoreApplicable?: boolean;
+  productConsistencyScoreApplicable?: boolean;
+  expectedAnchorIds?: string[];
+  selectedReferenceCount?: number;
+  missingReferenceAnchorIds?: string[];
+  comparableChecks?: string[];
   /** Video review may be informative only and must not veto or auto-regenerate media. */
   advisoryOnly?: boolean;
   assetId: string;
@@ -908,7 +979,7 @@ export interface GenerationQualityReport {
   metadataIssues?: string[];
   userAccepted?: boolean;
   originalPassed?: boolean;
-  retryFromStage?: "stage2b" | "stage3" | "generation" | "manual";
+  retryFromStage?: "stage2b" | "stage3" | "reference_selector" | "generation" | "manual";
   evaluationModel?: string;
   evaluationDurationMs?: number;
   displaySummaries?: Partial<Record<QualityDisplayLanguage, QualityDisplaySummary>>;
@@ -998,6 +1069,8 @@ export interface OnePromptVideoPlan {
   narrativeEvents?: NarrativeEvent[];
   creativeStrategy?: VideoCreativeStrategy;
   storyBeats?: VideoStoryBeat[];
+  evidenceRegistry?: VideoStoryEvidence[];
+  assetContract?: VideoAssetContract;
   narrativeMicroRules?: VideoNarrativeMicroRules;
   shotGroupingPass?: VideoShotGroupingPass;
   storyQualityReport?: VideoStoryQualityReport;
