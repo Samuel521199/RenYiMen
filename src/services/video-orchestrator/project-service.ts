@@ -121,6 +121,7 @@ const DEMO_PROJECT_PROMPT = "Create a 30s game ad with strong visual polish and 
 const DEMO_PROJECT_FINAL_VIDEO_URL = "/demo/tongits/final.mp4";
 const ONE_PROMPT_VIDEO_COST_CREDITS = 5000;
 const MANUAL_STOP_MESSAGE = "Generation stopped by user";
+const CLIP_CONTINUITY_REPORT_MISSING_ERROR = "Clip has no passed end-frame continuity report; visual continuity evaluation is required.";
 
 export type VideoProjectWithShots = Prisma.VideoProjectGetPayload<{
   include: typeof PROJECT_INCLUDE;
@@ -1728,6 +1729,24 @@ function generationQualityReportForActiveMedia(
     && (item.mediaUrl ?? item.media_url) === mediaUrl
   );
   return value && isRecord(value) ? value as unknown as GenerationQualityReport : undefined;
+}
+
+export function hasUsableVideoCandidateForActiveClip(
+  candidates: Array<{
+    kind: string;
+    targetId: string;
+    status: string;
+    mediaUrl: string | null;
+  }>,
+  targetId: string,
+  clipUrl: string,
+): boolean {
+  return candidates.some((candidate) =>
+    candidate.kind === "segment_video"
+    && candidate.targetId === targetId
+    && candidate.mediaUrl === clipUrl
+    && candidate.status !== "failed"
+  );
 }
 
 function maxEndFrameContinuityRetries(): number {
@@ -6212,6 +6231,11 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     await updateProjectArtifactStatus(project.id, [candidate.artifactId], "generating", { retryFromStage: "generation" });
   }
   const artifactIds = [...new Set(fresh.map((candidate) => candidate.artifactId))];
+  const hasActiveVideoGenerationTasks = fresh.some((candidate) =>
+    candidate.kind === "segment_video"
+    && (candidate.status === "running" || candidate.status === "pending")
+    && Boolean(candidate.taskId)
+  );
   let evaluationsStarted = 0;
   for (const artifactId of artifactIds) {
     const artifactCandidates = fresh.filter((candidate) => candidate.artifactId === artifactId);
@@ -6222,6 +6246,9 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     const qualityWorkItems = artifactCandidates.filter((item) => {
       if (!item.mediaUrl) return false;
       if (item.kind === "segment_video" && item.status === "review_ready" && !item.qualityReport) {
+        // Keep upstream task polling fast while any segment video is still
+        // rendering. Advisory analysis can run after generation settles.
+        if (hasActiveVideoGenerationTasks) return false;
         const metadata = candidateMetadata(item.metadata);
         const advisoryNextEvalAt = Date.parse(String(metadata.advisoryNextEvalAt || ""));
         return !Number.isFinite(advisoryNextEvalAt) || advisoryNextEvalAt <= Date.now();
@@ -6439,18 +6466,35 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
       );
       const segment = project.segments.find((item) => item.id === allArtifactCandidates[0]?.targetId);
       if (segment && usableCandidates.length > 0) {
+        const activeCandidate = usableCandidates.find((candidate) =>
+          candidate.selected && candidate.mediaUrl === segment.clipUrl
+        );
         await prisma.videoSegment.update({
           where: { id: segment.id },
-          data: { status: VideoShotStatus.CLIP_RUNNING, errorMessage: null },
+          data: activeCandidate
+            ? {
+                status: VideoShotStatus.CLIP_READY,
+                clipTaskId: null,
+                qualityScore: Math.round(activeCandidate.compositeScore ?? segment.qualityScore ?? 0),
+                errorMessage: null,
+              }
+            : {
+                status: VideoShotStatus.CLIP_RUNNING,
+                clipTaskId: null,
+                errorMessage: null,
+              },
         });
-        await prisma.videoProject.update({
-          where: { id: project.id },
-          data: { status: VideoProjectStatus.CLIP_REVIEW, errorMessage: null },
-        });
-        await updateProjectArtifactStatus(project.id, [artifactId], "generating", {
-          dirtyReason: "Video candidates are ready for user review; automated visual analysis is advisory only.",
-          retryFromStage: "manual",
-        });
+        await updateProjectArtifactStatus(
+          project.id,
+          [artifactId],
+          activeCandidate ? "ready" : "generating",
+          activeCandidate
+            ? { retryFromStage: "generation" }
+            : {
+                dirtyReason: "Video candidates are ready for user review; automated visual analysis is advisory only.",
+                retryFromStage: "manual",
+              },
+        );
       } else if (segment) {
         const technicalErrors = allArtifactCandidates
           .map((candidate) => candidate.errorMessage)
@@ -6465,7 +6509,10 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
         });
         await prisma.videoProject.update({
           where: { id: project.id },
-          data: { status: VideoProjectStatus.CLIP_REVIEW, errorMessage: null },
+          data: {
+            status: VideoProjectStatus.FAILED,
+            errorMessage: technicalErrors.join("；") || "所有视频候选均未通过文件技术检查，请修改提示词或素材后手动重新生成。",
+          },
         });
         await updateProjectArtifactStatus(project.id, [artifactId], "failed", {
           dirtyReason: technicalErrors.join("；") || "All video candidates failed deterministic file validation.",
@@ -6602,6 +6649,69 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
               : "generation",
     });
   }
+  await reconcileSegmentVideoProjectStatus(project.id);
+}
+
+async function reconcileSegmentVideoProjectStatus(projectId: string): Promise<void> {
+  const snapshot = await prisma.videoProject.findUnique({
+    where: { id: projectId },
+    select: {
+      status: true,
+      errorMessage: true,
+      segments: { select: { id: true, clipUrl: true } },
+      generationCandidates: {
+        where: { kind: "segment_video" },
+        select: { targetId: true, status: true, selected: true, mediaUrl: true, taskId: true },
+      },
+    },
+  });
+  const activeCandidateStatuses = new Set(["pending", "running", "review_ready", "evaluating", "quality_retry"]);
+  const hasActiveVideoCandidate = Boolean(snapshot?.generationCandidates.some((candidate) =>
+    activeCandidateStatuses.has(candidate.status)
+    && (Boolean(candidate.taskId) || Boolean(candidate.mediaUrl))
+  ));
+  const recoverableLegacyFailure = Boolean(
+    snapshot?.status === VideoProjectStatus.FAILED
+    && (
+      (
+        snapshot.errorMessage === CLIP_CONTINUITY_REPORT_MISSING_ERROR
+        && snapshot.generationCandidates.some((candidate) =>
+          Boolean(candidate.mediaUrl) && candidate.status !== "failed"
+        )
+      )
+      || hasActiveVideoCandidate
+    )
+  );
+  if (
+    !snapshot
+    || (
+      snapshot.status !== VideoProjectStatus.CLIP_GENERATING
+      && snapshot.status !== VideoProjectStatus.CLIP_REVIEW
+      && !recoverableLegacyFailure
+    )
+  ) return;
+  const reviewableStatuses = new Set(["review_ready", "evaluating", "evaluated", "selected", "succeeded"]);
+  const reviewableTargetIds = new Set(
+    snapshot.generationCandidates
+      .filter((candidate) => Boolean(candidate.mediaUrl) && (candidate.selected || reviewableStatuses.has(candidate.status)))
+      .map((candidate) => candidate.targetId),
+  );
+  const readyCount = snapshot.segments.filter((segment) =>
+    Boolean(segment.clipUrl) || reviewableTargetIds.has(segment.id)
+  ).length;
+  const allSegmentsReady = snapshot.segments.length > 0 && readyCount === snapshot.segments.length;
+  const nextStatus = allSegmentsReady ? VideoProjectStatus.CLIP_REVIEW : VideoProjectStatus.CLIP_GENERATING;
+  if (snapshot.status === nextStatus) return;
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { status: nextStatus, errorMessage: null },
+  });
+  await logOnePromptVideo("clip.candidate_stage.reconciled", {
+    projectId,
+    readyCount,
+    clipTotal: snapshot.segments.length,
+    status: nextStatus,
+  });
 }
 
 async function updateGenerationTargetForTechnicalQualityRetry(
@@ -7492,8 +7602,11 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
       Boolean(segment.clipUrl) &&
       (segment.status === VideoShotStatus.CLIP_PENDING || segment.status === VideoShotStatus.CLIP_RUNNING),
   );
-  const recoverableClipBackedSegments = clipBackedUnreadySegments.filter((segment) => latestGenerationQualityReport(project.planJson, videoArtifactIdForSegmentNo(segment.segmentNo))?.passed);
-  const unsafeClipBackedSegments = clipBackedUnreadySegments.filter((segment) => !recoverableClipBackedSegments.includes(segment));
+  // A persisted clip is already usable for human review. Video visual analysis
+  // is advisory and must never turn an existing playable result into FAILED.
+  // New candidate media has already passed deterministic file/decode checks
+  // before it can be selected and written to segment.clipUrl.
+  const recoverableClipBackedSegments = clipBackedUnreadySegments;
   if (recoverableClipBackedSegments.length) {
     await prisma.videoSegment.updateMany({
       where: {
@@ -7512,13 +7625,6 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
       })),
     }, "warn");
   }
-  if (unsafeClipBackedSegments.length) {
-    await prisma.videoSegment.updateMany({
-      where: { id: { in: unsafeClipBackedSegments.map((segment) => segment.id) } },
-      data: { status: VideoShotStatus.FAILED, clipTaskId: null, errorMessage: "Clip has no passed end-frame continuity report; visual continuity evaluation is required." },
-    });
-  }
-
   const candidateArtifacts = new Set(project.generationCandidates.map((candidate) => candidate.artifactId));
   const running = project.segments.filter((segment) => segment.status === VideoShotStatus.CLIP_RUNNING && segment.clipTaskId && !segment.clipUrl && !candidateArtifacts.has(videoArtifactIdForSegmentNo(segment.segmentNo)));
   await logOnePromptVideo("clip.sync.start", {

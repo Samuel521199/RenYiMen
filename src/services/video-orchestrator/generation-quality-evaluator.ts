@@ -181,12 +181,18 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
   try {
     await download(params.mediaUrl, clipPath);
     const metadata = await probeVideo(clipPath);
-    const sampleTimes = sampleTimesForDuration(metadata.durationSeconds || params.durationSeconds);
-    const frames = await Promise.all(sampleTimes.map(async (time, index) => {
+    const sampleTimes = sampleTimesForDuration(metadata.durationSeconds || params.durationSeconds, metadata.frameRate);
+    const frames: Array<{ time: number; dataUrl: string }> = [];
+    for (const [index, time] of sampleTimes.entries()) {
       const outputPath = path.join(workDir, `frame-${index}.png`);
-      await extractFrame(clipPath, outputPath, time);
-      return `data:image/png;base64,${(await readFile(outputPath)).toString("base64")}`;
-    }));
+      frames.push(await extractFrameDataUrlWithFallback(
+        clipPath,
+        outputPath,
+        time,
+        metadata.durationSeconds || params.durationSeconds,
+        metadata.frameRate,
+      ));
+    }
     const content: Array<Record<string, unknown>> = [{
       type: "text",
       text: [
@@ -205,8 +211,8 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
       ].join("\n"),
     }];
     for (const [index, frame] of frames.entries()) {
-      content.push({ type: "text", text: `Ordered video sample ${index + 1}/5 at ${sampleTimes[index].toFixed(3)}s:` });
-      content.push({ type: "image_url", image_url: { url: frame } });
+      content.push({ type: "text", text: `Ordered video sample ${index + 1}/5 at ${frame.time.toFixed(3)}s:` });
+      content.push({ type: "image_url", image_url: { url: frame.dataUrl } });
     }
     content.push({ type: "text", text: "Approved first-frame reference:" }, { type: "image_url", image_url: { url: params.startFrameUrl } });
     content.push({ type: "text", text: "Approved end-state soft reference:" }, { type: "image_url", image_url: { url: params.endFrameUrl } });
@@ -324,11 +330,19 @@ export async function extractVideoFrameDataUrls(mediaUrl: string, fractions = [0
     const metadata = await probeVideo(clipPath);
     if (metadata.durationSeconds <= 0) throw new Error("Transition reference video has invalid duration metadata");
     const safeFractions = fractions.map((value) => Math.max(0, Math.min(0.98, value)));
-    return Promise.all(safeFractions.map(async (fraction, index) => {
+    const frames: Array<{ fraction: number; dataUrl: string }> = [];
+    for (const [index, fraction] of safeFractions.entries()) {
       const outputPath = path.join(workDir, `candidate-${index + 1}.png`);
-      await extractFrame(clipPath, outputPath, metadata.durationSeconds * fraction);
-      return { fraction, dataUrl: `data:image/png;base64,${(await readFile(outputPath)).toString("base64")}` };
-    }));
+      const frame = await extractFrameDataUrlWithFallback(
+        clipPath,
+        outputPath,
+        metadata.durationSeconds * fraction,
+        metadata.durationSeconds,
+        metadata.frameRate,
+      );
+      frames.push({ fraction, dataUrl: frame.dataUrl });
+    }
+    return frames;
   } finally {
     await removeWorkDir(workDir);
   }
@@ -627,8 +641,41 @@ function isRetryableQualityError(error: unknown): boolean {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function sampleTimesForDuration(duration: number): number[] { const safe = Math.max(0.2, duration); return [0, safe * 0.25, safe * 0.5, safe * 0.75, Math.max(0, safe - 0.08)]; }
+function sampleTimesForDuration(duration: number, frameRate = 24): number[] {
+  const safe = Math.max(0.2, duration);
+  const tailMargin = Math.max(0.35, 4 / Math.max(1, frameRate));
+  const safeTail = Math.max(0, Math.min(safe * 0.9, safe - tailMargin));
+  return [0, safe * 0.25, safe * 0.5, safe * 0.75, safeTail];
+}
 async function probeVideo(inputPath: string): Promise<{ durationSeconds: number; width: number; height: number; frameRate: number }> { const output = await runCapture(process.env.FFPROBE_PATH?.trim() || "ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate:format=duration", "-of", "json", inputPath]); const data = JSON.parse(output) as Record<string, unknown>; const stream = Array.isArray(data.streams) ? record(data.streams[0]) : {}; const format = record(data.format); return { durationSeconds: Number(format.duration) || 0, width: Number(stream.width) || 0, height: Number(stream.height) || 0, frameRate: frameRate(stream.r_frame_rate) }; }
+async function extractFrameDataUrlWithFallback(
+  inputPath: string,
+  outputPath: string,
+  requestedTime: number,
+  duration: number,
+  frameRate: number,
+): Promise<{ time: number; dataUrl: string }> {
+  const tailMargin = Math.max(0.35, 4 / Math.max(1, frameRate));
+  const maxSafeTime = Math.max(0, duration - tailMargin);
+  const attempts = uniqueNumbers([
+    Math.max(0, Math.min(requestedTime, maxSafeTime)),
+    Math.max(0, Math.min(duration * 0.85, maxSafeTime)),
+    Math.max(0, Math.min(requestedTime - 0.5, maxSafeTime)),
+  ]);
+  let lastError: unknown;
+  for (const time of attempts) {
+    try {
+      await rm(outputPath, { force: true });
+      await extractFrame(inputPath, outputPath, time);
+      const frame = await readFile(outputPath);
+      if (frame.byteLength < 1024) throw new Error(`decoded frame at ${time.toFixed(3)}s is empty`);
+      return { time, dataUrl: `data:image/png;base64,${frame.toString("base64")}` };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Unable to decode a sampled video frame");
+}
 async function extractFrame(inputPath: string, outputPath: string, time: number): Promise<void> {
   await runCapture(process.env.FFMPEG_PATH?.trim() || "ffmpeg", [
     "-y",
@@ -646,6 +693,12 @@ async function extractFrame(inputPath: string, outputPath: string, time: number)
     "1",
     outputPath,
   ]);
+}
+function uniqueNumbers(values: number[]): number[] {
+  return values.filter((value, index) =>
+    Number.isFinite(value)
+    && values.findIndex((candidate) => Math.abs(candidate - value) < 0.001) === index
+  );
 }
 async function download(url: string, outputPath: string): Promise<void> { const response = await fetch(url); if (!response.ok) throw new Error(`download failed HTTP ${response.status}`); await writeFile(outputPath, Buffer.from(await response.arrayBuffer())); }
 async function runCapture(command: string, args: string[]): Promise<string> { return new Promise((resolve, reject) => { const child = spawn(command, args, { windowsHide: true }); let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk) => { stdout += String(chunk); }); child.stderr.on("data", (chunk) => { stderr += String(chunk); }); child.on("error", reject); child.on("close", (code) => code === 0 ? resolve(stdout) : reject(new Error(`${command} exited ${code}: ${stderr.slice(-1600)}`))); }); }

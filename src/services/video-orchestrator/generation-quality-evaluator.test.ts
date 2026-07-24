@@ -4,7 +4,12 @@ import path from "node:path";
 import test from "node:test";
 
 import { generationQualityCompositeScore, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
-import { generationQualityAttemptsUsed, generationTransportAttemptsUsed, nextGenerationCandidateAttempt } from "./project-service.ts";
+import {
+  generationQualityAttemptsUsed,
+  generationTransportAttemptsUsed,
+  hasUsableVideoCandidateForActiveClip,
+  nextGenerationCandidateAttempt,
+} from "./project-service.ts";
 import { mediaKeyMatchingContentType } from "./oss-media.ts";
 import { fitAliyunImagePrompt, prepareAliyunImagePrompt } from "./aliyun-workflow.ts";
 
@@ -62,6 +67,9 @@ test("video frame extraction uses PNG and cleanup cannot overwrite a valid evalu
   assert.match(source, /`frame-\$\{index\}\.png`/);
   assert.match(source, /format=rgb24/);
   assert.match(source, /"-c:v",\s*"png"/);
+  assert.match(source, /extractFrameDataUrlWithFallback/);
+  assert.match(source, /const tailMargin = Math\.max\(0\.35, 4 \/ Math\.max\(1, frameRate\)\)/);
+  assert.match(source, /Math\.min\(duration \* 0\.85, maxSafeTime\)/);
   assert.match(source, /await removeWorkDir\(workDir\)/);
   assert.match(source, /Cleanup must never overwrite an otherwise valid visual-evaluation result/);
 });
@@ -70,11 +78,44 @@ test("video candidates use deterministic technical validation while visual revie
   const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(evaluator, /inspectGeneratedVideoTechnicalQuality/);
-  assert.match(evaluator, /does not make any aesthetic or semantic judgement/);
+  assert.match(evaluator, /does[\s*]+not make any aesthetic or semantic judgement/i);
   assert.match(service, /videoAdvisoryOnly = candidate\.kind === "segment_video"/);
   assert.match(service, /advisoryOnly: true/);
   assert.match(service, /Video candidates are ready for user review; automated visual analysis is advisory only/);
   assert.match(service, /candidate\.kind !== "segment_video" && candidate\.passed !== true/);
+  assert.match(service, /reconcileSegmentVideoProjectStatus\(project\.id\)/);
+  assert.match(service, /const allSegmentsReady = snapshot\.segments\.length > 0 && readyCount === snapshot\.segments\.length/);
+  assert.match(service, /allSegmentsReady \? VideoProjectStatus\.CLIP_REVIEW : VideoProjectStatus\.CLIP_GENERATING/);
+  assert.match(service, /recoverableLegacyFailure/);
+  assert.match(service, /const hasActiveVideoCandidate/);
+  assert.match(service, /\|\| hasActiveVideoCandidate/);
+  assert.match(service, /const hasActiveVideoGenerationTasks/);
+  assert.match(service, /if \(hasActiveVideoGenerationTasks\) return false/);
+  assert.match(service, /activeCandidate \? "ready" : "generating"/);
+  assert.match(service, /Video visual analysis[\s\S]{0,120}must never turn an existing playable result into FAILED/);
+  assert.match(service, /const recoverableClipBackedSegments = clipBackedUnreadySegments/);
+});
+
+test("an active clip backed by a technically usable video candidate does not require a visual pass", () => {
+  const activeUrl = "https://example.test/segment-1.mp4";
+  assert.equal(hasUsableVideoCandidateForActiveClip([{
+    kind: "segment_video",
+    targetId: "segment-1",
+    status: "selected",
+    mediaUrl: activeUrl,
+  }], "segment-1", activeUrl), true);
+  assert.equal(hasUsableVideoCandidateForActiveClip([{
+    kind: "segment_video",
+    targetId: "segment-1",
+    status: "failed",
+    mediaUrl: activeUrl,
+  }], "segment-1", activeUrl), false);
+  assert.equal(hasUsableVideoCandidateForActiveClip([{
+    kind: "segment_video",
+    targetId: "segment-2",
+    status: "selected",
+    mediaUrl: activeUrl,
+  }], "segment-1", activeUrl), false);
 });
 
 test("image quality normalization preserves scores observed by the visual model", () => {

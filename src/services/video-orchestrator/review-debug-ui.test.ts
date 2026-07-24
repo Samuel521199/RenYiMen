@@ -61,6 +61,9 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.match(picker, /人工采用这张原图/);
   assert.match(pageSource, /已采用这张原图；还有/);
   assert.match(pageSource, /res\.project\.status === "CLIP_GENERATING"/);
+  assert.match(pageSource, /hasRunningGenerationCandidate\(item\)/);
+  assert.match(pageSource, /syncingProjectIdsRef\.current\.has\(projectId\)/);
+  assert.match(pageSource, /syncingProjectIdsRef\.current\.delete\(projectId\)/);
   assert.match(pageSource, /正在采用候选并保存，请稍候/);
   assert.match(pageSource, /signal: selectionController\.signal/);
   assert.match(pageSource, /candidateSelectionAbortControllerRef\.current\?\.abort\(\)/);
@@ -69,7 +72,9 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.doesNotMatch(picker, /!technicalQualityFailure && !candidate\.selected && candidate\.mediaUrl/);
   assert.doesNotMatch(pageSource, /adoptAvailableMicroShotsAndContinue/);
   assert.doesNotMatch(pageSource, /采用现有最佳原图并继续/);
-  assert.match(pageSource, /const acceptFailed = candidate\.passed !== true/);
+  assert.match(pageSource, /const acceptFailed = candidate\.kind !== "segment_video" && candidate\.passed !== true/);
+  assert.match(picker, /视频可直接预览和人工选择，自动分析仅供参考/);
+  assert.match(picker, /采用这个视频/);
   assert.match(picker, /identityScore/);
   assert.match(picker, /singleTakeScore/);
   assert.match(picker, /repeat\(auto-fill,minmax\(9\.5rem,1fr\)\)/);
@@ -201,6 +206,19 @@ test("selected micro-shot candidates count as ready across serialization, progre
   assert.match(projectServiceSource, /selectedArtifactIds\.has\(imageArtifactIdForMicroShot/);
   assert.match(pageSource, /candidate\.artifactId === artifactId && candidate\.selected && Boolean\(candidate\.mediaUrl\)/);
   assert.match(pageSource, /Boolean\(item\.imageUrl \|\| selectedCandidate\?\.mediaUrl\)/);
+});
+
+test("clip detail preview exposes the same persistent size control as image previews", () => {
+  const activeShotDetail = pageSource.slice(
+    pageSource.indexOf(") : Boolean(selectedShot) ? ("),
+    pageSource.indexOf(") : (false as boolean) && selectedShot ? ("),
+  );
+  assert.match(activeShotDetail, /<PreviewSizeControl/);
+  assert.match(activeShotDetail, /value=\{detailPreviewHeight\}/);
+  assert.match(activeShotDetail, /onPreview=\{previewDetailHeight\}/);
+  assert.match(activeShotDetail, /onCommit=\{commitDetailHeight\}/);
+  assert.match(activeShotDetail, /h-\[var\(--detail-preview-height\)\]/);
+  assert.doesNotMatch(activeShotDetail, /h-\[220px\]/);
 });
 
 test("candidate issue summary stays compact and loads localized copy without blocking generation", () => {

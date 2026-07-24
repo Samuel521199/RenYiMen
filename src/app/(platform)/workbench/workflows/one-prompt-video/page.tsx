@@ -1258,6 +1258,7 @@ export default function OnePromptVideoPage() {
   const projectLayoutRef = useRef<HTMLElement | null>(null);
   const detailPanelRef = useRef<HTMLElement | null>(null);
   const selectedProjectIdRef = useRef("");
+  const syncingProjectIdsRef = useRef<Set<string>>(new Set());
 
   const selectedShot = useMemo(
     () => project?.shots.find((shot) => shot.id === selectedShotId) ?? project?.shots[0],
@@ -1354,7 +1355,11 @@ export default function OnePromptVideoPage() {
   const runningProjectIds = useMemo(
     () => Array.from(new Set([
       ...projects
-        .filter((item) => RUNNING_PROJECT_STATUSES.includes(item.status) || hasRunningMicroShotImage(item))
+        .filter((item) =>
+          RUNNING_PROJECT_STATUSES.includes(item.status)
+          || hasRunningMicroShotImage(item)
+          || hasRunningGenerationCandidate(item)
+        )
         .map((item) => item.id),
       ...planningProjectIds,
     ])),
@@ -1418,6 +1423,7 @@ export default function OnePromptVideoPage() {
       generationProjectId === project.id ||
       optimisticProgress?.active ||
       RUNNING_PROJECT_STATUSES.includes(project.status) ||
+      hasRunningGenerationCandidate(project) ||
       project.plannerProgress?.status === "queued" ||
       project.plannerProgress?.status === "running"
     ),
@@ -1615,11 +1621,15 @@ export default function OnePromptVideoPage() {
   }, [selectedProjectId]);
 
   const syncProject = useCallback(async (projectId: string, options?: { silent?: boolean }) => {
+    if (syncingProjectIdsRef.current.has(projectId)) return;
+    syncingProjectIdsRef.current.add(projectId);
     try {
       const res = await fetchJson(`/api/video-projects/${projectId}/sync`, copy, { method: "POST" });
       if (res.project) rememberProject(res.project);
     } catch (err) {
       if (!options?.silent) setError(err instanceof Error ? err.message : copy.actionFailed);
+    } finally {
+      syncingProjectIdsRef.current.delete(projectId);
     }
   }, [copy, rememberProject]);
 
@@ -1637,7 +1647,12 @@ export default function OnePromptVideoPage() {
     // returns the new project status. Keep the optimistic progress visible
     // instead of immediately restoring the stale FAILED/stopped banner.
     if (loading) return;
-    if (project && !RUNNING_PROJECT_STATUSES.includes(project.status) && !hasRunningMicroShotImage(project)) {
+    if (
+      project
+      && !RUNNING_PROJECT_STATUSES.includes(project.status)
+      && !hasRunningMicroShotImage(project)
+      && !hasRunningGenerationCandidate(project)
+    ) {
       setGenerationAbortController(null);
       setGenerationProjectId("");
       setOptimisticProgress(null);
@@ -3408,7 +3423,15 @@ export default function OnePromptVideoPage() {
                     <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot!.status, selectedShot!.errorMessage, copy)}</span>
                   </div>
                   <div className="space-y-2">
-                    <div className="h-[220px] overflow-hidden rounded-md border border-white/10 bg-slate-900">
+                    <div className="flex items-center justify-end gap-3">
+                      <PreviewSizeControl
+                        label={copy.previewSize}
+                        value={detailPreviewHeight}
+                        onPreview={previewDetailHeight}
+                        onCommit={commitDetailHeight}
+                      />
+                    </div>
+                    <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
                       {selectedShot!.clipUrl ? (
                         <video src={selectedShot!.clipUrl} controls playsInline preload="metadata" poster={selectedShot!.imageUrl || undefined} className="h-full w-full object-contain" />
                       ) : (
@@ -4245,13 +4268,22 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
   }, [lang, projectId, qualitySummaryOverrides]);
 
   if (!candidates.length) return null;
+  const onlyVideoCandidates = candidates.every((candidate) => candidate.kind === "segment_video");
   return (
     <>
     <div className="space-y-3 rounded-xl border border-white/[0.08] bg-slate-950/45 p-3 shadow-[0_18px_50px_rgba(2,6,23,0.18)]">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
         <div>
           <p className="text-xs font-semibold tracking-wide text-slate-100">{lang === "zh" ? "候选版本" : "Candidate versions"}</p>
-          <p className="mt-1 text-[11px] text-slate-500">{lang === "zh" ? "已按画面质量排序，你可以随时改选" : "Ranked by visual quality; you can switch anytime"}</p>
+          <p className="mt-1 text-[11px] text-slate-500">
+            {onlyVideoCandidates
+              ? (lang === "zh"
+                  ? "视频可直接预览和人工选择，自动分析仅供参考"
+                  : "Preview and choose directly; automated analysis is advisory")
+              : (lang === "zh"
+                  ? "已按画面质量排序，你可以随时改选"
+                  : "Ranked by visual quality; you can switch anytime")}
+          </p>
         </div>
         <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.07] px-2.5 py-1 text-[10px] font-medium text-cyan-100/80">
           {lang === "zh" ? `${candidates.length} 个版本` : `${candidates.length} versions`}
@@ -4359,7 +4391,11 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                   {typeof report.singleTakeScore === "number" && <div className="col-span-2 flex items-center justify-between bg-slate-950/90 px-2 py-1.5 text-[10px]"><span className="text-slate-600">Single-take</span><span className="font-medium tabular-nums text-slate-300">{formatQualityScore(report.singleTakeScore)}</span></div>}
                 </div>}
                 {technicalQualityFailure ? <p className="rounded-md border border-amber-300/10 bg-amber-300/[0.05] px-2 py-1.5 text-[10px] leading-4 text-amber-100/80">
-                  {candidate.status === "quality_failed"
+                  {isVideo
+                    ? (lang === "zh"
+                        ? "自动分析暂不可用，不影响预览或采用；你也可以修改提示词后重新生成。"
+                        : "Automated analysis is unavailable. You can still preview, use, or regenerate after editing the prompt.")
+                    : candidate.status === "quality_failed"
                     ? (lang === "zh" ? "视觉质检服务连续失败，原图已保留，请稍后重新质检。" : "Visual review failed repeatedly. The original media is preserved; retry the review later.")
                     : (lang === "zh" ? "视觉质检超时，系统将使用原图自动重试，不会重新生成。" : "Visual review timed out. The original media will be rechecked automatically without regeneration.")}
                 </p> : issueLedger.length ? <button
@@ -6231,8 +6267,23 @@ function projectProgress(project: VideoProject, status: ProjectStatus = project.
   const images = project.keyframes?.length
     ? project.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
     : project.shots.filter((shot) => Boolean(shot.imageUrl)).length;
+  const reviewableVideoTargetIds = new Set(
+    (project.generationCandidates ?? [])
+      .filter((candidate) =>
+        candidate.kind === "segment_video"
+        && Boolean(candidate.mediaUrl)
+        && candidate.status !== "failed"
+        && candidate.status !== "quality_failed"
+      )
+      .map((candidate) => candidate.targetId),
+  );
   const clips = project.segments?.length
-    ? project.segments.filter((segment) => Boolean(segment.clipUrl) || segment.status === "CLIP_READY" || segment.status === "CLIP_APPROVED").length
+    ? project.segments.filter((segment) =>
+        Boolean(segment.clipUrl)
+        || segment.status === "CLIP_READY"
+        || segment.status === "CLIP_APPROVED"
+        || reviewableVideoTargetIds.has(segment.id)
+      ).length
     : project.shots.filter((shot) => Boolean(shot.clipUrl) || shot.status === "CLIP_READY" || shot.status === "CLIP_APPROVED").length;
   const stageWeight: Record<ProjectStatus, number> = {
     DRAFT: 0,
@@ -6312,6 +6363,14 @@ function hasRunningMicroShotImage(project: VideoProject): boolean {
     if (!required || item.imageUrl || item.imageStatus === "failed") return false;
     return item.imageStatus === "running" || item.imageStatus === "pending" || !item.imageStatus || item.imageStatus === "idle";
   }));
+}
+
+function hasRunningGenerationCandidate(project: VideoProject): boolean {
+  const activeStatuses = new Set(["pending", "running", "review_ready", "evaluating", "quality_retry"]);
+  return (project.generationCandidates ?? []).some((candidate) =>
+    activeStatuses.has(candidate.status)
+    && (Boolean(candidate.mediaUrl) || candidate.status === "pending" || candidate.status === "running")
+  );
 }
 
 function microShotImageProgress(project: VideoProject): { required: number; ready: number; running: number; failed: number; missing: number } {
