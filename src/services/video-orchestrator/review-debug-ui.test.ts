@@ -245,6 +245,19 @@ test("candidate issue summary stays compact and loads localized copy without blo
   assert.doesNotMatch(pageSource, /return "检测到其他画面质量问题。"/);
 });
 
+test("candidate cards expose a concise asset-reference trust chain", () => {
+  const picker = pageSource.slice(
+    pageSource.indexOf("function GenerationCandidatePicker"),
+    pageSource.indexOf("function ZoomableImage"),
+  );
+  assert.match(picker, /report\?\.evaluationStatus === "reference_missing"/);
+  assert.match(picker, /report\?\.referenceComparable === false/);
+  assert.match(picker, /report\.expectedAnchorIds\?\.join/);
+  assert.match(picker, /report\.selectedReferenceCount/);
+  assert.match(picker, /report\.comparableChecks/);
+  assert.match(picker, /不会消耗抽图重试次数/);
+});
+
 test("asset progress counts approvals and keeps approval available after a recoverable failure", () => {
   assert.match(pageSource, /Boolean\(keyframe\.imageUrl\) && \(keyframe\.locked \|\| keyframe\.status === "IMAGE_APPROVED"\)/);
   assert.match(pageSource, /project\.status === "IMAGE_REVIEW" \|\| project\.status === "FAILED"/);

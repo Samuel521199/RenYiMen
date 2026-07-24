@@ -47,6 +47,29 @@ test("normalized consistency anchors using id are accepted", () => {
   assert.ok(!errorCodes(plan).includes("MISSING_ANCHOR_REFERENCE"));
 });
 
+test("semantic asset coverage detects omitted derived anchors and unjustified exclusions", () => {
+  const plan = validPlan();
+  plan.keyframes = [
+    {
+      keyframeNo: 1,
+      usesConsistencyAnchors: [],
+      declaredAnchorIds: [],
+      derivedAnchorIds: ["person_1"],
+      effectiveRequiredAnchorIds: [],
+      excludedAnchors: [],
+    },
+    { keyframeNo: 2, usesConsistencyAnchors: ["person_1"] },
+  ];
+  assert.ok(errorCodes(plan).includes("REQUIRED_ANCHOR_COVERAGE_MISSING"));
+
+  (plan.keyframes as Array<Record<string, unknown>>)[0].excludedAnchors = [{
+    anchorId: "person_1",
+    reason: "not needed",
+    valid: false,
+  }];
+  assert.ok(errorCodes(plan).includes("UNJUSTIFIED_ANCHOR_EXCLUSION"));
+});
+
 test("motionful endpoint contracts are rebuilt from static boundary keyframes before validation", () => {
   const plan = validPlan();
   plan.keyframes = [

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { generationQualityCompositeScore, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
+import { evaluateGeneratedImageQuality, generationQualityCompositeScore, isReferenceMissingQualityEvaluation, isTechnicalQualityEvaluationFailure, normalizeImageQualityResponse, normalizeVideoQualityResponse } from "./generation-quality-evaluator.ts";
 import {
   generationQualityAttemptsUsed,
   generationTransportAttemptsUsed,
@@ -60,6 +60,23 @@ test("technical evaluator failures are distinct from visual vetoes", () => {
     contentBased: true,
     evaluationStatus: "completed",
   }), false);
+});
+
+test("missing required references is routed to reference selection without a redraw or fake identity score", async () => {
+  const report = await evaluateGeneratedImageQuality({
+    ...base,
+    targetContract: { effectiveRequiredAnchorIds: ["character_main"] },
+    selectedReferenceUrls: [],
+    referenceUsageNotes: [],
+  });
+  assert.equal(report.evaluationStatus, "reference_missing");
+  assert.equal(report.referenceComparable, false);
+  assert.equal(report.identityScoreApplicable, false);
+  assert.equal(report.retryFromStage, "reference_selector");
+  assert.equal(report.technicalRetryable, false);
+  assert.deepEqual(report.missingReferenceAnchorIds, ["character_main"]);
+  assert.equal(isReferenceMissingQualityEvaluation(report), true);
+  assert.equal(isTechnicalQualityEvaluationFailure(report), false);
 });
 
 test("video frame extraction uses PNG and cleanup cannot overwrite a valid evaluation", () => {

@@ -55,6 +55,14 @@ const aggregate = {
     referenceOveruseRiskRate: average(results.map((item) => item.referenceOveruseRisk ? 1 : 0)),
     firstPassRate: average(results.map((item) => item.contractRepairCount === 0 ? 1 : 0)),
     repairSuccessRate: average(results.map((item) => item.contractPassed ? 1 : 0)),
+    appliedAnchorCoverageRate: average(results.map((item) => item.appliedAnchorCoverageRate)),
+    invalidAnchorExclusionRate: average(results.map((item) => item.invalidAnchorExclusionRate)),
+    firstPassAssetContractRate: average(results.map((item) => item.assetContractPassed ? 1 : 0)),
+    hardAnchorFinalSelectionRate: averageKnown(results.map((item) => item.hardAnchorFinalSelectionRate)),
+    hardAnchorFinalSelectionObservationCount: results.filter((item) => item.hardAnchorFinalSelectionRate != null).length,
+    unreferencedIdentityScoreRate: averageKnown(results.map((item) => item.unreferencedIdentityScoreRate)),
+    unreferencedIdentityScoreObservationCount: results.filter((item) => item.unreferencedIdentityScoreRate != null).length,
+    assetDriftIssueRate: averageKnown(results.map((item) => item.assetDriftIssueRate)),
     averageLatencyMs: average(results.map((item) => item.latencyMs)),
   },
 };
@@ -78,6 +86,24 @@ function summarize(
     ...(beat.resolvesConflictBeatId ? [beat.resolvesConflictBeatId] : []),
   ]).filter((id) => !beatIds.has(id));
   const issueCodes = new Set(plan.storyQualityReport?.issueCodes ?? []);
+  const assetTargets = [
+    ...(plan.assetContract?.beatTargets ?? []),
+    ...(plan.assetContract?.segmentTargets ?? []),
+    ...(plan.assetContract?.boundaryTargets ?? []),
+  ];
+  const expectedAnchorApplications = assetTargets.flatMap((target) =>
+    target.derivedAnchorIds.map((anchorId) => ({ anchorId, effective: target.effectiveRequiredAnchorIds.includes(anchorId) }))
+  );
+  const invalidExclusions = assetTargets.flatMap((target) => target.excludedAnchors).filter((item) => !item.valid);
+  const qualityReports = plan.generationQualityReports ?? [];
+  const scoredIdentityReports = qualityReports.filter((report) => report.identityScoreApplicable !== false);
+  const unreferencedIdentityReports = scoredIdentityReports.filter((report) => report.referenceComparable === false || (report.selectedReferenceCount ?? 0) === 0);
+  const assetDriftReports = qualityReports.filter((report) =>
+    report.artifactIssues.some((issue) => /identity drift|product drift|logo drift|身份漂移|产品漂移|品牌漂移/i.test(issue))
+  );
+  // Planner-only canaries do not run the Reference Selector. Keep the metric
+  // explicitly unobserved instead of manufacturing a misleading zero.
+  const hardAnchorFinalSelectionRate: number | null = null;
   return {
     id,
     category,
@@ -91,6 +117,16 @@ function summarize(
     suddenOutcomeRisk: issueCodes.has("sudden_outcome_risk"),
     referenceOveruseRisk: issueCodes.has("reference_overuse_risk"),
     storyQualityScore: plan.storyQualityReport?.score ?? 0,
+    appliedAnchorCoverageRate: expectedAnchorApplications.length
+      ? expectedAnchorApplications.filter((item) => item.effective).length / expectedAnchorApplications.length
+      : 1,
+    invalidAnchorExclusionRate: assetTargets.length ? invalidExclusions.length / assetTargets.length : 0,
+    assetContractPassed: (plan.assetContract?.issues.length ?? 0) === 0 && invalidExclusions.length === 0,
+    hardAnchorFinalSelectionRate,
+    unreferencedIdentityScoreRate: scoredIdentityReports.length
+      ? unreferencedIdentityReports.length / scoredIdentityReports.length
+      : null,
+    assetDriftIssueRate: qualityReports.length ? assetDriftReports.length / qualityReports.length : null,
   };
 }
 
@@ -105,3 +141,7 @@ function average(values: number[]): number {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
+function averageKnown(values: Array<number | null>): number | null {
+  const known = values.filter((value): value is number => value != null);
+  return known.length ? average(known) : null;
+}
