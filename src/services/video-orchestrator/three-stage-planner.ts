@@ -43,6 +43,11 @@ import { errorForLog, logOnePromptVideo } from "./logger";
 import { assertPlanValidForGeneration } from "./plan-validator";
 import { repairMotionfulEndpointContracts } from "./frame-contract";
 import { auditSingleTakePlan } from "./single-take-audit";
+import { deriveCameraGraphFromStoryboardBrief } from "./camera-graph";
+import {
+  validateVideoPromptContract,
+  videoPromptContractFromUnknown,
+} from "./video-terminal-contract";
 import { decideStoryRewrite, markStoryRewriteRequired, withStoryQualityGate, type StoryRewriteDecision } from "./story-quality-gate";
 import {
   readStoryRolloutConfig,
@@ -283,6 +288,7 @@ Hard rules:
 - Start and end boundary frames of the same segment must be compatible as two moments from the same continuous shot: same location logic, same camera axis family, same subject/product identity, same lighting direction, and no impossible scene jump.
 - Identify consistency anchors dynamically. Do not assume every task has a product. Anchors may be person, product, prop, location, style, brand_visual, task_object, effect_state, vehicle, food, space_layout, or custom.
 - A consistency-anchor image prompt is an asset-sheet prompt, not a narrative keyframe. Keep identity/appearance facts, but remove story actions, screen positions, title interactions, scene decoration, and event-specific composition.
+- A prop prompt must be operationally specific rather than generic: state the exact object count, named variants, face/orientation, arrangement, material, colors, intrinsic markings, and forbidden extra objects. If the prop is a playing card, explicitly name every required rank and suit and require matching corner indices; never combine "A/K must be visible" with a blanket "no text" instruction.
 - For a person anchor, image_prompt_zh/image_prompt_en must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
 - Reference images may contain a finished poster or advertisement. Extract the anchor's stable identity only; never copy the reference image's background, typography, logo placement, framing, or full composition into a person asset prompt.
 - Scene/location anchors may describe the environment. Brand-visual anchors may describe approved logos or typography. Do not leak those elements into person, prop, or product asset prompts unless they are an intrinsic part of that asset.
@@ -720,6 +726,11 @@ Hard rules:
 - micro_shots are internal same-take motion checkpoints, not extra clips, not extra scenes, and not edit points. Use text, image_prompt, or mixed only to describe reachable intermediate states inside the same continuous shot.
 - All micro_shots in a segment must preserve the same location, camera axis family, lighting direction, color tone, subject identity, product identity, and prop layout. If this is impossible, flag the segment as high risk.
 - Every user-visible micro_shot field must be bilingual. Fill scene_zh/action_zh/camera_zh/prompt_zh in Chinese only, and scene_en/action_en/camera_en/prompt_en in English only. Do not mix Chinese and English inside the same language field.
+- Set end_frame_requirement_level for every segment: hard_exact only when near-exact terminal composition is indispensable for the next boundary; hard_semantic when the visible action result must occur but composition may vary; soft_directional when the end frame is aspirational; editorial when only a stable edit point is required. Prefer hard_semantic unless the story contract proves another level.
+- Produce video_prompt_contract as the semantic compression source of truth for the provider prompt. The compiler will not truncate, reorder, deduplicate, summarize, or repair it.
+- video_prompt_contract must contain 1-3 terminal_requirements, 1-3 motion_steps, at most 5 preserve_requirements, and at most 5 forbidden_outcomes. Every list item must be unique.
+- At least one terminal requirement must have priority=hard. Each terminal requirement needs a stable requirement_id, one visible observable_fact, a concrete acceptance_criteria, and source=user|story_contract|approved_end_frame|planner.
+- Keep the complete compiled provider prompt under 4200 characters. Compress explanatory soft prose here; never omit or weaken a hard user, story, identity, product, or approved-boundary requirement.
 - Every segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, key_evidence_ids, depends_on_beat_ids, evidence_from_beat_ids, and resolves_conflict_beat_id. Preserve the validated causal graph; never invent or replace IDs.
 - If a segment contains a complex action, state action_continuity with motivation_or_preparation, execution, and result_or_reaction.
 - If story_function is payoff or turning_point, include reaction_beat and power_shift.
@@ -742,6 +753,24 @@ Return this JSON shape:
     "segment_render_descriptions": [
       {
         "segment_no": 1,
+        "end_frame_requirement_level": "hard_semantic",
+        "video_prompt_contract": {
+          "version": "video-prompt-contract-v1",
+          "terminal_requirements": [
+            {
+              "requirement_id": "terminal.primary_result",
+              "priority": "hard",
+              "observable_fact": "",
+              "acceptance_criteria": "",
+              "source": "approved_end_frame"
+            }
+          ],
+          "motion_steps": [""],
+          "preserve_requirements": [],
+          "forbidden_outcomes": [],
+          "narrative_boundary": "",
+          "shot_intent": ""
+        },
         "visible_anchor_ids": [],
         "start_frame_contract": {},
         "end_frame_contract": {},
@@ -846,6 +875,8 @@ Your job:
 - Do not describe internal cuts, dissolves, fades, montage edits, shot switches, or scene transitions inside the segment.
 - The start and end keyframes must be reachable moments in the same scene and camera setup family.
 - Include concise bilingual fields for user-visible text.
+- Set end_frame_requirement_level using hard_exact, hard_semantic, soft_directional, or editorial. Use hard_exact only when near-exact terminal composition is indispensable; otherwise prefer hard_semantic.
+- Return a complete video_prompt_contract within the same limits as the global shot decomposer: 1-3 unique terminal requirements, 1-3 unique motion steps, at most 5 preserve requirements, at most 5 forbidden outcomes, and at least one hard terminal requirement. The downstream compiler validates and serializes this contract without rewriting it, so resolve duplication and compression here.
 - Subtitles are editorial overlay copy. Do not ask generated images/videos to render text.
 - Use target_story_beats and target_shot_group to preserve story causality.
 - The target segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, key_evidence_ids, depends_on_beat_ids, evidence_from_beat_ids, and resolves_conflict_beat_id. Preserve the validated causal graph; never invent or replace IDs.
@@ -864,6 +895,24 @@ Return this JSON shape, containing only the target segment, its render descripti
     "segment_render_descriptions": [
       {
         "segment_no": 1,
+        "end_frame_requirement_level": "hard_semantic",
+        "video_prompt_contract": {
+          "version": "video-prompt-contract-v1",
+          "terminal_requirements": [
+            {
+              "requirement_id": "terminal.primary_result",
+              "priority": "hard",
+              "observable_fact": "",
+              "acceptance_criteria": "",
+              "source": "approved_end_frame"
+            }
+          ],
+          "motion_steps": [""],
+          "preserve_requirements": [],
+          "forbidden_outcomes": [],
+          "narrative_boundary": "",
+          "shot_intent": ""
+        },
         "visible_anchor_ids": [],
         "start_frame_contract": {},
         "end_frame_contract": {},
@@ -1011,6 +1060,8 @@ Your job:
 - Preserve planning_manifest.timeline_blueprint segment count, segment numbers, start/end/duration, narrative_events, anchors, and storyboard_artist_plan unless the audit says the segment cannot be repaired.
 - When repair_scope is target_segments_only, repair and return only target_segment_nos. Never regenerate, alter, or repeat already approved segments.
 - Prefer simplifying action, reducing camera movement, clarifying product/prop paths, merging excessive checkpoints, and making start/end frame contracts physically reachable.
+- Preserve or regenerate a complete valid video_prompt_contract for every returned segment. It remains the semantic source of truth after repair and must satisfy the same limits as Shot Decomposer: 1-3 unique terminal requirements with at least one hard requirement, 1-3 unique motion steps, at most 5 preserve requirements, and at most 5 forbidden outcomes.
+- Fade in, fade out, opacity reveal, dissolve, and crossfade remain prohibited even when described as a continuous overlay. Never repeat those operations in executable motion fields. For a CTA, either use a physically reachable reveal such as a real sign sliding or rising into view, or move logo/text to an editorial overlay outside the generated clip and return a clean stable background plate.
 - Do not hide cuts inside wording. If a segment still requires a cut, keep requires_cut=true, risk_level=high, and explain why with recommended_split.
 - Do not output final image or video prompts.
 
@@ -1020,7 +1071,21 @@ Return this JSON shape:
     "title": "",
     "logline": "",
     "style_bible": {},
-    "segment_render_descriptions": [],
+    "segment_render_descriptions": [
+      {
+        "segment_no": 1,
+        "end_frame_requirement_level": "hard_semantic",
+        "video_prompt_contract": {
+          "version": "video-prompt-contract-v1",
+          "terminal_requirements": [],
+          "motion_steps": [],
+          "preserve_requirements": [],
+          "forbidden_outcomes": [],
+          "narrative_boundary": "",
+          "shot_intent": ""
+        }
+      }
+    ],
     "keyframes": [],
     "segments": []
   },
@@ -1089,7 +1154,7 @@ type JsonStageContentResult = {
 };
 
 export interface AliyunStoryboardPlannerCheckpoint {
-  version: 1;
+  version: 2;
   inputFingerprint: string;
   referenceFactsRaw?: unknown;
   referenceFactsFingerprint?: string;
@@ -1139,21 +1204,40 @@ export interface AliyunStoryboardProgressUpdate {
   };
 }
 
+export interface AliyunStoryboardStageMetric {
+  stage: string;
+  modelName: string;
+  status: "completed" | "failed";
+  durationMs: number;
+  httpStatus?: number;
+  retryable?: boolean;
+  startedAt: Date;
+  completedAt: Date;
+}
+
 interface AliyunStoryboardPlannerOptions {
   checkpoint?: unknown;
   onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
   onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
+  onStageMetric?: (metric: AliyunStoryboardStageMetric) => Promise<void> | void;
 }
 
 const plannerProgressStorage = new AsyncLocalStorage<{
   onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
+  onStageMetric?: (metric: AliyunStoryboardStageMetric) => Promise<void> | void;
 }>();
+
+const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 2 as const;
+const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-24-video-prompt-contract-v3";
 
 export async function createAliyunStoryboardPlan(
   input: PlanVideoProjectInput,
   options: AliyunStoryboardPlannerOptions = {},
 ): Promise<OnePromptVideoPlan> {
-  return plannerProgressStorage.run({ onProgress: options.onProgress }, () => createAliyunStoryboardPlanInternal(input, options));
+  return plannerProgressStorage.run(
+    { onProgress: options.onProgress, onStageMetric: options.onStageMetric },
+    () => createAliyunStoryboardPlanInternal(input, options),
+  );
 }
 
 async function createAliyunStoryboardPlanInternal(
@@ -1508,7 +1592,8 @@ async function callJsonStage(params: {
   userContent: ChatContent;
   temperature: number;
 }): Promise<unknown> {
-  const startedAt = Date.now();
+  const startedAt = new Date();
+  const startedAtMs = startedAt.getTime();
   const body: Record<string, unknown> = {
     model: params.modelName,
     messages: [
@@ -1522,40 +1607,69 @@ async function callJsonStage(params: {
     model: params.modelName,
     baseUrl: compatibleBaseUrl(),
   });
-  const result = await fetchJsonStageContent(params.stage, body);
-  await logOnePromptVideo(`aliyun.storyboard.${params.stage}.response`, {
-    httpStatus: result.httpStatus,
-    ok: result.ok,
-    durationMs: Date.now() - startedAt,
-    rawSummary: result.rawSummary,
-  }, result.ok ? "info" : "error");
-  if (!result.ok) {
-    throw new StoryboardStageError(
-      result.errorMessage || `Aliyun storyboard ${params.stage} failed HTTP ${result.httpStatus}`,
-      {
-        code: "upstream_http_error",
-        retryable: result.httpStatus === 408 || result.httpStatus === 429 || result.httpStatus >= 500,
-        httpStatus: result.httpStatus,
-      },
-    );
-  }
-  const content = result.content;
-  if (!content) throw new Error(`Aliyun storyboard ${params.stage} returned empty content`);
+  let observationRecorded = false;
   try {
-    return parseJsonObject(content);
-  } catch (parseError) {
-    await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_parse.failed`, {
-      error: errorForLog(parseError),
-      contentLength: content.length,
-      contentPreview: content.slice(0, 1200),
-    }, "warn");
-    if (params.stage.startsWith("json_repair")) throw parseError;
-    return repairJsonStageContent({
+    const result = await fetchJsonStageContent(params.stage, body);
+    const completedAt = new Date();
+    await logOnePromptVideo(`aliyun.storyboard.${params.stage}.response`, {
+      httpStatus: result.httpStatus,
+      ok: result.ok,
+      durationMs: completedAt.getTime() - startedAtMs,
+      rawSummary: result.rawSummary,
+    }, result.ok ? "info" : "error");
+    await reportPlannerStageMetric({
       stage: params.stage,
-      modelName: model("ALIYUN_STORYBOARD_MODEL", params.modelName),
-      content,
-      parseError,
+      modelName: params.modelName,
+      status: result.ok ? "completed" : "failed",
+      durationMs: completedAt.getTime() - startedAtMs,
+      httpStatus: result.httpStatus,
+      retryable: !result.ok && (result.httpStatus === 408 || result.httpStatus === 429 || result.httpStatus >= 500),
+      startedAt,
+      completedAt,
     });
+    observationRecorded = true;
+    if (!result.ok) {
+      throw new StoryboardStageError(
+        result.errorMessage || `Aliyun storyboard ${params.stage} failed HTTP ${result.httpStatus}`,
+        {
+          code: "upstream_http_error",
+          retryable: result.httpStatus === 408 || result.httpStatus === 429 || result.httpStatus >= 500,
+          httpStatus: result.httpStatus,
+        },
+      );
+    }
+    const content = result.content;
+    if (!content) throw new Error(`Aliyun storyboard ${params.stage} returned empty content`);
+    try {
+      return parseJsonObject(content);
+    } catch (parseError) {
+      await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_parse.failed`, {
+        error: errorForLog(parseError),
+        contentLength: content.length,
+        contentPreview: content.slice(0, 1200),
+      }, "warn");
+      if (params.stage.startsWith("json_repair")) throw parseError;
+      return repairJsonStageContent({
+        stage: params.stage,
+        modelName: model("ALIYUN_STORYBOARD_MODEL", params.modelName),
+        content,
+        parseError,
+      });
+    }
+  } catch (error) {
+    if (!observationRecorded) {
+      const completedAt = new Date();
+      await reportPlannerStageMetric({
+        stage: params.stage,
+        modelName: params.modelName,
+        status: "failed",
+        durationMs: completedAt.getTime() - startedAtMs,
+        retryable: error instanceof StoryboardStageError ? error.retryable : undefined,
+        startedAt,
+        completedAt,
+      });
+    }
+    throw error;
   }
 }
 
@@ -1763,7 +1877,8 @@ async function repairJsonStageContent(params: {
   content: string;
   parseError: unknown;
 }): Promise<unknown> {
-  const startedAt = Date.now();
+  const startedAt = new Date();
+  const startedAtMs = startedAt.getTime();
   const repairContent = JSON.stringify({
     stage: params.stage,
     parse_error: errorForLog(params.parseError),
@@ -1788,8 +1903,34 @@ async function repairJsonStageContent(params: {
     detailEn: `${params.stage} returned invalid JSON. Repairing its structure.`,
     metricsDelta: { jsonRepairCount: 1 },
   });
-  const result = await fetchJsonStageContent(`json_repair_${params.stage}`, body);
-  const repairDurationMs = Date.now() - startedAt;
+  let result: JsonStageContentResult;
+  try {
+    result = await fetchJsonStageContent(`json_repair_${params.stage}`, body);
+  } catch (error) {
+    const completedAt = new Date();
+    await reportPlannerStageMetric({
+      stage: `json_repair_${params.stage}`,
+      modelName: params.modelName,
+      status: "failed",
+      durationMs: completedAt.getTime() - startedAtMs,
+      retryable: error instanceof StoryboardStageError ? error.retryable : undefined,
+      startedAt,
+      completedAt,
+    });
+    throw error;
+  }
+  const completedAt = new Date();
+  const repairDurationMs = completedAt.getTime() - startedAtMs;
+  await reportPlannerStageMetric({
+    stage: `json_repair_${params.stage}`,
+    modelName: params.modelName,
+    status: result.ok ? "completed" : "failed",
+    durationMs: repairDurationMs,
+    httpStatus: result.httpStatus,
+    retryable: !result.ok && (result.httpStatus === 408 || result.httpStatus === 429 || result.httpStatus >= 500),
+    startedAt,
+    completedAt,
+  });
   await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_repair.response`, {
     httpStatus: result.httpStatus,
     ok: result.ok,
@@ -2004,21 +2145,53 @@ async function createShotDecomposerPlan(params: {
     const checkpointKey = String(segment.segmentNo);
     let plan = params.checkpoint.shotDecomposerSegmentPlans?.[checkpointKey];
     if (!plan) {
-      const raw = await runStoryboardStageWithRetry({
+      let contractValidationFeedback = "";
+      plan = await runStoryboardStageWithRetry({
         stage,
         maxAttempts: shotDecomposerRetryAttempts(),
         baseDelayMs: shotDecomposerRetryBaseDelayMs(),
-        run: () => callJsonStage({
-          stage,
-          modelName: params.modelName,
-          systemPrompt: SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT,
-          userContent: buildShotDecomposerSegmentContent({
+        run: async () => {
+          const baseContent = buildShotDecomposerSegmentContent({
             ...params,
             segment,
-          }),
-          temperature: 0.28,
-        }),
+          });
+          const raw = await callJsonStage({
+            stage,
+            modelName: params.modelName,
+            systemPrompt: contractValidationFeedback
+              ? `${SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT}
+
+The previous response violated video_prompt_contract. Return the complete target-segment JSON again.
+Resolve the reported issue through model reasoning. Do not omit hard requirements and do not ask application code to repair your output.`
+              : SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT,
+            userContent: contractValidationFeedback
+              ? JSON.stringify({
+                original_request: JSON.parse(baseContent),
+                previous_contract_validation_error: contractValidationFeedback,
+              })
+              : baseContent,
+            temperature: 0.28,
+          });
+          const candidatePlan = unwrapPlanRoot(raw, "shot_decomposer_plan");
+          try {
+            assertShotPlanVideoPromptContract(candidatePlan, segment.segmentNo);
+          } catch (error) {
+            contractValidationFeedback = error instanceof Error ? error.message : String(error);
+            throw new StoryboardStageError(
+              `Segment ${segment.segmentNo} video prompt contract is invalid: ${contractValidationFeedback}`,
+              {
+                code: "contract_validation_error",
+                retryable: true,
+                cause: error,
+              },
+            );
+          }
+          return candidatePlan;
+        },
         onRetry: async ({ attempt, nextAttempt, delayMs, error }) => {
+          const isContractRetry =
+            error instanceof StoryboardStageError
+            && error.code === "contract_validation_error";
           await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segment.retry", {
             segmentNo: segment.segmentNo,
             stage,
@@ -2035,12 +2208,15 @@ async function createShotDecomposerPlan(params: {
             completedSegments,
             totalSegments: timelineSegments.length,
             attempt: nextAttempt,
-            detailZh: `第 ${segment.segmentNo} 段上游请求超时，${Math.round(delayMs / 1000)} 秒后进行第 ${nextAttempt} 次尝试；已完成 ${completedSegments}/${timelineSegments.length} 段。`,
-            detailEn: `Segment ${segment.segmentNo} timed out upstream. Attempt ${nextAttempt} starts in ${Math.round(delayMs / 1000)}s; ${completedSegments}/${timelineSegments.length} segments are complete.`,
+            detailZh: isContractRetry
+              ? `第 ${segment.segmentNo} 段的视频提示合同不合规，正在把校验错误反馈给规划模型并请求重新输出。`
+              : `第 ${segment.segmentNo} 段上游请求失败，${Math.round(delayMs / 1000)} 秒后进行第 ${nextAttempt} 次尝试。`,
+            detailEn: isContractRetry
+              ? `Segment ${segment.segmentNo} returned an invalid video prompt contract. The validation error is being sent back to the planning model for a complete replacement.`
+              : `Segment ${segment.segmentNo} failed upstream. Attempt ${nextAttempt} starts in ${Math.round(delayMs / 1000)}s; ${completedSegments}/${timelineSegments.length} segments are complete.`,
           });
         },
       });
-      plan = unwrapPlanRoot(raw, "shot_decomposer_plan");
       params.checkpoint.shotDecomposerSegmentPlans = {
         ...(params.checkpoint.shotDecomposerSegmentPlans ?? {}),
         [checkpointKey]: plan,
@@ -2052,6 +2228,7 @@ async function createShotDecomposerPlan(params: {
         stage,
       });
     }
+    assertShotPlanVideoPromptContract(plan, segment.segmentNo);
     await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segment.parsed", {
       segmentNo: segment.segmentNo,
       keyframeCount: arrayOfRecords(plan.keyframes).length,
@@ -2090,6 +2267,7 @@ async function createShotDecomposerPlan(params: {
         segmentNo: segment.segmentNo,
       });
     }
+    assertShotPlanVideoPromptContract(approvedPlan, segment.segmentNo);
 
     let promptDetailPlan = params.checkpoint.promptDetailSegmentPlans?.[checkpointKey];
     if (!promptDetailPlan) {
@@ -2150,6 +2328,26 @@ async function createShotDecomposerPlan(params: {
   };
 }
 
+function assertShotPlanVideoPromptContract(
+  plan: Record<string, unknown>,
+  segmentNo: number,
+): void {
+  const descriptions = arrayOfRecords(
+    plan.segment_render_descriptions ?? plan.segmentRenderDescriptions,
+  );
+  const description = descriptions.find(
+    (item) => numberFrom(item.segmentNo ?? item.segment_no) === segmentNo,
+  );
+  if (!description) {
+    throw new Error(`segment_render_descriptions is missing segment ${segmentNo}.`);
+  }
+  const contract = videoPromptContractFromUnknown(description);
+  if (!contract) {
+    throw new Error(`segment ${segmentNo} is missing video_prompt_contract.`);
+  }
+  validateVideoPromptContract(contract);
+}
+
 async function callWholeShotDecomposerPlan(params: {
   input: PlanVideoProjectInput;
   modelName: string;
@@ -2172,7 +2370,11 @@ async function callWholeShotDecomposerPlan(params: {
     }),
     temperature: 0.32,
   });
-  return unwrapPlanRoot(shotDecomposerRaw, "shot_decomposer_plan");
+  const plan = unwrapPlanRoot(shotDecomposerRaw, "shot_decomposer_plan");
+  for (const segment of params.planningManifest.timelineBlueprint.segments) {
+    assertShotPlanVideoPromptContract(plan, segment.segmentNo);
+  }
+  return plan;
 }
 
 function buildShotDecomposerSegmentContent(params: {
@@ -2824,7 +3026,38 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
       isRecord(repairedEnvelope.shot_decomposer_plan) ? repairedEnvelope : repairedEnvelope.split_repair_plan,
       "shot_decomposer_plan",
     );
-    currentPlan = Object.keys(repairedPlan).length ? repairedPlan : unwrapPlanRoot(repairRaw, "shot_decomposer_plan");
+    const repairPatch = Object.keys(repairedPlan).length ? repairedPlan : unwrapPlanRoot(repairRaw, "shot_decomposer_plan");
+    await logOnePromptVideo("split_repair.patch_fields", {
+      revision: revision + 1,
+      segments: arrayOfRecords(repairPatch.segments).map((segment) => ({
+        segmentNo: numberFrom(segment.segmentNo ?? segment.segment_no),
+        motion: segment.motion,
+        subjectMotion: segment.subjectMotion ?? segment.subject_motion,
+      })),
+      renderDescriptions: arrayOfRecords(
+        repairPatch.segmentRenderDescriptions ?? repairPatch.segment_render_descriptions,
+      ).map((description) => {
+        const motionContract = isRecord(description.motionContract)
+          ? description.motionContract
+          : isRecord(description.motion_contract)
+            ? description.motion_contract
+            : {};
+        return {
+          segmentNo: numberFrom(description.segmentNo ?? description.segment_no),
+          subjectMotion: motionContract.subjectMotion ?? motionContract.subject_motion,
+          motionSteps: readLoose(
+            isRecord(description.videoPromptContract)
+              ? description.videoPromptContract
+              : isRecord(description.video_prompt_contract)
+                ? description.video_prompt_contract
+                : {},
+            "motionSteps",
+            "motion_steps",
+          ),
+        };
+      }),
+    });
+    currentPlan = mergeTargetedShotDecomposerRepair(currentPlan, repairPatch, expectedSegmentNos);
     await logOnePromptVideo("split_repair.result", {
       revision: revision + 1,
       repairNotes: isRecord(repairRaw) ? repairRaw.repair_notes ?? repairRaw.repairNotes : undefined,
@@ -2833,6 +3066,84 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
     });
   }
   return currentPlan;
+}
+
+export function mergeTargetedShotDecomposerRepair(
+  basePlan: Record<string, unknown>,
+  repairPatch: Record<string, unknown>,
+  targetSegmentNos: number[],
+): Record<string, unknown> {
+  const targets = new Set(targetSegmentNos);
+  const mergeNumberedRecords = (
+    baseValue: unknown,
+    patchValue: unknown,
+    keyNames: string[],
+    restrictToTargets: boolean,
+  ): Record<string, unknown>[] => {
+    const map = new Map<number, Record<string, unknown>>();
+    for (const item of arrayOfRecords(baseValue)) {
+      const itemNo = numberFrom(firstDefined(...keyNames.map((key) => item[key])));
+      if (itemNo) map.set(itemNo, item);
+    }
+    for (const item of arrayOfRecords(patchValue)) {
+      const itemNo = numberFrom(firstDefined(...keyNames.map((key) => item[key])));
+      if (!itemNo || (restrictToTargets && targets.size && !targets.has(itemNo))) continue;
+      map.set(itemNo, { ...(map.get(itemNo) ?? {}), ...item });
+    }
+    return Array.from(map.entries())
+      .sort(([left], [right]) => left - right)
+      .map(([, item]) => item);
+  };
+
+  const merged: Record<string, unknown> = { ...basePlan, ...repairPatch };
+  merged.segments = mergeNumberedRecords(basePlan.segments, repairPatch.segments, ["segmentNo", "segment_no"], true);
+  merged.keyframes = mergeNumberedRecords(basePlan.keyframes, repairPatch.keyframes, ["keyframeNo", "keyframe_no"], false);
+  merged.segment_render_descriptions = mergeNumberedRecords(
+    basePlan.segmentRenderDescriptions ?? basePlan.segment_render_descriptions,
+    repairPatch.segmentRenderDescriptions ?? repairPatch.segment_render_descriptions,
+    ["segmentNo", "segment_no"],
+    true,
+  );
+  const patchedSegments = new Map(
+    arrayOfRecords(repairPatch.segments).flatMap((item) => {
+      const segmentNo = numberFrom(item.segmentNo ?? item.segment_no);
+      return segmentNo ? [[segmentNo, item] as const] : [];
+    }),
+  );
+  merged.segment_render_descriptions = arrayOfRecords(merged.segment_render_descriptions).map((description) => {
+    const segmentNo = numberFrom(description.segmentNo ?? description.segment_no);
+    const patchedSegment = patchedSegments.get(segmentNo);
+    if (!patchedSegment) return description;
+    const repairedSubjectMotion = stringOr(patchedSegment.subjectMotion ?? patchedSegment.subject_motion, "");
+    const repairedMotion = stringOr(patchedSegment.motion, repairedSubjectMotion);
+    const authoritativeMotion = repairedMotion || repairedSubjectMotion;
+    if (!repairedSubjectMotion && !repairedMotion) return description;
+
+    const motionContractKey = isRecord(description.motionContract) ? "motionContract" : "motion_contract";
+    const motionContract = isRecord(description[motionContractKey]) ? description[motionContractKey] as Record<string, unknown> : {};
+    const singleTakeContractKey = isRecord(description.singleTakeContract) ? "singleTakeContract" : "single_take_contract";
+    const singleTakeContract = isRecord(description[singleTakeContractKey]) ? description[singleTakeContractKey] as Record<string, unknown> : {};
+    const videoPromptContractKey = isRecord(description.videoPromptContract) ? "videoPromptContract" : "video_prompt_contract";
+    const videoPromptContract = isRecord(description[videoPromptContractKey]) ? description[videoPromptContractKey] as Record<string, unknown> : {};
+
+    return {
+      ...description,
+      [motionContractKey]: {
+        ...motionContract,
+        [("subjectMotion" in motionContract) ? "subjectMotion" : "subject_motion"]: authoritativeMotion,
+      },
+      [singleTakeContractKey]: {
+        ...singleTakeContract,
+        [("subjectPath" in singleTakeContract) ? "subjectPath" : "subject_path"]: authoritativeMotion,
+      },
+      [videoPromptContractKey]: {
+        ...videoPromptContract,
+        [("motionSteps" in videoPromptContract) ? "motionSteps" : "motion_steps"]: [authoritativeMotion],
+      },
+    };
+  });
+  delete merged.segmentRenderDescriptions;
+  return merged;
 }
 
 function singleTakeAuditErrorMessage(issues: Array<{ segmentNo?: number; reason?: string }>): string {
@@ -3145,13 +3456,18 @@ function normalizePlanStructureExtras(params: {
     { warnings, anchorIds },
   );
   validateSegmentRenderDescriptions(segmentRenderDescriptions, params.manifest.timelineBlueprint.segments, warnings);
-  const cameraGraph = normalizeCameraGraph(
+  const normalizedCameraGraph = normalizeCameraGraph(
     firstDefined(
       readLoose(storyboardRoot, "cameraGraph", "camera_graph"),
       readLoose(promptRoot, "cameraGraph", "camera_graph"),
     ),
     { warnings, cameraIds },
   );
+  const derivedCameraGraph = normalizedCameraGraph ?? deriveCameraGraphFromStoryboardBrief(storyboardBrief);
+  const cameraGraph = derivedCameraGraph.cameras.length ? derivedCameraGraph : undefined;
+  if (!normalizedCameraGraph && cameraGraph) {
+    warnings.push("cameraGraph missing from Storyboard Artist; derived a conservative fallback from storyboardBrief");
+  }
   const knownCameraIds = new Set([
     ...cameraIds,
     ...(cameraGraph?.cameras ?? []).map((camera) => camera.cameraId),
@@ -4022,6 +4338,8 @@ function normalizeCandidateTimeline(value: unknown, fallback: VideoTimelineBluep
     if (!fallbackSegment) return [];
     return [{
       segmentNo,
+      endFrameRequirementLevel: normalizeEndFrameRequirementLevel(item.endFrameRequirementLevel ?? item.end_frame_requirement_level),
+      videoPromptContract: readValidatedVideoPromptContract(item, segmentNo),
       startTimeSeconds: numberFrom(item.startTimeSeconds ?? item.start_time_seconds) || fallbackSegment.startTimeSeconds,
       endTimeSeconds: numberFrom(item.endTimeSeconds ?? item.end_time_seconds) || fallbackSegment.endTimeSeconds,
       durationSeconds: numberFrom(item.durationSeconds ?? item.duration_seconds) || fallbackSegment.durationSeconds,
@@ -4121,6 +4439,7 @@ function normalizeSegmentRenderDescriptions(
     }
     return [{
       segmentNo,
+      videoPromptContract: readValidatedVideoPromptContract(item, segmentNo),
       startFrameContract: isRecord(item.startFrameContract) ? item.startFrameContract : isRecord(item.start_frame_contract) ? item.start_frame_contract : undefined,
       endFrameContract: isRecord(item.endFrameContract) ? item.endFrameContract : isRecord(item.end_frame_contract) ? item.end_frame_contract : undefined,
       motionContract: isRecord(item.motionContract) ? item.motionContract : isRecord(item.motion_contract) ? item.motion_contract : undefined,
@@ -4144,6 +4463,23 @@ function normalizeSegmentRenderDescriptions(
       warnings: normalizeStringArray(item.warnings) ?? [],
     }];
   }).slice(0, 40);
+}
+
+function readValidatedVideoPromptContract(
+  value: unknown,
+  segmentNo: number,
+): SegmentRenderDescription["videoPromptContract"] {
+  const contract = videoPromptContractFromUnknown(value);
+  if (!contract) return undefined;
+  try {
+    validateVideoPromptContract(contract);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `segment ${segmentNo} returned an invalid video_prompt_contract: ${message}. Re-run the planning model; do not repair the contract in application code.`,
+    );
+  }
+  return contract;
 }
 
 function validateSegmentRenderDescriptions(
@@ -4958,6 +5294,7 @@ function singleTakeMaxRevisions(targetedSegmentRepair: boolean): number {
 
 function plannerInputFingerprint(input: PlanVideoProjectInput): string {
   return createHash("sha256").update(JSON.stringify({
+    plannerContractRevision: STORYBOARD_PLANNER_CONTRACT_REVISION,
     userPrompt: input.userPrompt,
     aspectRatio: input.aspectRatio,
     durationSeconds: input.durationSeconds,
@@ -4977,9 +5314,9 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
     : isRecord(value)
       ? value
       : {};
-  if (envelope.version !== 1 || envelope.inputFingerprint !== fingerprint) {
+  if (envelope.version !== STORYBOARD_PLANNER_CHECKPOINT_VERSION || envelope.inputFingerprint !== fingerprint) {
     return {
-      version: 1,
+      version: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
       inputFingerprint: fingerprint,
       shotDecomposerSegmentPlans: {},
       approvedShotDecomposerSegmentPlans: {},
@@ -5000,7 +5337,7 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
     }))
     : {};
   return {
-    version: 1,
+    version: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
     inputFingerprint: fingerprint,
     referenceFactsRaw: envelope.referenceFactsRaw,
     referenceFactsFingerprint: typeof envelope.referenceFactsFingerprint === "string" ? envelope.referenceFactsFingerprint : undefined,
@@ -5040,6 +5377,10 @@ function serializePlannerCheckpointWriter(
 
 async function reportPlannerProgress(progress: AliyunStoryboardProgressUpdate): Promise<void> {
   await plannerProgressStorage.getStore()?.onProgress?.(progress);
+}
+
+async function reportPlannerStageMetric(metric: AliyunStoryboardStageMetric): Promise<void> {
+  await plannerProgressStorage.getStore()?.onStageMetric?.(metric);
 }
 
 async function safeJson(res: Response): Promise<unknown> {
@@ -5240,6 +5581,11 @@ function normalizeReferenceOrientation(value: unknown): "front" | "side" | "back
 function normalizeRiskLevel(value: unknown): NonNullable<SegmentRenderDescription["riskLevel"]> {
   if (value === "low" || value === "medium" || value === "high") return value;
   return "low";
+}
+
+function normalizeEndFrameRequirementLevel(value: unknown): NonNullable<SegmentRenderDescription["endFrameRequirementLevel"]> {
+  if (value === "hard_exact" || value === "hard_semantic" || value === "soft_directional" || value === "editorial") return value;
+  return "hard_semantic";
 }
 
 function normalizeArtifactStatus(value: unknown): ArtifactMetadata["status"] {

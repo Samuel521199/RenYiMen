@@ -27,6 +27,8 @@ export function buildAuthoritativeVisualContract(input: {
   const flatTarget = flattenText(input.targetContract);
   const anchorText = input.anchorContractText?.trim() ?? "";
   const combined = [flatTarget, anchorText, input.prompt].filter(Boolean).join("\n");
+  const isolationMode = textField(input.targetContract, ["isolationMode", "isolation_mode"]);
+  const isolatedAsset = isolationMode === "single_asset";
   const requiredText = unique([
     ...readStringList(input.targetContract, ["requiredText", "required_text", "requiredBrandText", "required_brand_text"]),
     ...extractQuotedBrandText(anchorText),
@@ -35,7 +37,8 @@ export function buildAuthoritativeVisualContract(input: {
   const verifiedConflicts = requiredText
     .filter((required) => explicitForbiddenText.some((forbidden) => normalize(required) === normalize(forbidden)))
     .map((text) => `The structured contract both requires and forbids exact text: ${text}`);
-  const allowGameUi = /game[_\s-]?interface|game ui|hud|计时器|得分|分数|游戏界面|asset_category[:=]\s*(?:prop|brand_visual)/i.test(combined);
+  const allowGameUi = !isolatedAsset
+    && /game[_\s-]?interface|game ui|hud|计时器|得分|分数|游戏界面/i.test(combined);
   const allowBrandText = requiredText.length > 0 || /brand_visual|game[_\s-]?logo|logo|品牌|字样/i.test(combined);
   const dynamicRequirements = extractDynamicRequirements(flatTarget);
   const warnings: string[] = [];
@@ -174,6 +177,14 @@ function readStringList(record: Record<string, unknown>, keys: string[]): string
     if (typeof value === "string" && value.trim()) return [value.trim()];
   }
   return [];
+}
+
+function textField(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
 }
 
 function flattenText(value: unknown): string {

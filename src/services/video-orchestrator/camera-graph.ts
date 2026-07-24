@@ -100,6 +100,56 @@ export function readCameraGraph(value: unknown): CameraGraph {
   return { cameras, relations };
 }
 
+export function deriveCameraGraphFromStoryboardBrief(value: unknown): CameraGraph {
+  const briefs = arrayRecords(value)
+    .map((item) => ({
+      cameraId: text(item.cameraId ?? item.camera_id),
+      segmentNo: number(item.segmentNo ?? item.segment_no),
+      locationId: optionalText(item.locationId ?? item.location_id),
+      description: optionalText(item.visualDescZh ?? item.visual_desc_zh ?? item.visualDescEn ?? item.visual_desc_en),
+    }))
+    .filter((item) => item.cameraId && item.segmentNo > 0)
+    .sort((a, b) => a.segmentNo - b.segmentNo);
+  const cameras: CameraGraphNode[] = [];
+  const relations: CameraGraph["relations"] = [];
+
+  for (const brief of briefs) {
+    const existing = cameras.find((camera) => camera.cameraId === brief.cameraId);
+    if (existing) {
+      if (!existing.segmentNos.includes(brief.segmentNo)) existing.segmentNos.push(brief.segmentNo);
+      continue;
+    }
+    const parent = cameras.at(-1);
+    const sameLocation = Boolean(parent && brief.locationId && parent.locationId === brief.locationId);
+    const relation: CameraRelation = !parent || !sameLocation ? "new_camera_setup" : "same_spatial_context";
+    cameras.push({
+      cameraId: brief.cameraId,
+      segmentNos: [brief.segmentNo],
+      locationId: brief.locationId,
+      description: brief.description,
+      parentCameraId: parent?.cameraId,
+      parentSegmentNo: parent?.segmentNos.at(-1),
+      relationToParent: relation,
+      inheritanceReasonZh: !parent
+        ? "初始根机位，无需继承上一机位。"
+        : sameLocation
+          ? "同一空间的后续机位，仅继承场景布局、固定物体和光线。"
+          : "场景或位置已经变化，使用独立机位，无需继承上一机位构图。",
+    });
+    if (parent) {
+      relations.push({
+        fromCameraId: parent.cameraId,
+        toCameraId: brief.cameraId,
+        relation,
+        reason: sameLocation
+          ? "Derived from adjacent storyboard briefs in the same location."
+          : "Derived as an independent setup because the storyboard location changed or was unspecified.",
+      });
+    }
+  }
+  return { cameras, relations };
+}
+
 function cameraRelation(value: unknown): CameraRelation | undefined {
   return value === "same_camera_setup" || value === "same_axis" || value === "derived_reframe" ||
     value === "same_spatial_context" || value === "same_subject_group" || value === "alternate_view" ||

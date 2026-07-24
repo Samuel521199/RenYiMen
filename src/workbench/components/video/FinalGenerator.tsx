@@ -53,7 +53,7 @@ export default function FinalGenerator({
   const displayFinals = finals.filter((final) => !final.operation);
   const [expandedQualityIds, setExpandedQualityIds] = useState<Record<string, boolean>>({});
   const filteredFinals = showOnlyLowScore
-    ? displayFinals.filter((final) => typeof final.qualityScore === "number" && final.qualityScore < qualityThreshold)
+    ? displayFinals.filter((final) => final.qualityModelSource === "model" && typeof final.qualityScore === "number" && final.qualityScore < qualityThreshold)
     : displayFinals;
   const visibleFinals = sortByQuality
     ? [...filteredFinals].sort((a, b) => {
@@ -63,14 +63,14 @@ export default function FinalGenerator({
         return a.id > b.id ? 1 : -1;
       })
     : filteredFinals;
-  const scoredFinals = displayFinals.filter((final) => typeof final.qualityScore === "number");
+  const scoredFinals = displayFinals.filter((final) => final.qualityModelSource === "model" && typeof final.qualityScore === "number");
   const averageQualityScore = scoredFinals.length
     ? Math.round(
         scoredFinals.reduce((sum, final) => sum + (final.qualityScore as number), 0) / scoredFinals.length,
       )
     : null;
   const lowScoreCount = displayFinals.filter(
-    (final) => typeof final.qualityScore === "number" && final.qualityScore < qualityThreshold,
+    (final) => final.qualityModelSource === "model" && typeof final.qualityScore === "number" && final.qualityScore < qualityThreshold,
   ).length;
 
   useEffect(() => {
@@ -79,7 +79,7 @@ export default function FinalGenerator({
       const next = { ...prev };
       let changed = false;
       for (const final of displayFinals) {
-        if (typeof final.qualityScore !== "number") continue;
+        if (final.qualityModelSource !== "model" || typeof final.qualityScore !== "number") continue;
         if (final.qualityScore >= qualityThreshold) continue;
         if (final.id in next) continue;
         next[final.id] = true;
@@ -319,7 +319,7 @@ export default function FinalGenerator({
                             质检 {final.qualityScore} · {final.qualityGrade ?? "C"}
                           </span>
                           <span className="text-[11px] text-gray-500">
-                            {final.qualityModelSource === "model" ? "模型评分" : "本地评分"}
+                            {final.qualityModelSource === "model" ? "视觉质量评分" : "交付健康度"}
                           </span>
                         </div>
                       )}
@@ -355,7 +355,7 @@ export default function FinalGenerator({
                   </div>
                   {expandedQualityIds[final.id] && typeof final.qualityScore === "number" && (
                     <div className="mt-3 rounded-lg border border-gray-200 bg-white/80 p-3">
-                      <div className="mb-2 text-xs font-medium text-gray-600">质检评分详情（四维）</div>
+                      <div className="mb-2 text-xs font-medium text-gray-600">{final.qualityModelSource === "model" ? "视觉质量详情（四维）" : "交付健康度详情"}</div>
                       <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600">
                         <div className="rounded bg-gray-50 px-2 py-1">
                           一致性：{final.qualityDimensions?.consistency ?? "--"}

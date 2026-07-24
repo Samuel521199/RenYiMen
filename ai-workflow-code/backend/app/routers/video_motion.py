@@ -1,6 +1,9 @@
 import base64
+import asyncio
 import json
 import re
+import tempfile
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -106,12 +109,22 @@ def _grade_from_score(score: int) -> str:
     return "D"
 
 
-def _clamp_score(value: Any, default: int = 0) -> int:
+def _optional_score(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
     try:
         number = int(float(value))
     except (TypeError, ValueError):
-        number = default
+        return None
     return max(0, min(100, number))
+
+
+def _clamp_confidence(value: Any, default: float = 0.5) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(0.0, min(1.0, number))
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -188,11 +201,13 @@ async def _run_video_quality_scoring(
 ) -> dict[str, Any]:
     base_url = (mc.base_url or "https://api.302.ai/v1").rstrip("/")
     api_key = mc.api_key
-    video_b64 = base64.b64encode(video_bytes).decode()
+    sampled_frames = await _extract_video_quality_frames(video_bytes)
     prompt_text = (
-        "You are a strict video quality auditor for social media operations. "
-        "Evaluate this short video and return JSON only, no markdown, no explanation. "
-        'Schema: {"overall_score":0-100,"consistency_score":0-100,"motion_score":0-100,"visual_score":0-100,'
+        "You are an evidence-based video quality auditor for social media operations. "
+        "Evaluate the ordered sampled frames. Do not invent defects that are not clearly visible. "
+        "If evidence is uncertain, describe it as a suggestion instead of forcing a failure. "
+        "Return JSON only, no markdown, no explanation. "
+        'Schema: {"evaluation_confidence":0-1,"overall_score":0-100,"consistency_score":0-100,"motion_score":0-100,"visual_score":0-100,'
         '"text_clean_score":0-100,"reasons":["short reason"],"suggestions":["short suggestion"]}. '
         "Scoring rule: focus on character consistency, motion smoothness, visual clarity, and text/watermark cleanliness."
     )
@@ -203,7 +218,14 @@ async def _run_video_quality_scoring(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": f"data:video/mp4;base64,{video_b64}"}},
+                    *[
+                        item
+                        for index, frame_bytes in enumerate(sampled_frames)
+                        for item in (
+                            {"type": "text", "text": f"Ordered video sample {index + 1}/{len(sampled_frames)}:"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(frame_bytes).decode()}"}},
+                        )
+                    ],
                 ],
             }
         ],
@@ -226,6 +248,55 @@ async def _run_video_quality_scoring(
     if not isinstance(content, str):
         content = str(content)
     return _extract_json_object(content)
+
+
+async def _extract_video_quality_frames(video_bytes: bytes) -> list[bytes]:
+    with tempfile.TemporaryDirectory(prefix="video-quality-") as temp_dir:
+        video_path = Path(temp_dir) / "input.mp4"
+        video_path.write_bytes(video_bytes)
+        probe = await _run_media_process(
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "json",
+            str(video_path),
+        )
+        probe_payload = json.loads(probe.decode() or "{}")
+        duration = float(probe_payload.get("format", {}).get("duration") or 0)
+        if duration <= 0:
+            raise ValueError("Video duration is unavailable")
+        tail_margin = min(0.35, duration * 0.1)
+        sample_times = [0.0, duration * 0.25, duration * 0.5, duration * 0.75, max(0.0, duration - tail_margin)]
+        frames: list[bytes] = []
+        for sample_time in sample_times:
+            frame = await _run_media_process(
+                "ffmpeg",
+                "-v", "error",
+                "-ss", f"{sample_time:.3f}",
+                "-i", str(video_path),
+                "-frames:v", "1",
+                "-vf", "scale=1024:-2:force_original_aspect_ratio=decrease,format=rgb24",
+                "-f", "image2pipe",
+                "-vcodec", "png",
+                "pipe:1",
+            )
+            if len(frame) < 1024:
+                raise ValueError(f"Decoded frame at {sample_time:.3f}s is empty")
+            frames.append(frame)
+        return frames
+
+
+async def _run_media_process(command: str, *args: str) -> bytes:
+    process = await asyncio.create_subprocess_exec(
+        command,
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(f"{command} failed: {stderr.decode(errors='replace')[-800:]}")
+    return stdout
 
 
 @router.post("/auto-extract/{job_id}", response_model=dict)
@@ -383,19 +454,30 @@ async def quality_score_video_drafts(
         try:
             video_bytes = await _download_video_bytes(str(draft.video_url))
             model_result = await _run_video_quality_scoring(model_config, video_bytes)
-            score = _clamp_score(model_result.get("overall_score"), default=0)
+            score = _optional_score(model_result.get("overall_score"))
+            consistency_score = _optional_score(model_result.get("consistency_score"))
+            motion_score = _optional_score(model_result.get("motion_score"))
+            visual_score = _optional_score(model_result.get("visual_score"))
+            text_clean_score = _optional_score(model_result.get("text_clean_score"))
+            confidence = _clamp_confidence(model_result.get("evaluation_confidence"), default=0.5)
+            completed = confidence >= 0.7 and all(
+                value is not None
+                for value in (score, consistency_score, motion_score, visual_score, text_clean_score)
+            )
             reasons = model_result.get("reasons")
             suggestions = model_result.get("suggestions")
             items.append(
                 {
                     "draft_id": str(draft.id),
+                    "evaluation_status": "completed" if completed else "partial",
+                    "evaluation_confidence": confidence,
                     "score": score,
-                    "grade": _grade_from_score(score),
-                    "pass": score >= body.threshold,
-                    "consistency_score": _clamp_score(model_result.get("consistency_score"), default=score),
-                    "motion_score": _clamp_score(model_result.get("motion_score"), default=score),
-                    "visual_score": _clamp_score(model_result.get("visual_score"), default=score),
-                    "text_clean_score": _clamp_score(model_result.get("text_clean_score"), default=score),
+                    "grade": _grade_from_score(score) if score is not None else None,
+                    "pass": score >= body.threshold if completed and score is not None else None,
+                    "consistency_score": consistency_score,
+                    "motion_score": motion_score,
+                    "visual_score": visual_score,
+                    "text_clean_score": text_clean_score,
                     "reasons": reasons if isinstance(reasons, list) else [],
                     "suggestions": suggestions if isinstance(suggestions, list) else [],
                 }
@@ -404,13 +486,14 @@ async def quality_score_video_drafts(
             items.append(
                 {
                     "draft_id": str(draft.id),
-                    "score": 0,
-                    "grade": "D",
-                    "pass": False,
-                    "consistency_score": 0,
-                    "motion_score": 0,
-                    "visual_score": 0,
-                    "text_clean_score": 0,
+                    "evaluation_status": "unavailable",
+                    "score": None,
+                    "grade": None,
+                    "pass": None,
+                    "consistency_score": None,
+                    "motion_score": None,
+                    "visual_score": None,
+                    "text_clean_score": None,
                     "reasons": [f"质检模型失败: {exc}"],
                     "suggestions": [],
                 }

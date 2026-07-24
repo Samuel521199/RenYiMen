@@ -7,6 +7,7 @@ import { buildImageGenerationQualityReport, buildVideoGenerationQualityReport } 
 import {
   queryDashScopeTask,
   queryImsComposeJob,
+  aliyunImageToVideoCapabilities,
   prepareAliyunImagePrompt,
   submitAliyunImageTask,
   submitAliyunImageToVideoTask,
@@ -16,6 +17,7 @@ import {
   type AliyunStoryboardPlannerCheckpoint,
   type AliyunStoryboardProgressStage,
   type AliyunStoryboardProgressUpdate,
+  type AliyunStoryboardStageMetric,
 } from "./three-stage-planner";
 import { decideStoryRewrite, markStoryRewriteRequired, withStoryQualityGate } from "./story-quality-gate";
 import { readStoryRolloutConfig, shouldEvaluateStoryQuality, shouldRequireStoryQualityReview } from "./story-rollout-config";
@@ -35,6 +37,19 @@ import { createOnePromptRolloutSnapshot, legacyReferenceSelection, onePromptRoll
 import { hydratePlanArtifactsFromTables, mirrorPlanArtifactsToTables } from "./plan-artifact-store";
 import { buildAuthoritativeVisualContract, repairNegativePromptAgainstVisualContract, repairPromptAgainstVisualContract, type AuthoritativeVisualContract } from "./visual-quality-contract";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
+import {
+  assertEndFrameRequirementSupported,
+  buildLegacyVideoPromptContract,
+  compileHappyHorseVideoPrompt,
+  resolveEndFrameRequirementLevel,
+  videoPromptContractFromUnknown,
+} from "./video-terminal-contract";
+import {
+  finishPlanningPerformanceRun,
+  queuePlanningPerformanceRun,
+  recordPlanningStageObservation,
+  startPlanningPerformanceRun,
+} from "./planning-performance";
 
 const PROJECT_INCLUDE = {
   shots: { orderBy: { shotNo: "asc" as const } },
@@ -100,6 +115,14 @@ function onePromptPlannerArch(): OnePromptPlannerArch {
   if (raw === "v1" || raw === "legacy") return "v1";
   if (raw === "v2_shadow" || raw === "shadow") return "v2_shadow";
   return "v2";
+}
+
+function planningErrorCategory(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
+    return error.code.slice(0, 80);
+  }
+  if (error instanceof Error && error.name) return error.name.slice(0, 80);
+  return "unknown_error";
 }
 
 function imageTaskConcurrency(): number {
@@ -496,7 +519,12 @@ function videoCandidateCount(): number {
   return Math.max(1, Math.min(4, envInt("ONE_PROMPT_VIDEO_CANDIDATE_COUNT", DEFAULT_GENERATION_CANDIDATE_COUNT)));
 }
 
-function generationMaxRetries(): number {
+function generationMaxRetries(kind?: CandidateKind): number {
+  if (kind === "keyframe_image" || kind === "micro_shot_image") {
+    // Image iteration is comparatively cheap and benefits from preserving a
+    // candidate history. Do not force a human decision after only three images.
+    return Math.max(0, Math.min(8, envInt("ONE_PROMPT_IMAGE_GENERATION_MAX_RETRIES", 5)));
+  }
   return Math.max(0, Math.min(4, envInt("ONE_PROMPT_GENERATION_MAX_RETRIES", 2)));
 }
 
@@ -638,6 +666,12 @@ async function createVideoCandidateBatch(params: {
   const batchId = randomUUID();
   const requestedRetryCycleId = typeof params.metadata.retryCycleId === "string" ? params.metadata.retryCycleId : undefined;
   const { attempt, retryCycleId } = nextGenerationCandidateAttempt(params.project.generationCandidates, artifactId, requestedRetryCycleId);
+  const endFrameRequirementLevel = resolveEndFrameRequirementLevel(params.metadata.targetContract);
+  assertEndFrameRequirementSupported(
+    endFrameRequirementLevel,
+    aliyunImageToVideoCapabilities(),
+    "happyhorse-1.1-i2v",
+  );
   let firstTaskId = "";
   for (let candidateNo = 1; candidateNo <= videoCandidateCount(); candidateNo += 1) {
     try {
@@ -646,9 +680,10 @@ async function createVideoCandidateBatch(params: {
         lastFrameUrl: params.endFrameUrl,
         prompt: params.prompt,
         durationSeconds: params.segment.durationSeconds,
+        endFrameRequirementLevel,
       });
       if (!firstTaskId) firstTaskId = taskId;
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, taskId, status: "running", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, videoModel: "happyhorse-1.1-i2v", endFrameConstraintMode: "strong_prompt_target_and_visual_check", endFramePromptEnforced: true }) } });
+      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, taskId, status: "running", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, videoModel: "happyhorse-1.1-i2v", endFrameRequirementLevel, endFrameConstraintMode: "strong_prompt_target_and_visual_check", endFramePromptEnforced: true }) } });
     } catch (error) {
       await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, status: "failed", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl }) } });
     }
@@ -880,6 +915,7 @@ async function createPlanForPlannerArch(
     checkpoint?: unknown;
     onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
     onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
+    onStageMetric?: (metric: AliyunStoryboardStageMetric) => Promise<void> | void;
   },
 ): Promise<OnePromptVideoPlan> {
   const arch = onePromptPlannerArch();
@@ -1192,7 +1228,7 @@ function assetViewName(view: VideoAssetView, lang: "zh" | "en"): string {
   return "参考";
 }
 
-function buildAssetConsistencyReference(params: {
+export function buildAssetConsistencyReference(params: {
   item: VideoAssetLibraryItem;
   anchor: VideoConsistencyAnchor;
   baseReference?: VideoConsistencyReference;
@@ -1203,12 +1239,21 @@ function buildAssetConsistencyReference(params: {
 }): VideoConsistencyReference {
   const category = params.item.category;
   const view = params.item.view;
-  const anchorPromptZh = params.anchor.imagePromptZh || params.anchor.descriptionZh || params.baseReference?.imagePromptZh || params.baseReference?.imagePrompt || params.userPrompt;
-  const anchorPromptEn = params.anchor.imagePromptEn || params.anchor.descriptionEn || params.baseReference?.imagePromptEn || params.baseReference?.imagePrompt || params.userPrompt;
-  const viewInstructionEn = assetViewPromptInstruction(category, view, "en");
-  const viewInstructionZh = assetViewPromptInstruction(category, view, "zh");
-  const commonRulesEn = "Clean asset-library reference image on a plain white or light neutral background, one asset only, no storyboard panels, no split screen, no labels, no captions, no UI, no watermark.";
-  const commonRulesZh = "资产库参考图，白色或浅色纯净背景，只展示一个资产，不要分镜拼图、不要多宫格、不要标签文字、字幕、UI 或水印。";
+  const rawAnchorPromptZh = params.anchor.imagePromptZh || params.anchor.descriptionZh || params.baseReference?.imagePromptZh || params.baseReference?.imagePrompt || params.userPrompt;
+  const rawAnchorPromptEn = params.anchor.imagePromptEn || params.anchor.descriptionEn || params.baseReference?.imagePromptEn || params.baseReference?.imagePrompt || params.userPrompt;
+  const subjectInstructionEn = assetSubjectPromptInstruction(params.anchor, category, "en");
+  const subjectInstructionZh = assetSubjectPromptInstruction(params.anchor, category, "zh");
+  const anchorPromptZh = normalizeAssetAnchorPrompt(rawAnchorPromptZh, Boolean(subjectInstructionZh), "zh");
+  const anchorPromptEn = normalizeAssetAnchorPrompt(rawAnchorPromptEn, Boolean(subjectInstructionEn), "en");
+  const viewInstructionEn = subjectInstructionEn ? "" : assetViewPromptInstruction(category, view, "en");
+  const viewInstructionZh = subjectInstructionZh ? "" : assetViewPromptInstruction(category, view, "zh");
+  const commonRulesEn = "Clean asset-library reference image on a plain white or light neutral background. Show only the explicitly requested asset set, with no storyboard panels, split screen, captions, interface chrome, branding, or watermark. Preserve intrinsic markings required to identify the asset; do not treat them as forbidden incidental text.";
+  const commonRulesZh = "资产库参考图，白色或浅色纯净背景。只展示明确要求的资产组合，不要分镜拼图、多宫格、字幕、界面框、品牌标识或水印。必须保留用于识别资产的固有标记，不能把牌面点数、花色等固有标记当成禁用文字。";
+  const specificNegativePromptEn = assetSpecificNegativePrompt(params.anchor, category, "en");
+  const specificNegativePromptZh = assetSpecificNegativePrompt(params.anchor, category, "zh");
+  const baseNegativePrompt = params.baseReference?.negativePrompt || params.negativePrompt;
+  const baseNegativePromptZh = params.baseReference?.negativePromptZh || params.negativePromptZh || params.negativePrompt;
+  const baseNegativePromptEn = params.baseReference?.negativePromptEn || params.negativePromptEn || params.negativePrompt;
   return {
     kind: assetReferenceKindForCategory(category),
     needed: true,
@@ -1225,16 +1270,95 @@ function buildAssetConsistencyReference(params: {
     purpose: params.item.displayNameZh || params.item.displayNameEn || params.item.assetId,
     purposeZh: params.item.displayNameZh,
     purposeEn: params.item.displayNameEn,
-    scene: params.baseReference?.scene || "clean asset library reference background",
-    characterState: category === "person" ? `${params.item.displayNameEn || params.item.assetId}: ${viewInstructionEn}` : params.baseReference?.characterState || "",
-    productState: category !== "person" ? `${params.item.displayNameEn || params.item.assetId}: ${viewInstructionEn}` : params.baseReference?.productState || "",
-    imagePrompt: `${viewInstructionZh}\n${anchorPromptZh}\n${commonRulesZh}`,
-    imagePromptZh: `${viewInstructionZh}\n${anchorPromptZh}\n${commonRulesZh}`,
-    imagePromptEn: `${viewInstructionEn}\n${anchorPromptEn}\n${commonRulesEn}`,
-    negativePrompt: params.baseReference?.negativePrompt || params.negativePrompt,
-    negativePromptZh: params.baseReference?.negativePromptZh || params.negativePromptZh || params.negativePrompt,
-    negativePromptEn: params.baseReference?.negativePromptEn || params.negativePromptEn || params.negativePrompt,
+    scene: category === "scene"
+      ? params.baseReference?.scene || params.anchor.descriptionEn || params.anchor.descriptionZh || "reusable scene overview"
+      : "plain white or light neutral asset-library background",
+    characterState: category === "person" ? `${params.item.displayNameEn || params.item.assetId}: ${viewInstructionEn}` : "",
+    productState: category === "product" || category === "prop" || category === "brand_visual"
+      ? `${params.item.displayNameEn || params.item.assetId}: ${viewInstructionEn}`
+      : "",
+    imagePrompt: [viewInstructionZh, subjectInstructionZh, anchorPromptZh, commonRulesZh].filter(Boolean).join("\n"),
+    imagePromptZh: [viewInstructionZh, subjectInstructionZh, anchorPromptZh, commonRulesZh].filter(Boolean).join("\n"),
+    imagePromptEn: [viewInstructionEn, subjectInstructionEn, anchorPromptEn, commonRulesEn].filter(Boolean).join("\n"),
+    negativePrompt: mergeNegativePrompt(baseNegativePrompt, specificNegativePromptZh, "zh"),
+    negativePromptZh: mergeNegativePrompt(baseNegativePromptZh, specificNegativePromptZh, "zh"),
+    negativePromptEn: mergeNegativePrompt(baseNegativePromptEn, specificNegativePromptEn, "en"),
   };
+}
+
+function mergeNegativePrompt(base: string, addition: string, lang: "zh" | "en"): string {
+  const separator = lang === "zh" ? "，" : ", ";
+  const parts = `${base}${separator}${addition}`
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set(parts)].join(separator);
+}
+
+function normalizeAssetAnchorPrompt(prompt: string, hasIntrinsicMarkingContract: boolean, lang: "zh" | "en"): string {
+  if (!hasIntrinsicMarkingContract) return prompt;
+  if (lang === "en") {
+    return prompt.replace(
+      /\bno text\b/gi,
+      "no extra decorative text; preserve the explicitly required card ranks and suit symbols",
+    );
+  }
+  return prompt.replace(
+    /无文字/g,
+    "无额外装饰文字（必须保留明确指定的牌面点数与花色）",
+  );
+}
+
+function isPlayingCardAnchor(anchor: VideoConsistencyAnchor): boolean {
+  const searchable = [
+    anchor.id,
+    anchor.displayNameZh,
+    anchor.displayNameEn,
+    anchor.descriptionZh,
+    anchor.descriptionEn,
+    anchor.imagePromptZh,
+    anchor.imagePromptEn,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /扑克牌|纸牌|playing[\s_-]*cards?|poker[\s_-]*cards?|game[\s_-]*cards?/.test(searchable);
+}
+
+export function assetSubjectPromptInstruction(
+  anchor: VideoConsistencyAnchor,
+  category: VideoAssetCategory,
+  lang: "zh" | "en",
+): string {
+  if (category !== "prop" || !isPlayingCardAnchor(anchor)) return "";
+  if (lang === "en") {
+    return [
+      "Playing-card prop identity sheet for a polished cartoon mobile game.",
+      "Show exactly two complete face-up cards from a strict top-down orthographic view: Ace of Spades on the left and King of Hearts on the right.",
+      "Place the two cards horizontally side by side with a clear gap; no overlap, no cropping, all four rounded corners visible.",
+      "Use standard 1:1.4 playing-card proportions, clean white coated card stock, a thin dark outline, black spade ink, and red heart ink.",
+      "On each card, the top-left and bottom-right indices must show the same correct rank and suit; the center must contain one large matching suit symbol.",
+      "Render crisp, readable A♠ and K♥ markings. These card-face indices and suit symbols are mandatory intrinsic markings, not incidental text.",
+      "Do not add any third card, card back, joker, hand, table, chip, character, scenery, decorative lettering, logo, or interface element.",
+    ].join(" ");
+  }
+  return [
+    "精致卡通手游风格的扑克牌道具设定图。",
+    "严格只显示两张完整、正面朝上的扑克牌，采用正上方无透视俯视：左侧黑桃 A，右侧红桃 K。",
+    "两张牌横向并排并留出清晰间距，彼此不得重叠，不得裁切，四个圆角全部可见。",
+    "卡牌采用标准约 1:1.4 长宽比、白色覆膜纸牌材质、细深色描边；黑桃为纯黑色，红桃为鲜红色。",
+    "每张牌左上角和右下角必须显示完全一致且正确的点数与花色，中央只放一个对应的大花色图案。",
+    "A♠ 与 K♥ 必须清晰、端正、可辨认；这些点数和花色是必须保留的牌面固有标记，不属于随机文字。",
+    "禁止出现第三张牌、牌背、大小王、手、牌桌、筹码、人物、场景、装饰文字、Logo 或 UI。",
+  ].join("");
+}
+
+function assetSpecificNegativePrompt(
+  anchor: VideoConsistencyAnchor,
+  category: VideoAssetCategory,
+  lang: "zh" | "en",
+): string {
+  if (category !== "prop" || !isPlayingCardAnchor(anchor)) return "";
+  return lang === "en"
+    ? "extra cards, duplicate cards, overlapping cards, cropped corners, card backs, joker, wrong rank, wrong suit, mismatched corner indices, malformed A, malformed K, invented symbols, mirrored symbols, unreadable card face"
+    : "多余扑克牌，重复扑克牌，牌面重叠，卡角裁切，出现牌背，大小王，错误点数，错误花色，对角点数不一致，A变形，K变形，虚构符号，镜像符号，牌面不可辨认";
 }
 
 function assetViewPromptInstruction(category: VideoAssetCategory, view: VideoAssetView, lang: "zh" | "en"): string {
@@ -3389,6 +3513,16 @@ export async function queueVideoProjectPlanning(
     },
     include: PROJECT_INCLUDE,
   });
+  await queuePlanningPerformanceRun({
+    taskId,
+    projectId,
+    userId,
+    plannerArch: onePromptPlannerArch(),
+    durationSeconds: input.durationSeconds,
+    referenceImageCount: input.referenceImageUrls.length,
+    checkpointResume: Boolean(checkpoint),
+    queuedAt: new Date(now),
+  });
 
   const run = new Promise<void>((resolve) => setImmediate(resolve))
     .then(async () => {
@@ -3408,6 +3542,12 @@ export async function queueVideoProjectPlanning(
     })
     .catch(async (error) => {
       await logOnePromptVideo("project.plan.background.error", { userId, projectId, taskId, ...errorForLog(error) }, "error");
+      await finishPlanningPerformanceRun({
+        taskId,
+        status: "failed",
+        failureStage: "background",
+        errorCategory: planningErrorCategory(error),
+      });
     })
     .finally(() => {
       if (planningRuns.get(projectId) === run) planningRuns.delete(projectId);
@@ -3451,6 +3591,19 @@ export async function planVideoProject(
     stylePreset: override?.stylePreset ?? project.stylePreset,
     referenceImageUrls: override?.referenceImageUrls ?? jsonStringArray(project.referenceImageUrls),
   });
+  const performanceTaskId = internal?.planningTaskId ?? claimedProgress?.taskId ?? randomUUID();
+  if (!internal?.planningTaskId && !claimedProgress?.taskId) {
+    await queuePlanningPerformanceRun({
+      taskId: performanceTaskId,
+      projectId,
+      userId,
+      plannerArch: onePromptPlannerArch(),
+      durationSeconds: input.durationSeconds,
+      referenceImageCount: input.referenceImageUrls.length,
+      checkpointResume: Boolean(project.planJson),
+    });
+  }
+  await startPlanningPerformanceRun(performanceTaskId);
   await logOnePromptVideo("project.plan.start", {
     userId,
     projectId,
@@ -3507,6 +3660,12 @@ export async function planVideoProject(
       latestStatus: latest.status,
       reason: "planning_claim_lost",
     }, "warn");
+    await finishPlanningPerformanceRun({
+      taskId: performanceTaskId,
+      status: "cancelled",
+      failureStage: "claim",
+      errorCategory: "planning_claim_lost",
+    });
     return latest;
   }
   let planningStateWrite = Promise.resolve();
@@ -3609,6 +3768,7 @@ export async function planVideoProject(
       checkpoint: project.planJson,
       onCheckpoint: savePlannerCheckpoint,
       onProgress: savePlannerProgress,
+      onStageMetric: (metric) => recordPlanningStageObservation(performanceTaskId, metric),
     });
     plan = ensureProjectAssetLibrary(plan, input);
     const storyRolloutConfig = readStoryRolloutConfig();
@@ -3685,6 +3845,13 @@ export async function planVideoProject(
         aspectRatio: input.aspectRatio,
         stylePreset: input.stylePreset,
       },
+    });
+    await finishPlanningPerformanceRun({
+      taskId: performanceTaskId,
+      status: "failed",
+      failureStage: plannerProgress?.stage,
+      errorCategory: planningErrorCategory(error),
+      counters: plannerProgress?.metrics,
     });
     throw error;
   }
@@ -3828,6 +3995,12 @@ export async function planVideoProject(
     return updated;
   });
   if (appliedProject.planJson) await mirrorPlanArtifactsToTables(appliedProject.id, appliedProject.planJson);
+  await finishPlanningPerformanceRun({
+    taskId: performanceTaskId,
+    status: isManuallyStopped(appliedProject) ? "cancelled" : "completed",
+    segmentCount: appliedProject.segments.length,
+    counters: plannerProgress?.metrics,
+  });
   return appliedProject;
 }
 
@@ -4181,8 +4354,8 @@ function buildImageCandidateLearningSummary(
     .filter(({ candidate }) => Boolean(candidate.mediaUrl))
     .sort((a, b) => {
       const scoreDelta =
-        (b.candidate.compositeScore ?? generationQualityCompositeScore(b.report)) -
-        (a.candidate.compositeScore ?? generationQualityCompositeScore(a.report));
+        (b.candidate.compositeScore ?? generationQualityCompositeScore(b.report) ?? -1) -
+        (a.candidate.compositeScore ?? generationQualityCompositeScore(a.report) ?? -1);
       if (scoreDelta !== 0) return scoreDelta;
       const createdDelta = b.candidate.createdAt.getTime() - a.candidate.createdAt.getTime();
       return createdDelta !== 0 ? createdDelta : b.candidate.candidateNo - a.candidate.candidateNo;
@@ -4195,10 +4368,10 @@ function buildImageCandidateLearningSummary(
     && issue.severity !== "advisory"
   );
   const strongDimensions = strongest ? [
-    strongest.report.identityScore >= 80 ? `identity ${strongest.report.identityScore.toFixed(1)}` : "",
-    strongest.report.layoutScore >= 80 ? `layout ${strongest.report.layoutScore.toFixed(1)}` : "",
-    strongest.report.promptAlignmentScore >= 80 ? `prompt alignment ${strongest.report.promptAlignmentScore.toFixed(1)}` : "",
-    strongest.report.continuityScore >= 80 ? `continuity ${strongest.report.continuityScore.toFixed(1)}` : "",
+    typeof strongest.report.identityScore === "number" && strongest.report.identityScore >= 80 ? `identity ${strongest.report.identityScore.toFixed(1)}` : "",
+    typeof strongest.report.layoutScore === "number" && strongest.report.layoutScore >= 80 ? `layout ${strongest.report.layoutScore.toFixed(1)}` : "",
+    typeof strongest.report.promptAlignmentScore === "number" && strongest.report.promptAlignmentScore >= 80 ? `prompt alignment ${strongest.report.promptAlignmentScore.toFixed(1)}` : "",
+    typeof strongest.report.continuityScore === "number" && strongest.report.continuityScore >= 80 ? `continuity ${strongest.report.continuityScore.toFixed(1)}` : "",
   ].filter(Boolean) : [];
   const failureIssues = uniqueStrings((activeLedgerIssues.length
     ? activeLedgerIssues.map((issue) => issue.summary)
@@ -4237,7 +4410,14 @@ function buildImageCandidateLearningSummary(
       const createdDelta = b.createdAt.getTime() - a.createdAt.getTime();
       return createdDelta !== 0 ? createdDelta : b.candidateNo - a.candidateNo;
     })[0];
-  const baselineCandidate = latestWithMedia;
+  // Continue from the strongest structurally usable result. A failed isolated
+  // asset that contains scenery, UI, or extra subjects must not be fed back as
+  // an image reference because visual conditioning would reinforce the defect.
+  const baselineCandidate = strongest && isStructurallyUsableImageBaseline(strongest.candidate, strongest.report)
+    ? strongest.candidate
+    : evaluated.length === 0
+      ? latestWithMedia
+      : undefined;
   const baselineUrl = baselineCandidate?.mediaUrl || currentImageUrl || "";
   const sourceCandidateIds = uniqueStrings([
     ...evaluated.map(({ candidate }) => candidate.id),
@@ -4275,7 +4455,7 @@ function buildImageCandidateLearningSummary(
       manuallyAcceptedCandidateCount: acceptedCount,
       strongestCandidateId: strongest?.candidate.id,
       baselineCandidateId: baselineCandidate?.id,
-      baselineSelectionRule: "latest_available_candidate",
+      baselineSelectionRule: "strongest_structurally_usable_candidate_then_unscored_latest_fallback",
       strongDimensions,
       accumulatedFailureIssues: failureIssues,
       accumulatedRetryInstructions: retryInstructions,
@@ -4287,12 +4467,122 @@ function buildImageCandidateLearningSummary(
   };
 }
 
+function isStructurallyUsableImageBaseline(
+  candidate: VideoProjectWithShots["generationCandidates"][number],
+  report: GenerationQualityReport,
+): boolean {
+  const metadata = candidateMetadata(candidate.metadata);
+  const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
+  const isolatedAsset = Number(metadata.keyframeNo) < 0
+    || readPlanShotString(targetContract, ["isolationMode", "isolation_mode"]) === "single_asset";
+  if (!isolatedAsset || report.passed) return true;
+  const structuralIssues = [
+    ...(report.artifactIssues ?? []),
+    ...(report.correctionActions ?? []).flatMap((action) => [
+      action.region,
+      action.element,
+      action.observed,
+      action.instruction,
+    ]),
+  ].join(" ");
+  const hasIsolationViolation = /background|scenery|scene|environment|ui|logo|title|extra character|second character|multiple (?:people|characters|subjects)|牌桌|场景|背景|界面|徽标|标题|其他角色|多个角色/i.test(structuralIssues);
+  return !hasIsolationViolation
+    && (report.identityScore ?? 0) >= 55
+    && (report.layoutScore ?? 0) >= 55
+    && (report.promptAlignmentScore ?? 0) >= 55;
+}
+
 function effectiveRequiredAnchorIds(source: Record<string, unknown> | undefined): string[] {
   if (!source) return [];
   if ("effectiveRequiredAnchorIds" in source || "effective_required_anchor_ids" in source) {
     return readPlanStringArray(source, ["effectiveRequiredAnchorIds", "effective_required_anchor_ids"]);
   }
   return readPlanStringArray(source, ["usesConsistencyAnchors", "uses_consistency_anchors", "requiredAnchorIds", "required_anchor_ids"]);
+}
+
+export type ImageTargetDependencyScope = {
+  targetArtifactId: string;
+  isolatedAsset: boolean;
+  assetCategory: string;
+  assetView: string;
+  targetAnchorId?: string;
+  requiredAnchorIds: string[];
+  forbiddenAnchorIds: string[];
+};
+
+export function resolveImageTargetDependencyScope(
+  planJson: Prisma.JsonValue | null,
+  target: Record<string, unknown> | undefined,
+  keyframeNo: number,
+): ImageTargetDependencyScope {
+  const isolatedAsset = isConsistencyKeyframeNo(keyframeNo);
+  const targetArtifactId = isolatedAsset ? `consistency_reference:${keyframeNo}` : `keyframe:${keyframeNo}`;
+  const assetCategory = readPlanShotString(target, ["assetCategory", "asset_category"]);
+  const assetView = readPlanShotString(target, ["assetView", "asset_view"]);
+  if (!isolatedAsset) {
+    return {
+      targetArtifactId,
+      isolatedAsset: false,
+      assetCategory,
+      assetView,
+      requiredAnchorIds: effectiveRequiredAnchorIds(target),
+      forbiddenAnchorIds: [],
+    };
+  }
+
+  const targetAnchorId = anchorIdForConsistencyReference(target);
+  const allAnchorIds = consistencyAnchorsFromPlan(planRecord(planJson)).map((anchor) => anchor.id).filter(Boolean);
+  return {
+    targetArtifactId,
+    isolatedAsset: true,
+    assetCategory,
+    assetView,
+    targetAnchorId: targetAnchorId || undefined,
+    // Project-level anchors describe downstream story consumers. A reusable
+    // asset reference must render only its own anchor.
+    requiredAnchorIds: targetAnchorId ? [targetAnchorId] : [],
+    forbiddenAnchorIds: targetAnchorId
+      ? allAnchorIds.filter((anchorId) => anchorId !== targetAnchorId)
+      : allAnchorIds,
+  };
+}
+
+function scopedImageTargetContract(
+  target: Record<string, unknown> | undefined,
+  keyframe: VideoProjectWithShots["keyframes"][number],
+  scope: ImageTargetDependencyScope,
+): Record<string, unknown> {
+  const sourceImagePrompt = readPlanShotString(target, ["imagePrompt", "image_prompt", "imagePromptZh", "image_prompt_zh", "imagePromptEn", "image_prompt_en"])
+    || keyframe.imagePrompt;
+  const category = scope.assetCategory;
+  return {
+    targetArtifactId: scope.targetArtifactId,
+    purpose: keyframe.purpose,
+    assetCategory: category,
+    assetView: scope.assetView,
+    targetAnchorId: scope.targetAnchorId,
+    effectiveRequiredAnchorIds: scope.requiredAnchorIds,
+    forbiddenAnchorIds: scope.forbiddenAnchorIds,
+    isolationMode: scope.isolatedAsset ? "single_asset" : "story_frame",
+    scene: !scope.isolatedAsset || category === "scene"
+      ? readPlanShotString(target, ["scene"]) || keyframe.scene
+      : "plain white or light neutral asset-library background",
+    characterState: !scope.isolatedAsset || category === "person"
+      ? readPlanShotString(target, ["characterState", "character_state"]) || keyframe.characterState
+      : "",
+    productState: !scope.isolatedAsset || category === "product" || category === "prop" || category === "brand_visual"
+      ? readPlanShotString(target, ["productState", "product_state"]) || keyframe.productState
+      : "",
+    imagePrompt: sourceImagePrompt,
+  };
+}
+
+function scopedTargetContractFromCompiled(
+  compiled: CompiledPrompt,
+  fallback: Record<string, unknown>,
+): Record<string, unknown> {
+  const targetContract = compiled.debugArtifact.inputs.targetContract;
+  return isRecord(targetContract) ? targetContract : fallback;
 }
 
 export async function regenerateShotImage(
@@ -4331,9 +4621,12 @@ export async function regenerateShotImage(
     ...learning.referenceImageUrls,
     ...(compiled.referenceImageUrls ?? []),
   ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  const planTarget = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo)
+    ?? readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
+  const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planTarget, keyframe.keyframeNo);
   const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
     project.planJson,
-    effectiveRequiredAnchorIds(readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo)),
+    dependencyScope.requiredAnchorIds,
   );
   const learnedReferenceUsageNotes = uniqueStrings([
     ...learning.referenceUsageNotes,
@@ -4388,7 +4681,10 @@ export async function regenerateShotImage(
       historicalCandidateCount: learning.historicalCandidateCount,
       learnedFromCandidateIds: learning.sourceCandidateIds,
       keyframeNo: keyframe.keyframeNo,
-      targetContract: readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo) ?? { purpose: keyframe.purpose, imagePrompt: keyframe.imagePrompt },
+      targetContract: scopedTargetContractFromCompiled(
+        compiled,
+        planTarget ?? { purpose: keyframe.purpose, imagePrompt: keyframe.imagePrompt },
+      ),
       visualContract: compiled.debugArtifact.inputs.visualContract,
       selectedReferenceUrls: learnedReferenceUrls,
       referenceUsageNotes: learnedReferenceUsageNotes,
@@ -5962,7 +6258,7 @@ async function syncTransitionReferenceArtifacts(project: VideoProjectWithShots):
         await saveGenerationQualityReport(project.id, report);
         evaluated.push({ id, url, timestampFraction: frame.fraction, compositeScore: generationQualityCompositeScore(report), passed: report.passed, qualityReport: report });
       }
-      const best = evaluated.filter((item) => item.passed).sort((a, b) => b.compositeScore - a.compositeScore)[0];
+      const best = evaluated.filter((item) => item.passed).sort((a, b) => (b.compositeScore ?? -1) - (a.compositeScore ?? -1))[0];
       if (!best) {
         await patchTransitionReferenceArtifact(project.id, artifact.id, { status: "failed", videoUrl, frameCandidates: evaluated, errorMessage: "No extracted transition frame passed actual-image quality evaluation" });
         await updateProjectArtifactStatus(project.id, [artifact.id], "failed", { dirtyReason: "No transition frame passed visual evaluation", retryFromStage: "generation" });
@@ -6654,8 +6950,9 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     }
     const qualityAttemptsUsed = generationQualityAttemptsUsed(retryCycleCandidates);
     const transportAttemptsUsed = generationTransportAttemptsUsed(retryCycleCandidates);
-    const retryBudgetExhausted = qualityAttemptsUsed > generationMaxRetries();
-    const transportRetryBudgetExhausted = !failureReport && transportAttemptsUsed > generationMaxRetries();
+    const automaticRetryLimit = generationMaxRetries(retryCycleCandidates[0]?.kind as CandidateKind | undefined);
+    const retryBudgetExhausted = qualityAttemptsUsed > automaticRetryLimit;
+    const transportRetryBudgetExhausted = !failureReport && transportAttemptsUsed > automaticRetryLimit;
     const retryable = !technicalEvaluationExhausted
       && (!failureReport || effectiveRetryFromStage === "generation")
       && !retryBudgetExhausted
@@ -6667,7 +6964,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
       : technicalEvaluationExhausted
         ? `画面质检服务暂不可用，已保留现有候选图且未消耗画面生成重试预算。请稍后对现有候选重新质检。${errorDetails}`
       : retryBudgetExhausted
-        ? `画面质检未通过，且该版本链的自动重试预算已用完（初始生成 1 次，自动重试 ${generationMaxRetries()} 次）。请查看候选结果后重新生成或人工接受。${errorDetails}`
+        ? `画面质检未通过，且该版本链的自动重试预算已用完（初始生成 1 次，自动重试 ${automaticRetryLimit} 次）。请查看候选结果后重新生成或人工接受。${errorDetails}`
         : transportRetryBudgetExhausted
           ? `上游生成或素材下载连续失败，技术重试预算已用完；这不代表画面质检未通过。请检查素材地址后重试。${errorDetails}`
         : effectiveRetryFromStage === "stage3"
@@ -7105,7 +7402,8 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
         assetCategory: assetCategory || consistencyKind,
         requiresExactBrandText: brandVisualAsset,
       });
-      await prisma.videoKeyframe.update({ where: { id: keyframe.id }, data: { qualityScore: Math.round(generationQualityCompositeScore(report)) } });
+      const compositeScore = generationQualityCompositeScore(report);
+      await prisma.videoKeyframe.update({ where: { id: keyframe.id }, data: { qualityScore: compositeScore == null ? null : Math.round(compositeScore) } });
       await saveGenerationQualityReport(project.id, report);
       await appendProjectStageLog({
         projectId: project.id,
@@ -7488,9 +7786,12 @@ async function submitNextImageTask(params: {
         ...learning.referenceImageUrls,
         ...(compiled.referenceImageUrls ?? []),
       ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+      const planTarget = readPlanKeyframeMap(project.planJson).get(nextKeyframe.keyframeNo)
+        ?? readPlanConsistencyReferenceMap(project.planJson).get(nextKeyframe.keyframeNo);
+      const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planTarget, nextKeyframe.keyframeNo);
       const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
         project.planJson,
-        effectiveRequiredAnchorIds(readPlanKeyframeMap(project.planJson).get(nextKeyframe.keyframeNo)),
+        dependencyScope.requiredAnchorIds,
       );
       const learnedReferenceUsageNotes = uniqueStrings([
         ...learning.referenceUsageNotes,
@@ -7550,7 +7851,10 @@ async function submitNextImageTask(params: {
           historicalCandidateCount: learning.historicalCandidateCount,
           learnedFromCandidateIds: learning.sourceCandidateIds,
           keyframeNo: nextKeyframe.keyframeNo,
-          targetContract: readPlanKeyframeMap(project.planJson).get(nextKeyframe.keyframeNo) ?? { purpose: nextKeyframe.purpose, imagePrompt: nextKeyframe.imagePrompt },
+          targetContract: scopedTargetContractFromCompiled(
+            compiled,
+            planTarget ?? { purpose: nextKeyframe.purpose, imagePrompt: nextKeyframe.imagePrompt },
+          ),
           visualContract: compiled.debugArtifact.inputs.visualContract,
           selectedReferenceUrls: learnedReferenceUrls,
           referenceUsageNotes: learnedReferenceUsageNotes,
@@ -7727,6 +8031,7 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
         approvedEndFrameUrl: endKeyframe?.imageUrl ?? "",
         endFrameContract: readLooseRecord(renderDescription ?? {}, ["endFrameContract", "end_frame_contract"]),
         motionContract: readLooseRecord(renderDescription ?? {}, ["motionContract", "motion_contract"]),
+        endFrameRequirementLevel: resolveEndFrameRequirementLevel(renderDescription),
       });
       const previousReport = latestGenerationQualityReport(project.planJson, artifactId);
       const continuityRetryCount = (previousReport?.continuityRetryCount ?? 0) + (continuity.decision === "retry_generation" ? 1 : 0);
@@ -7750,11 +8055,17 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
         endFrameReasons: continuity.reasons,
         continuityRetryCount,
         passed: actualReport.passed && continuity.decision === "pass",
+        advisoryOnly: continuity.decision === "manual_review" || continuity.decision === "evaluation_failed" ? true : actualReport.advisoryOnly,
+        qualityDecision: continuity.decision === "manual_review" || continuity.decision === "evaluation_failed" ? "review" : actualReport.qualityDecision,
         retryInstruction: actualReport.retryInstruction || continuity.retryInstruction,
         retryFromStage: actualReport.retryFromStage === "stage2b" || continuity.decision === "return_stage_2b" ? "stage2b" : actualReport.retryFromStage,
       };
+      const compositeScore = generationQualityCompositeScore(report);
       await saveGenerationQualityReport(project.id, report);
-      const mayRetry = report.passed === false && report.retryFromStage === "generation" && continuityRetryCount <= maxEndFrameContinuityRetries();
+      const evaluationNeedsReview = continuity.decision === "manual_review"
+        || continuity.decision === "evaluation_failed"
+        || isTechnicalQualityEvaluationFailure(actualReport);
+      const mayRetry = !evaluationNeedsReview && report.passed === false && report.retryFromStage === "generation" && continuityRetryCount <= maxEndFrameContinuityRetries();
       await appendVideoMediaRevision(project.id, {
         kind: "segment_clip",
         targetId: segment.id,
@@ -7763,20 +8074,22 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
       });
       await prisma.videoSegment.update({
         where: { id: segment.id },
-        data: report.passed
-          ? { clipUrl, clipTaskId: null, status: VideoShotStatus.CLIP_READY, qualityScore: Math.round(generationQualityCompositeScore(report)), errorMessage: null }
+        data: report.passed || evaluationNeedsReview
+          ? { clipUrl, clipTaskId: null, status: VideoShotStatus.CLIP_READY, qualityScore: compositeScore == null ? null : Math.round(compositeScore), errorMessage: null }
           : mayRetry
-            ? { clipUrl: null, clipTaskId: null, status: VideoShotStatus.CLIP_PENDING, qualityScore: Math.round(generationQualityCompositeScore(report)), errorMessage: report.retryInstruction }
-            : { clipUrl, clipTaskId: null, status: VideoShotStatus.FAILED, qualityScore: Math.round(generationQualityCompositeScore(report)), errorMessage: report.retryInstruction || report.artifactIssues.join("; ") },
+            ? { clipUrl: null, clipTaskId: null, status: VideoShotStatus.CLIP_PENDING, qualityScore: compositeScore == null ? null : Math.round(compositeScore), errorMessage: report.retryInstruction }
+            : { clipUrl, clipTaskId: null, status: VideoShotStatus.FAILED, qualityScore: compositeScore == null ? null : Math.round(compositeScore), errorMessage: report.retryInstruction || report.artifactIssues.join("; ") },
       });
       await appendProjectStageLog({
         projectId: project.id,
         title: project.title,
         stage: "clips",
-        event: report.passed ? "Clip ready segment " + segment.segmentNo : mayRetry ? "Clip continuity retry segment " + segment.segmentNo : "Clip continuity blocked segment " + segment.segmentNo,
+        event: report.passed ? "Clip ready segment " + segment.segmentNo : evaluationNeedsReview ? "Clip ready for manual review segment " + segment.segmentNo : mayRetry ? "Clip continuity retry segment " + segment.segmentNo : "Clip continuity blocked segment " + segment.segmentNo,
         level: report.passed ? "info" : "warn",
         summary: report.passed
           ? "The generated last sampled frame is acceptably close to the approved end-state contract."
+          : evaluationNeedsReview
+            ? "The playable clip was preserved for review because automated evidence was unavailable or below the confidence threshold."
           : mayRetry
             ? "The ending is prompt-fixable; a bounded regeneration was queued with the visual evaluator retry instruction."
             : continuity.decision === "return_stage_2b"
@@ -7786,7 +8099,7 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
           "Clip URL: " + clipUrl,
           "End boundary: KF" + segment.endKeyframeNo + " was injected as a mandatory terminal-state prompt contract and independently checked; no still frame was pasted",
           "End-frame decision: " + continuity.decision,
-          "End-frame similarity: " + continuity.similarityScore.toFixed(3),
+          "End-frame similarity: " + (continuity.similarityScore == null ? "not evaluated" : continuity.similarityScore.toFixed(3)),
           "Continuity retry: " + continuityRetryCount + "/" + maxEndFrameContinuityRetries(),
           "Duration: " + segment.durationSeconds + "s",
           "Quality: " + (report.passed ? "passed" : "needs retry"),
@@ -8458,56 +8771,56 @@ function compileVideoPromptForSegment(
     segment.purpose || segment.videoPrompt,
     420,
   );
-  const checkpointLines = microShots.length
-    ? microShots.slice(0, 4).map((checkpoint, index) => {
-        const parts = [
-          "t=+" + checkpoint.localTimeSeconds + "s",
-          checkpoint.purpose || checkpoint.purposeZh || checkpoint.purposeEn,
-          checkpoint.scene || checkpoint.sceneZh || checkpoint.sceneEn,
-          checkpoint.action || checkpoint.actionZh || checkpoint.actionEn,
-          checkpoint.camera || checkpoint.cameraZh || checkpoint.cameraEn,
-        ].filter(Boolean).join("; ");
-        return "- " + (index + 1) + ". " + auditedVideoText(parts);
-      })
-    : checkpointRecords.slice(0, 4).map((checkpoint, index) => "- " + (index + 1) + ". " + auditedVideoText(compactJsonLine("state", checkpoint).replace(/^state: /, "")));
-  const finalPrompt = [
-    "HAPPYHORSE FIRST-FRAME I2V — MANDATORY TERMINAL-STATE CONTRACT",
-    "Duration: " + segment.durationSeconds + "s.",
-    "HARD START INPUT: begin exactly from the supplied approved first-frame image. Preserve its identity, composition, objects, environment, wardrobe, product instance, and visible state.",
-    startVisualBlueprint ? "Approved first-boundary visual blueprint: " + startVisualBlueprint : "",
-    "MANDATORY FINAL-FRAME CONTRACT: by the final sampled frame, the video MUST visibly arrive at the approved ending state described below. This is not optional atmosphere or inspiration; it is the required terminal pose, action result, framing, camera direction, subject/product state, object placement, environment layout, and lighting state.",
-    endVisualBlueprint ? "REQUIRED TERMINAL VISUAL STATE: " + endVisualBlueprint : "",
-    "Allocate the motion timing backward from the required ending: complete the main action early enough to settle into the terminal state before the clip ends. Hold the required terminal composition stably for the final visible moment. Do not stop midway, overshoot, introduce a different ending, or defer the required state beyond the clip.",
-    "Generate one continuous, physically plausible path from the supplied first frame to the mandatory terminal state. Do not fake arrival with a cut, dissolve, scene replacement, freeze-frame insertion, or pasted still image.",
-    narrativeContextLines.length ? "Narrative execution contract for this segment:" : "",
-    ...narrativeContextLines.map((line) => "- " + auditedVideoText(clipText(line, 900))),
-    "Hard narrative boundary: the video model must ONLY animate the visible transition from the approved first boundary state to the approved ending state. Do not invent missing plot events, new wins/rewards/conversions, extra CTA, extra UI, new characters, new products, or future beat evidence beyond this segment.",
-    "Brief intent: " + auditedVideoText(intent),
-    "Detailed same-take motion direction: " + auditedVideoText(clipText(beforePrompt, 1100)),
-    previousQualityReport?.passed === false && previousQualityReport.retryInstruction && (previousQualityReport.retryFromStage === "generation" || previousQualityReport.retryFromStage === "stage3" || previousQualityReport.endFrameDecision === "retry_generation")
-      ? "MANDATORY RETRY CORRECTION FROM END-FRAME VISUAL CHECK / ACTUAL VIDEO QUALITY CHECK: " + auditedVideoText(clipText(previousQualityReport.retryInstruction, 700))
-      : "",
-    "Start state:",
-    "- " + auditedVideoText(compactJsonLine("contract", startFrameContract) || (startKeyframe.purpose + ". " + startKeyframe.scene)),
-    "Required ending state:",
-    "- " + auditedVideoText(compactJsonLine("contract", endFrameContract) || (endKeyframe.purpose + ". " + endKeyframe.scene)),
-    "Continuous motion path:",
-    "- " + auditedVideoText(compactJsonLine("motion", motionContract) || segment.motion),
-    "Single-take execution contract:",
-    "- " + auditedVideoText(compactJsonLine("single_take", singleTakeContract) || segment.camera),
-    checkpointLines.length ? "Motion checkpoints as reachable states along the same path:" : "",
-    ...checkpointLines,
-    anchorLock ? "Visible anchor locks:\n" + auditedVideoText(clipText(anchorLock, 900)) : "",
-    cameraInheritance.inheritanceDirectives.length ? "Camera Graph inheritance contract:\n" + cameraInheritance.inheritanceDirectives.map((item) => "- " + item).join("\n") : "",
-    cameraInheritance.auditDirectives.length ? "Camera Graph audit constraints:\n" + cameraInheritance.auditDirectives.map((item) => "- " + item).join("\n") : "",
-    "Video rules:",
-    "- One uninterrupted camera take from first frame through the final moment.",
-    "- Keep the same location logic, camera axis family, lighting direction, color grade, identity, clothing, product instance, and prop layout.",
-    "- Every checkpoint is a reachable body/prop/camera state along one physical path, not a separate scene.",
-    "- Use gradual camera movement, subject movement, hand/prop movement, focus change, parallax, and ambient motion only.",
-    "- Do not render subtitles, captions, UI overlays, watermarks, timecodes, random letters, or lyrics.",
-    "- Generate coherent ambient sound, sound effects, and music matching the continuous action; do not create speech or singing unless the brief explicitly requests it.",
-  ].filter(Boolean).join("\n");
+  const endFrameRequirementLevel = resolveEndFrameRequirementLevel(renderDescription);
+  const modelPromptContract = videoPromptContractFromUnknown(renderDescription);
+  const compatibilityPromptContract = buildLegacyVideoPromptContract({
+    terminalState: auditedVideoText(
+      compactJsonLine("contract", endFrameContract)
+      || endVisualBlueprint
+      || (endKeyframe.purpose + ". " + endKeyframe.scene),
+    ),
+    motionPath: auditedVideoText(
+      [
+        compactJsonLine("motion", motionContract) || segment.motion,
+        compactJsonLine("single_take", singleTakeContract) || segment.camera,
+      ].filter(Boolean).join("; "),
+    ),
+    preserveRequirements: [[
+      anchorLock,
+      ...cameraInheritance.inheritanceDirectives,
+      ...cameraInheritance.auditDirectives,
+    ].filter((value): value is string => Boolean(value)).join(" ")].filter(Boolean),
+    narrativeBoundary: narrativeContextLines.length
+      ? narrativeContextLines.join(" ")
+      : "Animate only this approved boundary-to-boundary transition. Do not invent future plot events.",
+    shotIntent: auditedVideoText(intent),
+  });
+  const retryCorrections = previousQualityReport?.passed === false
+    && (previousQualityReport.retryFromStage === "generation"
+      || previousQualityReport.retryFromStage === "stage3"
+      || previousQualityReport.endFrameDecision === "retry_generation")
+    ? previousQualityReport.correctionActions?.length
+      ? previousQualityReport.correctionActions.map((action) => [
+          `${action.element}: ${action.instruction}`,
+          `Target: ${action.target}`,
+          action.preserve?.length ? `Preserve: ${action.preserve.join(", ")}` : "",
+        ].filter(Boolean).join(" "))
+      : previousQualityReport.retryInstruction
+        ? [previousQualityReport.retryInstruction]
+        : []
+    : [];
+  const compiledVideoPrompt = compileHappyHorseVideoPrompt({
+    durationSeconds: segment.durationSeconds,
+    requirementLevel: endFrameRequirementLevel,
+    startState: auditedVideoText(
+      compactJsonLine("contract", startFrameContract)
+      || startVisualBlueprint
+      || (startKeyframe.purpose + ". " + startKeyframe.scene),
+    ),
+    contract: modelPromptContract ?? compatibilityPromptContract,
+    retryCorrections,
+  });
+  const finalPrompt = compiledVideoPrompt.prompt;
   const negativePrompt = compileVideoNegativePrompt(generationNegativePromptForSegment(project, segment));
   return {
     prompt: finalPrompt,
@@ -8527,6 +8840,9 @@ function compileVideoPromptForSegment(
         cameraGraph: cameraInheritance,
         previousEndFrameQualityReport: previousQualityReport,
         narrativeContext,
+        endFrameRequirementLevel,
+        videoPromptContractSource: modelPromptContract ? "planner_model" : "legacy_compatibility",
+        videoPromptContract: modelPromptContract ?? compatibilityPromptContract,
       },
       selectedReferenceUrls: [startKeyframe.imageUrl, endKeyframe.imageUrl].filter((url): url is string => Boolean(url)),
       referenceUsageNotes: [
@@ -8547,7 +8863,7 @@ function compileVideoPromptForSegment(
         "no_embedded_subtitles_or_audio",
         "camera_graph_inheritance_enforced",
       ],
-      warnings: [],
+      warnings: compiledVideoPrompt.warnings,
       createdAt: new Date().toISOString(),
     },
   };
@@ -8583,10 +8899,11 @@ function compileImagePromptForKeyframe(
     readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
   const isConsistencyReference = isConsistencyKeyframeNo(keyframe.keyframeNo);
   const stylePreset = readStylePresetFromPlan(project.planJson);
-  const targetArtifactId = isConsistencyReference ? "consistency_reference:" + keyframe.keyframeNo : "keyframe:" + keyframe.keyframeNo;
-  const visibleAnchorIds = effectiveRequiredAnchorIds(planKeyframe);
-  const assetCategory = readPlanShotString(planKeyframe, ["assetCategory", "asset_category"]);
-  const assetView = readPlanShotString(planKeyframe, ["assetView", "asset_view"]);
+  const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planKeyframe, keyframe.keyframeNo);
+  const targetArtifactId = dependencyScope.targetArtifactId;
+  const visibleAnchorIds = dependencyScope.requiredAnchorIds;
+  const assetCategory = dependencyScope.assetCategory;
+  const assetView = dependencyScope.assetView;
   const consistencyKind = isConsistencyReference
     ? consistencyReferenceKindForPlan(planKeyframe, keyframe.keyframeNo)
     : undefined;
@@ -8596,8 +8913,9 @@ function compileImagePromptForKeyframe(
   const rawSourceImagePrompt = sanitizeGameVisualPromptText(stripNonStandardPromptSymbols(keyframe.imagePrompt), stylePreset, { brandVisual: brandVisualAsset });
   const isPersonAsset = isConsistencyReference && (assetCategory === "person" || consistencyKind === "character");
   const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, visibleAnchorIds);
+  const targetContract = scopedImageTargetContract(planKeyframe, keyframe, dependencyScope);
   const visualContract = buildAuthoritativeVisualContract({
-    targetContract: planKeyframe ?? { purpose: keyframe.purpose, imagePrompt: keyframe.imagePrompt },
+    targetContract,
     anchorContractText: anchorLock,
     prompt: rawSourceImagePrompt,
     negativePrompt: generationNegativePromptForKeyframe(project, keyframe),
@@ -8610,11 +8928,12 @@ function compileImagePromptForKeyframe(
     assetCategory ? "asset_category: " + assetCategory : "",
     assetView ? "asset_view: " + assetView : "",
     keyframe.purpose ? "purpose: " + keyframe.purpose : "",
-    "scene: " + (readPlanShotString(planKeyframe, ["scene"]) || keyframe.scene),
-    "character_state: " + (readPlanShotString(planKeyframe, ["characterState", "character_state"]) || keyframe.characterState),
-    "product_state: " + (readPlanShotString(planKeyframe, ["productState", "product_state"]) || keyframe.productState),
+    readPlanShotString(targetContract, ["scene"]) ? "scene: " + readPlanShotString(targetContract, ["scene"]) : "",
+    readPlanShotString(targetContract, ["characterState"]) ? "character_state: " + readPlanShotString(targetContract, ["characterState"]) : "",
+    readPlanShotString(targetContract, ["productState"]) ? "product_state: " + readPlanShotString(targetContract, ["productState"]) : "",
     sourceImagePrompt ? "source_image_prompt: " + clipText(sourceImagePrompt, 1200) : "",
     visibleAnchorIds.length ? "visible_anchors: " + visibleAnchorIds.join(", ") : "",
+    dependencyScope.forbiddenAnchorIds.length ? "forbidden_anchors: " + dependencyScope.forbiddenAnchorIds.join(", ") : "",
     compactJsonLine("frame_design", planKeyframe?.frameDesign ?? planKeyframe?.frame_design),
   ].filter(Boolean);
   const cameraInheritance = isConsistencyReference
@@ -8630,6 +8949,9 @@ function compileImagePromptForKeyframe(
     isConsistencyReference
       ? "Create one reusable still consistency reference image."
       : "Create one still boundary keyframe image.",
+    dependencyScope.isolatedAsset
+      ? `TARGET-SCOPED ASSET CONTRACT: render only anchor ${dependencyScope.targetAnchorId || "(missing target anchor)"}. Project-level anchors are downstream consumers and must not appear in this asset.`
+      : "",
     "Frame contract:",
     ...frameContract.map((line) => "- " + line),
     narrativeContextLines.length ? "Narrative boundary contract (must be visible in this still image):" : "",
@@ -8677,6 +8999,8 @@ function compileImagePromptForKeyframe(
       compilerVersion: "prompt-compiler-v1",
       inputs: {
         frameContract,
+        targetContract,
+        dependencyScope,
         visualContract,
         narrativeContext,
         visibleAnchorIds,
@@ -8692,6 +9016,7 @@ function compileImagePromptForKeyframe(
         "image_no_subtitles",
         "image_no_ui_watermark_random_text",
         "reference_usage_explicit_inherit_ignore",
+        ...(dependencyScope.isolatedAsset ? ["target_scoped_asset_dependency_isolation", "forbidden_global_anchors"] : []),
         "narrative_boundary_contract_injected",
         "camera_graph_inheritance_enforced",
       ],
@@ -8879,11 +9204,9 @@ async function selectReferenceImagesForKeyframe(
     keyframe.characterState,
     readPlanShotString(planKeyframe, ["imagePrompt", "image_prompt", "imagePromptZh", "image_prompt_zh", "imagePromptEn", "image_prompt_en"]),
   );
-  const targetAnchorId = anchorIdForConsistencyReference(planKeyframe);
-  const requiredAnchorIds = uniqueStrings([
-    ...effectiveRequiredAnchorIds(planKeyframe),
-    ...(isConsistencyKeyframeNo(keyframe.keyframeNo) && targetAnchorId ? [targetAnchorId] : []),
-  ]);
+  const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planKeyframe, keyframe.keyframeNo);
+  const targetAnchorId = dependencyScope.targetAnchorId ?? anchorIdForConsistencyReference(planKeyframe);
+  const requiredAnchorIds = dependencyScope.requiredAnchorIds;
   const hardAnchorIds = hardReferenceAnchorIds(project.planJson);
   let candidates = collectReferenceCandidates({
     project,
@@ -8900,7 +9223,15 @@ async function selectReferenceImagesForKeyframe(
       candidate.sourceType === "user_upload" ||
       candidate.sourceType === "style_brand" ||
       (derivedFromFront && candidate.sourceType === "hard_anchor" && candidate.anchorId === targetAnchorId && candidate.assetView === "front")
-    );
+    ).map((candidate) => candidate.sourceType === "user_upload"
+      ? {
+          ...candidate,
+          quotaType: "style_brand" as const,
+          relevanceScore: Math.min(candidate.relevanceScore, 0.55),
+          conflictScore: Math.max(candidate.conflictScore, 0.35),
+          usageNote: `STYLE-ONLY reference for isolated asset ${targetAnchorId || targetArtifactId}. Inherit rendering medium, palette, and line treatment only. Do not copy its subjects, character count, pose, scenery, props, text, logo, or UI.`,
+        }
+      : candidate);
     if (derivedFromFront && !candidates.some((candidate) => candidate.sourceType === "hard_anchor" && candidate.assetView === "front")) {
       throw new Error(`Person ${targetView || "derived"} view requires an approved front reference before generation`);
     }
@@ -9170,6 +9501,26 @@ function dedupeReferenceCandidates(candidates: ReferenceCandidateDraft[]): Refer
 }
 
 function assertCompiledVisualContractReady(compiled: CompiledPrompt): void {
+  const dependencyScope = compiled.debugArtifact.inputs.dependencyScope;
+  if (isRecord(dependencyScope) && dependencyScope.isolatedAsset === true) {
+    const targetAnchorId = readPlanShotString(dependencyScope, ["targetAnchorId", "target_anchor_id"]);
+    const requiredAnchorIds = readPlanStringArray(dependencyScope, ["requiredAnchorIds", "required_anchor_ids"]);
+    const forbiddenAnchorIds = readPlanStringArray(dependencyScope, ["forbiddenAnchorIds", "forbidden_anchor_ids"]);
+    if (!targetAnchorId || requiredAnchorIds.length !== 1 || requiredAnchorIds[0] !== targetAnchorId) {
+      throw new Error("生成前检测到资产依赖作用域缺失：单体资产必须且只能绑定一个目标锚点。");
+    }
+    const overlap = requiredAnchorIds.filter((anchorId) => forbiddenAnchorIds.includes(anchorId));
+    if (overlap.length) {
+      throw new Error(`生成前检测到资产依赖作用域冲突：${overlap.join(", ")} 同时被要求和禁止。`);
+    }
+    const visibleLockSection = compiled.prompt.split("Visible anchor locks:")[1]?.split("Authoritative visual contract:")[0] ?? "";
+    const leakedAnchorIds = forbiddenAnchorIds.filter((anchorId) =>
+      visibleLockSection.includes(`anchor_id=${anchorId}`),
+    );
+    if (leakedAnchorIds.length) {
+      throw new Error(`生成前检测到全局锚点污染，已停止抽图：${leakedAnchorIds.join(", ")}`);
+    }
+  }
   const value = compiled.debugArtifact.inputs.visualContract;
   if (!isRecord(value)) return;
   const conflicts = stringArrayValue(value.verifiedConflicts);

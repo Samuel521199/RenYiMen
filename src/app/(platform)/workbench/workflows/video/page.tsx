@@ -472,7 +472,12 @@ function VideoWorkflowInner() {
         }
         return applyModelQualityResults(
           fallback,
-          data.data.items.map((item: any) => ({
+          data.data.items
+          .filter((item: any) =>
+            item?.evaluation_status === "completed"
+            && Number.isFinite(Number(item?.score)),
+          )
+          .map((item: any) => ({
             draftId: String(item.draft_id),
             score: Number(item.score ?? 0),
             grade: (item.grade ?? "C") as "A" | "B" | "C" | "D",

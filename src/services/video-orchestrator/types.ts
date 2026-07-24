@@ -742,6 +742,8 @@ export interface StoryboardBrief {
 
 export interface SegmentRenderDescription {
   segmentNo: number;
+  endFrameRequirementLevel?: "hard_exact" | "hard_semantic" | "soft_directional" | "editorial";
+  videoPromptContract?: VideoPromptContract;
   startFrameContract?: Record<string, unknown>;
   endFrameContract?: Record<string, unknown>;
   motionContract?: Record<string, unknown>;
@@ -753,6 +755,24 @@ export interface SegmentRenderDescription {
   timelineChangeRequest?: Record<string, unknown>;
   recommendedSplit?: unknown[];
   warnings?: string[];
+}
+
+export interface VideoPromptTerminalRequirement {
+  requirementId: string;
+  priority: "hard" | "soft";
+  observableFact: string;
+  acceptanceCriteria: string;
+  source: "user" | "story_contract" | "approved_end_frame" | "planner";
+}
+
+export interface VideoPromptContract {
+  version: "video-prompt-contract-v1";
+  terminalRequirements: VideoPromptTerminalRequirement[];
+  motionSteps: string[];
+  preserveRequirements: string[];
+  forbiddenOutcomes: string[];
+  narrativeBoundary: string;
+  shotIntent: string;
 }
 
 export type CameraRelation =
@@ -814,7 +834,7 @@ export interface TransitionReferenceFrameCandidate {
   id: string;
   url: string;
   timestampFraction: number;
-  compositeScore: number;
+  compositeScore: number | null;
   passed: boolean;
   selected?: boolean;
   qualityReport: GenerationQualityReport;
@@ -931,7 +951,7 @@ export interface RollbackVideoMediaInput {
 
 export interface GenerationQualityReport {
   policyVersion?: "quality-policy-v2" | "quality-policy-v3";
-  evaluationStatus?: "completed" | "technical_failed" | "reference_missing";
+  evaluationStatus?: "completed" | "partial" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
   technicalError?: string;
   technicalRetryable?: boolean;
   /** Whether identity/product scores have an authoritative approved reference to compare against. */
@@ -948,16 +968,16 @@ export interface GenerationQualityReport {
   candidateId?: string;
   candidateNo?: number;
   mediaUrl?: string;
-  identityScore: number;
-  layoutScore: number;
-  promptAlignmentScore: number;
-  continuityScore: number;
-  singleTakeScore?: number;
+  identityScore: number | null;
+  layoutScore: number | null;
+  promptAlignmentScore: number | null;
+  continuityScore: number | null;
+  singleTakeScore?: number | null;
   artifactIssues: string[];
   passed: boolean;
   retryInstruction?: string;
-  endFrameSimilarityScore?: number;
-  endFrameDecision?: "pass" | "retry_generation" | "return_stage_2b" | "evaluation_failed";
+  endFrameSimilarityScore?: number | null;
+  endFrameDecision?: "pass" | "retry_generation" | "return_stage_2b" | "manual_review" | "evaluation_failed";
   endFrameReasons?: string[];
   continuityRetryCount?: number;
   contentBased?: boolean;
@@ -971,17 +991,18 @@ export interface GenerationQualityReport {
   issueLedger?: GenerationIssueLedgerEntry[];
   resolvedIssueIds?: string[];
   openHardIssueIds?: string[];
-  qualityDecision?: "pass" | "recommended" | "retry" | "blocked";
+  qualityDecision?: "pass" | "recommended" | "retry" | "blocked" | "review";
   hardFailureReasons?: string[];
   softSuggestions?: string[];
-  firstFrameConsistencyScore?: number;
-  checkpointOrderScore?: number;
+  firstFrameConsistencyScore?: number | null;
+  checkpointOrderScore?: number | null;
   metadataIssues?: string[];
   userAccepted?: boolean;
   originalPassed?: boolean;
   retryFromStage?: "stage2b" | "stage3" | "reference_selector" | "generation" | "manual";
   evaluationModel?: string;
   evaluationDurationMs?: number;
+  evaluationConfidence?: number;
   displaySummaries?: Partial<Record<QualityDisplayLanguage, QualityDisplaySummary>>;
 }
 

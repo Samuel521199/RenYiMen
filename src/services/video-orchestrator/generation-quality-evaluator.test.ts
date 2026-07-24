@@ -62,6 +62,15 @@ test("technical evaluator failures are distinct from visual vetoes", () => {
   }), false);
 });
 
+test("missing evaluator metrics remain unscored instead of becoming zero", () => {
+  const report = normalizeImageQualityResponse({ passed: false }, base);
+  assert.equal(report.evaluationStatus, "partial");
+  assert.equal(report.identityScore, null);
+  assert.equal(report.layoutScore, null);
+  assert.equal(report.qualityDecision, "review");
+  assert.equal(generationQualityCompositeScore(report), null);
+});
+
 test("missing required references is routed to reference selection without a redraw or fake identity score", async () => {
   const report = await evaluateGeneratedImageQuality({
     ...base,
@@ -230,6 +239,8 @@ test("visual evaluator prompt defines evidence-based QA and normalized repair co
   assert.match(source, /evidenceStatus=uncertain/);
   assert.match(source, /do not set passed=false solely/);
   assert.match(source, /A turned head is not automatically a failed gaze/);
+  assert.match(source, /at most 3 unique correctionActions/);
+  assert.match(source, /do not repeat diagnosis history/);
 });
 
 test("visual-model contract suspicions keep the image veto while staying in generation repair", () => {
@@ -476,12 +487,32 @@ test("image evaluator localizes current output and prevents reference-pixel leak
   assert.match(source, /seenReferenceUrls\.has\(url\)/);
 });
 
-test("candidate learning always uses the latest available candidate as its visual baseline", () => {
+test("candidate learning rejects structurally polluted asset baselines and keeps latest diagnostics", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(source, /baselineSelectionRule: "latest_available_candidate"/);
-  assert.match(source, /const baselineCandidate = latestWithMedia/);
-  assert.doesNotMatch(source, /const baselineCandidate = strongest\?\.candidate/);
+  assert.match(source, /baselineSelectionRule: "strongest_structurally_usable_candidate_then_unscored_latest_fallback"/);
+  assert.match(source, /isStructurallyUsableImageBaseline/);
+  assert.match(source, /hasIsolationViolation/);
+  assert.match(source, /report\.layoutScore \?\? 0\) >= 55/);
+  assert.match(source, /latestEvaluated\?\.report\.issueLedger/);
   assert.doesNotMatch(source, /const baselineUrl = currentImageUrl \|\| selected\?\.mediaUrl/);
+});
+
+test("isolated asset compilation uses one target anchor and rejects global-anchor leakage", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(source, /resolveImageTargetDependencyScope/);
+  assert.match(source, /requiredAnchorIds: targetAnchorId \? \[targetAnchorId\] : \[\]/);
+  assert.match(source, /Project-level anchors are downstream consumers and must not appear in this asset/);
+  assert.match(source, /生成前检测到全局锚点污染/);
+  assert.match(source, /STYLE-ONLY reference for isolated asset/);
+});
+
+test("image candidates continue beyond three results before requiring a human decision", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(source, /ONE_PROMPT_IMAGE_GENERATION_MAX_RETRIES", 5/);
+  assert.match(source, /Math\.min\(8,/);
+  assert.match(source, /generationMaxRetries\(retryCycleCandidates\[0\]\?\.kind as CandidateKind \| undefined\)/);
+  assert.match(source, /const automaticRetryLimit =/);
+  assert.match(source, /自动重试 \$\{automaticRetryLimit\} 次/);
 });
 
 test("legacy batches do not consume a new retry cycle", () => {
@@ -610,7 +641,7 @@ test("legacy image quality reports upgrade in place before another paid generati
 test("visual veto remains final and stale recovery cannot submit after a candidate becomes ready", () => {
   const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(evaluator, /const passed = originalPassed && scoreGatePassed && hardFailureReasons\.length === 0/);
+  assert.match(evaluator, /const passed = originalPassed && scoreSetComplete && !lowConfidence && scoreGatePassed && hardFailureReasons\.length === 0/);
   assert.match(evaluator, /You are the final visual quality gate/);
   assert.match(service, /options: \{ recovery\?: boolean \} = \{\}/);
   assert.match(service, /image\.regenerate\.skip_stale_recovery/);

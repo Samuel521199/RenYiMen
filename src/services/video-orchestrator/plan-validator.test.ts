@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { cameraRelationDirectives, resolveCameraInheritanceContext } from "./camera-graph.ts";
+import { cameraRelationDirectives, deriveCameraGraphFromStoryboardBrief, resolveCameraInheritanceContext } from "./camera-graph.ts";
 import { frameContractContainsMotionProcess, repairMotionfulEndpointContracts } from "./frame-contract.ts";
 import { PlanValidationError, assertPlanValidForGeneration, validateOnePromptVideoPlan } from "./plan-validator.ts";
 
@@ -39,6 +39,26 @@ function errorCodes(plan: unknown): string[] {
 
 test("valid historical camera nodes remain compatible without new optional fields", () => {
   assert.deepEqual(errorCodes(validPlan()), []);
+});
+
+test("missing camera graph can be conservatively derived from storyboard briefs", () => {
+  const cameraGraph = deriveCameraGraphFromStoryboardBrief([
+    { segmentNo: 1, cameraId: "camera_01", locationId: "table", visualDescZh: "牌桌中景" },
+    { segmentNo: 2, cameraId: "camera_02", locationId: "table", visualDescZh: "同一牌桌近景" },
+    { segmentNo: 3, cameraId: "camera_03", locationId: "store", visualDescZh: "商店结尾" },
+  ]);
+
+  assert.deepEqual(cameraGraph.cameras.map((camera) => camera.cameraId), ["camera_01", "camera_02", "camera_03"]);
+  assert.equal(cameraGraph.cameras[0].relationToParent, "new_camera_setup");
+  assert.equal(cameraGraph.cameras[1].relationToParent, "same_spatial_context");
+  assert.equal(cameraGraph.cameras[2].relationToParent, "new_camera_setup");
+  const plan = validPlan();
+  plan.storyboardBrief = [
+    { segmentNo: 1, eventIds: ["event_1"], cameraId: "camera_01", requiredAnchorIds: ["person_1"] },
+  ];
+  plan.cameraGraph = deriveCameraGraphFromStoryboardBrief(plan.storyboardBrief);
+  assert.ok(!errorCodes(plan).includes("MISSING_CAMERA_REFERENCE"));
+  assert.ok(!errorCodes(plan).includes("NEW_CAMERA_SPATIAL_SOURCE_MISSING"));
 });
 
 test("normalized consistency anchors using id are accepted", () => {
@@ -171,6 +191,23 @@ test("new camera setup needs a spatial source or explicit no-inheritance decisio
   const graph = (plan.cameraGraph as { cameras: Array<Record<string, unknown>> }).cameras;
   graph[1].missingInfo = [];
   graph[1].inheritanceReasonZh = "独立产品棚机位，无需继承上一机位";
+  assert.ok(!errorCodes(plan).includes("NEW_CAMERA_SPATIAL_SOURCE_MISSING"));
+});
+
+test("the initial root camera does not require a transition from a nonexistent parent", () => {
+  const plan = validPlan();
+  plan.cameraGraph = {
+    cameras: [{
+      cameraId: "cam_1",
+      segmentNos: [1],
+      parentCameraId: "",
+      parentSegmentNo: 0,
+      relationToParent: "new_camera_setup",
+      inheritanceReasonZh: "首个镜头，无父镜头。",
+      missingInfo: [],
+    }],
+    relations: [],
+  };
   assert.ok(!errorCodes(plan).includes("NEW_CAMERA_SPATIAL_SOURCE_MISSING"));
 });
 

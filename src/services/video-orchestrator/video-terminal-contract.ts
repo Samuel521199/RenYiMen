@@ -1,0 +1,289 @@
+import type {
+  VideoPromptContract,
+  VideoPromptTerminalRequirement,
+} from "./types";
+
+export type EndFrameRequirementLevel =
+  | "hard_exact"
+  | "hard_semantic"
+  | "soft_directional"
+  | "editorial";
+
+export interface VideoTerminalProviderCapabilities {
+  acceptsLastFrameImage: boolean;
+  endFrameSemanticMode: "soft_prompt_target" | "native_last_frame";
+}
+
+export interface HappyHorsePromptInput {
+  durationSeconds: number;
+  requirementLevel: EndFrameRequirementLevel;
+  startState: string;
+  contract: VideoPromptContract;
+  retryCorrections: string[];
+}
+
+export interface CompiledHappyHorsePrompt {
+  prompt: string;
+  requirementLevel: EndFrameRequirementLevel;
+  compacted: false;
+  warnings: string[];
+}
+
+export interface LegacyVideoPromptContractInput {
+  terminalState: string;
+  motionPath: string;
+  preserveRequirements: string[];
+  narrativeBoundary: string;
+  shotIntent: string;
+}
+
+const HAPPYHORSE_PROMPT_BUDGET = 4200;
+
+export function resolveEndFrameRequirementLevel(value: unknown): EndFrameRequirementLevel {
+  const source = record(value);
+  const raw = String(
+    source.endFrameRequirementLevel
+    ?? source.end_frame_requirement_level
+    ?? source.terminalStateControl
+    ?? source.terminal_state_control
+    ?? "",
+  ).trim().toLowerCase();
+  if (raw === "hard_exact" || raw === "hard_semantic" || raw === "soft_directional" || raw === "editorial") {
+    return raw;
+  }
+  return "hard_semantic";
+}
+
+export function assertEndFrameRequirementSupported(
+  requirementLevel: EndFrameRequirementLevel,
+  capabilities: VideoTerminalProviderCapabilities,
+  providerName: string,
+): void {
+  if (requirementLevel !== "hard_exact" || capabilities.acceptsLastFrameImage) return;
+  throw new Error(
+    `${providerName} only accepts a first-frame image, but this segment requires hard_exact terminal control. `
+    + "Route the segment to a provider/workflow with native last-frame input or lower the reviewed requirement level.",
+  );
+}
+
+export function videoPromptContractFromUnknown(value: unknown): VideoPromptContract | undefined {
+  const source = record(value);
+  const nestedContract = source.videoPromptContract ?? source.video_prompt_contract;
+  const looksLikeDirectContract =
+    source.version === "video-prompt-contract-v1"
+    || "terminalRequirements" in source
+    || "terminal_requirements" in source;
+  const contractSource = record(nestedContract ?? (looksLikeDirectContract ? source : undefined));
+  if (!Object.keys(contractSource).length) return undefined;
+  if (contractSource.version !== "video-prompt-contract-v1") {
+    throw new Error(
+      "video_prompt_contract.version must be video-prompt-contract-v1.",
+    );
+  }
+  const terminalRequirements = strictArray(
+    contractSource.terminalRequirements ?? contractSource.terminal_requirements,
+    "terminal_requirements",
+  )
+    .map((item, index) => normalizeTerminalRequirement(item, index));
+  return {
+    version: "video-prompt-contract-v1",
+    terminalRequirements,
+    motionSteps: strictStringArray(
+      contractSource.motionSteps ?? contractSource.motion_steps,
+      "motion_steps",
+    ),
+    preserveRequirements: strictStringArray(
+      contractSource.preserveRequirements ?? contractSource.preserve_requirements,
+      "preserve_requirements",
+    ),
+    forbiddenOutcomes: strictStringArray(
+      contractSource.forbiddenOutcomes ?? contractSource.forbidden_outcomes,
+      "forbidden_outcomes",
+    ),
+    narrativeBoundary: stringValue(contractSource.narrativeBoundary ?? contractSource.narrative_boundary),
+    shotIntent: stringValue(contractSource.shotIntent ?? contractSource.shot_intent),
+  };
+}
+
+/**
+ * Compatibility only for plans created before video-prompt-contract-v1.
+ * It wraps complete existing contract fields without selecting, summarizing,
+ * deduplicating, or truncating their meaning.
+ */
+export function buildLegacyVideoPromptContract(input: LegacyVideoPromptContractInput): VideoPromptContract {
+  return {
+    version: "video-prompt-contract-v1",
+    terminalRequirements: [{
+      requirementId: "legacy.complete_terminal_state",
+      priority: "hard",
+      observableFact: input.terminalState,
+      acceptanceCriteria: "The final stable frames visibly satisfy the complete approved terminal state.",
+      source: "approved_end_frame",
+    }],
+    motionSteps: input.motionPath ? [input.motionPath] : [],
+    preserveRequirements: input.preserveRequirements,
+    forbiddenOutcomes: [
+      "No cut, dissolve, teleportation, scene replacement, pasted still, or inserted freeze-frame.",
+      "No subtitles, captions, watermarks, timecodes, random letters, lyrics, or unrequested UI.",
+    ],
+    narrativeBoundary: input.narrativeBoundary,
+    shotIntent: input.shotIntent,
+  };
+}
+
+/**
+ * The compiler is deliberately non-creative. The planning model owns semantic
+ * compression inside video_prompt_contract; this function only validates and
+ * serializes that contract. Invalid or over-budget contracts are rejected
+ * instead of being silently rewritten.
+ */
+export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): CompiledHappyHorsePrompt {
+  validateVideoPromptContract(input.contract, input.retryCorrections);
+  const settleStart = Math.max(1, Number((input.durationSeconds * 0.7).toFixed(1)));
+  const blocks = [
+    [
+      "HAPPYHORSE FIRST-FRAME I2V — VALIDATED MODEL CONTRACT",
+      `CONTROL LEVEL: ${input.requirementLevel}. The approved last image is not a native model input.`,
+      `DURATION: ${input.durationSeconds}s. Complete the main action by ${settleStart}s, then decelerate and hold the terminal state through the final visible moment.`,
+    ].join("\n"),
+    ["1. HARD START INPUT", input.startState].join("\n"),
+    [
+      "2. MANDATORY FINAL-FRAME CONTRACT",
+      ...input.contract.terminalRequirements.map((item) => [
+        `REQUIREMENT ${item.requirementId} [${item.priority}]`,
+        `Visible fact: ${item.observableFact}`,
+        `Acceptance: ${item.acceptanceCriteria}`,
+        `Source: ${item.source}`,
+      ].join("\n")),
+    ].join("\n"),
+    [
+      "3. CONTINUOUS MOTION STEPS",
+      ...input.contract.motionSteps.map((item, index) => `STEP ${index + 1}: ${item}`),
+    ].join("\n"),
+    input.contract.preserveRequirements.length
+      ? ["4. PRESERVE UNCHANGED", ...input.contract.preserveRequirements.map((item) => `- ${item}`)].join("\n")
+      : "",
+    input.contract.forbiddenOutcomes.length
+      ? ["5. FORBIDDEN OUTCOMES", ...input.contract.forbiddenOutcomes.map((item) => `- ${item}`)].join("\n")
+      : "",
+    input.contract.narrativeBoundary
+      ? `6. NARRATIVE BOUNDARY\n${input.contract.narrativeBoundary}`
+      : "",
+    input.contract.shotIntent
+      ? `7. SHOT INTENT\n${input.contract.shotIntent}`
+      : "",
+    input.retryCorrections.length
+      ? ["8. STRUCTURED RETRY DELTA — APPLY WITHOUT CHANGING OTHER CONTRACT ITEMS", ...input.retryCorrections.map((item) => `- ${item}`)].join("\n")
+      : "",
+    [
+      "9. OUTPUT RULE",
+      "Use one physically plausible uninterrupted take. The last stable frames must satisfy every hard terminal requirement.",
+    ].join("\n"),
+  ].filter(Boolean);
+  const prompt = blocks.join("\n\n");
+  if (prompt.length > HAPPYHORSE_PROMPT_BUDGET) {
+    throw new Error(
+      `video_prompt_contract compiles to ${prompt.length} characters, exceeding the HappyHorse budget of ${HAPPYHORSE_PROMPT_BUDGET}. `
+      + "Return to the planning model to compress soft descriptions without dropping or rewriting hard requirements.",
+    );
+  }
+  return { prompt, requirementLevel: input.requirementLevel, compacted: false, warnings: [] };
+}
+
+export function validateVideoPromptContract(contract: VideoPromptContract, retryCorrections: string[] = []): void {
+  if (contract.version !== "video-prompt-contract-v1") throw new Error("Unsupported video prompt contract version.");
+  if (contract.terminalRequirements.length < 1 || contract.terminalRequirements.length > 3) {
+    throw new Error("video_prompt_contract must contain 1 to 3 terminal requirements.");
+  }
+  if (!contract.terminalRequirements.some((item) => item.priority === "hard")) {
+    throw new Error("video_prompt_contract must contain at least one hard terminal requirement.");
+  }
+  if (contract.motionSteps.length < 1 || contract.motionSteps.length > 3) {
+    throw new Error("video_prompt_contract must contain 1 to 3 continuous motion steps.");
+  }
+  if (contract.preserveRequirements.length > 5) throw new Error("video_prompt_contract may contain at most 5 preserve requirements.");
+  if (contract.forbiddenOutcomes.length > 5) throw new Error("video_prompt_contract may contain at most 5 forbidden outcomes.");
+  if (retryCorrections.length > 3) throw new Error("A retry may contain at most 3 structured correction actions.");
+  assertNoDuplicateValues(contract.terminalRequirements.map((item) => item.requirementId), "terminal requirement IDs");
+  assertNoDuplicateValues(contract.motionSteps, "motion steps");
+  assertNoDuplicateValues(contract.preserveRequirements, "preserve requirements");
+  assertNoDuplicateValues(contract.forbiddenOutcomes, "forbidden outcomes");
+  assertNoDuplicateValues(retryCorrections, "retry corrections");
+  for (const requirement of contract.terminalRequirements) {
+    if (!requirement.requirementId || !requirement.observableFact || !requirement.acceptanceCriteria) {
+      throw new Error("Every terminal requirement must include requirementId, observableFact, and acceptanceCriteria.");
+    }
+  }
+}
+
+function normalizeTerminalRequirement(
+  value: unknown,
+  index: number,
+): VideoPromptTerminalRequirement {
+  const source = record(value);
+  const requirementId = stringValue(source.requirementId ?? source.requirement_id);
+  const observableFact = stringValue(source.observableFact ?? source.observable_fact);
+  const acceptanceCriteria = stringValue(source.acceptanceCriteria ?? source.acceptance_criteria);
+  if (!requirementId || !observableFact || !acceptanceCriteria) {
+    throw new Error(
+      `video_prompt_contract.terminal_requirements[${index}] must include requirement_id, observable_fact, and acceptance_criteria.`,
+    );
+  }
+  const priority = stringValue(source.priority);
+  if (priority !== "hard" && priority !== "soft") {
+    throw new Error(
+      `video_prompt_contract.terminal_requirements[${index}].priority must be hard or soft.`,
+    );
+  }
+  const rawSource = stringValue(source.source);
+  if (
+    rawSource !== "user"
+    && rawSource !== "story_contract"
+    && rawSource !== "approved_end_frame"
+    && rawSource !== "planner"
+  ) {
+    throw new Error(
+      `video_prompt_contract.terminal_requirements[${index}].source is invalid.`,
+    );
+  }
+  return {
+    requirementId,
+    priority,
+    observableFact,
+    acceptanceCriteria,
+    source: rawSource,
+  };
+}
+
+function assertNoDuplicateValues(values: string[], label: string): void {
+  const normalized = values.map((item) => item.trim().toLowerCase());
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error(`video_prompt_contract contains duplicate ${label}; the planning model must resolve them explicitly.`);
+  }
+}
+
+function strictArray(value: unknown, fieldName: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`video_prompt_contract.${fieldName} must be an array.`);
+  }
+  return value;
+}
+
+function strictStringArray(value: unknown, fieldName: string): string[] {
+  return strictArray(value, fieldName).map((item, index) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(
+        `video_prompt_contract.${fieldName}[${index}] must be a non-empty string.`,
+      );
+    }
+    return item.trim();
+  });
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}

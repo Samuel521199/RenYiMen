@@ -85,7 +85,7 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
       params.visualContract ? `Authoritative visual contract: ${JSON.stringify(params.visualContract)}` : "",
       params.previousQualityReport ? `Previous issue ledger to compare and close: ${JSON.stringify(params.previousQualityReport.issueLedger ?? [])}` : "",
-      "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
       "For EVERY confirmed failed issue, correctionActions must contain one executable object: {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. evidenceStatus is confirmed|uncertain and confidence is 0..1. normalizedRegion is {xMin,yMin,xMax,yMax} in the top-left-origin 0..1 coordinate system; targetPoint is {x,y} in the same system. executionParameters contains only contract-supported measurable controls such as viewerRelativeDirection, yawDegrees, pitchDegrees, exactCount, spacingRatio, sizeRatio, color, or textValue. tolerance states the acceptable visible range.",
       "region must identify a concrete visual location. observed states exactly what is visibly wrong and cites visible evidence rather than inferred intent. target states one concrete desired result, including exact value/count/format/color/pose/size when the contract supports it. instruction must be imperative and ready to paste into the next generation prompt; never merely repeat the diagnosis.",
       "retryInstruction must consolidate correctionActions into a precise redraw specification: say WHAT to change, WHERE to change it, the exact TARGET state, and what nearby/strong-scoring content must remain unchanged. Prefer concrete renderable values over vague words such as improve, fix, proper, near, appropriate, or more accurate.",
@@ -205,8 +205,8 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
         `Negative prompt: ${(params.negativePrompt ?? "").slice(0, 1200)}`,
         `Motion checkpoints in required order: ${JSON.stringify(params.motionCheckpoints)}`,
         `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
-        "Return strict JSON with identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], correctionActions[], contractConflicts[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
-        "For every confirmed failure, correctionActions[] must specify {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. Make each action spatially and temporally precise and directly renderable in the next attempt. Include exact state/value/count/timing/viewer-relative direction/pose when supported by the contract, and state which successful content must remain unchanged.",
+        "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], correctionActions[], contractConflicts[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+        "Return at most 3 unique correctionActions, limited to the highest-impact confirmed deltas for this candidate only; do not repeat diagnosis history or restate the unchanged base contract. Each correctionActions[] item must specify {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. Make each action spatially and temporally precise and directly renderable in the next attempt. Include exact state/value/count/timing/viewer-relative direction/pose when supported by the contract, and state which successful content must remain unchanged.",
         "retryInstruction must be a consolidated shot-level modification plan, not a diagnosis. Resolve requirements using target contract and explicit visible evidence above generic negative defaults. List possible contradictions in contractConflicts[] as advisory evidence; only the compiler can authorize stage-3 routing.",
         "Detect identity drift, abnormal duplicate instances, spatial layout drift, jump cuts, teleportation, melting, scene replacement, out-of-order checkpoints, first-frame mismatch and ending-state mismatch.",
         "Use retryFromStage=stage2b for physically unreachable or structural motion; stage3 for prompt/compiler repair; generation for ordinary visual defects.",
@@ -218,7 +218,11 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
     }
     content.push({ type: "text", text: "Approved first-frame reference:" }, { type: "image_url", image_url: { url: params.startFrameUrl } });
     content.push({ type: "text", text: "Approved end-state soft reference:" }, { type: "image_url", image_url: { url: params.endFrameUrl } });
-    for (const [index, url] of params.selectedReferenceUrls.slice(0, 3).entries()) {
+    const boundaryUrls = new Set([params.startFrameUrl, params.endFrameUrl].map((url) => url.trim()).filter(Boolean));
+    const additionalReferences = params.selectedReferenceUrls
+      .filter((url) => !boundaryUrls.has(url.trim()))
+      .slice(0, 3);
+    for (const [index, url] of additionalReferences.entries()) {
       content.push({ type: "text", text: `Identity/layout reference ${index + 1}: ${params.referenceUsageNotes[index] ?? "approved reference"}` });
       content.push({ type: "image_url", image_url: { url } });
     }
@@ -297,30 +301,46 @@ export function normalizeImageQualityResponse(value: unknown, params: BaseEvalua
 export function normalizeVideoQualityResponse(value: unknown, params: BaseEvaluationParams, metadata?: { durationSeconds: number; width: number; height: number; frameRate: number }): GenerationQualityReport {
   const report = normalizeReport(value, params);
   const source = record(value);
-  const singleTakeScore = score(source.singleTakeScore ?? source.single_take_score);
-  const firstFrameConsistencyScore = score(source.firstFrameConsistencyScore ?? source.first_frame_consistency_score);
-  const checkpointOrderScore = score(source.checkpointOrderScore ?? source.checkpoint_order_score);
+  const singleTakeScore = optionalScore(source.singleTakeScore ?? source.single_take_score);
+  const firstFrameConsistencyScore = optionalScore(source.firstFrameConsistencyScore ?? source.first_frame_consistency_score);
+  const checkpointOrderScore = optionalScore(source.checkpointOrderScore ?? source.checkpoint_order_score);
   const metadataIssues = strings(source.metadataIssues ?? source.metadata_issues);
-  const passed = report.passed && singleTakeScore >= 65 && firstFrameConsistencyScore >= 65 && checkpointOrderScore >= 60 && metadataIssues.length === 0 && (!metadata || metadata.durationSeconds > 0);
+  const videoScoresComplete = singleTakeScore != null && firstFrameConsistencyScore != null && checkpointOrderScore != null;
+  const passed = report.passed
+    && videoScoresComplete
+    && singleTakeScore >= 65
+    && firstFrameConsistencyScore >= 65
+    && checkpointOrderScore >= 60
+    && metadataIssues.length === 0
+    && (!metadata || metadata.durationSeconds > 0);
+  const needsReEvaluation = report.evaluationStatus === "partial" || !videoScoresComplete;
   return {
     ...report,
+    evaluationStatus: needsReEvaluation ? "partial" : report.evaluationStatus,
+    technicalRetryable: needsReEvaluation ? true : report.technicalRetryable,
     singleTakeScore,
     firstFrameConsistencyScore,
     checkpointOrderScore,
     metadataIssues,
     passed,
     originalPassed: passed,
-    retryInstruction: report.retryInstruction || (!passed ? `Improve the same-take result using the observed scores: first-frame ${firstFrameConsistencyScore}, checkpoint order ${checkpointOrderScore}, single-take ${singleTakeScore}.` : undefined),
+    qualityDecision: needsReEvaluation ? "review" : report.qualityDecision,
+    retryFromStage: needsReEvaluation ? "manual" : report.retryFromStage,
+    retryInstruction: needsReEvaluation
+      ? "Retry visual quality evaluation for this existing candidate because one or more required video metrics were not returned. Do not regenerate the media."
+      : report.retryInstruction || (!passed ? `Improve the same-take result using the observed scores: first-frame ${firstFrameConsistencyScore}, checkpoint order ${checkpointOrderScore}, single-take ${singleTakeScore}.` : undefined),
     artifactIssues: uniqueStrings([...report.artifactIssues, ...metadataIssues, ...(metadata && metadata.durationSeconds <= 0 ? ["invalid video duration metadata"] : [])]),
   };
 }
 
-export function generationQualityCompositeScore(report: GenerationQualityReport): number {
+export function generationQualityCompositeScore(report: GenerationQualityReport): number | null {
   const values = [report.identityScore, report.layoutScore, report.promptAlignmentScore, report.continuityScore];
   if (typeof report.singleTakeScore === "number") values.push(report.singleTakeScore);
   if (typeof report.firstFrameConsistencyScore === "number") values.push(report.firstFrameConsistencyScore);
   if (typeof report.checkpointOrderScore === "number") values.push(report.checkpointOrderScore);
-  return Math.round((values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length)) * 1000) / 1000;
+  const scoredValues = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (!scoredValues.length) return null;
+  return Math.round((scoredValues.reduce((sum, value) => sum + value, 0) / scoredValues.length) * 1000) / 1000;
 }
 
 export async function extractVideoFrameDataUrls(mediaUrl: string, fractions = [0.2, 0.4, 0.6, 0.8]): Promise<Array<{ fraction: number; dataUrl: string }>> {
@@ -353,10 +373,12 @@ export async function extractVideoFrameDataUrls(mediaUrl: string, fractions = [0
 function normalizeReport(value: unknown, params: BaseEvaluationParams): GenerationQualityReport {
   const source = record(value);
   const originalPassed = source.passed === true;
-  const identityScore = score(source.identityScore ?? source.identity_score);
-  const layoutScore = score(source.layoutScore ?? source.layout_score);
-  const promptAlignmentScore = score(source.promptAlignmentScore ?? source.prompt_alignment_score);
-  const continuityScore = score(source.continuityScore ?? source.continuity_score);
+  const evaluationConfidence = optionalUnitScore(source.evaluationConfidence ?? source.evaluation_confidence);
+  const identityScore = optionalScore(source.identityScore ?? source.identity_score);
+  const layoutScore = optionalScore(source.layoutScore ?? source.layout_score);
+  const promptAlignmentScore = optionalScore(source.promptAlignmentScore ?? source.prompt_alignment_score);
+  const continuityScore = optionalScore(source.continuityScore ?? source.continuity_score);
+  const scoreSetComplete = identityScore != null && layoutScore != null && promptAlignmentScore != null && continuityScore != null;
   const wrongTextDetected = source.wrongTextDetected === true || source.wrong_text_detected === true;
   const productInstanceCount = count(source.productInstanceCount ?? source.product_instance_count);
   const personInstanceCount = count(source.personInstanceCount ?? source.person_instance_count);
@@ -384,12 +406,13 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     ...rawArtifactIssues.filter((issue) => !invalidForStageIssues.includes(issue)),
     ...suspectedContractConflicts.map((item) => `Unverified evaluator contract suspicion: ${item}`),
   ]);
-  const scoreGatePassed = identityScore >= 65 && layoutScore >= 60 && promptAlignmentScore >= 65 && continuityScore >= 60;
+  const scoreGatePassed = scoreSetComplete && identityScore >= 65 && layoutScore >= 60 && promptAlignmentScore >= 65 && continuityScore >= 60;
   // The vision model's boolean is advisory. For exact brand/logo lock assets,
   // use explicit deterministic gates so minor decorative/layout comments do
   // not veto an otherwise strong, usable logo. Exact-text or person leakage
   // remains a hard failure.
-  const brandVisualGatePassed = identityScore >= 85
+  const brandVisualGatePassed = scoreSetComplete
+    && identityScore >= 85
     && layoutScore >= 75
     && promptAlignmentScore >= 75
     && continuityScore >= 70
@@ -400,16 +423,17 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     || params.visualContract.exactTextAuthority !== "none";
   const hardFailureReasons = uniqueStrings([
     ...contractConflicts,
-    identityScore < 65 ? `identity score ${identityScore} is below 65` : "",
-    layoutScore < 60 ? `layout score ${layoutScore} is below 60` : "",
-    promptAlignmentScore < 65 ? `prompt alignment score ${promptAlignmentScore} is below 65` : "",
-    continuityScore < 60 ? `continuity score ${continuityScore} is below 60` : "",
+    identityScore != null && identityScore < 65 ? `identity score ${identityScore} is below 65` : "",
+    layoutScore != null && layoutScore < 60 ? `layout score ${layoutScore} is below 60` : "",
+    promptAlignmentScore != null && promptAlignmentScore < 65 ? `prompt alignment score ${promptAlignmentScore} is below 65` : "",
+    continuityScore != null && continuityScore < 60 ? `continuity score ${continuityScore} is below 60` : "",
     wrongTextDetected && exactTextHardGate ? "authoritative locked text is visibly wrong" : "",
     params.requiresExactBrandText && !brandVisualGatePassed ? "isolated brand asset failed its deterministic identity/layout/text gate" : "",
   ]);
   // The visual model is the final semantic quality gate. Deterministic checks
   // may add failures, but a high score must never reverse passed=false.
-  const passed = originalPassed && scoreGatePassed && hardFailureReasons.length === 0;
+  const lowConfidence = evaluationConfidence != null && evaluationConfidence < 0.7;
+  const passed = originalPassed && scoreSetComplete && !lowConfidence && scoreGatePassed && hardFailureReasons.length === 0;
   const issueLedger = reconcileGenerationIssueLedger({
     previous: params.previousQualityReport,
     candidateNo: params.candidateNo,
@@ -420,12 +444,16 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   const openHardIssueIds = issueLedger.filter((item) => (item.status === "open" || item.status === "regressed") && item.severity === "hard" && item.applicableStage === params.visualContract?.mediaStage).map((item) => item.issueId);
   const resolvedIssueIds = issueLedger.filter((item) => item.status === "resolved").map((item) => item.issueId);
   const softSuggestions = issueLedger.filter((item) => (item.status === "open" || item.status === "regressed") && item.severity !== "hard").map((item) => item.summary);
-  const qualityDecision = contractConflictsVerified
+  const qualityDecision = !scoreSetComplete || lowConfidence
+    ? "review" as const
+    : contractConflictsVerified
     ? "blocked" as const
     : passed
       ? originalPassed && softSuggestions.length === 0 ? "pass" as const : "recommended" as const
       : "retry" as const;
-  const retryFromStage = contractConflictsVerified
+  const retryFromStage = !scoreSetComplete || lowConfidence
+    ? "manual" as const
+    : contractConflictsVerified
     ? "stage3" as const
     : suspectedContractConflicts.length
       ? "generation" as const
@@ -444,7 +472,9 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   ]);
   return {
     policyVersion: "quality-policy-v3",
-    evaluationStatus: "completed",
+    evaluationStatus: scoreSetComplete && !lowConfidence ? "completed" : "partial",
+    technicalRetryable: scoreSetComplete && !lowConfidence ? undefined : true,
+    evaluationConfidence: evaluationConfidence ?? undefined,
     referenceComparable,
     identityScoreApplicable: expectedAnchorIds.length > 0 && selectedReferenceCount > 0,
     productConsistencyScoreApplicable: comparableChecks.includes("product"),
@@ -476,7 +506,9 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     softSuggestions,
     passed,
     originalPassed,
-    retryInstruction: !passed || correctionActions.length > 0
+    retryInstruction: !scoreSetComplete || lowConfidence
+      ? "Retry visual quality evaluation for this existing candidate because required evidence was incomplete or evaluator confidence was low. Do not regenerate the media."
+      : !passed || correctionActions.length > 0
       ? concreteRetryInstruction({ correctionActions, contractConflicts, suppliedRetryInstruction, identityScore, layoutScore, promptAlignmentScore, continuityScore })
       : suppliedRetryInstruction || undefined,
     retryFromStage,
@@ -521,10 +553,10 @@ function concreteRetryInstruction(params: {
   correctionActions: GenerationCorrectionAction[];
   contractConflicts: string[];
   suppliedRetryInstruction: string;
-  identityScore: number;
-  layoutScore: number;
-  promptAlignmentScore: number;
-  continuityScore: number;
+  identityScore: number | null;
+  layoutScore: number | null;
+  promptAlignmentScore: number | null;
+  continuityScore: number | null;
 }): string {
   if (params.contractConflicts.length) {
     return `Do not regenerate until these prompt-contract conflicts are resolved: ${params.contractConflicts.join("; ")}. Keep the target contract and explicit required-visible evidence authoritative over generic negative defaults.`;
@@ -563,10 +595,10 @@ function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFro
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
     mediaUrl: params.mediaUrl,
-    identityScore: 0,
-    layoutScore: 0,
-    promptAlignmentScore: 0,
-    continuityScore: 0,
+    identityScore: null,
+    layoutScore: null,
+    promptAlignmentScore: null,
+    continuityScore: null,
     artifactIssues: [issue],
     passed: false,
     originalPassed: false,
@@ -607,10 +639,10 @@ function missingReferenceQualityReport(params: BaseEvaluationParams): Generation
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
     mediaUrl: params.mediaUrl,
-    identityScore: 0,
-    layoutScore: 0,
-    promptAlignmentScore: 0,
-    continuityScore: 0,
+    identityScore: null,
+    layoutScore: null,
+    promptAlignmentScore: null,
+    continuityScore: null,
     artifactIssues: [issue],
     passed: false,
     originalPassed: false,
@@ -628,7 +660,8 @@ export function isReferenceMissingQualityEvaluation(report: GenerationQualityRep
 export function isTechnicalQualityEvaluationFailure(report: GenerationQualityReport | null | undefined): boolean {
   if (!report) return false;
   if (isReferenceMissingQualityEvaluation(report)) return false;
-  if (report.evaluationStatus === "technical_failed") return true;
+  if (report.evaluationStatus === "not_run") return false;
+  if (report.evaluationStatus === "technical_failed" || report.evaluationStatus === "unavailable" || report.evaluationStatus === "partial") return true;
   if (report.contentBased === false && report.passed === false) return true;
   return report.artifactIssues.some((issue) =>
     /视觉质量评估失败|quality evaluation failed|this operation was aborted|aborterror|timed? out|timeout|rate limit|too many requests|fetch failed|network/i.test(issue),
@@ -639,21 +672,22 @@ function legacyQualityFallback(params: BaseEvaluationParams, video: boolean): Ge
   const hasMedia = Boolean(params.mediaUrl?.trim());
   const hasPrompt = params.prompt.trim().length >= (video ? 60 : 30);
   const passed = hasMedia && hasPrompt;
-  const scoreValue = passed ? 70 : 0;
   return {
+    evaluationStatus: "not_run",
     assetId: params.assetId,
     candidateId: params.candidateId,
     candidateNo: params.candidateNo,
     mediaUrl: params.mediaUrl,
-    identityScore: scoreValue,
-    layoutScore: scoreValue,
-    promptAlignmentScore: scoreValue,
-    continuityScore: scoreValue,
-    singleTakeScore: video ? scoreValue : undefined,
+    identityScore: null,
+    layoutScore: null,
+    promptAlignmentScore: null,
+    continuityScore: null,
+    singleTakeScore: video ? null : undefined,
     artifactIssues: passed ? [] : [!hasMedia ? "missing generated media url" : "generation prompt is too short"],
     passed,
     originalPassed: passed,
     contentBased: false,
+    qualityDecision: "review",
     retryFromStage: "generation",
     retryInstruction: passed ? undefined : "Regenerate using the legacy precheck path while visual quality evaluation is disabled.",
   };
@@ -798,7 +832,16 @@ function record(value: unknown): Record<string, unknown> { return value != null 
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function strings(value: unknown): string[] { return Array.isArray(value) ? uniqueStrings(value) : []; }
 function uniqueStrings(value: unknown[]): string[] { return [...new Set(value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()))]; }
-function score(value: unknown): number { const n = Number(value); return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 0; }
+function optionalScore(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+}
+function optionalUnitScore(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null;
+}
 function count(value: unknown): number { const n = Number(value); return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0; }
 function unitNumber(value: unknown): number | undefined {
   if (value == null || value === "") return undefined;

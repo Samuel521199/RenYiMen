@@ -71,6 +71,7 @@ model User {
   apiLogs             ApiLog[]
   generationHistories GenerationHistory[]
   videoProjects       VideoProject[]
+  videoPlanningRuns   VideoPlanningRunMetric[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -106,12 +107,75 @@ model VideoProject {
   audioAssets               VideoAudioAsset[]
   transitionReferences      VideoTransitionReference[]
   artifactMetadataRows      VideoArtifactMetadata[]
+  planningPerformanceRuns   VideoPlanningRunMetric[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([userId, createdAt])
   @@map("video_projects")
+}
+
+model VideoPlanningRunMetric {
+  id                         String                     @id @default(cuid())
+  taskId                     String                     @unique @map("task_id")
+  projectId                  String                     @map("project_id")
+  userId                     String                     @map("user_id")
+  status                     String                     @default("queued")
+  plannerArch                String                     @default("v2") @map("planner_arch")
+  modelName                  String?                    @map("model_name")
+  durationSeconds            Int                        @map("duration_seconds")
+  segmentCount               Int                        @default(0) @map("segment_count")
+  referenceImageCount        Int                        @default(0) @map("reference_image_count")
+  checkpointResume           Boolean                    @default(false) @map("checkpoint_resume")
+  queuedAt                   DateTime                   @default(now()) @map("queued_at")
+  startedAt                  DateTime?                  @map("started_at")
+  completedAt                DateTime?                  @map("completed_at")
+  queueDurationMs            Int?                       @map("queue_duration_ms")
+  totalDurationMs            Int?                       @map("total_duration_ms")
+  jsonRepairCount            Int                        @default(0) @map("json_repair_count")
+  jsonRepairDurationMs       Int                        @default(0) @map("json_repair_duration_ms")
+  singleTakeRepairCount      Int                        @default(0) @map("single_take_repair_count")
+  singleTakeRepairDurationMs Int                        @default(0) @map("single_take_repair_duration_ms")
+  storyContractRepairCount   Int                        @default(0) @map("story_contract_repair_count")
+  storyContractRepairMs      Int                        @default(0) @map("story_contract_repair_ms")
+  failureStage               String?                    @map("failure_stage")
+  errorCategory              String?                    @map("error_category")
+  project                    VideoProject               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user                       User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stages                     VideoPlanningStageMetric[]
+  createdAt                  DateTime                   @default(now()) @map("created_at")
+  updatedAt                  DateTime                   @updatedAt @map("updated_at")
+
+  @@index([status, completedAt])
+  @@index([durationSeconds, completedAt])
+  @@index([modelName, completedAt])
+  @@index([userId, completedAt])
+  @@map("video_planning_run_metrics")
+}
+
+model VideoPlanningStageMetric {
+  id          String                 @id @default(cuid())
+  runId       String                 @map("run_id")
+  stage       String
+  segmentNo   Int?                   @map("segment_no")
+  attempt     Int                    @default(1)
+  kind        String                 @default("model_call")
+  modelName   String?                @map("model_name")
+  status      String
+  durationMs  Int                    @map("duration_ms")
+  httpStatus  Int?                   @map("http_status")
+  retryable   Boolean?
+  startedAt   DateTime               @map("started_at")
+  completedAt DateTime               @map("completed_at")
+  metadata    Json?
+  run         VideoPlanningRunMetric @relation(fields: [runId], references: [id], onDelete: Cascade)
+  createdAt   DateTime               @default(now()) @map("created_at")
+
+  @@index([runId, stage])
+  @@index([stage, completedAt])
+  @@index([status, completedAt])
+  @@map("video_planning_stage_metrics")
 }
 
 model VideoConsistencyAnchorImage {

@@ -27,6 +27,38 @@ test("one Single-take Audit accepts a reachable continuous plan and ignores expl
   assert.equal(result.auditVersion, "single-take-audit-v1");
 });
 
+test("Chinese no-cut safety directives are not mistaken for edit instructions", () => {
+  const value = plan({
+    segments: [{
+      segmentNo: 1,
+      videoPrompt: "连续无间断单镜头。全程无内部剪切、跳切、淡入淡出、叠化、蒙太奇或场景切换。",
+    }],
+  });
+  assert.equal(auditSingleTakePlan(value).passed, true);
+});
+
+test("Chinese no-any-cut prompt-detailer wording is treated as a prohibition", () => {
+  const value = plan({
+    segments: [{
+      segmentNo: 1,
+      videoPrompt: "全程保持明亮均匀的柔和光照和高饱和度色彩，无任何剪切、跳切、淡入淡出、溶解、交叉溶解、蒙太奇、鬼影叠加、场景切换或硬视觉过渡。",
+    }],
+  });
+  assert.equal(auditSingleTakePlan(value).passed, true);
+});
+
+test("fallback micro-shot safety wording is not mistaken for a scene transition", () => {
+  const value = plan({
+    segments: [{
+      segmentNo: 1,
+      microShots: [{
+        promptEn: "Use this as a same-take internal motion checkpoint, not as an extra video clip, not as a separate shot, and not as a scene transition.",
+      }],
+    }],
+  });
+  assert.equal(auditSingleTakePlan(value).passed, true);
+});
+
 test("requiresCut is a non-retryable Stage 2B block", () => {
   const value = plan();
   const descriptions = value.segmentRenderDescriptions as Array<Record<string, unknown>>;
@@ -56,24 +88,59 @@ test("positive internal dissolve language is rejected instead of rewritten", () 
   assert.ok(result.issues.some((item) => item.code === "INTERNAL_CUT_LANGUAGE"));
 });
 
+test("forbidden outcome fields do not become false positive cut instructions", () => {
+  const value = plan();
+  const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  description.videoPromptContract = {
+    version: "video-prompt-contract-v1",
+    terminalRequirements: [{
+      requirementId: "terminal.primary_result",
+      priority: "hard",
+      observableFact: "人物最终稳定站在产品旁",
+      acceptanceCriteria: "尾帧清晰可见人物和产品",
+      source: "approved_end_frame",
+    }],
+    motionSteps: ["人物沿可见路径连续走到产品旁"],
+    preserveRequirements: ["保持人物、产品和场景一致"],
+    forbiddenOutcomes: ["切镜、叠化、蒙太奇、场景切换", "cut, dissolve, crossfade, or montage"],
+    narrativeBoundary: "只表现人物抵达产品旁",
+    shotIntent: "连续推进",
+  };
+  assert.equal(auditSingleTakePlan(value).passed, true);
+});
+
+test("cut instructions remain blocked inside executable video prompt contract fields", () => {
+  const value = plan();
+  const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  description.videoPromptContract = {
+    forbiddenOutcomes: ["切镜、叠化、蒙太奇"],
+    motionSteps: ["人物抵达中点后切换机位，再走到产品旁"],
+  };
+  const result = auditSingleTakePlan(value);
+  assert.ok(result.issues.some((item) => item.code === "INTERNAL_CUT_LANGUAGE"));
+});
+
 test("end-frame evaluator maps small gap, prompt-fixable gap and unreachable gap", () => {
-  const passed = normalizeEndFrameContinuityResponse({ passed: true, similarityScore: 0.86, motionReachability: "reachable", reasons: [] });
+  const passed = normalizeEndFrameContinuityResponse({ passed: true, similarityScore: 0.86, confidenceScore: 0.92, stableHold: true, motionReachability: "reachable", reasons: [] });
   assert.equal(passed.decision, "pass");
-  const retry = normalizeEndFrameContinuityResponse({ passed: false, similarityScore: 0.55, motionReachability: "prompt_fixable", retryInstruction: "hold the product beside the face" });
+  const retry = normalizeEndFrameContinuityResponse({ passed: false, similarityScore: 0.55, confidenceScore: 0.9, stableHold: false, motionReachability: "prompt_fixable", retryInstruction: "hold the product beside the face" });
   assert.equal(retry.decision, "retry_generation");
   assert.match(retry.retryInstruction ?? "", /product/);
-  const blocked = normalizeEndFrameContinuityResponse({ passed: false, similarityScore: 0.2, motionReachability: "unreachable", reasons: ["too many actions"] });
+  const blocked = normalizeEndFrameContinuityResponse({ passed: false, similarityScore: 0.2, confidenceScore: 0.9, stableHold: false, motionReachability: "unreachable", reasons: ["too many actions"] });
   assert.equal(blocked.decision, "return_stage_2b");
+  const uncertain = normalizeEndFrameContinuityResponse({ passed: false, similarityScore: 0.7, confidenceScore: 0.45, reasons: ["motion blur"] });
+  assert.equal(uncertain.decision, "manual_review");
 });
 
 test("HappyHorse uses a hard first frame and a mandatory end-state prompt without pasted end-frame dissolve", () => {
   const root = process.cwd();
   const workflow = readFileSync(path.join(root, "src/services/video-orchestrator/aliyun-workflow.ts"), "utf8");
   const service = readFileSync(path.join(root, "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const compiler = readFileSync(path.join(root, "src/services/video-orchestrator/video-terminal-contract.ts"), "utf8");
   const compose = readFileSync(path.join(root, "src/services/video-orchestrator/local-compose.ts"), "utf8");
   assert.match(workflow, /acceptsLastFrameImage: false/);
   assert.match(workflow, /media: \[\{ type: "first_frame", url: params\.imageUrl \}\]/);
-  assert.match(service, /MANDATORY FINAL-FRAME CONTRACT/);
+  assert.match(compiler, /MANDATORY FINAL-FRAME CONTRACT/);
   assert.match(service, /endFramePromptEnforced: true/);
   assert.doesNotMatch(service, /enforceSegmentEndFrameLocally|deterministic_exact_end_frame_postprocess|stripVideoForbiddenTerms/);
   assert.doesNotMatch(compose, /one-prompt-boundary|approved-end-frame|clip\.boundary_enforce/);
@@ -90,5 +157,5 @@ test("planning, runtime validator and failure recovery share the audit service",
   assert.match(validator, /auditSingleTakePlan\(/);
   assert.match(service, /targetArtifactId: "project:failure_recovery"/);
   assert.match(service, /stage: "video_generation"/);
-  assert.match(service, /MANDATORY RETRY CORRECTION FROM END-FRAME VISUAL CHECK/);
+  assert.match(service, /retryCorrections,/);
 });

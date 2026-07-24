@@ -129,7 +129,7 @@ export default function DraftExplorer({
     ? drafts.filter((draft) => draft.status === "done" || draft.status === "selected")
     : drafts;
   const filteredDrafts = showOnlyLowScore
-    ? doneScopedDrafts.filter((draft) => typeof draft.qualityScore === "number" && draft.qualityScore < qualityThreshold)
+    ? doneScopedDrafts.filter((draft) => draft.qualityModelSource === "model" && typeof draft.qualityScore === "number" && draft.qualityScore < qualityThreshold)
     : doneScopedDrafts;
   const visibleDrafts = sortByQuality
     ? [...filteredDrafts].sort((a, b) => {
@@ -147,14 +147,14 @@ export default function DraftExplorer({
     .map((line) => line.trim())
     .filter(Boolean).length;
   const estimatedBatchCount = batchEnabled ? Math.max(batchLineCount, 1) * Math.max(batchPerVariableCount, 1) : draftCount;
-  const scoredDrafts = drafts.filter((draft) => typeof draft.qualityScore === "number");
+  const scoredDrafts = drafts.filter((draft) => draft.qualityModelSource === "model" && typeof draft.qualityScore === "number");
   const averageQualityScore = scoredDrafts.length
     ? Math.round(
         scoredDrafts.reduce((sum, draft) => sum + (draft.qualityScore as number), 0) / scoredDrafts.length,
       )
     : null;
   const lowScoreCount = drafts.filter(
-    (draft) => typeof draft.qualityScore === "number" && draft.qualityScore < qualityThreshold,
+    (draft) => draft.qualityModelSource === "model" && typeof draft.qualityScore === "number" && draft.qualityScore < qualityThreshold,
   ).length;
 
   const handleCreateEmotion = async () => {
@@ -195,7 +195,7 @@ export default function DraftExplorer({
       const next = { ...prev };
       let changed = false;
       for (const draft of drafts) {
-        if (typeof draft.qualityScore !== "number") continue;
+        if (draft.qualityModelSource !== "model" || typeof draft.qualityScore !== "number") continue;
         if (draft.qualityScore >= qualityThreshold) continue;
         if (draft.id in next) continue;
         next[draft.id] = true;
@@ -646,7 +646,7 @@ export default function DraftExplorer({
                             质检 {draft.qualityScore} · {draft.qualityGrade ?? "C"}
                           </span>
                           <span className="text-[11px] text-gray-500">
-                            {draft.qualityModelSource === "model" ? "模型评分" : "本地评分"}
+                            {draft.qualityModelSource === "model" ? "视觉质量评分" : "交付健康度"}
                           </span>
                           {autoQualityEnabled && draft.qualityScore < qualityThreshold ? (
                             <span className="text-[11px] text-red-500">低于阈值</span>
@@ -689,7 +689,7 @@ export default function DraftExplorer({
 
                   {expandedQualityIds[draft.id] && typeof draft.qualityScore === "number" && (
                     <div className="mt-3 rounded-lg border border-gray-200 bg-white/80 p-3">
-                      <div className="mb-2 text-xs font-medium text-gray-600">质检评分详情（四维）</div>
+                      <div className="mb-2 text-xs font-medium text-gray-600">{draft.qualityModelSource === "model" ? "视觉质量详情（四维）" : "交付健康度详情"}</div>
                       <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600">
                         <div className="rounded bg-gray-50 px-2 py-1">
                           一致性：{draft.qualityDimensions?.consistency ?? "--"}

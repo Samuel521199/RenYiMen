@@ -272,12 +272,12 @@ test("prompt compiler injects narrative contracts into boundary images and segme
   ]) {
     assert.match(source, new RegExp(`${field}:`));
   }
-  assert.match(source, /Narrative execution contract for this segment/);
+  assert.match(source, /narrativeBoundary:/);
   for (const field of ["storyFunction", "cause", "effect", "actionContinuity", "reactionBeat", "keyEvidenceIds"]) {
     assert.match(source, new RegExp(`${field}`));
   }
-  assert.match(source, /the video model must ONLY animate the visible transition/);
-  assert.match(source, /Do not invent missing plot events/);
+  assert.match(source, /Animate only this approved boundary-to-boundary transition/);
+  assert.match(source, /Do not invent future plot events/);
   assert.match(source, /narrative_boundary_contract_injected/);
   assert.match(source, /narrative_contract_injected/);
   assert.match(source, /model_must_not_invent_story/);

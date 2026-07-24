@@ -72,18 +72,20 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
       push(issues, "SINGLE_TAKE_PHYSICALLY_UNREACHABLE", segmentNo, "physically_unreachable", `片段 ${segmentNo} 的动作路径不可物理到达，必须先执行 Split Repair。`, "stage2b", true);
     }
     const checkpoints = array(description.motionCheckpoints ?? description.motion_checkpoints);
-    if (checkpoints.some(containsCutLanguage)) {
-      push(issues, "MOTION_CHECKPOINT_CONTAINS_CUT", segmentNo, "motion_checkpoint_contains_cut", `片段 ${segmentNo} 的中间状态包含切镜或转场。`, "stage2b", true);
+    const checkpointCutPath = findCutLanguagePath(checkpoints, "motionCheckpoints");
+    if (checkpointCutPath) {
+      push(issues, "MOTION_CHECKPOINT_CONTAINS_CUT", segmentNo, `motion_checkpoint_contains_cut:${checkpointCutPath}`, `片段 ${segmentNo} 的中间状态包含切镜或转场（命中字段：${checkpointCutPath}）。`, "stage2b", true);
     }
-    if (containsCutLanguage([
+    const internalCutPath = findCutLanguagePath({
       description,
-      segment?.videoPrompt ?? segment?.video_prompt,
-      segment?.motion,
-      segment?.camera,
-      segment?.microShots ?? segment?.micro_shots,
-      segment?.timedPrompts ?? segment?.timed_prompts,
-    ])) {
-      push(issues, "INTERNAL_CUT_LANGUAGE", segmentNo, "internal_cut_language_detected", `片段 ${segmentNo} 的结构合同或生成字段包含内部切镜/叠化/蒙太奇语义，禁止靠 Prompt 文本替换隐藏。`, "stage2b", true);
+      videoPrompt: segment?.videoPrompt ?? segment?.video_prompt,
+      motion: segment?.motion,
+      camera: segment?.camera,
+      microShots: segment?.microShots ?? segment?.micro_shots,
+      timedPrompts: segment?.timedPrompts ?? segment?.timed_prompts,
+    }, "segment");
+    if (internalCutPath) {
+      push(issues, "INTERNAL_CUT_LANGUAGE", segmentNo, `internal_cut_language_detected:${internalCutPath}`, `片段 ${segmentNo} 的结构合同或生成字段包含内部切镜/叠化/蒙太奇语义（命中字段：${internalCutPath}），禁止靠 Prompt 文本替换隐藏。`, "stage2b", true);
     }
 
     const cameraContext = resolveCameraInheritanceContext(plan, segmentNo);
@@ -118,13 +120,35 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
 function push(issues: SingleTakeAuditIssue[], code: string, segmentNo: number, reason: string, messageZh: string, retryFromStage: "stage2a" | "stage2b", repairable: boolean): void {
   issues.push({ code, severity: "error", segmentNo, artifactId: `segment:${segmentNo}`, reason, messageZh, retryFromStage, repairable });
 }
-function containsCutLanguage(value: unknown): boolean {
-  const text = flatText(value)
-    .replace(/\b(?:no|without|forbid(?:den)?|avoid|must not|do not|don't|never)[^.。;；\n]*(?:cut|dissolve|crossfade|montage|fade|transition|switch)[^.。;；\n]*/gi, "")
-    .replace(/(?:禁止|不得|不要|避免|不可|不能)[^。；\n]*(?:切镜|跳切|转场|叠化|蒙太奇|换镜头|淡入|淡出)[^。；\n]*/g, "");
-  return /\b(cut to|jump cut|hard cut|dissolve|crossfade|montage|switch to|switch angle|switch camera|scene transition|new shot|another shot|shot change|fade out|fade in)\b|切到|切镜|跳切|转场|叠化|交叉溶解|蒙太奇|换镜头|切换机位|镜头切换|场景切换|淡入|淡出/i.test(text);
+function findCutLanguagePath(value: unknown, rootPath: string): string | undefined {
+  return executableTextLeaves(value, rootPath).find((leaf) => {
+    const text = leaf.text
+      .replace(/\bnot\s+as\s+(?:an?\s+)?(?:extra\s+video\s+clip|separate\s+shot|scene\s+transition)\b/gi, "")
+      .replace(/\b(?:no|without|forbid(?:den)?|avoid|must not|do not|don't|never)\b[^.。;；\n]*/gi, "")
+      .replace(/(?:禁止|不得|不要|避免|不可|不能)[^。；\n]*/g, "")
+      .replace(/(?:全程)?无(?:任何)?(?:内部)?(?:切镜|剪切|跳切|转场|叠化|交叉溶解|蒙太奇|换镜头|淡入|淡出)[^。；\n]*/g, "");
+    return /\b(cut to|jump cut|hard cut|dissolve|crossfade|montage|switch to|switch angle|switch camera|scene transition|new shot|another shot|shot change|fade out|fade in)\b|切到|切镜|跳切|转场|叠化|交叉溶解|蒙太奇|换镜头|切换机位|镜头切换|场景切换|淡入|淡出/i.test(text);
+  })?.path;
 }
-function flatText(value: unknown): string { if (typeof value === "string") return value; if (Array.isArray(value)) return value.map(flatText).join(" "); if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).map(flatText).join(" "); return ""; }
+function executableTextLeaves(value: unknown, path: string, parentKey = ""): Array<{ path: string; text: string }> {
+  if (isNegativeConstraintKey(parentKey)) return [];
+  if (typeof value === "string") return [{ path, text: value }];
+  if (Array.isArray(value)) return value.flatMap((item, index) => executableTextLeaves(item, `${path}[${index}]`, parentKey));
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .flatMap(([key, item]) => executableTextLeaves(item, `${path}.${key}`, key));
+  }
+  return [];
+}
+function isNegativeConstraintKey(key: string): boolean {
+  const normalized = key.replace(/[^a-z0-9\u4e00-\u9fff]/gi, "").toLowerCase();
+  return normalized.includes("forbidden")
+    || normalized.includes("prohibited")
+    || normalized.includes("disallowed")
+    || normalized.includes("negativeprompt")
+    || normalized.includes("禁止项")
+    || normalized.includes("负面提示");
+}
 function dedupe(issues: SingleTakeAuditIssue[]): SingleTakeAuditIssue[] { const seen = new Set<string>(); return issues.filter((item) => { const key = `${item.code}:${item.artifactId}`; if (seen.has(key)) return false; seen.add(key); return true; }); }
 function record(value: unknown): Record<string, unknown> { return value != null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function recordOrUndefined(value: unknown): Record<string, unknown> | undefined { const result = record(value); return Object.keys(result).length ? result : undefined; }

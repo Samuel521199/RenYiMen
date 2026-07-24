@@ -478,9 +478,10 @@ interface ArtifactMetadata {
 
 interface GenerationQualityReport {
   policyVersion?: "quality-policy-v2" | "quality-policy-v3";
-  evaluationStatus?: "completed" | "technical_failed" | "reference_missing";
+  evaluationStatus?: "completed" | "partial" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
   technicalError?: string;
   technicalRetryable?: boolean;
+  evaluationConfidence?: number;
   referenceComparable?: boolean;
   identityScoreApplicable?: boolean;
   productConsistencyScoreApplicable?: boolean;
@@ -490,11 +491,11 @@ interface GenerationQualityReport {
   comparableChecks?: string[];
   advisoryOnly?: boolean;
   assetId: string;
-  identityScore: number;
-  layoutScore: number;
-  promptAlignmentScore: number;
-  continuityScore: number;
-  singleTakeScore?: number;
+  identityScore: number | null;
+  layoutScore: number | null;
+  promptAlignmentScore: number | null;
+  continuityScore: number | null;
+  singleTakeScore?: number | null;
   artifactIssues: string[];
   passed: boolean;
   originalPassed?: boolean;
@@ -4584,13 +4585,14 @@ function ZoomableImage({ src, alt, lang, className = "" }: { src: string; alt: s
   );
 }
 
-function formatQualityScore(value: number | undefined): string {
+function formatQualityScore(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "-";
 }
 
 function isTechnicalQualityReport(report: GenerationQualityReport | null | undefined): boolean {
   if (!report) return false;
-  if (report.evaluationStatus === "technical_failed") return true;
+  if (report.evaluationStatus === "not_run") return false;
+  if (report.evaluationStatus === "technical_failed" || report.evaluationStatus === "unavailable" || report.evaluationStatus === "partial") return true;
   if (report.contentBased === false && report.passed === false) return true;
   return report.artifactIssues.some((issue) =>
     /视觉质量评估失败|quality evaluation failed|this operation was aborted|aborterror|timed? out|timeout|rate limit|too many requests|fetch failed|network/i.test(issue),

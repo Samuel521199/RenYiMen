@@ -8,6 +8,7 @@
 | [runninghub-api.md](runninghub-api.md) | RunningHub 接口及本项目集成规范 |
 | [AI-WORKBENCH-INTEGRATION.md](AI-WORKBENCH-INTEGRATION.md) | Workbench 部署、SSO、身份迁移与运维 |
 | [one-prompt-video-overview.md](one-prompt-video-overview.md) | 一句话成片功能说明（人话版：结构、流程、剧本拆解逻辑） |
+| [one-prompt-video-script-structures-and-system-prompts.md](one-prompt-video-script-structures-and-system-prompts.md) | 剧本拆解全部数据结构、系统 Prompt 原文与 Bug 审计 |
 | [one-prompt-video-script-planner.md](one-prompt-video-script-planner.md) | 一句话成片当前流程、状态机、接口和配置 |
 | [one-prompt-video-story-design-coherence-plan.md](one-prompt-video-story-design-coherence-plan.md) | 一句话成片剧情设计、因果连贯性和广告创意结构改进方案 |
 | [one-prompt-video-script-decomposition-baseline.md](one-prompt-video-script-decomposition-baseline.md) | 一句话成片固定测试样本与验收基线 |

@@ -131,6 +131,9 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
 
 function validateCameraSafety(plan: Record<string, unknown>, entries: Array<{ node: ReturnType<typeof readCameraGraph>["cameras"][number]; context: ReturnType<typeof resolveCameraInheritanceContext> }>, issues: PlanValidationIssue[]): void {
   const transitions = arrayRecords(plan.transitionReferencePlan ?? plan.transition_reference_plan);
+  const firstSegmentNo = Math.min(
+    ...entries.flatMap(({ node }) => node.segmentNos).filter((segmentNo) => segmentNo > 0),
+  );
   for (const { node, context } of entries) {
     if (context.relation === "alternate_view" && (!node.axisDescription || !node.spatialLayoutLock)) {
       error(issues, "ALTERNATE_VIEW_AXIS_UNRESOLVED", `camera:${node.cameraId}`, `alternate_view 机位 ${node.cameraId} 缺少轴线或左右空间锁，无法检查 180 度规则。`, "stage_2a_storyboard");
@@ -138,8 +141,11 @@ function validateCameraSafety(plan: Record<string, unknown>, entries: Array<{ no
     if (context.relation !== "new_camera_setup") continue;
     const hasTransition = transitions.some((item) => text(item.toCameraId ?? item.to_camera_id) === node.cameraId || node.segmentNos.includes(number(item.segmentNo ?? item.segment_no ?? item.toSegmentNo ?? item.to_segment_no)));
     const explicitNoInheritance = /无需继承|不继承|no[- ]?inheritance|independent setup/i.test(node.inheritanceReasonZh ?? "");
+    const isInitialRootCamera = node.segmentNos.includes(firstSegmentNo)
+      && !node.parentCameraId
+      && (!node.parentSegmentNo || node.parentSegmentNo <= 0);
     const unresolved = (node.missingInfo ?? []).filter(Boolean);
-    if (unresolved.length || (!hasTransition && !explicitNoInheritance)) {
+    if (unresolved.length || (!hasTransition && !explicitNoInheritance && !isInitialRootCamera)) {
       error(issues, "NEW_CAMERA_SPATIAL_SOURCE_MISSING", `camera:${node.cameraId}`, `新机位 ${node.cameraId} 缺少 transition reference 或明确的无需继承说明${unresolved.length ? `，未解决信息：${unresolved.join("、")}` : ""}。`, "stage_2a_storyboard");
     }
   }

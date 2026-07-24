@@ -146,10 +146,10 @@ function aspectHint(aspectRatio: VideoAspectRatio): string {
   return "vertical 9:16 frame";
 }
 
-function deriveTitle(prompt: string, stylePreset?: string): string {
+function deriveTitle(prompt: string, stylePreset: string | undefined, durationSeconds: number): string {
   const cleaned = prompt.replace(/[，。！？,.!?]/g, " ").replace(/\s+/g, " ").trim();
   const prefix = cleaned.slice(0, 18) || "一句话成片";
-  const suffix = stylePreset === "guofeng" ? "国风短片" : stylePreset === "product" ? "产品短片" : "30s 短片";
+  const suffix = stylePreset === "guofeng" ? "国风短片" : stylePreset === "product" ? "产品短片" : `${durationSeconds}s 短片`;
   return `${prefix} ${suffix}`;
 }
 
@@ -373,7 +373,7 @@ export function createVideoPlan(input: PlanVideoProjectInput): OnePromptVideoPla
   const segments = buildSegments(normalizedInput, styleBible, prompt);
 
   return {
-    title: deriveTitle(prompt, input.stylePreset),
+    title: deriveTitle(prompt, input.stylePreset, input.durationSeconds),
     logline: `围绕“${prompt}”规划 ${keyframes.length} 张静态边界参考帧和 ${segments.length} 段首尾帧视频片段，合成 ${durationSeconds}s 成片。`,
     durationSeconds,
     aspectRatio,

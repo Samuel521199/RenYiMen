@@ -28,11 +28,12 @@ export function buildImageGenerationQualityReport(params: {
   }
 
   return {
+    evaluationStatus: "not_run",
     assetId: params.assetId,
-    identityScore: 0,
-    layoutScore: 0,
-    promptAlignmentScore: 0,
-    continuityScore: 0,
+    identityScore: null,
+    layoutScore: null,
+    promptAlignmentScore: null,
+    continuityScore: null,
     singleTakeScore: undefined,
     artifactIssues: issues,
     passed: false,
@@ -64,12 +65,13 @@ export function buildVideoGenerationQualityReport(params: {
   }
 
   return {
+    evaluationStatus: params.endFrameContinuity?.decision === "evaluation_failed" ? "unavailable" : "not_run",
     assetId: params.assetId,
-    identityScore: 0,
-    layoutScore: 0,
-    promptAlignmentScore: 0,
-    continuityScore: 0,
-    singleTakeScore: 0,
+    identityScore: null,
+    layoutScore: null,
+    promptAlignmentScore: null,
+    continuityScore: null,
+    singleTakeScore: null,
     artifactIssues: issues,
     passed: false,
     contentBased: false,

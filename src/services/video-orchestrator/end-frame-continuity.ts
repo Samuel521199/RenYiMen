@@ -3,10 +3,15 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { logOnePromptVideo } from "./logger";
+import {
+  resolveEndFrameRequirementLevel,
+  type EndFrameRequirementLevel,
+} from "./video-terminal-contract";
 
 export interface EndFrameContinuityResult {
-  decision: "pass" | "retry_generation" | "return_stage_2b" | "evaluation_failed";
-  similarityScore: number;
+  decision: "pass" | "retry_generation" | "return_stage_2b" | "manual_review" | "evaluation_failed";
+  similarityScore: number | null;
+  confidenceScore?: number;
   reasons: string[];
   retryInstruction?: string;
   sampledFrameDataUrl?: string;
@@ -19,38 +24,48 @@ export async function evaluateEndFrameContinuity(params: {
   approvedEndFrameUrl: string;
   endFrameContract: Record<string, unknown> | undefined;
   motionContract: Record<string, unknown> | undefined;
+  endFrameRequirementLevel?: EndFrameRequirementLevel;
 }): Promise<EndFrameContinuityResult> {
   if (!continuityVisionEnabled()) {
     return failure("端帧视觉检查未启用或缺少 DashScope API Key；不会机械贴入尾帧。", "Enable ONE_PROMPT_END_FRAME_VISION_EVAL and configure a DashScope API key, then retry continuity evaluation.");
   }
   const workDir = path.join(os.tmpdir(), `one-prompt-end-check-${params.projectId}-${params.segmentNo}-${Date.now()}`);
   const clipPath = path.join(workDir, "clip.mp4");
-  const sampledPath = path.join(workDir, "last-frame.png");
   await mkdir(workDir, { recursive: true });
   try {
     await download(params.clipUrl, clipPath);
-    await extractLastFrame(clipPath, sampledPath);
-    const sampledFrameDataUrl = `data:image/png;base64,${(await readFile(sampledPath)).toString("base64")}`;
+    const sampledFrameDataUrls: string[] = [];
+    for (const [index, offsetSeconds] of [0.8, 0.4, 0.12].entries()) {
+      const sampledPath = path.join(workDir, `tail-frame-${index + 1}.png`);
+      await extractTailFrame(clipPath, sampledPath, offsetSeconds);
+      sampledFrameDataUrls.push(`data:image/png;base64,${(await readFile(sampledPath)).toString("base64")}`);
+    }
+    const requirementLevel = params.endFrameRequirementLevel ?? resolveEndFrameRequirementLevel(params.endFrameContract);
     const content: Array<Record<string, unknown>> = [
       {
         type: "text",
         text: [
-          "Compare the generated video's last sampled frame with the approved end-frame reference and ending-state contract.",
-          "The approved end frame was compiled into the generator prompt as a mandatory terminal-state contract.",
-          "Do not require pixel-for-pixel identity, but treat failure to arrive at the same visible terminal state as a generation failure.",
+          "Evaluate the generated video's ordered tail stability window against the approved end-state contract.",
+          "Judge the minimum visible terminal facts required by the contract. Do not require pixel-for-pixel identity and do not fail non-critical background, lighting, or decorative differences.",
+          "The three generated samples are ordered from earlier to later. A usable ending should converge toward and stably hold the required state; a single blurred or encoded tail frame must not veto an otherwise stable window.",
           `Segment: ${params.segmentNo}`,
+          `Requirement level: ${requirementLevel}`,
           `End-frame contract: ${JSON.stringify(params.endFrameContract ?? {})}`,
           `Motion contract: ${JSON.stringify(params.motionContract ?? {})}`,
-          "Return strict JSON: similarityScore 0..1, motionReachability reachable|prompt_fixable|unreachable, reasons[], retryInstruction, passed.",
-          "passed=true only when identity, subject/product state, composition and camera direction, location/layout, lighting state and final action state all visibly match the approved terminal frame.",
+          "Return strict JSON: similarityScore 0..1, confidenceScore 0..1, stableHold true|false, hardFailure true|false, motionReachability reachable|prompt_fixable|unreachable, reasons[], retryInstruction, passed.",
+          "hardFailure=true only when a required core action result, required subject/product state, identity, instance count, or indispensable spatial relationship is clearly wrong or absent.",
           "Use unreachable only when the requested motion or state transition is structurally impossible in one continuous take; do not recommend blind retries in that case.",
         ].join("\n"),
       },
-      { type: "text", text: "Generated video last sampled frame:" },
-      { type: "image_url", image_url: { url: sampledFrameDataUrl } },
-      { type: "text", text: "User-approved end-frame reference:" },
-      { type: "image_url", image_url: { url: params.approvedEndFrameUrl } },
     ];
+    for (const [index, dataUrl] of sampledFrameDataUrls.entries()) {
+      content.push({ type: "text", text: `Generated tail sample ${index + 1}/3:` });
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    content.push(
+      { type: "text", text: "User-approved end-frame reference (target evidence, not pixel-exact requirement):" },
+      { type: "image_url", image_url: { url: params.approvedEndFrameUrl } },
+    );
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), continuityTimeoutMs());
     let response: Response;
@@ -74,12 +89,13 @@ export async function evaluateEndFrameContinuity(params: {
     }
     const raw = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new Error(extractError(raw) || `HTTP ${response.status}`);
-    const result = normalizeEndFrameContinuityResponse(parseContent(raw), sampledFrameDataUrl);
+    const result = normalizeEndFrameContinuityResponse(parseContent(raw), sampledFrameDataUrls, requirementLevel);
     await logOnePromptVideo("clip.end_frame_continuity.result", {
       projectId: params.projectId,
       segmentNo: params.segmentNo,
       decision: result.decision,
       similarityScore: result.similarityScore,
+      confidenceScore: result.confidenceScore,
       reasons: result.reasons,
       retryInstruction: result.retryInstruction,
     }, result.decision === "pass" ? "info" : "warn");
@@ -101,39 +117,55 @@ export async function evaluateEndFrameContinuity(params: {
   }
 }
 
-export function normalizeEndFrameContinuityResponse(value: unknown, sampledFrameDataUrl?: string): EndFrameContinuityResult {
+export function normalizeEndFrameContinuityResponse(
+  value: unknown,
+  sampledFrameDataUrls: string[] = [],
+  requirementLevel: EndFrameRequirementLevel = "hard_semantic",
+): EndFrameContinuityResult {
   const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const similarityScore = clamp01(Number(source.similarityScore ?? source.similarity_score));
+  const similarityScore = optionalClamp01(source.similarityScore ?? source.similarity_score);
+  const confidenceScore = optionalClamp01(source.confidenceScore ?? source.confidence_score) ?? 0.5;
   const reachability = String(source.motionReachability ?? source.motion_reachability ?? "").toLowerCase();
-  const passed = source.passed === true && similarityScore >= 0.8;
+  const hardFailure = source.hardFailure === true || source.hard_failure === true;
+  const stableHold = source.stableHold === true || source.stable_hold === true;
+  const threshold = requirementLevel === "hard_exact" ? 0.9 : requirementLevel === "hard_semantic" ? 0.75 : requirementLevel === "soft_directional" ? 0.6 : 0.5;
+  const passed = source.passed === true && similarityScore != null && similarityScore >= threshold && !hardFailure && (stableHold || requirementLevel === "editorial");
   const reasons = uniqueStrings(Array.isArray(source.reasons) ? source.reasons : []);
   const modelRetry = typeof source.retryInstruction === "string" ? source.retryInstruction.trim() : typeof source.retry_instruction === "string" ? source.retry_instruction.trim() : "";
-  if (passed) return { decision: "pass", similarityScore, reasons, sampledFrameDataUrl };
+  const sampledFrameDataUrl = sampledFrameDataUrls.at(-1);
+  const evidence = { similarityScore, confidenceScore, sampledFrameDataUrl };
+  if (confidenceScore < 0.7 || similarityScore == null) {
+    return {
+      decision: "manual_review",
+      ...evidence,
+      reasons: reasons.length ? reasons : ["tail-window evidence is insufficient for an automatic terminal-state decision"],
+      retryInstruction: "Review the existing video or retry continuity evaluation. Do not regenerate solely because evaluator confidence is low.",
+    };
+  }
+  if (passed) return { decision: "pass", ...evidence, reasons };
   if (reachability === "unreachable") {
     return {
       decision: "return_stage_2b",
-      similarityScore,
+      ...evidence,
       reasons: reasons.length ? reasons : ["motion path cannot reach the approved end-state contract in one take"],
       retryInstruction: modelRetry || "Return to Stage 2B and split or simplify the physically unreachable motion contract.",
-      sampledFrameDataUrl,
     };
   }
   return {
     decision: "retry_generation",
-    similarityScore,
+    ...evidence,
     reasons: reasons.length ? reasons : ["generated final sampled frame is not close enough to the approved end-state contract"],
     retryInstruction: modelRetry || "Regenerate from the same approved first frame with a clearer reachable ending-state instruction and simpler motion checkpoints.",
-    sampledFrameDataUrl,
   };
 }
 
-function failure(reason: string, retryInstruction: string): EndFrameContinuityResult { return { decision: "evaluation_failed", similarityScore: 0, reasons: [reason], retryInstruction }; }
+function failure(reason: string, retryInstruction: string): EndFrameContinuityResult { return { decision: "evaluation_failed", similarityScore: null, reasons: [reason], retryInstruction }; }
 async function download(url: string, outputPath: string): Promise<void> { const response = await fetch(url); if (!response.ok) throw new Error(`download failed HTTP ${response.status}`); await writeFile(outputPath, Buffer.from(await response.arrayBuffer())); }
-async function extractLastFrame(inputPath: string, outputPath: string): Promise<void> {
+async function extractTailFrame(inputPath: string, outputPath: string, offsetSeconds: number): Promise<void> {
   await run(process.env.FFMPEG_PATH?.trim() || "ffmpeg", [
     "-y",
     "-sseof",
-    "-0.12",
+    `-${offsetSeconds}`,
     "-i",
     inputPath,
     "-frames:v",
@@ -155,4 +187,8 @@ function requireApiKey(): string { const key = process.env.DASHSCOPE_API_KEY || 
 function parseContent(raw: Record<string, unknown>): unknown { const choices = Array.isArray(raw.choices) ? raw.choices : []; const first = choices[0] as Record<string, unknown> | undefined; const message = first?.message as Record<string, unknown> | undefined; const content = message?.content; if (typeof content !== "string") return {}; return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
 function extractError(raw: Record<string, unknown>): string { if (typeof raw.message === "string") return raw.message; const error = raw.error as Record<string, unknown> | undefined; return typeof error?.message === "string" ? error.message : ""; }
 function uniqueStrings(values: unknown[]): string[] { return [...new Set(values.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()))]; }
-function clamp01(value: number): number { return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0; }
+function optionalClamp01(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : null;
+}

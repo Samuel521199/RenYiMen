@@ -241,6 +241,7 @@ export function withDraftQuality(
   options: QualityJudgeOptions = {},
 ): VideoDraftItem[] {
   return drafts.map((draft) => {
+    if (draft.qualityModelSource === "model" && typeof draft.qualityScore === "number") return draft;
     const judged = judgeDraftQuality(draft, options);
     return {
       ...draft,
@@ -258,7 +259,12 @@ export function pickBestDraftByQuality(
 ): VideoDraftItem | undefined {
   const scored = withDraftQuality(drafts, options).filter((item) => item.status === "done" && item.video_url);
   if (!scored.length) return undefined;
-  return scored.sort((a, b) => {
+  const modelScored = scored.filter((item) => item.qualityModelSource === "model" && typeof item.qualityScore === "number");
+  if (!modelScored.length) {
+    // Delivery health confirms playability; it cannot rank visual quality.
+    return scored[0];
+  }
+  return modelScored.sort((a, b) => {
     const scoreGap = (b.qualityScore ?? 0) - (a.qualityScore ?? 0);
     if (scoreGap !== 0) return scoreGap;
     return a.id > b.id ? -1 : 1;

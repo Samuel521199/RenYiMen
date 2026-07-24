@@ -6,7 +6,7 @@ import {
   runStoryboardStageWithRetry,
   storyboardStageHttpStatus,
 } from "./storyboard-stage-retry";
-import { normalizeAliyunStoryboardPlannerCheckpoint } from "./three-stage-planner";
+import { mergeTargetedShotDecomposerRepair, normalizeAliyunStoryboardPlannerCheckpoint } from "./three-stage-planner";
 
 test("shot decomposer retry only reruns the failed stage", async () => {
   let attempts = 0;
@@ -54,6 +54,10 @@ test("non-retryable upstream errors fail immediately", async () => {
 test("network failures are retryable but ordinary validation errors are not", () => {
   assert.equal(isRetryableStoryboardStageError(new Error("fetch failed: ECONNRESET")), true);
   assert.equal(isRetryableStoryboardStageError(new Error("invalid storyboard JSON")), false);
+  assert.equal(isRetryableStoryboardStageError(new StoryboardStageError("invalid model contract", {
+    code: "contract_validation_error",
+    retryable: true,
+  })), true);
 });
 
 test("timeouts and upstream failures use gateway status codes", () => {
@@ -101,4 +105,66 @@ test("planner checkpoints are reused only when the input fingerprint matches", (
   assert.deepEqual(changed.shotDecomposerSegmentPlans, {});
   assert.deepEqual(changed.approvedShotDecomposerSegmentPlans, {});
   assert.deepEqual(changed.promptDetailSegmentPlans, {});
+});
+
+test("legacy planner checkpoints are invalidated when the prompt contract version changes", () => {
+  const input = {
+    userPrompt: "一个产品广告",
+    aspectRatio: "9:16" as const,
+    durationSeconds: 45,
+    referenceImageUrls: [],
+  };
+  const current = normalizeAliyunStoryboardPlannerCheckpoint(undefined, input);
+  const legacy = normalizeAliyunStoryboardPlannerCheckpoint({
+    plannerCheckpoint: {
+      ...current,
+      version: 1,
+      planningRaw: { stale: true },
+      shotDecomposerSegmentPlans: { "1": { stale: true } },
+    },
+  }, input);
+
+  assert.equal(legacy.version, 2);
+  assert.equal(legacy.planningRaw, undefined);
+  assert.deepEqual(legacy.shotDecomposerSegmentPlans, {});
+});
+
+test("targeted split repair merges partial fields without deleting the approved segment contracts", () => {
+  const original = {
+    segments: [{
+      segment_no: 5,
+      purpose_zh: "CTA",
+      duration_seconds: 6,
+      subject_motion: "Logo fade in",
+      motion: "Logo fade in over the table",
+    }],
+    keyframes: [{ keyframe_no: 5 }, { keyframe_no: 6 }],
+    segment_render_descriptions: [{
+      segment_no: 5,
+      start_frame_contract: { state: "牌桌空镜" },
+      end_frame_contract: { state: "品牌结尾" },
+      motion_contract: { path: "镜头连续推进" },
+      single_take_contract: { requires_cut: false, subject_path: "Logo fade in" },
+      video_prompt_contract: { motion_steps: ["Logo fade in"] },
+    }],
+  };
+  const repair = {
+    segments: [{
+      segment_no: 5,
+      subject_motion: "实体品牌牌从桌后连续滑入画面",
+      motion: "镜头连续推进，实体品牌牌从桌后滑入并保持静止",
+    }],
+    segment_render_descriptions: [{
+      segment_no: 5,
+    }],
+  };
+
+  const merged = mergeTargetedShotDecomposerRepair(original, repair, [5]);
+  const description = (merged.segment_render_descriptions as Array<Record<string, unknown>>)[0];
+  assert.equal((merged.segments as unknown[]).length, 1);
+  assert.equal((merged.keyframes as unknown[]).length, 2);
+  assert.deepEqual(description.start_frame_contract, { state: "牌桌空镜" });
+  assert.deepEqual(description.motion_contract, { path: "镜头连续推进", subject_motion: "镜头连续推进，实体品牌牌从桌后滑入并保持静止" });
+  assert.deepEqual(description.single_take_contract, { requires_cut: false, subject_path: "镜头连续推进，实体品牌牌从桌后滑入并保持静止" });
+  assert.deepEqual(description.video_prompt_contract, { motion_steps: ["镜头连续推进，实体品牌牌从桌后滑入并保持静止"] });
 });

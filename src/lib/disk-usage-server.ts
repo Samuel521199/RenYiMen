@@ -72,13 +72,19 @@ export async function readLocalDiskUsage(customPath?: string): Promise<DiskUsage
 export async function readWorkbenchBackendDiskUsage(
   backendUrl: string,
 ): Promise<DiskUsagePayload | null> {
-  const base = backendUrl.replace(/\/$/, "");
-  const response = await fetch(`${base}/api/system/disk-usage`, {
-    cache: "no-store",
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!response.ok) return null;
-  const json = (await response.json()) as { code?: number; data?: DiskUsagePayload };
-  if (json.code !== 0 || !json.data) return null;
-  return json.data;
+  try {
+    const base = backendUrl.replace(/\/$/, "");
+    const response = await fetch(`${base}/api/system/disk-usage`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) return null;
+    const json = (await response.json()) as { code?: number; data?: DiskUsagePayload };
+    if (json.code !== 0 || !json.data) return null;
+    return json.data;
+  } catch {
+    // The workbench backend is optional. Connection failures, timeouts, and
+    // malformed responses must fall back to the local filesystem probe.
+    return null;
+  }
 }

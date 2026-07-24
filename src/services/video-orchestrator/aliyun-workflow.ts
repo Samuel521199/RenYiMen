@@ -5,6 +5,10 @@ import {
 } from "@/lib/one-prompt-video-limits";
 import type { VideoAspectRatio } from "./types";
 import { errorForLog, logOnePromptVideo } from "./logger";
+import {
+  assertEndFrameRequirementSupported,
+  type EndFrameRequirementLevel,
+} from "./video-terminal-contract";
 
 const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
@@ -256,12 +260,15 @@ export async function submitAliyunImageToVideoTask(params: {
   lastFrameUrl: string;
   prompt: string;
   durationSeconds: number;
+  endFrameRequirementLevel?: EndFrameRequirementLevel;
 }): Promise<string> {
   const i2vModel = onePromptI2vModel();
   if (!params.lastFrameUrl?.trim()) {
     throw new Error("HappyHorse generation requires an approved end-frame reference for the semantic target and continuity evaluation.");
   }
   const capabilities = aliyunImageToVideoCapabilities();
+  const endFrameRequirementLevel = params.endFrameRequirementLevel ?? "hard_semantic";
+  assertEndFrameRequirementSupported(endFrameRequirementLevel, capabilities, i2vModel);
   const prompt = params.prompt;
   const duration = clamp(params.durationSeconds, 3, 15);
   const resolution = process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P";
@@ -289,6 +296,7 @@ export async function submitAliyunImageToVideoTask(params: {
     imageUrl: params.imageUrl,
     lastFrameUrl: params.lastFrameUrl,
     lastFrameMode: capabilities.endFrameSemanticMode,
+    endFrameRequirementLevel,
     providerCapabilities: capabilities,
     promptLength: prompt.length,
     requestedDurationSeconds: params.durationSeconds,

@@ -4,7 +4,8 @@ export type StoryboardStageErrorCode =
   | "max_stream_timeout"
   | "request_timeout"
   | "upstream_http_error"
-  | "network_error";
+  | "network_error"
+  | "contract_validation_error";
 
 export class StoryboardStageError extends Error {
   readonly code: StoryboardStageErrorCode;
