@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { logOnePromptVideo } from "./logger";
+import { errorForLog, logOnePromptVideo } from "./logger";
 import type { FinalTransitionPlan, VideoAspectRatio } from "./types";
 
 interface LocalComposeParams {
@@ -55,11 +55,16 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
     const clipPaths: string[] = [];
     for (let index = 0; index < params.clipUrls.length; index += 1) {
       const clipPath = path.join(workDir, `clip-${String(index + 1).padStart(2, "0")}.mp4`);
-      await downloadToFile(params.clipUrls[index], clipPath);
+      await timedComposeStep(params.projectId, "clip_download", {
+        clipIndex: index + 1,
+        clipCount: params.clipUrls.length,
+      }, () => downloadToFile(params.clipUrls[index], clipPath));
       clipPaths.push(clipPath);
     }
 
-    const probedClipDurations = await Promise.all(clipPaths.map((clipPath) => probeClipDurationSeconds(ffmpegPath, clipPath)));
+    const probedClipDurations = await Promise.all(clipPaths.map((clipPath, index) =>
+      timedComposeStep(params.projectId, "clip_duration_probe", { clipIndex: index + 1 }, () =>
+        probeClipDurationSeconds(ffmpegPath, clipPath))));
     const effectiveClipDurations = clipPaths.map((_, index) => {
       const probed = probedClipDurations[index];
       if (Number.isFinite(probed) && Number(probed) > 0) return Number(probed);
@@ -71,7 +76,9 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
     assertNoUnresolvedGeneratedBridge(transitionPlan);
     const transitionSeconds = maxTransitionSeconds(transitionPlan);
     const stripSourceAudio = shouldStripSourceAudio(params.audioBible);
-    const audioPresence = await Promise.all(clipPaths.map((clipPath) => probeClipHasAudio(ffmpegPath, clipPath)));
+    const audioPresence = await Promise.all(clipPaths.map((clipPath, index) =>
+      timedComposeStep(params.projectId, "clip_audio_probe", { clipIndex: index + 1 }, () =>
+        probeClipHasAudio(ffmpegPath, clipPath))));
     await logOnePromptVideo("compose.local.audio_probe", {
       projectId: params.projectId,
       clipCount: clipPaths.length,
@@ -83,17 +90,23 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       effectiveDurations: effectiveClipDurations,
     }, audioPresence.every(Boolean) ? "info" : "warn");
     const hasExplicitVisualBlend = transitionPlan.some((item) => item.visualMode === "dissolve" || item.visualMode === "fade_to_black");
-    if (clipPaths.length > 1 && hasExplicitVisualBlend && transitionSeconds > 0) {
-      await composeWithPlannedXfade(ffmpegPath, clipPaths, effectiveClipDurations, transitionPlan, composedPath, audioPresence, stripSourceAudio);
-    } else {
-      await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath, stripSourceAudio);
-    }
+    await timedComposeStep(params.projectId, "ffmpeg_video_compose", {
+      mode: clipPaths.length > 1 && hasExplicitVisualBlend && transitionSeconds > 0 ? "planned_xfade" : "concat",
+      clipCount: clipPaths.length,
+    }, async () => {
+      if (clipPaths.length > 1 && hasExplicitVisualBlend && transitionSeconds > 0) {
+        await composeWithPlannedXfade(ffmpegPath, clipPaths, effectiveClipDurations, transitionPlan, composedPath, audioPresence, stripSourceAudio);
+      } else {
+        await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath, stripSourceAudio);
+      }
+    });
     const expectedVideoDuration = Math.max(
       0,
       effectiveClipDurations.reduce((sum, duration) => sum + duration, 0) -
         transitionPlan.reduce((sum, transition) => sum + transition.overlapSeconds, 0),
     );
-    const composedVideoDuration = await probeClipDurationSeconds(ffmpegPath, composedPath);
+    const composedVideoDuration = await timedComposeStep(params.projectId, "composed_duration_probe", {}, () =>
+      probeClipDurationSeconds(ffmpegPath, composedPath));
     await logOnePromptVideo("compose.local.video_probe", {
       projectId: params.projectId,
       expectedVideoDuration,
@@ -108,14 +121,17 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       );
     }
 
-    const audioMixedPath = await applyUnifiedAudioIfNeeded({
-      ffmpegPath,
-      inputPath: composedPath,
-      workDir,
-      projectId: params.projectId,
-      audioBible: params.audioBible,
-    });
-    const outputPath = await burnSubtitlesIfNeeded({
+    const audioMixedPath = await timedComposeStep(params.projectId, "audio_postprocess", {}, () =>
+      applyUnifiedAudioIfNeeded({
+        ffmpegPath,
+        inputPath: composedPath,
+        workDir,
+        projectId: params.projectId,
+        audioBible: params.audioBible,
+      }));
+    const outputPath = await timedComposeStep(params.projectId, "subtitle_burn", {
+      subtitleCount: params.subtitles?.length ?? 0,
+    }, () => burnSubtitlesIfNeeded({
       ffmpegPath,
       inputPath: audioMixedPath,
       workDir,
@@ -124,9 +140,10 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       subtitles: params.subtitles ?? [],
       durations: effectiveClipDurations,
       transitionSeconds,
-    });
+    }));
     const key = `one-prompt-video/final/${params.projectId}-${Date.now()}.mp4`;
-    const publicUrl = await uploadFileToOss(cfg, key, outputPath);
+    const publicUrl = await timedComposeStep(params.projectId, "oss_upload", {}, () =>
+      uploadFileToOss(cfg, key, outputPath));
     await logOnePromptVideo("compose.local.success", {
       projectId: params.projectId,
       clipCount: params.clipUrls.length,
@@ -142,6 +159,35 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
     throw error;
   } finally {
     await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+async function timedComposeStep<T>(
+  projectId: string,
+  step: string,
+  data: Record<string, unknown>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  await logOnePromptVideo(`compose.local.${step}.start`, { projectId, ...data });
+  try {
+    const result = await operation();
+    await logOnePromptVideo(`compose.local.${step}.done`, {
+      projectId,
+      ...data,
+      durationMs: Date.now() - startedAt,
+      timingSource: "explicit_step",
+    });
+    return result;
+  } catch (error) {
+    await logOnePromptVideo(`compose.local.${step}.error`, {
+      projectId,
+      ...data,
+      durationMs: Date.now() - startedAt,
+      timingSource: "explicit_step",
+      ...errorForLog(error),
+    }, "error");
+    throw error;
   }
 }
 

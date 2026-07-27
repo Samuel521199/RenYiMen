@@ -34,15 +34,26 @@ import type {
   VideoStoryEvidence,
   VideoStoryFunction,
   VideoStoryQualityReport,
+  VideoStorySemanticReview,
   VideoStoryTraceFields,
   VideoShotGroupingPass,
   VideoTimelineBlueprintSegment,
 } from "./types";
 import { createVideoPlan } from "./planner";
+import {
+  deriveCanonicalBoundaryContracts,
+  validateBoundaryContracts,
+} from "./boundary-contract";
+import {
+  compileAssetImagePromptEn,
+  compileAssetImagePromptZh,
+  validatePlanningAssetImageContracts,
+  type AssetImageContractIssue,
+} from "./asset-image-contract";
 import { errorForLog, logOnePromptVideo } from "./logger";
 import { assertPlanValidForGeneration } from "./plan-validator";
 import { repairMotionfulEndpointContracts } from "./frame-contract";
-import { auditSingleTakePlan } from "./single-take-audit";
+import { auditSingleTakePlan, type SingleTakeAuditResult } from "./single-take-audit";
 import { deriveCameraGraphFromStoryboardBrief } from "./camera-graph";
 import {
   validateVideoPromptContract,
@@ -62,7 +73,9 @@ import {
 } from "./storyboard-stage-retry";
 import {
   requiredStoryFunctionsForTemplate,
+  validatePlanningNarrativeContract,
   validateStoryboardStoryContract,
+  type PlanningNarrativeContractResult,
   type StoryContractGateResult,
 } from "./story-contract-gate";
 import {
@@ -71,6 +84,11 @@ import {
   targetForKeyframe,
   targetForSegment,
 } from "./asset-contract-resolver";
+import {
+  normalizeStorySemanticReview,
+  STORY_SEMANTIC_CRITIC_SYSTEM_PROMPT,
+  STORY_SEMANTIC_REPAIR_SYSTEM_PROMPT,
+} from "./story-semantic-critic";
 
 const MIN_SEGMENT_SECONDS = 3;
 const MAX_SEGMENT_SECONDS = 15;
@@ -242,6 +260,7 @@ type PlanStructureExtras = {
   narrativeMicroRules: VideoNarrativeMicroRules;
   shotGroupingPass?: VideoShotGroupingPass;
   storyQualityReport: VideoStoryQualityReport;
+  storySemanticReview?: VideoStorySemanticReview;
   anchorStateTimeline: AnchorStateTimeline[];
   audioBible: Record<string, unknown>;
   candidateTimeline: VideoTimelineBlueprintSegment[];
@@ -265,29 +284,43 @@ Return only valid JSON. No markdown, explanations, or comments.
 
 Your only job in stage 1:
 - Understand the user's video task.
-- First output creative_strategy before narrative_events. Decide video_category, template_id, template_reason, conversion_goal, viewer promise, hook, conflict, turning point, payoff, CTA, and how references should be used as assets rather than as a finished storyboard.
+- First choose video_category, template_id, and chronology_mode. Then construct the causal narrative_events. Only after the event chain exists, derive creative_strategy hook, conflict, turning point, payoff, and CTA from those events. Creative prose must summarize bound events and must never invent a second story.
 - Route the task to exactly one initial template_id: game_reversal, game_bonus_payoff, product_problem_solution, ecommerce_offer_conversion, food_sensory_reaction, auto_performance_hero, short_drama_conflict_twist, or generic_brand_story.
 - Do not use game-only semantics such as bonus, jackpot, opponent shock, cards, coins, leaderboard, or win streak unless video_category is game.
 - If category is uncertain, choose generic_brand_story and write fallback_reason_zh.
 - First decompose the task into narrative_events before deciding the segment timeline.
+- Bind every creative function to narrative_events through hook_event_ids, conflict_event_ids, turning_point_event_ids, payoff_event_ids, and cta_event_ids.
+- Default chronology_mode to chronological. In chronological mode, the hook may establish a pain point, curiosity gap, or partial tease, but it must not fully reveal the turning point, payoff, reward, solution, victory, or final product state.
+- Use flashforward_hook only when an intentional climax preview materially improves the concept. Then set hook_mode=payoff_preview, hook_reveal_level=partial or full, and return_to_event_id to the earlier event where chronological storytelling resumes.
+- The same event must not serve as both hook and turning point in chronological mode.
 - Output narrative_micro_rules so later stages know which story failures to avoid, especially sudden outcome, reference-only animation, missing visible trigger, and CTA before payoff.
 - Decide which objects, states, visual rules, and task elements must stay consistent across the whole video.
 - For every consistency anchor, separate static visual locks from dynamic state changes across the story.
 - Output anchor_state_timeline so later stages can distinguish legal state evolution from identity drift.
 - Decide whether this video needs editorial overlay subtitles, and if needed define their role, language, timing, placement, readability, and editability requirements.
 - Derive candidate_timeline and planning_manifest.timeline_blueprint from narrative_events. Do not invent segment boundaries without event reasons.
-- Do not write detailed keyframes, video prompts, image prompts, or micro-shot prompts.
+- Do not write detailed narrative keyframes, video prompts, or micro-shot prompts.
+- You MUST write an executable asset-sheet image contract and matching image_prompt_zh/image_prompt_en for every anchor with needs_reference_image=true. These are isolated reusable asset specifications, not narrative keyframes.
 
 Hard rules:
 - Every segment duration must be 3-15 seconds.
 - Total segment duration must equal duration_seconds exactly.
 - Segment count must be between segment_count_min and segment_count_max.
+- You, not application code, must allocate every segment's duration from its event complexity, action path, subtitle/CTA readability, emotional rhythm, camera travel, and physically reachable start-to-end state.
+- Never obtain segment durations by simply dividing duration_seconds by segment_count unless you independently justify why every segment has genuinely equal timing needs.
+- Every segment must output duration_reason_zh, minimum_executable_seconds, preferred_duration_seconds, maximum_useful_seconds, and timing_budget.
+- timing_budget.setup_seconds + timing_budget.action_seconds + timing_budget.result_seconds must equal duration_seconds for that segment exactly.
+- minimum_executable_seconds <= duration_seconds <= maximum_useful_seconds, and preferred_duration_seconds must remain inside the same range.
 - Do not default to 6 segments for 30 seconds. Choose by task complexity, information rhythm, subtitle rhythm, action continuity, scene changes, and generation continuity risk.
 - Every segment must be generatable as one continuous unbroken camera take. A segment is not a montage container.
 - If a beat requires a location change, environment replacement, large time jump, major camera setup change, major composition reset, subject teleport, product state discontinuity, or dissolve-like transformation, create a new segment boundary instead of putting that change inside one segment.
 - Start and end boundary frames of the same segment must be compatible as two moments from the same continuous shot: same location logic, same camera axis family, same subject/product identity, same lighting direction, and no impossible scene jump.
 - Identify consistency anchors dynamically. Do not assume every task has a product. Anchors may be person, product, prop, location, style, brand_visual, task_object, effect_state, vehicle, food, space_layout, or custom.
 - A consistency-anchor image prompt is an asset-sheet prompt, not a narrative keyframe. Keep identity/appearance facts, but remove story actions, screen positions, title interactions, scene decoration, and event-specific composition.
+- For every anchor with needs_reference_image=true, asset_image_contract is mandatory. Never use placeholders such as "fixed spatial layout", "lighting direction", "color atmosphere", "main background structure", "clear presentation", or "high quality" unless you replace them with actual visible values.
+- Every asset_image_contract must make the result mechanically checkable: exact subject count; concrete subject description; framing; camera angle; placement; frame occupancy; named background; lighting direction and quality; forbidden elements; and at least two acceptance criteria.
+- Person/product/prop/task-object/vehicle/food contracts must list concrete identity, geometry, clothing, marking, or material details. Scene/location/space-layout contracts must separately specify foreground, midground, far background, and at least two explicit spatial relationships or distances.
+- image_prompt_zh/image_prompt_en must faithfully serialize asset_image_contract. Do not shorten it into a category template or style summary.
 - A prop prompt must be operationally specific rather than generic: state the exact object count, named variants, face/orientation, arrangement, material, colors, intrinsic markings, and forbidden extra objects. If the prop is a playing card, explicitly name every required rank and suit and require matching corner indices; never combine "A/K must be visible" with a blanket "no text" instruction.
 - For a person anchor, image_prompt_zh/image_prompt_en must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
 - Reference images may contain a finished poster or advertisement. Extract the anchor's stable identity only; never copy the reference image's background, typography, logo placement, framing, or full composition into a person asset prompt.
@@ -301,16 +334,100 @@ Hard rules:
 - A product/prop cannot occupy two mutually exclusive places at the same time unless consistency_manifest explicitly defines multiple instances.
 - Holder changes must have a visible_transition_path or an event explanation.
 - The timeline_blueprint is a hard contract for later stages.
+- In chronological mode enforce hook < conflict < turning_point < payoff < CTA whenever those functions apply. Strategy event bindings, narrative_events, and timeline source_event_ids must describe one identical causal chain.
+- Emit the top-level sections in the dependency order shown below: classification, consistency_manifest, narrative_events, creative_strategy, narrative_micro_rules, anchor_state_timeline, audio_bible, candidate_timeline, planning_manifest.
+- classification is the single source of truth for video_type, video_category, template_id, template_reason_zh, chronology_mode, and fallback_reason_zh. Do not duplicate those fields inside creative_strategy.
+- Finish the anchor registry and causal narrative_events before emitting creative_strategy. Every creative_strategy event ID must reference an event already emitted above.
 
 Return this JSON shape:
 {
-  "creative_strategy": {
+  "classification": {
     "video_type": "game_ad | product_ad | ecommerce_ad | food_ad | short_drama | brand_film | tutorial | custom",
     "video_category": "game | product | ecommerce | food | auto | short_drama | brand | tutorial | custom",
     "template_id": "game_reversal | game_bonus_payoff | product_problem_solution | ecommerce_offer_conversion | food_sensory_reaction | auto_performance_hero | short_drama_conflict_twist | generic_brand_story",
     "template_reason_zh": "",
+    "chronology_mode": "chronological | flashforward_hook | result_first | problem_solution | demonstration",
+    "fallback_reason_zh": ""
+  },
+  "consistency_manifest": {
+    "anchors": [
+      {
+        "id": "main_character",
+        "type": "person",
+        "display_name_zh": "",
+        "display_name_en": "",
+        "must_stay_consistent": true,
+        "needs_reference_image": true,
+        "reference_strength": "hard",
+        "description_zh": "",
+        "description_en": "",
+        "visual_lock": {
+          "shape": "",
+          "material": "",
+          "color": "",
+          "markings": "",
+          "scale": "",
+          "state": "",
+          "forbidden_drift": []
+        },
+        "applies_to": ["keyframes", "segments", "micro_shots"],
+        "user_editable": true,
+        "image_prompt_zh": "",
+        "image_prompt_en": "",
+        "asset_image_contract": {
+          "subject_count": 1,
+          "subject_description": "concrete visible identity or environment description",
+          "composition": {
+            "framing": "exact shot size",
+            "camera_angle": "exact camera height, angle, and facing direction",
+            "placement": "exact placement in frame",
+            "occupancy": "approximate frame occupancy percentage"
+          },
+          "environment": {
+            "background": "named background, not a placeholder",
+            "foreground": "required for scene/location/space_layout",
+            "midground": "required for scene/location/space_layout",
+            "background_layer": "required for scene/location/space_layout",
+            "spatial_relationships": ["A is left/right/in front of B with distance", "C is behind/beyond D"]
+          },
+          "lighting": {
+            "direction": "named direction such as upper-left/front-right/backlight",
+            "quality": "hard/soft and shadow behavior",
+            "color_temperature": "warm/cool/neutral or Kelvin description"
+          },
+          "palette": ["named color 1", "named color 2"],
+          "material_details": ["concrete material/surface detail"],
+          "intrinsic_details": ["identity-locked detail 1", "identity-locked detail 2", "identity-locked detail 3"],
+          "forbidden_elements": ["unrelated character", "unrelated prop", "text", "logo", "UI"],
+          "acceptance_criteria": ["visually verifiable criterion 1", "visually verifiable criterion 2"]
+        }
+      }
+    ]
+  },
+  "narrative_events": [
+    {
+      "event_id": "event_1",
+      "dramatic_goal": "",
+      "participants": [],
+      "location_id": "",
+      "initial_state": "",
+      "action": "",
+      "resulting_state": "",
+      "required_anchor_ids": [],
+      "previous_event_ids": [],
+      "must_become_separate_segment": true
+    }
+  ],
+  "creative_strategy": {
+    "hook_mode": "pain_point | curiosity | tease | payoff_preview",
+    "hook_reveal_level": "none | partial | full",
+    "hook_event_ids": ["event_1"],
+    "conflict_event_ids": ["event_2"],
+    "turning_point_event_ids": ["event_3"],
+    "payoff_event_ids": ["event_4"],
+    "cta_event_ids": ["event_5"],
+    "return_to_event_id": "",
     "conversion_goal_zh": "",
-    "fallback_reason_zh": "",
     "audience_zh": "",
     "core_promise_zh": "",
     "hook_zh": "",
@@ -336,23 +453,6 @@ Return this JSON shape:
     "continuity_rules": [],
     "cta_rules": []
   },
-  "consistency_manifest": {
-    "anchors": []
-  },
-  "narrative_events": [
-    {
-      "event_id": "event_1",
-      "dramatic_goal": "",
-      "participants": [],
-      "location_id": "",
-      "initial_state": "",
-      "action": "",
-      "resulting_state": "",
-      "required_anchor_ids": [],
-      "previous_event_ids": [],
-      "must_become_separate_segment": true
-    }
-  ],
   "anchor_state_timeline": [
     {
       "anchor_id": "",
@@ -383,6 +483,15 @@ Return this JSON shape:
       "start_time_seconds": 0,
       "end_time_seconds": 5,
       "duration_seconds": 5,
+      "duration_reason_zh": "Why this event needs this exact amount of screen time",
+      "minimum_executable_seconds": 4,
+      "preferred_duration_seconds": 5,
+      "maximum_useful_seconds": 7,
+      "timing_budget": {
+        "setup_seconds": 1,
+        "action_seconds": 3,
+        "result_seconds": 1
+      },
       "source_event_ids": [],
       "purpose_zh": "",
       "split_reason_zh": "",
@@ -430,6 +539,15 @@ Return this JSON shape:
           "start_time_seconds": 0,
           "end_time_seconds": 5,
           "duration_seconds": 5,
+          "duration_reason_zh": "Why this event needs this exact amount of screen time",
+          "minimum_executable_seconds": 4,
+          "preferred_duration_seconds": 5,
+          "maximum_useful_seconds": 7,
+          "timing_budget": {
+            "setup_seconds": 1,
+            "action_seconds": 3,
+            "result_seconds": 1
+          },
           "beat_role": "hook | setup | interaction | proof | payoff | ending | custom",
           "purpose_zh": "",
           "purpose_en": "",
@@ -439,34 +557,6 @@ Return this JSON shape:
           "required_anchor_ids": [],
           "source_event_ids": [],
           "boundary_mode_hint": "continuous | hard_cut | dissolve | match_cut"
-        }
-      ]
-    },
-    "consistency_manifest": {
-      "anchors": [
-        {
-          "id": "main_character",
-          "type": "person",
-          "display_name_zh": "",
-          "display_name_en": "",
-          "must_stay_consistent": true,
-          "needs_reference_image": true,
-          "reference_strength": "hard",
-          "description_zh": "",
-          "description_en": "",
-          "visual_lock": {
-            "shape": "",
-            "material": "",
-            "color": "",
-            "markings": "",
-            "scale": "",
-            "state": "",
-            "forbidden_drift": []
-          },
-          "applies_to": ["keyframes", "segments", "micro_shots"],
-          "user_editable": true,
-          "image_prompt_zh": "",
-          "image_prompt_en": ""
         }
       ]
     },
@@ -485,6 +575,57 @@ Return this JSON shape:
       }
     ]
   }
+}`;
+
+const PLANNING_DURATION_REPAIR_SYSTEM_PROMPT = `You repair only the Stage 1 segment duration contract.
+
+Return only valid JSON. No markdown, explanations, or comments.
+
+Rules:
+- Preserve classification, creative strategy, narrative event order and causality, consistency anchors, source_event_ids, segment purposes, and segment boundaries by event.
+- Do not add, remove, merge, or reorder segments.
+- Allocate a deliberate duration to every segment from event complexity, visible action path, subtitle/CTA readability, emotional rhythm, camera travel, and physical reachability.
+- Do not mechanically divide total duration by segment count.
+- Every duration_seconds must be 3-15 seconds and all durations must sum to duration_seconds exactly.
+- Recompute sequential start_time_seconds and end_time_seconds with no gaps or overlaps.
+- Every segment must include a concrete duration_reason_zh, minimum_executable_seconds, preferred_duration_seconds, maximum_useful_seconds, and timing_budget.
+- minimum_executable_seconds <= duration_seconds <= maximum_useful_seconds. preferred_duration_seconds must be inside that range.
+- timing_budget.setup_seconds + timing_budget.action_seconds + timing_budget.result_seconds must equal the segment duration exactly.
+- Resolve every supplied validation issue.
+
+Return:
+{
+  "duration_replan": {
+    "candidate_timeline": [],
+    "timeline_blueprint": {
+      "segment_count": 1,
+      "total_duration_seconds": 30,
+      "segment_duration_min_seconds": 3,
+      "segment_duration_max_seconds": 15,
+      "split_strategy_zh": "",
+      "segments": []
+    },
+    "change_summary_zh": ""
+  }
+}`;
+
+const PLANNING_NARRATIVE_CONTRACT_REPAIR_SYSTEM_PROMPT = `You repair only the Planning Architect creative_strategy-to-event contract.
+
+Return only valid JSON. No markdown, explanations, or comments.
+
+Rules:
+- Preserve narrative_events, planning_manifest.timeline_blueprint, candidate_timeline, anchors, durations, segment numbers, and source_event_ids exactly.
+- Return one complete creative_strategy object.
+- Creative prose must summarize only its bound event_ids.
+- Default chronological stories must keep hook before conflict before turning point before payoff before CTA.
+- In chronological mode, hook_event_ids and turning_point_event_ids must not overlap, and hook_reveal_level cannot be full.
+- A chronological hook may establish a pain point, curiosity gap, or partial tease, but must remove any complete reveal of the later reward, solution, victory, transformation, or payoff.
+- Use flashforward_hook only for an intentional climax preview, and then provide a valid return_to_event_id.
+- Resolve every supplied contract issue. Do not alter the underlying story to make the prose fit.
+
+Return:
+{
+  "creative_strategy": {}
 }`;
 
 const STORYBOARD_ARTIST_SYSTEM_PROMPT = `You are Storyboard Artist for a controllable AI video pipeline.
@@ -509,6 +650,8 @@ Hard rules:
 - Do not output complete video prompts.
 - Do not output detailed checkpoint prompts.
 - Do not rewrite planning_manifest.timeline_blueprint.
+- Treat creative_strategy event bindings as authoritative: hook beats use hook_event_ids, conflict beats use conflict_event_ids, turning-point beats use turning_point_event_ids, payoff beats use payoff_event_ids, and CTA beats use cta_event_ids.
+- Do not move a later turning-point/reward/solution event into an earlier chronological hook. A hook may only reveal what its bound source_event_ids contain.
 - Every storyboard_brief item must include linked_beat_ids and story_function.
 - Causal references must point only to existing beats with a smaller order. Never invent a plausible-looking ID.
 - A payoff is invalid unless it depends on an earlier turning_point/proof and cites it in evidence_from_beat_ids.
@@ -675,6 +818,20 @@ Return this JSON shape:
     ]
   }
 }`;
+
+const ASSET_IMAGE_CONTRACT_REPAIR_SYSTEM_PROMPT = `You repair only the consistency anchors whose reusable asset-image specifications are not executable.
+
+Return only valid JSON in this shape: {"anchors":[...]}.
+Return every supplied anchor, preserving its id, type, identity, and story-independent visual facts.
+
+For each anchor:
+- Fill asset_image_contract with exact subject_count, subject_description, composition.framing, composition.camera_angle, composition.placement, composition.occupancy, environment.background, lighting.direction, lighting.quality, lighting.color_temperature, palette, material_details, intrinsic_details, forbidden_elements, and acceptance_criteria.
+- For location or space_layout, also fill environment.foreground, midground, background_layer, and at least two measurable or directional spatial_relationships.
+- For person, prop, product, task_object, vehicle, or food, isolate the asset and forbid unrelated story characters, scenery, props, typography, logos, UI, frames, collages, and duplicates unless intrinsically required.
+- Write complete image_prompt_zh and image_prompt_en that serialize all contract facts. Do not use placeholders such as "fixed layout", "lighting direction", "color atmosphere", "main background structure", "clear", "high quality", or "detailed" without concrete visible values.
+- Do not add narrative actions, scene events, ad typography, or assets from other anchors.
+- Preserve intrinsic markings such as playing-card ranks/suits; distinguish them from incidental text.
+`;
 
 const STORY_CONTRACT_REPAIR_SYSTEM_PROMPT = `You repair only the Storyboard Artist story contract.
 
@@ -1092,6 +1249,42 @@ Return this JSON shape:
   "repair_notes": []
 }`;
 
+const TIMELINE_REPLANNER_SYSTEM_PROMPT = `You are Stage 1 Timeline Replanner for a controllable AI video pipeline.
+
+Return only valid JSON. No markdown, explanations, or comments.
+
+Your job:
+- Handle a structured timeline_change_request emitted by the Single-Take Audit when Stage 2B proves that one or more existing segments cannot be generated as a continuous unbroken take.
+- Make the smallest possible Stage 1 timeline change. Split the affected event range into additional segments when a location change, time jump, camera setup reset, composition reset, teleport, discontinuous product state, or dissolve-like transformation requires a real boundary.
+- Preserve every segment before first_affected_segment_no byte-for-byte in meaning, timing, source_event_ids, anchors, and order.
+- Preserve the creative strategy, event causality, asset identities, global style, total duration, and unaffected narrative events.
+- You may update affected narrative_events only when their internal action must be separated to make the new boundary explicit.
+- Renumber the affected segment and every later segment sequentially. Recompute start_time_seconds and end_time_seconds.
+- Every segment duration must be 3-15 seconds. The sum must equal duration_seconds exactly. Segment count must remain within segment_count_min and segment_count_max.
+- Allocate each revised segment duration from its event complexity and physical action path. Do not mechanically divide the remaining duration by the revised segment count.
+- Every segment must include duration_reason_zh, minimum_executable_seconds, preferred_duration_seconds, maximum_useful_seconds, and timing_budget whose setup/action/result values sum to duration_seconds.
+- Every resulting segment must itself be executable as one continuous unbroken camera take.
+- Do not produce storyboard beats, keyframes, shot descriptions, or generation prompts.
+
+Return this JSON shape:
+{
+  "timeline_replan": {
+    "planning_manifest": {
+      "timeline_blueprint": {
+        "segment_count": 1,
+        "total_duration_seconds": 30,
+        "segment_duration_min_seconds": 3,
+        "segment_duration_max_seconds": 15,
+        "split_strategy_zh": "",
+        "segments": []
+      }
+    },
+    "narrative_events": [],
+    "change_summary_zh": "",
+    "resolved_request_ids": []
+  }
+}`;
+
 const PROMPT_DETAILER_SYSTEM_PROMPT = `You are Prompt Detailer for a controllable AI video pipeline.
 
 Return only valid JSON. No markdown, explanations, or comments.
@@ -1154,30 +1347,62 @@ type JsonStageContentResult = {
 };
 
 export interface AliyunStoryboardPlannerCheckpoint {
-  version: 2;
+  version: 8;
   inputFingerprint: string;
   referenceFactsRaw?: unknown;
   referenceFactsFingerprint?: string;
   planningRaw?: unknown;
+  assetPromptRepairRaw?: unknown;
   storyboardArtistPlan?: Record<string, unknown>;
   storyContractReport?: StoryContractGateResult;
+  storySemanticReview?: VideoStorySemanticReview;
   shotDecomposerSegmentPlans?: Record<string, Record<string, unknown>>;
   approvedShotDecomposerSegmentPlans?: Record<string, Record<string, unknown>>;
   promptDetailSegmentPlans?: Record<string, VideoPromptDetailPlan>;
+  timelineReplanAttempts?: number;
+  timelineChangeHistory?: TimelineChangeRequest[];
   updatedAt: string;
+}
+
+export interface TimelineChangeRequest {
+  requestId: string;
+  source: "single_take_audit";
+  changeType: "split_segment";
+  affectedSegmentNos: number[];
+  firstAffectedSegmentNo: number;
+  issueCodes: string[];
+  reasons: string[];
+  requestedChanges: unknown[];
+}
+
+export class TimelineReplanRequiredError extends Error {
+  readonly request: TimelineChangeRequest;
+
+  constructor(request: TimelineChangeRequest) {
+    super(`Stage 1 timeline replan required from segment ${request.firstAffectedSegmentNo}: ${request.issueCodes.join(", ")}`);
+    this.name = "TimelineReplanRequiredError";
+    this.request = request;
+  }
 }
 
 export type AliyunStoryboardProgressStage =
   | "queued"
   | "reference_fact_extractor"
   | "planning_architect"
+  | "planning_contract_repair"
+  | "planning_duration_repair"
+  | "asset_prompt_contract_gate"
+  | "asset_prompt_contract_repair"
   | "storyboard_artist"
   | "story_contract_gate"
   | "story_contract_repair"
+  | "story_semantic_critic"
+  | "story_semantic_repair"
   | "asset_contract_gate"
   | "shot_decomposer"
   | "single_take_audit"
   | "split_repair"
+  | "timeline_replan"
   | "json_repair"
   | "prompt_detailer"
   | "story_quality_gate"
@@ -1227,8 +1452,8 @@ const plannerProgressStorage = new AsyncLocalStorage<{
   onStageMetric?: (metric: AliyunStoryboardStageMetric) => Promise<void> | void;
 }>();
 
-const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 2 as const;
-const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-24-video-prompt-contract-v3";
+const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 8 as const;
+const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-26-model-duration-contract-v8";
 
 export async function createAliyunStoryboardPlan(
   input: PlanVideoProjectInput,
@@ -1286,22 +1511,128 @@ async function createAliyunStoryboardPlanInternal(
       detailZh: "正在理解创意、参考图、广告目标和时间轴约束。",
       detailEn: "Understanding the brief, references, campaign goal, and timeline constraints.",
     });
-      const planningRaw = checkpoint.planningRaw ?? await callJsonStage({
+    let planningRaw = checkpoint.planningRaw;
+    if (planningRaw === undefined) {
+      const planningPromptStartedAtMs = Date.now();
+      const planningUserContent = buildPlanningArchitectContent(input, referenceFactsRaw);
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "故事架构与一致性资产规划",
+        stepNameZh: "编写故事架构和一致性资产规划提示词",
+        executionMethod: "program",
+        durationMs: Date.now() - planningPromptStartedAtMs,
+        model: textModel,
+        resultZh: "已写入创意、参考事实、广告目标、时长和资产约束",
+      });
+      planningRaw = await callJsonStage({
         stage: "planning_architect",
         modelName: textModel,
         systemPrompt: PLANNING_ARCHITECT_SYSTEM_PROMPT,
-        userContent: buildPlanningArchitectContent(input, referenceFactsRaw),
+        userContent: planningUserContent,
         temperature: 0.25,
       });
-    if (checkpoint.planningRaw === undefined) {
-      checkpoint.planningRaw = planningRaw;
-      await savePlannerCheckpoint(checkpoint, onCheckpoint);
-    } else {
+    }
+    if (checkpoint.planningRaw !== undefined) {
       await logOnePromptVideo("aliyun.storyboard.planning_architect.checkpoint_reused", {
         inputFingerprint: checkpoint.inputFingerprint,
       });
     }
-    const planningManifest = normalizePlanningManifest(planningRaw, input, fallback);
+    planningRaw = await ensurePlanningDurationContract({
+      input,
+      modelName: textModel,
+      planningRaw,
+    });
+    checkpoint.planningRaw = planningRaw;
+    await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    let planningManifest = normalizePlanningManifest(planningRaw, input, fallback);
+    await reportPlannerProgress({
+      stage: "asset_prompt_contract_gate",
+      detailZh: "正在检查人物、场景和道具资产描述是否具体、可执行且可验收。",
+      detailEn: "Checking whether character, scene, and prop asset specifications are concrete, executable, and testable.",
+    });
+    const assetContractCheckStartedAtMs = Date.now();
+    let assetContractIssues = validatePlanningAssetImageContracts(planningManifest.consistencyManifest.anchors);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "一致性资产规划",
+      stepNameZh: "程序质检资产描述是否具体、可生成、可验收",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - assetContractCheckStartedAtMs,
+      passed: assetContractIssues.length === 0,
+      resultZh: assetContractIssues.length
+        ? `发现 ${assetContractIssues.length} 个问题，打回大模型修复`
+        : `检查 ${planningManifest.consistencyManifest.anchors.length} 个资产，全部通过`,
+    });
+    if (assetContractIssues.length) {
+      const assetRepairCycleStartedAtMs = Date.now();
+      await reportPlannerProgress({
+        stage: "asset_prompt_contract_repair",
+        attempt: 1,
+        detailZh: `发现 ${assetContractIssues.length} 个资产描述结构问题，正在规划阶段自动返修。`,
+        detailEn: `Found ${assetContractIssues.length} asset specification issues. Repairing them before storyboard decomposition.`,
+      });
+      const invalidAnchorIds = new Set(assetContractIssues.map((issue) => issue.anchorId));
+      const invalidAnchors = planningManifest.consistencyManifest.anchors.filter((anchor) => invalidAnchorIds.has(anchor.id));
+      let assetPromptRepairRaw = checkpoint.assetPromptRepairRaw;
+      if (assetPromptRepairRaw === undefined) {
+        const repairPromptStartedAtMs = Date.now();
+        const repairUserContent = JSON.stringify({
+          user_idea: input.userPrompt,
+          aspect_ratio: input.aspectRatio,
+          global_style: planningManifest.globalStyle,
+          invalid_anchors: invalidAnchors,
+          validation_issues: assetContractIssues,
+        });
+        await logOnePromptVideo("production.step.completed", {
+          moduleNameZh: "一致性资产规划",
+          stepNameZh: "根据程序质检问题编写资产规划返修提示词",
+          executionMethod: "program",
+          durationMs: Date.now() - repairPromptStartedAtMs,
+          model: textModel,
+          attempt: 1,
+          resultZh: `把 ${assetContractIssues.length} 个问题写入返修要求`,
+        });
+        assetPromptRepairRaw = await callJsonStage({
+          stage: "asset_prompt_contract_repair",
+          modelName: textModel,
+          systemPrompt: ASSET_IMAGE_CONTRACT_REPAIR_SYSTEM_PROMPT,
+          userContent: repairUserContent,
+          temperature: 0.15,
+        });
+      }
+      if (checkpoint.assetPromptRepairRaw === undefined) {
+        checkpoint.assetPromptRepairRaw = assetPromptRepairRaw;
+        await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      }
+      planningManifest = mergeRepairedAssetAnchors(planningManifest, assetPromptRepairRaw);
+      const repairedAssetCheckStartedAtMs = Date.now();
+      assetContractIssues = validatePlanningAssetImageContracts(planningManifest.consistencyManifest.anchors);
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "一致性资产规划",
+        stepNameZh: "程序复检大模型返修后的资产描述",
+        executionMethod: "deterministic_program",
+        durationMs: Date.now() - repairedAssetCheckStartedAtMs,
+        passed: assetContractIssues.length === 0,
+        attempt: 2,
+        resultZh: assetContractIssues.length
+          ? `返修后仍有 ${assetContractIssues.length} 个问题`
+          : "返修后的资产描述已经通过",
+      }, assetContractIssues.length ? "warn" : "info");
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "一致性资产规划",
+        stepNameZh: "本轮资产规划从质检打回到返修复检完成",
+        executionMethod: "program",
+        durationMs: Date.now() - assetRepairCycleStartedAtMs,
+        passed: assetContractIssues.length === 0,
+        attempt: 1,
+        resultZh: assetContractIssues.length ? "返修仍未通过" : "返修闭环完成",
+      }, assetContractIssues.length ? "warn" : "info");
+      if (assetContractIssues.length) {
+        throw new StoryboardStageError(
+          `剧本拆解未生成可执行的资产图片合同：${formatAssetContractIssues(assetContractIssues)}`,
+          { code: "contract_validation_error", retryable: true },
+        );
+      }
+    }
+    planningManifest = materializePlanningAssetImagePrompts(planningManifest);
     const totalSegments = planningManifest.timelineBlueprint.segments.length;
     const segmentPipelineEnabled = shotDecomposerMode() === "segment" && totalSegments > 1;
     const referenceStepOffset = referenceImageUrls.length ? 1 : 0;
@@ -1314,12 +1645,33 @@ async function createAliyunStoryboardPlanInternal(
       detailZh: `规划架构已完成，正在设计剧情节拍、冲突、转折和 CTA；后续需要拆解 ${totalSegments} 个片段。`,
       detailEn: `Planning architecture is complete. Designing story beats, conflict, payoff, and CTA before decomposing ${totalSegments} segments.`,
     });
-    const planningStoryDesignBase = storyDesignStageContext(planningRaw);
-    const planningCreativeStrategy = normalizeCreativeStrategy(
+    let planningStoryDesignBase = storyDesignStageContext(planningRaw);
+    let planningCreativeStrategy = normalizeCreativeStrategy(
       planningStoryDesignBase.creative_strategy,
       planningManifest,
       [],
     );
+    const planningNarrativeEvents = normalizeNarrativeEvents(
+      planningStoryDesignBase.narrative_events,
+      {
+        warnings: [],
+        anchorIds: new Set(planningManifest.consistencyManifest.anchors.map((anchor) => anchor.id)),
+      },
+    );
+    const planningNarrativeContract = await ensurePlanningNarrativeContract({
+      input,
+      modelName: textModel,
+      planningManifest,
+      creativeStrategy: planningCreativeStrategy,
+      narrativeEvents: planningNarrativeEvents,
+    });
+    if (planningNarrativeContract.repairCount > 0) {
+      planningCreativeStrategy = planningNarrativeContract.creativeStrategy;
+      planningRaw = replacePlanningCreativeStrategy(planningRaw, planningCreativeStrategy);
+      checkpoint.planningRaw = planningRaw;
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      planningStoryDesignBase = storyDesignStageContext(planningRaw);
+    }
     const planningTemplateId = planningCreativeStrategy.templateId ?? "generic_brand_story";
     const planningStoryDesignContext: Record<string, unknown> = {
       ...planningStoryDesignBase,
@@ -1346,6 +1698,12 @@ async function createAliyunStoryboardPlanInternal(
           required_story_contract: {
             template_id: planningTemplateId,
             required_story_functions: requiredStoryFunctionsForTemplate(planningTemplateId),
+            chronology_mode: planningCreativeStrategy.chronologyMode,
+            hook_event_ids: planningCreativeStrategy.hookEventIds,
+            conflict_event_ids: planningCreativeStrategy.conflictEventIds,
+            turning_point_event_ids: planningCreativeStrategy.turningPointEventIds,
+            payoff_event_ids: planningCreativeStrategy.payoffEventIds,
+            cta_event_ids: planningCreativeStrategy.ctaEventIds,
             causal_fields: ["depends_on_beat_ids", "evidence_from_beat_ids", "resolves_conflict_beat_id"],
             evidence_registry_required: true,
           },
@@ -1372,13 +1730,17 @@ async function createAliyunStoryboardPlanInternal(
       storyboardArtistPlan,
     });
     storyboardArtistPlan = storyContractResult.storyboardArtistPlan;
-    const planningNarrativeEvents = normalizeNarrativeEvents(
-      planningStoryDesignContext.narrative_events,
-      {
-        warnings: [],
-        anchorIds: new Set(planningManifest.consistencyManifest.anchors.map((anchor) => anchor.id)),
-      },
-    );
+    const semanticStoryResult = await ensureStoryboardSemanticQuality({
+      input,
+      modelName: model("ALIYUN_STORY_CRITIC_MODEL", textModel),
+      repairModelName: textModel,
+      planningManifest,
+      planningStoryDesignContext,
+      planningTemplateId,
+      storyboardArtistPlan,
+      referenceFacts: referenceFactsRaw,
+    });
+    storyboardArtistPlan = semanticStoryResult.storyboardArtistPlan;
     const assetContractResolution = resolveAssetContract({
       planningManifest,
       narrativeEvents: planningNarrativeEvents,
@@ -1388,6 +1750,7 @@ async function createAliyunStoryboardPlanInternal(
     storyboardArtistPlan = assetContractResolution.storyboardArtistPlan;
     checkpoint.storyboardArtistPlan = storyboardArtistPlan;
     checkpoint.storyContractReport = storyContractResult.report;
+    checkpoint.storySemanticReview = semanticStoryResult.review;
     await savePlannerCheckpoint(checkpoint, onCheckpoint);
     await reportPlannerProgress({
       stage: "story_contract_gate",
@@ -1402,8 +1765,21 @@ async function createAliyunStoryboardPlanInternal(
       } : undefined,
     });
     await reportPlannerProgress({
-      stage: "asset_contract_gate",
+      stage: "story_semantic_critic",
       completedSteps: 3 + referenceStepOffset,
+      totalSteps: totalPlanningSteps,
+      completedSegments: 0,
+      totalSegments,
+      detailZh: semanticStoryResult.review.passed
+        ? "语义剧情评审已通过，钩子、因果、转折、兑现和转化目标具有有效证据。"
+        : `语义剧情评审仍有 ${semanticStoryResult.review.blockingIssueCodes.length} 项高置信度问题，已记录供审核。`,
+      detailEn: semanticStoryResult.review.passed
+        ? "The semantic story review passed with evidence-backed hook, causality, payoff, and conversion alignment."
+        : `The semantic story review retained ${semanticStoryResult.review.blockingIssueCodes.length} high-confidence issue(s) for review.`,
+    });
+    await reportPlannerProgress({
+      stage: "asset_contract_gate",
+      completedSteps: 4 + referenceStepOffset,
       totalSteps: totalPlanningSteps,
       completedSegments: 0,
       totalSegments,
@@ -1412,7 +1788,7 @@ async function createAliyunStoryboardPlanInternal(
     });
     await reportPlannerProgress({
       stage: "shot_decomposer",
-      completedSteps: 4 + referenceStepOffset,
+      completedSteps: 5 + referenceStepOffset,
       totalSteps: totalPlanningSteps,
       completedSegments: 0,
       totalSegments,
@@ -1420,37 +1796,137 @@ async function createAliyunStoryboardPlanInternal(
       detailEn: `Story design is complete. Decomposing ${totalSegments} executable video segments.`,
     });
 
-    const shotPipelineResult = await createShotDecomposerPlan({
-      input,
-      modelName: textModel,
-      planningManifest,
-      storyboardArtistPlan,
-      storyDesignContext: {
-        ...planningStoryDesignContext,
-        story_beats: readLoose(storyboardArtistPlan, "storyBeats", "story_beats") ?? planningStoryDesignContext.story_beats,
-        shot_grouping_pass: readLoose(storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") ?? planningStoryDesignContext.shot_grouping_pass,
-      },
-      checkpoint,
-      onCheckpoint,
-      baseCompletedSteps: 4 + referenceStepOffset,
-      totalPlanningSteps,
-    });
-    let shotDecomposerPlan = shotPipelineResult.shotDecomposerPlan;
-    await logOnePromptVideo("aliyun.storyboard.shot_decomposer.parsed", {
-      shotDecomposerPlan,
-    });
-    if (!shotPipelineResult.promptDetailPlan) {
-      shotDecomposerPlan = await repairShotDecomposerPlanUntilSingleTake({
+    const shotStoryDesignContext = {
+      ...planningStoryDesignContext,
+      story_beats: readLoose(storyboardArtistPlan, "storyBeats", "story_beats") ?? planningStoryDesignContext.story_beats,
+      shot_grouping_pass: readLoose(storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") ?? planningStoryDesignContext.shot_grouping_pass,
+    };
+    let shotPipelineResult: ShotDecomposerPipelineResult;
+    let shotDecomposerPlan: Record<string, unknown>;
+    try {
+      shotPipelineResult = await createShotDecomposerPlan({
         input,
         modelName: textModel,
         planningManifest,
         storyboardArtistPlan,
-        storyDesignContext: {
-          ...planningStoryDesignContext,
-          story_beats: readLoose(storyboardArtistPlan, "storyBeats", "story_beats") ?? planningStoryDesignContext.story_beats,
-          shot_grouping_pass: readLoose(storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") ?? planningStoryDesignContext.shot_grouping_pass,
-        },
+        storyDesignContext: shotStoryDesignContext,
+        checkpoint,
+        onCheckpoint,
+        baseCompletedSteps: 5 + referenceStepOffset,
+        totalPlanningSteps,
+      });
+      shotDecomposerPlan = shotPipelineResult.shotDecomposerPlan;
+      await logOnePromptVideo("aliyun.storyboard.shot_decomposer.parsed", {
         shotDecomposerPlan,
+      });
+      if (!shotPipelineResult.promptDetailPlan) {
+        shotDecomposerPlan = await repairShotDecomposerPlanUntilSingleTake({
+          input,
+          modelName: textModel,
+          planningManifest,
+          storyboardArtistPlan,
+          storyDesignContext: shotStoryDesignContext,
+          shotDecomposerPlan,
+        });
+      }
+    } catch (error) {
+      if (!(error instanceof TimelineReplanRequiredError)) throw error;
+      const replanAttempts = checkpoint.timelineReplanAttempts ?? 0;
+      const maxReplans = timelineReplanMax();
+      if (replanAttempts >= maxReplans) {
+        throw new Error(
+          `Timeline replan limit reached (${maxReplans}). ${error.message}`,
+          { cause: error },
+        );
+      }
+      await reportPlannerProgress({
+        stage: "timeline_replan",
+        attempt: replanAttempts + 1,
+        currentSegmentNo: error.request.firstAffectedSegmentNo,
+        totalSegments,
+        detailZh: `第 ${error.request.firstAffectedSegmentNo} 段存在无法在单镜头内完成的结构变化，正在自动回退到 Stage 1 局部新增分段。`,
+        detailEn: `Segment ${error.request.firstAffectedSegmentNo} contains a structural change that cannot fit one take. Returning to Stage 1 for a local timeline split.`,
+      });
+      const bounds = segmentCountBounds(input.durationSeconds);
+      let contractValidationFeedback = "";
+      const revisedPlanningRaw = await runStoryboardStageWithRetry({
+        stage: `timeline_replan_r${replanAttempts + 1}`,
+        maxAttempts: 2,
+        baseDelayMs: 0,
+        run: async () => {
+          const timelineReplanRaw = await callJsonStage({
+            stage: `timeline_replan_r${replanAttempts + 1}`,
+            modelName: textModel,
+            systemPrompt: contractValidationFeedback
+              ? `${TIMELINE_REPLANNER_SYSTEM_PROMPT}
+
+The previous response violated the timeline replan contract. Return a complete corrected timeline_replan.
+Validation error: ${contractValidationFeedback}`
+              : TIMELINE_REPLANNER_SYSTEM_PROMPT,
+            userContent: JSON.stringify({
+              user_idea: input.userPrompt,
+              aspect_ratio: input.aspectRatio,
+              duration_seconds: input.durationSeconds,
+              segment_count_min: bounds.min,
+              segment_count_max: bounds.max,
+              segment_duration_min_seconds: MIN_SEGMENT_SECONDS,
+              segment_duration_max_seconds: MAX_SEGMENT_SECONDS,
+              planning_manifest: planningManifest,
+              story_design_context: planningStoryDesignContext,
+              timeline_change_request: error.request,
+              locked_prefix_segments: planningManifest.timelineBlueprint.segments.slice(
+                0,
+                Math.max(0, error.request.firstAffectedSegmentNo - 1),
+              ),
+            }),
+            temperature: 0.15,
+          });
+          try {
+            return applyTimelineReplanToPlanningRaw({
+              planningRaw,
+              timelineReplanRaw,
+              currentManifest: planningManifest,
+              input,
+              fallback,
+              request: error.request,
+            });
+          } catch (validationError) {
+            contractValidationFeedback = validationError instanceof Error
+              ? validationError.message
+              : String(validationError);
+            throw new StoryboardStageError(contractValidationFeedback, {
+              code: "contract_validation_error",
+              retryable: true,
+              cause: validationError,
+            });
+          }
+        },
+      });
+      checkpoint.planningRaw = revisedPlanningRaw;
+      checkpoint.timelineReplanAttempts = replanAttempts + 1;
+      checkpoint.timelineChangeHistory = [
+        ...(checkpoint.timelineChangeHistory ?? []),
+        error.request,
+      ].slice(-10);
+      invalidateCheckpointAfterTimelineReplan(
+        checkpoint,
+        error.request.firstAffectedSegmentNo,
+      );
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      await logOnePromptVideo("aliyun.storyboard.timeline_replan.applied", {
+        request: error.request,
+        attempt: checkpoint.timelineReplanAttempts,
+        previousSegmentCount: planningManifest.timelineBlueprint.segments.length,
+        nextSegmentCount: normalizePlanningManifest(
+          revisedPlanningRaw,
+          input,
+          fallback,
+        ).timelineBlueprint.segments.length,
+        preservedPrefixSegmentCount: error.request.firstAffectedSegmentNo - 1,
+      }, "warn");
+      return createAliyunStoryboardPlanInternal(input, {
+        ...options,
+        checkpoint,
       });
     }
     await reportPlannerProgress({
@@ -1511,6 +1987,7 @@ async function createAliyunStoryboardPlanInternal(
     const storyRolloutConfig = readStoryRolloutConfig();
     await logOnePromptVideo("story_rollout.config", { ...storyRolloutConfig });
 
+    const storyQualityCheckStartedAtMs = Date.now();
     const planFallback = createVideoPlan({ ...input, shotCount: planningManifest.timelineBlueprint.segmentCount });
     let plan = buildThreeStagePlan({
       input,
@@ -1524,6 +2001,16 @@ async function createAliyunStoryboardPlanInternal(
     plan = applyStoryQualityGateForRollout(plan, storyRolloutConfig);
     const finalStoryDecision = decideStoryRewrite(plan.storyQualityReport);
     plan = finalizeStoryQualityRollout(plan, storyRolloutConfig, 0, finalStoryDecision);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "脚本拆解",
+      stepNameZh: "程序执行剧情质量和结构质检",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - storyQualityCheckStartedAtMs,
+      passed: !finalStoryDecision.shouldRewrite,
+      resultZh: finalStoryDecision.shouldRewrite
+        ? `发现 ${finalStoryDecision.reasons.length} 项问题，需要返修`
+        : "剧情质量和结构检查通过",
+    }, finalStoryDecision.shouldRewrite ? "warn" : "info");
     await logOnePromptVideo("story_quality_rewrite.deferred_to_pre_shot_contract", {
       storyGateMode: storyRolloutConfig.storyGateMode,
       configuredLateRewriteMaxIgnored: storyRolloutConfig.storyRewriteMax,
@@ -1594,6 +2081,9 @@ async function callJsonStage(params: {
 }): Promise<unknown> {
   const startedAt = new Date();
   const startedAtMs = startedAt.getTime();
+  const moduleNameZh = plannerModuleNameZh(params.stage);
+  const promptBuildStartedAtMs = Date.now();
+  const reasoningPolicy = jsonStageReasoningPolicy(params.stage);
   const body: Record<string, unknown> = {
     model: params.modelName,
     messages: [
@@ -1601,16 +2091,45 @@ async function callJsonStage(params: {
       { role: "user", content: params.userContent },
     ],
     temperature: params.temperature,
+    enable_thinking: reasoningPolicy.enableThinking,
     response_format: { type: "json_object" },
   };
+  if (reasoningPolicy.thinkingBudget !== undefined) {
+    body.thinking_budget = reasoningPolicy.thinkingBudget;
+  }
+  await logOnePromptVideo("production.step.completed", {
+    moduleNameZh,
+    stepNameZh: "组装本阶段提示词和请求内容",
+    executionMethod: "program",
+    durationMs: Date.now() - promptBuildStartedAtMs,
+    model: params.modelName,
+    resultZh: "系统提示词、用户内容和返回格式已经组装完成",
+  });
   await logOnePromptVideo(`aliyun.storyboard.${params.stage}.request`, {
     model: params.modelName,
     baseUrl: compatibleBaseUrl(),
+    enableThinking: reasoningPolicy.enableThinking,
+    thinkingBudget: reasoningPolicy.thinkingBudget,
   });
   let observationRecorded = false;
   try {
+    await logOnePromptVideo("production.step.start", {
+      moduleNameZh,
+      stepNameZh: "把提示词交给大模型并等待完整返回",
+      executionMethod: "model",
+      model: params.modelName,
+    });
+    const modelRequestStartedAtMs = Date.now();
     const result = await fetchJsonStageContent(params.stage, body);
     const completedAt = new Date();
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh,
+      stepNameZh: "把提示词交给大模型并等待完整返回",
+      executionMethod: "model",
+      model: params.modelName,
+      durationMs: Date.now() - modelRequestStartedAtMs,
+      resultZh: result.ok ? "大模型已返回内容" : `上游返回 HTTP ${result.httpStatus}`,
+    }, result.ok ? "info" : "error");
     await logOnePromptVideo(`aliyun.storyboard.${params.stage}.response`, {
       httpStatus: result.httpStatus,
       ok: result.ok,
@@ -1640,9 +2159,25 @@ async function callJsonStage(params: {
     }
     const content = result.content;
     if (!content) throw new Error(`Aliyun storyboard ${params.stage} returned empty content`);
+    const parseStartedAtMs = Date.now();
     try {
-      return parseJsonObject(content);
+      const parsed = parseJsonObject(content);
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh,
+        stepNameZh: "程序解析并检查大模型返回的 JSON",
+        executionMethod: "program",
+        durationMs: Date.now() - parseStartedAtMs,
+        resultZh: "JSON 结构可用",
+      });
+      return parsed;
     } catch (parseError) {
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh,
+        stepNameZh: "程序解析并检查大模型返回的 JSON",
+        executionMethod: "program",
+        durationMs: Date.now() - parseStartedAtMs,
+        resultZh: "JSON 不合格，打回 JSON 修复模型",
+      }, "warn");
       await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_parse.failed`, {
         error: errorForLog(parseError),
         contentLength: content.length,
@@ -1671,6 +2206,21 @@ async function callJsonStage(params: {
     }
     throw error;
   }
+}
+
+function plannerModuleNameZh(stage: string): string {
+  if (stage.startsWith("reference_fact_extractor")) return "参考素材事实提取";
+  if (stage.startsWith("planning_architect")) return "故事架构与一致性资产规划";
+  if (stage.startsWith("asset_prompt_contract")) return "一致性资产规划质检与返修";
+  if (stage.startsWith("planning_contract") || stage.startsWith("planning_duration")) return "故事架构质检与返修";
+  if (stage.startsWith("storyboard_artist")) return "故事板规划";
+  if (stage.startsWith("shot_decomposer")) return "脚本拆解";
+  if (stage.startsWith("prompt_detailer")) return "生成提示词细化";
+  if (stage.startsWith("story_contract")) return "故事逻辑质检与修复";
+  if (stage.startsWith("story_quality")) return "剧情质量质检与返修";
+  if (stage.startsWith("split_repair")) return "镜头拆分质检与修复";
+  if (stage.startsWith("json_repair")) return "大模型返回格式修复";
+  return "脚本与分镜规划";
 }
 
 async function fetchJsonStage(stage: string, body: Record<string, unknown>): Promise<Response> {
@@ -1772,7 +2322,12 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
     const contentParts: string[] = [];
     let buffer = "";
     let chunkCount = 0;
-    let firstChunkMs: number | undefined;
+    let reasoningChunkCount = 0;
+    let reasoningContentLength = 0;
+    let firstNetworkChunkMs: number | undefined;
+    let firstSseEventMs: number | undefined;
+    let firstReasoningChunkMs: number | undefined;
+    let firstAnswerChunkMs: number | undefined;
     let finishReason: unknown;
     let usage: unknown;
 
@@ -1785,6 +2340,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         .join("\n")
         .trim();
       if (!data || data === "[DONE]") return;
+      if (firstSseEventMs === undefined) firstSseEventMs = Date.now() - startedAt;
       let raw: unknown;
       try {
         raw = JSON.parse(data);
@@ -1798,6 +2354,18 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         if (choice.finish_reason) finishReason = choice.finish_reason;
         const delta = isRecord(choice.delta) ? choice.delta : undefined;
         const message = isRecord(choice.message) ? choice.message : undefined;
+        const reasoningPiece = typeof delta?.reasoning_content === "string"
+          ? delta.reasoning_content
+          : typeof message?.reasoning_content === "string"
+            ? message.reasoning_content
+            : "";
+        if (reasoningPiece) {
+          reasoningChunkCount += 1;
+          reasoningContentLength += reasoningPiece.length;
+          if (firstReasoningChunkMs === undefined) {
+            firstReasoningChunkMs = Date.now() - startedAt;
+          }
+        }
         const piece = typeof delta?.content === "string"
           ? delta.content
           : typeof message?.content === "string"
@@ -1806,7 +2374,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         if (piece) {
           contentParts.push(piece);
           chunkCount += 1;
-          if (firstChunkMs === undefined) firstChunkMs = Date.now() - startedAt;
+          if (firstAnswerChunkMs === undefined) firstAnswerChunkMs = Date.now() - startedAt;
         }
       }
     };
@@ -1814,6 +2382,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      if (firstNetworkChunkMs === undefined) firstNetworkChunkMs = Date.now() - startedAt;
       armIdleTimeout(idleTimeoutMs, "stream_idle_timeout");
       buffer += decoder.decode(value, { stream: true });
       buffer = buffer.replace(/\r\n/g, "\n");
@@ -1840,8 +2409,16 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
       rawSummary: {
         stream: true,
         chunkCount,
+        reasoningChunkCount,
+        reasoningContentLength,
         contentLength: content.length,
-        firstChunkMs,
+        firstNetworkChunkMs,
+        firstSseEventMs,
+        firstReasoningChunkMs,
+        firstAnswerChunkMs,
+        // Backward compatibility for existing log analysis. This field has
+        // always meant the first answer token, not the first network packet.
+        firstChunkMs: firstAnswerChunkMs,
         finishReason,
         usage,
       },
@@ -1969,6 +2546,207 @@ function buildPlanningArchitectContent(input: PlanVideoProjectInput, referenceFa
   });
 }
 
+export interface PlanningDurationContractIssue {
+  code: string;
+  path: string;
+  message: string;
+}
+
+export function validatePlanningDurationContract(
+  planningRaw: unknown,
+  input: PlanVideoProjectInput,
+): PlanningDurationContractIssue[] {
+  const envelope = isRecord(planningRaw) ? planningRaw : {};
+  const root = isRecord(envelope.planning_manifest) ? envelope.planning_manifest : envelope;
+  const timeline = isRecord(root.timeline_blueprint)
+    ? root.timeline_blueprint
+    : isRecord(root.timelineBlueprint)
+      ? root.timelineBlueprint
+      : {};
+  const segments = arrayOfRecords(timeline.segments);
+  const issues: PlanningDurationContractIssue[] = [];
+  const bounds = segmentCountBounds(input.durationSeconds);
+  const declaredCount = strictInteger(timeline.segment_count ?? timeline.segmentCount);
+  const declaredTotal = strictInteger(timeline.total_duration_seconds ?? timeline.totalDurationSeconds);
+  if (!segments.length) {
+    return [{
+      code: "DURATION_SEGMENTS_MISSING",
+      path: "planning_manifest.timeline_blueprint.segments",
+      message: "timeline_blueprint.segments must be a non-empty array.",
+    }];
+  }
+  if (declaredCount !== segments.length) {
+    issues.push({ code: "DURATION_SEGMENT_COUNT_MISMATCH", path: "planning_manifest.timeline_blueprint.segment_count", message: `segment_count must equal ${segments.length}.` });
+  }
+  if (segments.length < bounds.min || segments.length > bounds.max) {
+    issues.push({ code: "DURATION_SEGMENT_COUNT_OUT_OF_RANGE", path: "planning_manifest.timeline_blueprint.segments", message: `segment count must be within ${bounds.min}-${bounds.max}.` });
+  }
+  if (declaredTotal !== input.durationSeconds) {
+    issues.push({ code: "DURATION_TOTAL_DECLARATION_INVALID", path: "planning_manifest.timeline_blueprint.total_duration_seconds", message: `total_duration_seconds must equal ${input.durationSeconds}.` });
+  }
+  if (
+    strictInteger(timeline.segment_duration_min_seconds ?? timeline.segmentDurationMinSeconds) !== MIN_SEGMENT_SECONDS
+    || strictInteger(timeline.segment_duration_max_seconds ?? timeline.segmentDurationMaxSeconds) !== MAX_SEGMENT_SECONDS
+  ) {
+    issues.push({ code: "DURATION_LIMIT_DECLARATION_INVALID", path: "planning_manifest.timeline_blueprint", message: `segment duration limits must be ${MIN_SEGMENT_SECONDS}-${MAX_SEGMENT_SECONDS} seconds.` });
+  }
+
+  let cursor = 0;
+  let allocatedTotal = 0;
+  const durationReasons: string[] = [];
+  segments.forEach((segment, index) => {
+    const path = `planning_manifest.timeline_blueprint.segments[${index}]`;
+    const segmentNo = strictInteger(segment.segment_no ?? segment.segmentNo);
+    const start = strictInteger(segment.start_time_seconds ?? segment.startTimeSeconds);
+    const end = strictInteger(segment.end_time_seconds ?? segment.endTimeSeconds);
+    const duration = strictInteger(segment.duration_seconds ?? segment.durationSeconds);
+    const minimum = strictInteger(segment.minimum_executable_seconds ?? segment.minimumExecutableSeconds);
+    const preferred = strictInteger(segment.preferred_duration_seconds ?? segment.preferredDurationSeconds);
+    const maximum = strictInteger(segment.maximum_useful_seconds ?? segment.maximumUsefulSeconds);
+    const reason = stringOr(segment.duration_reason_zh ?? segment.durationReasonZh, "").trim();
+    const budget = isRecord(segment.timing_budget)
+      ? segment.timing_budget
+      : isRecord(segment.timingBudget)
+        ? segment.timingBudget
+        : {};
+    const setup = strictInteger(budget.setup_seconds ?? budget.setupSeconds);
+    const action = strictInteger(budget.action_seconds ?? budget.actionSeconds);
+    const result = strictInteger(budget.result_seconds ?? budget.resultSeconds);
+    durationReasons.push(reason);
+
+    if (segmentNo !== index + 1) {
+      issues.push({ code: "DURATION_SEGMENT_NUMBER_INVALID", path: `${path}.segment_no`, message: `segment_no must equal ${index + 1}.` });
+    }
+    if (duration === undefined || duration < MIN_SEGMENT_SECONDS || duration > MAX_SEGMENT_SECONDS) {
+      issues.push({ code: "DURATION_VALUE_INVALID", path: `${path}.duration_seconds`, message: `duration_seconds must be an integer within ${MIN_SEGMENT_SECONDS}-${MAX_SEGMENT_SECONDS}.` });
+    }
+    if (start !== cursor || duration === undefined || end !== cursor + duration) {
+      issues.push({ code: "DURATION_BOUNDARY_INVALID", path, message: `segment must start at ${cursor} and end at start + duration with no gap or overlap.` });
+    }
+    if (reason.length < 8) {
+      issues.push({ code: "DURATION_REASON_MISSING", path: `${path}.duration_reason_zh`, message: "duration_reason_zh must explain the event-specific timing need." });
+    }
+    if (
+      minimum === undefined || preferred === undefined || maximum === undefined || duration === undefined
+      || minimum < MIN_SEGMENT_SECONDS || maximum > MAX_SEGMENT_SECONDS
+      || minimum > duration || duration > maximum || preferred < minimum || preferred > maximum
+    ) {
+      issues.push({ code: "DURATION_EXECUTABLE_RANGE_INVALID", path, message: "minimum_executable_seconds <= duration_seconds <= maximum_useful_seconds and preferred_duration_seconds must be inside that range." });
+    }
+    if (
+      setup === undefined || action === undefined || result === undefined
+      || setup < 0 || action < 0 || result < 0 || duration === undefined
+      || setup + action + result !== duration
+    ) {
+      issues.push({ code: "DURATION_TIMING_BUDGET_INVALID", path: `${path}.timing_budget`, message: "setup_seconds + action_seconds + result_seconds must equal duration_seconds exactly." });
+    }
+    if (duration !== undefined) {
+      allocatedTotal += duration;
+      cursor += duration;
+    }
+  });
+  if (allocatedTotal !== input.durationSeconds) {
+    issues.push({ code: "DURATION_TOTAL_MISMATCH", path: "planning_manifest.timeline_blueprint.segments", message: `segment durations sum to ${allocatedTotal}; expected ${input.durationSeconds}.` });
+  }
+
+  const candidateSegments = arrayOfRecords(envelope.candidate_timeline ?? envelope.candidateTimeline);
+  if (candidateSegments.length !== segments.length) {
+    issues.push({ code: "DURATION_CANDIDATE_TIMELINE_MISMATCH", path: "candidate_timeline", message: "candidate_timeline must contain the same number of segments as timeline_blueprint." });
+  } else {
+    candidateSegments.forEach((candidate, index) => {
+      const blueprint = segments[index];
+      const fieldsMatch = [
+        ["segment_no", "segmentNo"],
+        ["start_time_seconds", "startTimeSeconds"],
+        ["end_time_seconds", "endTimeSeconds"],
+        ["duration_seconds", "durationSeconds"],
+      ].every(([snake, camel]) =>
+        strictInteger(candidate[snake] ?? candidate[camel])
+        === strictInteger(blueprint[snake] ?? blueprint[camel]));
+      if (!fieldsMatch) {
+        issues.push({ code: "DURATION_CANDIDATE_TIMELINE_MISMATCH", path: `candidate_timeline[${index}]`, message: "candidate_timeline timing must exactly mirror timeline_blueprint." });
+      }
+    });
+  }
+
+  const uniqueDurations = new Set(segments.map((segment) =>
+    strictInteger(segment.duration_seconds ?? segment.durationSeconds)));
+  const normalizedReasons = durationReasons.map((reason) => reason.replace(/\s+/g, "").toLowerCase());
+  if (segments.length >= 3 && uniqueDurations.size === 1 && new Set(normalizedReasons).size <= 1) {
+    issues.push({ code: "DURATION_MECHANICAL_EQUAL_SPLIT", path: "planning_manifest.timeline_blueprint.segments", message: "equal durations require distinct event-specific reasons; mechanical total/count division is not accepted." });
+  }
+  return issues;
+}
+
+async function ensurePlanningDurationContract(params: {
+  input: PlanVideoProjectInput;
+  modelName: string;
+  planningRaw: unknown;
+}): Promise<Record<string, unknown>> {
+  let current = isRecord(params.planningRaw) ? params.planningRaw : {};
+  const maxRepairs = planningDurationRepairMax();
+  for (let revision = 0; revision <= maxRepairs; revision += 1) {
+    const issues = validatePlanningDurationContract(current, params.input);
+    if (!issues.length) return current;
+    if (revision >= maxRepairs) {
+      throw new StoryboardStageError(
+        `Planning duration contract remains invalid: ${issues.slice(0, 8).map((issue) => `${issue.code}@${issue.path}`).join(", ")}`,
+        { code: "contract_validation_error", retryable: true },
+      );
+    }
+    await reportPlannerProgress({
+      stage: "planning_duration_repair",
+      attempt: revision + 1,
+      detailZh: `发现 ${issues.length} 个分段时长合同问题，正在让 Planning Architect 重新分配每段时长。`,
+      detailEn: `Found ${issues.length} segment duration contract issue(s). Asking Planning Architect to reallocate segment timing.`,
+    });
+    const repairRaw = await callJsonStage({
+      stage: `planning_duration_repair_r${revision + 1}`,
+      modelName: params.modelName,
+      systemPrompt: PLANNING_DURATION_REPAIR_SYSTEM_PROMPT,
+      userContent: JSON.stringify({
+        user_idea: params.input.userPrompt,
+        duration_seconds: params.input.durationSeconds,
+        segment_count_bounds: segmentCountBounds(params.input.durationSeconds),
+        current_planning_output: current,
+        validation_issues: issues,
+      }),
+      temperature: 0.15,
+    });
+    current = mergePlanningDurationRepair(current, repairRaw);
+  }
+  return current;
+}
+
+export function mergePlanningDurationRepair(planningRaw: unknown, repairRaw: unknown): Record<string, unknown> {
+  const base = isRecord(planningRaw) ? { ...planningRaw } : {};
+  const repairEnvelope = isRecord(repairRaw) ? repairRaw : {};
+  const replan = isRecord(repairEnvelope.duration_replan) ? repairEnvelope.duration_replan : repairEnvelope;
+  const timeline = isRecord(replan.timeline_blueprint)
+    ? replan.timeline_blueprint
+    : isRecord(replan.timelineBlueprint)
+      ? replan.timelineBlueprint
+      : {};
+  if (!arrayOfRecords(timeline.segments).length) return base;
+  const baseManifest = isRecord(base.planning_manifest)
+    ? { ...base.planning_manifest }
+    : isRecord(base.planningManifest)
+      ? { ...base.planningManifest }
+      : {};
+  return {
+    ...base,
+    candidate_timeline: Array.isArray(replan.candidate_timeline) ? replan.candidate_timeline : timeline.segments,
+    planning_manifest: {
+      ...baseManifest,
+      timeline_blueprint: timeline,
+    },
+  };
+}
+
+function strictInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+}
+
 async function extractReferenceFacts(
   modelName: string,
   referenceImageUrls: string[],
@@ -2003,6 +2781,213 @@ async function extractReferenceFacts(
     referenceFactCache.delete(fingerprint);
     throw error;
   }
+}
+
+async function ensurePlanningNarrativeContract(params: {
+  input: PlanVideoProjectInput;
+  modelName: string;
+  planningManifest: VideoPlanningManifest;
+  creativeStrategy: VideoCreativeStrategy;
+  narrativeEvents: NarrativeEvent[];
+}): Promise<{
+  creativeStrategy: VideoCreativeStrategy;
+  report: PlanningNarrativeContractResult;
+  repairCount: number;
+}> {
+  const maxRepairs = storyContractRepairMax();
+  let current = params.creativeStrategy;
+  let report = validatePlanningNarrativeContract({
+    creativeStrategy: current,
+    narrativeEvents: params.narrativeEvents,
+    timelineSegments: params.planningManifest.timelineBlueprint.segments,
+  });
+  for (let repairCount = 0; !report.passed && repairCount < maxRepairs; repairCount += 1) {
+    await reportPlannerProgress({
+      stage: "planning_contract_repair",
+      attempt: repairCount + 1,
+      detailZh: `创意策略与事件时间线存在 ${report.issues.length} 项不一致，正在定向修复事件绑定与钩子揭示范围。`,
+      detailEn: `Creative strategy has ${report.issues.length} event-contract issue(s). Repairing bindings and hook reveal scope.`,
+    });
+    const repairedRaw = await callJsonStage({
+      stage: `planning_contract_repair_${repairCount + 1}`,
+      modelName: params.modelName,
+      systemPrompt: PLANNING_NARRATIVE_CONTRACT_REPAIR_SYSTEM_PROMPT,
+      userContent: JSON.stringify({
+        user_idea: params.input.userPrompt,
+        current_creative_strategy: current,
+        narrative_events: params.narrativeEvents,
+        timeline_blueprint: params.planningManifest.timelineBlueprint,
+        contract_issues: report.issues,
+      }),
+      temperature: 0.1,
+    });
+    const envelope = isRecord(repairedRaw) ? repairedRaw : {};
+    current = normalizeCreativeStrategy(
+      readLoose(envelope, "creativeStrategy", "creative_strategy") ?? repairedRaw,
+      params.planningManifest,
+      [],
+    );
+    report = validatePlanningNarrativeContract({
+      creativeStrategy: current,
+      narrativeEvents: params.narrativeEvents,
+      timelineSegments: params.planningManifest.timelineBlueprint.segments,
+    });
+    await logOnePromptVideo("aliyun.storyboard.planning_contract.repair", {
+      attempt: repairCount + 1,
+      passed: report.passed,
+      remainingIssues: report.issues,
+    }, report.passed ? "info" : "warn");
+    if (report.passed) return { creativeStrategy: current, report, repairCount: repairCount + 1 };
+  }
+  if (!report.passed) {
+    throw new Error(`Planning narrative contract validation failed: ${report.issues
+      .slice(0, 8)
+      .map((item) => `${item.code}@${item.path}`)
+      .join(", ")}`);
+  }
+  return { creativeStrategy: current, report, repairCount: 0 };
+}
+
+function replacePlanningCreativeStrategy(
+  planningRaw: unknown,
+  creativeStrategy: VideoCreativeStrategy,
+): Record<string, unknown> {
+  const envelope = isRecord(planningRaw) ? { ...planningRaw } : {};
+  envelope.classification = {
+    video_type: creativeStrategy.videoType,
+    video_category: creativeStrategy.videoCategory,
+    template_id: creativeStrategy.templateId,
+    template_reason_zh: creativeStrategy.templateReasonZh,
+    chronology_mode: creativeStrategy.chronologyMode,
+    fallback_reason_zh: creativeStrategy.fallbackReasonZh,
+  };
+  delete envelope.creativeStrategy;
+  envelope.creative_strategy = creativeStrategy;
+  return envelope;
+}
+
+export function applyTimelineReplanToPlanningRaw(params: {
+  planningRaw: unknown;
+  timelineReplanRaw: unknown;
+  currentManifest: VideoPlanningManifest;
+  input: PlanVideoProjectInput;
+  fallback: OnePromptVideoPlan;
+  request: TimelineChangeRequest;
+}): Record<string, unknown> {
+  const responseEnvelope = isRecord(params.timelineReplanRaw) ? params.timelineReplanRaw : {};
+  const replan = isRecord(responseEnvelope.timeline_replan)
+    ? responseEnvelope.timeline_replan
+    : responseEnvelope;
+  const manifestPatch = isRecord(replan.planning_manifest)
+    ? replan.planning_manifest
+    : isRecord(replan.planningManifest)
+      ? replan.planningManifest
+      : {};
+  const timelinePatch = isRecord(manifestPatch.timeline_blueprint)
+    ? manifestPatch.timeline_blueprint
+    : isRecord(manifestPatch.timelineBlueprint)
+      ? manifestPatch.timelineBlueprint
+      : {};
+  if (!arrayOfRecords(timelinePatch.segments).length) {
+    throw new Error("Timeline Replanner returned no timeline_blueprint.segments.");
+  }
+
+  const baseEnvelope = isRecord(params.planningRaw) ? { ...params.planningRaw } : {};
+  const baseManifest = isRecord(baseEnvelope.planning_manifest)
+    ? { ...baseEnvelope.planning_manifest }
+    : isRecord(baseEnvelope.planningManifest)
+      ? { ...baseEnvelope.planningManifest }
+      : { ...params.currentManifest };
+  const revisedRaw: Record<string, unknown> = {
+    ...baseEnvelope,
+    planning_manifest: {
+      ...baseManifest,
+      timeline_blueprint: timelinePatch,
+    },
+    candidate_timeline: timelinePatch.segments,
+  };
+  const revisedNarrativeEvents = replan.narrative_events ?? replan.narrativeEvents;
+  if (Array.isArray(revisedNarrativeEvents) && revisedNarrativeEvents.length) {
+    revisedRaw.narrative_events = revisedNarrativeEvents;
+  }
+
+  const durationIssues = validatePlanningDurationContract(revisedRaw, params.input);
+  if (durationIssues.length) {
+    throw new Error(
+      `Timeline Replanner returned an invalid duration contract: ${durationIssues
+        .slice(0, 8)
+        .map((issue) => `${issue.code}@${issue.path}`)
+        .join(", ")}`,
+    );
+  }
+  const revisedManifest = normalizePlanningManifest(
+    revisedRaw,
+    params.input,
+    params.fallback,
+  );
+  const currentSegments = params.currentManifest.timelineBlueprint.segments;
+  const revisedSegments = revisedManifest.timelineBlueprint.segments;
+  if (revisedSegments.length <= currentSegments.length) {
+    throw new Error(
+      `Timeline Replanner must add at least one segment; received ${revisedSegments.length}, current ${currentSegments.length}.`,
+    );
+  }
+  const lockedPrefixCount = Math.max(0, params.request.firstAffectedSegmentNo - 1);
+  for (let index = 0; index < lockedPrefixCount; index += 1) {
+    if (!timelineSegmentsEquivalent(currentSegments[index], revisedSegments[index])) {
+      throw new Error(
+        `Timeline Replanner changed locked prefix segment ${index + 1}; only segment ${params.request.firstAffectedSegmentNo} and later may change.`,
+      );
+    }
+  }
+  return revisedRaw;
+}
+
+function timelineSegmentsEquivalent(
+  left: VideoTimelineBlueprintSegment | undefined,
+  right: VideoTimelineBlueprintSegment | undefined,
+): boolean {
+  if (!left || !right) return false;
+  return JSON.stringify({
+    segmentNo: left.segmentNo,
+    startTimeSeconds: left.startTimeSeconds,
+    endTimeSeconds: left.endTimeSeconds,
+    durationSeconds: left.durationSeconds,
+    beatRole: left.beatRole ?? "custom",
+    purposeZh: left.purposeZh ?? "",
+    requiredAnchorIds: left.requiredAnchorIds ?? [],
+    sourceEventIds: left.sourceEventIds ?? [],
+    boundaryModeHint: left.boundaryModeHint ?? "continuous",
+  }) === JSON.stringify({
+    segmentNo: right.segmentNo,
+    startTimeSeconds: right.startTimeSeconds,
+    endTimeSeconds: right.endTimeSeconds,
+    durationSeconds: right.durationSeconds,
+    beatRole: right.beatRole ?? "custom",
+    purposeZh: right.purposeZh ?? "",
+    requiredAnchorIds: right.requiredAnchorIds ?? [],
+    sourceEventIds: right.sourceEventIds ?? [],
+    boundaryModeHint: right.boundaryModeHint ?? "continuous",
+  });
+}
+
+export function invalidateCheckpointAfterTimelineReplan(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+  firstAffectedSegmentNo: number,
+): void {
+  const keepPrefix = <T>(records: Record<string, T> | undefined): Record<string, T> =>
+    Object.fromEntries(
+      Object.entries(records ?? {}).filter(([key]) => {
+        const segmentNo = Number(key);
+        return Number.isInteger(segmentNo) && segmentNo > 0 && segmentNo < firstAffectedSegmentNo;
+      }),
+    );
+  checkpoint.storyboardArtistPlan = undefined;
+  checkpoint.storyContractReport = undefined;
+  checkpoint.storySemanticReview = undefined;
+  checkpoint.shotDecomposerSegmentPlans = keepPrefix(checkpoint.shotDecomposerSegmentPlans);
+  checkpoint.approvedShotDecomposerSegmentPlans = keepPrefix(checkpoint.approvedShotDecomposerSegmentPlans);
+  checkpoint.promptDetailSegmentPlans = keepPrefix(checkpoint.promptDetailSegmentPlans);
 }
 
 async function ensureStoryboardStoryContract(params: {
@@ -2087,8 +3072,247 @@ async function ensureStoryboardStoryContract(params: {
   return { storyboardArtistPlan: current, report, repairCount: 0 };
 }
 
+async function ensureStoryboardSemanticQuality(params: {
+  input: PlanVideoProjectInput;
+  modelName: string;
+  repairModelName: string;
+  planningManifest: VideoPlanningManifest;
+  planningStoryDesignContext: Record<string, unknown>;
+  planningTemplateId: VideoCreativeTemplateId;
+  storyboardArtistPlan: Record<string, unknown>;
+  referenceFacts: unknown;
+}): Promise<{
+  storyboardArtistPlan: Record<string, unknown>;
+  review: VideoStorySemanticReview;
+  repairCount: number;
+}> {
+  const mode = semanticStoryGateMode();
+  let current = params.storyboardArtistPlan;
+  if (mode === "off") {
+    const review: VideoStorySemanticReview = {
+      passed: true,
+      dimensionScores: {},
+      issues: [],
+      strengths: [],
+      summaryZh: "语义剧情评审已通过环境变量关闭。",
+      blockingIssueCodes: [],
+      invalidEvidenceReferences: [],
+      repairAttempts: 0,
+      modelName: params.modelName,
+    };
+    return { storyboardArtistPlan: attachSemanticReview(current, review), review, repairCount: 0 };
+  }
+
+  let review: VideoStorySemanticReview;
+  try {
+    review = await reviewStoryboardSemantics({ ...params, storyboardArtistPlan: current, repairAttempts: 0 });
+  } catch (error) {
+    if (mode === "strict") throw error;
+    review = semanticStoryUnavailableReview(params.modelName, error);
+    await logOnePromptVideo("aliyun.storyboard.story_semantic_critic.unavailable", {
+      mode,
+      ...errorForLog(error),
+    }, "warn");
+    return { storyboardArtistPlan: attachSemanticReview(current, review), review, repairCount: 0 };
+  }
+  const maxRepairs = semanticStoryRepairMax();
+  for (let repairCount = 0; !review.passed && repairCount < maxRepairs; repairCount += 1) {
+    await reportPlannerProgress({
+      stage: "story_semantic_repair",
+      attempt: repairCount + 1,
+      detailZh: `语义剧情评审发现 ${review.blockingIssueCodes.length} 项高置信度问题，正在定向修复剧情节拍。`,
+      detailEn: `Semantic story review found ${review.blockingIssueCodes.length} high-confidence issue(s). Repairing story beats only.`,
+    });
+    try {
+      const repairedRaw = await callJsonStage({
+        stage: `story_semantic_repair_${repairCount + 1}`,
+        modelName: params.repairModelName,
+        systemPrompt: STORY_SEMANTIC_REPAIR_SYSTEM_PROMPT,
+        userContent: JSON.stringify({
+          user_idea: params.input.userPrompt,
+          planning_manifest: params.planningManifest,
+          story_design_context: params.planningStoryDesignContext,
+          critic_review: review,
+          current_storyboard_artist_plan: current,
+        }),
+        temperature: 0.18,
+      });
+      current = mergeSemanticStoryRepair(current, unwrapPlanRoot(repairedRaw, "storyboard_artist_plan"));
+      const repairedContract = await ensureStoryboardStoryContract({
+        input: params.input,
+        modelName: params.repairModelName,
+        planningManifest: params.planningManifest,
+        planningStoryDesignContext: params.planningStoryDesignContext,
+        planningTemplateId: params.planningTemplateId,
+        storyboardArtistPlan: current,
+      });
+      current = repairedContract.storyboardArtistPlan;
+      review = await reviewStoryboardSemantics({
+        ...params,
+        storyboardArtistPlan: current,
+        repairAttempts: repairCount + 1,
+      });
+    } catch (error) {
+      if (mode === "strict") throw error;
+      await logOnePromptVideo("aliyun.storyboard.story_semantic_repair.unavailable", {
+        mode,
+        attempt: repairCount + 1,
+        ...errorForLog(error),
+      }, "warn");
+      break;
+    }
+  }
+
+  current = attachSemanticReview(current, review);
+  await logOnePromptVideo("aliyun.storyboard.story_semantic_critic.result", {
+    mode,
+    passed: review.passed,
+    repairAttempts: review.repairAttempts,
+    blockingIssueCodes: review.blockingIssueCodes,
+    invalidEvidenceReferences: review.invalidEvidenceReferences,
+    dimensionScores: review.dimensionScores,
+  }, review.passed ? "info" : "warn");
+  if (!review.passed && mode === "strict") {
+    throw new Error(`Semantic story review failed before shot decomposition: ${review.blockingIssueCodes.slice(0, 8).join(", ")}`);
+  }
+  return {
+    storyboardArtistPlan: current,
+    review,
+    repairCount: review.repairAttempts ?? 0,
+  };
+}
+
+function semanticStoryUnavailableReview(modelName: string, error: unknown): VideoStorySemanticReview {
+  return {
+    passed: true,
+    dimensionScores: {},
+    issues: [{
+      code: "SEMANTIC_CRITIC_UNAVAILABLE",
+      severity: "warning",
+      confidence: 1,
+      dimension: "causal_coherence",
+      claimZh: "语义剧情评审服务暂时不可用，本轮仅保留硬编码剧情合同检查。",
+      evidenceEventIds: [],
+      evidenceBeatIds: [],
+      whyItHurtsZh: "本轮无法获得对吸引力、转折、兑现和转化语义的模型评审。",
+      repairInstructionZh: "稍后重新运行剧情评审，或在严格模式下阻止继续生成。",
+      rewriteFromStage: "storyboard",
+    }],
+    strengths: [],
+    summaryZh: error instanceof Error
+      ? `语义剧情评审不可用：${error.message}`
+      : "语义剧情评审不可用。",
+    blockingIssueCodes: [],
+    invalidEvidenceReferences: [],
+    repairAttempts: 0,
+    modelName,
+  };
+}
+
+async function reviewStoryboardSemantics(params: {
+  input: PlanVideoProjectInput;
+  modelName: string;
+  planningManifest: VideoPlanningManifest;
+  planningStoryDesignContext: Record<string, unknown>;
+  storyboardArtistPlan: Record<string, unknown>;
+  referenceFacts: unknown;
+  repairAttempts: number;
+}): Promise<VideoStorySemanticReview> {
+  const storyBeats = arrayOfRecords(readLoose(params.storyboardArtistPlan, "storyBeats", "story_beats"));
+  const validBeatIds = storyBeats
+    .map((beat) => stringOr(beat.beatId ?? beat.beat_id, ""))
+    .filter(Boolean);
+  const narrativeEvents = arrayOfRecords(readLoose(params.planningStoryDesignContext, "narrativeEvents", "narrative_events"));
+  const validEventIds = narrativeEvents
+    .map((event) => stringOr(event.eventId ?? event.event_id, ""))
+    .filter(Boolean);
+  const creativeStrategy = isRecord(params.planningStoryDesignContext.creative_strategy)
+    ? params.planningStoryDesignContext.creative_strategy
+    : {};
+  const raw = await callJsonStage({
+    stage: params.repairAttempts > 0
+      ? `story_semantic_critic_after_repair_${params.repairAttempts}`
+      : "story_semantic_critic",
+    modelName: params.modelName,
+    systemPrompt: STORY_SEMANTIC_CRITIC_SYSTEM_PROMPT,
+    userContent: JSON.stringify({
+      user_idea: params.input.userPrompt,
+      aspect_ratio: params.input.aspectRatio,
+      duration_seconds: params.input.durationSeconds,
+      target_audience: readLoose(creativeStrategy, "audienceZh", "audience_zh"),
+      conversion_goal: readLoose(creativeStrategy, "conversionGoalZh", "conversion_goal_zh"),
+      reference_facts: params.referenceFacts,
+      creative_strategy: creativeStrategy,
+      narrative_events: narrativeEvents,
+      story_beats: storyBeats,
+      evidence_registry: readLoose(params.storyboardArtistPlan, "evidenceRegistry", "evidence_registry") ?? [],
+      timeline_blueprint: params.planningManifest.timelineBlueprint,
+      storyboard_brief: readLoose(params.storyboardArtistPlan, "storyboardBrief", "storyboard_brief") ?? [],
+    }),
+    temperature: 0.12,
+  });
+  return normalizeStorySemanticReview(raw, {
+    validEventIds,
+    validBeatIds,
+    modelName: params.modelName,
+    repairAttempts: params.repairAttempts,
+  });
+}
+
+function mergeSemanticStoryRepair(
+  current: Record<string, unknown>,
+  repaired: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...current };
+  for (const [camel, snake] of [
+    ["storyBeats", "story_beats"],
+    ["evidenceRegistry", "evidence_registry"],
+    ["storyboardBrief", "storyboard_brief"],
+    ["shotGroupingPass", "shot_grouping_pass"],
+  ] as const) {
+    const value = readLoose(repaired, camel, snake);
+    if (value === undefined) continue;
+    delete next[camel];
+    next[snake] = value;
+  }
+  return next;
+}
+
+function attachSemanticReview(
+  plan: Record<string, unknown>,
+  review: VideoStorySemanticReview,
+): Record<string, unknown> {
+  return {
+    ...plan,
+    story_semantic_review: review,
+  };
+}
+
+function semanticStoryGateMode(): "off" | "warn" | "strict" {
+  const raw = String(process.env.ONE_PROMPT_VIDEO_SEMANTIC_STORY_GATE ?? "warn").trim().toLowerCase();
+  return raw === "off" || raw === "strict" ? raw : "warn";
+}
+
+function semanticStoryRepairMax(): number {
+  const raw = Number(process.env.ONE_PROMPT_VIDEO_SEMANTIC_STORY_REPAIR_MAX);
+  if (!Number.isFinite(raw)) return 1;
+  return Math.max(0, Math.min(2, Math.round(raw)));
+}
+
 function storyContractRepairMax(): number {
   const raw = Number(process.env.ONE_PROMPT_VIDEO_STORY_CONTRACT_REPAIR_MAX);
+  if (!Number.isFinite(raw)) return 2;
+  return Math.max(0, Math.min(3, Math.round(raw)));
+}
+
+function timelineReplanMax(): number {
+  const raw = Number(process.env.ONE_PROMPT_VIDEO_TIMELINE_REPLAN_MAX);
+  if (!Number.isFinite(raw)) return 2;
+  return Math.max(0, Math.min(3, Math.round(raw)));
+}
+
+function planningDurationRepairMax(): number {
+  const raw = Number(process.env.ONE_PROMPT_VIDEO_DURATION_REPAIR_MAX);
   if (!Number.isFinite(raw)) return 2;
   return Math.max(0, Math.min(3, Math.round(raw)));
 }
@@ -2097,7 +3321,7 @@ function storyDesignStageContext(source: unknown): Record<string, unknown> {
   const envelope = isRecord(source) ? source : {};
   const root = unwrapPlanRoot(source, "planning_manifest");
   return {
-    creative_strategy: readLoose(envelope, "creativeStrategy", "creative_strategy") ?? readLoose(root, "creativeStrategy", "creative_strategy") ?? {},
+    creative_strategy: planningCreativeStrategySource(source),
     narrative_micro_rules: readLoose(envelope, "narrativeMicroRules", "narrative_micro_rules") ?? readLoose(root, "narrativeMicroRules", "narrative_micro_rules") ?? {},
     narrative_events: readLoose(envelope, "narrativeEvents", "narrative_events") ?? readLoose(root, "narrativeEvents", "narrative_events") ?? [],
     story_beats: readLoose(envelope, "storyBeats", "story_beats") ?? readLoose(root, "storyBeats", "story_beats") ?? [],
@@ -2105,10 +3329,38 @@ function storyDesignStageContext(source: unknown): Record<string, unknown> {
   };
 }
 
+function planningCreativeStrategySource(source: unknown): Record<string, unknown> {
+  const envelope = isRecord(source) ? source : {};
+  const root = unwrapPlanRoot(source, "planning_manifest");
+  const strategy = firstDefined(
+    readLoose(envelope, "creativeStrategy", "creative_strategy"),
+    readLoose(root, "creativeStrategy", "creative_strategy"),
+  );
+  const classification = firstDefined(
+    readLoose(envelope, "classification", "classification"),
+    readLoose(root, "classification", "classification"),
+  );
+  return {
+    ...(isRecord(strategy) ? strategy : {}),
+    ...(isRecord(classification) ? classification : {}),
+  };
+}
+
 interface ShotDecomposerPipelineResult {
   shotDecomposerPlan: Record<string, unknown>;
   promptDetailPlan?: VideoPromptDetailPlan;
 }
+
+type SegmentShotPipelineResult =
+  | {
+    status: "completed";
+    shotDecomposerPlan: Record<string, unknown>;
+    promptDetailPlan?: VideoPromptDetailPlan;
+  }
+  | {
+    status: "timeline_replan_required";
+    request: TimelineChangeRequest;
+  };
 
 async function createShotDecomposerPlan(params: {
   input: PlanVideoProjectInput;
@@ -2140,7 +3392,10 @@ async function createShotDecomposerPlan(params: {
   let decomposedSegments = 0;
   let completedSegments = 0;
   const totalSteps = params.totalPlanningSteps;
-  const segmentResults = await mapWithConcurrency(timelineSegments, concurrency, async (segment) => {
+  const segmentResults = await mapWithConcurrency<VideoTimelineBlueprintSegment, SegmentShotPipelineResult>(
+    timelineSegments,
+    concurrency,
+    async (segment) => {
     const stage = `shot_decomposer_s${segment.segmentNo}`;
     const checkpointKey = String(segment.segmentNo);
     let plan = params.checkpoint.shotDecomposerSegmentPlans?.[checkpointKey];
@@ -2248,15 +3503,25 @@ Resolve the reported issue through model reasoning. Do not omit hard requirement
     });
     let approvedPlan = params.checkpoint.approvedShotDecomposerSegmentPlans?.[checkpointKey];
     if (!approvedPlan) {
-      approvedPlan = await repairShotDecomposerPlanUntilSingleTake({
-        input: params.input,
-        modelName: params.modelName,
-        planningManifest: params.planningManifest,
-        storyboardArtistPlan: params.storyboardArtistPlan,
-        storyDesignContext: params.storyDesignContext,
-        shotDecomposerPlan: plan,
-        expectedSegmentNos: [segment.segmentNo],
-      });
+      try {
+        approvedPlan = await repairShotDecomposerPlanUntilSingleTake({
+          input: params.input,
+          modelName: params.modelName,
+          planningManifest: params.planningManifest,
+          storyboardArtistPlan: params.storyboardArtistPlan,
+          storyDesignContext: params.storyDesignContext,
+          shotDecomposerPlan: plan,
+          expectedSegmentNos: [segment.segmentNo],
+        });
+      } catch (error) {
+        if (error instanceof TimelineReplanRequiredError) {
+          return {
+            status: "timeline_replan_required",
+            request: error.request,
+          };
+        }
+        throw error;
+      }
       params.checkpoint.approvedShotDecomposerSegmentPlans = {
         ...(params.checkpoint.approvedShotDecomposerSegmentPlans ?? {}),
         [checkpointKey]: approvedPlan,
@@ -2305,16 +3570,31 @@ Resolve the reported issue through model reasoning. Do not omit hard requirement
       detailZh: `第 ${segment.segmentNo} 段已完成拆解、审计和提示词编译；全流程完成 ${completedSegments}/${timelineSegments.length} 段。`,
       detailEn: `Segment ${segment.segmentNo} completed decomposition, audit, and prompt compilation; ${completedSegments}/${timelineSegments.length} segment pipelines are complete.`,
     });
-    return { shotDecomposerPlan: approvedPlan, promptDetailPlan };
-  });
+      return { status: "completed", shotDecomposerPlan: approvedPlan, promptDetailPlan };
+    },
+  );
+
+  const timelineChangeRequests = segmentResults.flatMap((result) =>
+    result.status === "timeline_replan_required" ? [result.request] : []);
+  if (timelineChangeRequests.length) {
+    throw new TimelineReplanRequiredError(
+      combineTimelineChangeRequests(timelineChangeRequests),
+    );
+  }
+  const completedSegmentResults = segmentResults.filter(
+    (result): result is Extract<SegmentShotPipelineResult, { status: "completed" }> =>
+      result.status === "completed",
+  );
 
   const merged = mergeShotDecomposerSegmentPlans({
     storyboardArtistPlan: params.storyboardArtistPlan,
     planningManifest: params.planningManifest,
-    segmentPlans: segmentResults.map((result) => result.shotDecomposerPlan),
+    segmentPlans: completedSegmentResults.map((result) => result.shotDecomposerPlan),
   });
-  const mergedPromptDetailPlan = segmentResults.reduce<VideoPromptDetailPlan>(
-    (current, result) => mergePromptDetailPlans(current, result.promptDetailPlan),
+  const mergedPromptDetailPlan = completedSegmentResults.reduce<VideoPromptDetailPlan>(
+    (current, result) => result.promptDetailPlan
+      ? mergePromptDetailPlans(current, result.promptDetailPlan)
+      : current,
     {},
   );
   await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segmented.merged", {
@@ -2971,6 +4251,7 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
       detailZh: revision === 0 ? "正在检查每个片段能否一镜到底执行。" : `正在复核第 ${revision} 轮一镜到底修复结果。`,
       detailEn: revision === 0 ? "Auditing whether every segment is executable as one continuous take." : `Reviewing single-take repair round ${revision}.`,
     });
+    const auditStartedAtMs = Date.now();
     const audit = auditSingleTakePlan({
       ...params.storyboardArtistPlan,
       ...currentPlan,
@@ -2980,13 +4261,36 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
       segments: currentPlan.segments,
       segmentRenderDescriptions: currentPlan.segmentRenderDescriptions ?? currentPlan.segment_render_descriptions,
     }, expectedSegmentNos);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "脚本拆解",
+      stepNameZh: revision === 0 ? "程序检查每个片段能否一镜到底执行" : "程序复检拆分返修结果",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - auditStartedAtMs,
+      passed: audit.passed,
+      attempt: revision + 1,
+      resultZh: audit.passed ? "结构可执行" : `发现 ${audit.issues.length} 个结构问题，需要返修`,
+    }, audit.passed ? "info" : "warn");
     await logOnePromptVideo("single_take_audit.result", {
       revision,
       passed: audit.passed,
+      action: audit.action,
       issues: audit.issues,
     }, audit.passed ? "info" : "warn");
     if (audit.passed) return currentPlan;
+    if (audit.action === "block_stage_2b") {
+      if (auditNeedsTimelineReplan(audit, currentPlan)) {
+        throw new TimelineReplanRequiredError(
+          createTimelineChangeRequest(audit, currentPlan),
+        );
+      }
+      throw new Error(singleTakeAuditErrorMessage(audit.issues));
+    }
     if (revision >= maxRevisions) {
+      if (auditNeedsTimelineReplan(audit, currentPlan)) {
+        throw new TimelineReplanRequiredError(
+          createTimelineChangeRequest(audit, currentPlan),
+        );
+      }
       throw new Error(singleTakeAuditErrorMessage(audit.issues));
     }
 
@@ -3066,6 +4370,105 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
     });
   }
   return currentPlan;
+}
+
+function auditNeedsTimelineReplan(
+  audit: SingleTakeAuditResult,
+  shotDecomposerPlan: Record<string, unknown>,
+): boolean {
+  const structuralIssueCodes = new Set([
+    "SINGLE_TAKE_REQUIRES_CUT",
+    "SINGLE_TAKE_HIGH_RISK",
+    "SINGLE_TAKE_PHYSICALLY_UNREACHABLE",
+    "MOTION_CHECKPOINT_CONTAINS_CUT",
+    "INTERNAL_CUT_LANGUAGE",
+  ]);
+  if (audit.issues.some(
+    (issue) => issue.severity === "error" && structuralIssueCodes.has(issue.code),
+  )) {
+    return true;
+  }
+  return arrayOfRecords(
+    shotDecomposerPlan.segmentRenderDescriptions ?? shotDecomposerPlan.segment_render_descriptions,
+  ).some((description) =>
+    description.timelineChangeRequest !== undefined
+    || description.timeline_change_request !== undefined
+    || description.recommendedSplit !== undefined
+    || description.recommended_split !== undefined);
+}
+
+export function createTimelineChangeRequest(
+  audit: SingleTakeAuditResult,
+  shotDecomposerPlan: Record<string, unknown>,
+): TimelineChangeRequest {
+  const affectedSegmentNos = Array.from(new Set(
+    audit.issues
+      .filter((issue) => issue.severity === "error")
+      .map((issue) => issue.segmentNo)
+      .filter((segmentNo): segmentNo is number => typeof segmentNo === "number" && segmentNo > 0),
+  )).sort((left, right) => left - right);
+  const fallbackSegmentNos = audit.auditedSegmentNos.filter((segmentNo) => segmentNo > 0);
+  const targets = affectedSegmentNos.length ? affectedSegmentNos : fallbackSegmentNos;
+  const descriptions = arrayOfRecords(
+    shotDecomposerPlan.segmentRenderDescriptions ?? shotDecomposerPlan.segment_render_descriptions,
+  );
+  const requestedChanges = targets.flatMap((segmentNo) => {
+    const description = descriptions.find(
+      (item) => numberFrom(item.segmentNo ?? item.segment_no) === segmentNo,
+    );
+    if (!description) return [];
+    return [
+      description.timelineChangeRequest ?? description.timeline_change_request,
+      description.recommendedSplit ?? description.recommended_split,
+    ].filter((value) => value !== undefined && value !== null);
+  });
+  const issueCodes = uniqueStrings(
+    audit.issues
+      .filter((issue) => issue.severity === "error")
+      .map((issue) => issue.code),
+  );
+  const reasons = uniqueStrings(
+    audit.issues
+      .filter((issue) => issue.severity === "error")
+      .map((issue) => issue.reason),
+  );
+  const firstAffectedSegmentNo = Math.max(1, Math.min(...(targets.length ? targets : [1])));
+  const requestSeed = JSON.stringify({
+    affectedSegmentNos: targets,
+    issueCodes,
+    reasons,
+    requestedChanges,
+  });
+  return {
+    requestId: `timeline_${createHash("sha256").update(requestSeed).digest("hex").slice(0, 12)}`,
+    source: "single_take_audit",
+    changeType: "split_segment",
+    affectedSegmentNos: targets,
+    firstAffectedSegmentNo,
+    issueCodes,
+    reasons,
+    requestedChanges,
+  };
+}
+
+function combineTimelineChangeRequests(requests: TimelineChangeRequest[]): TimelineChangeRequest {
+  const affectedSegmentNos = Array.from(new Set(
+    requests.flatMap((request) => request.affectedSegmentNos),
+  )).sort((left, right) => left - right);
+  const issueCodes = uniqueStrings(requests.flatMap((request) => request.issueCodes));
+  const reasons = uniqueStrings(requests.flatMap((request) => request.reasons));
+  const requestedChanges = requests.flatMap((request) => request.requestedChanges);
+  const requestSeed = JSON.stringify({ affectedSegmentNos, issueCodes, reasons, requestedChanges });
+  return {
+    requestId: `timeline_${createHash("sha256").update(requestSeed).digest("hex").slice(0, 12)}`,
+    source: "single_take_audit",
+    changeType: "split_segment",
+    affectedSegmentNos,
+    firstAffectedSegmentNo: Math.max(1, Math.min(...(affectedSegmentNos.length ? affectedSegmentNos : [1]))),
+    issueCodes,
+    reasons,
+    requestedChanges,
+  };
 }
 
 export function mergeTargetedShotDecomposerRepair(
@@ -3311,7 +4714,7 @@ function buildThreeStagePlan(params: {
 
   const consistencyReferences = anchorsToConsistencyReferences(params.planningManifest, styleBible);
   const shots = segmentsToCompatShots(keyframes, segments);
-  return {
+  const plan: OnePromptVideoPlan = {
     title: stringOr(source.title, params.fallback.title),
     logline: stringOr(source.logline, params.fallback.logline),
     durationSeconds: params.input.durationSeconds,
@@ -3330,6 +4733,7 @@ function buildThreeStagePlan(params: {
     narrativeMicroRules: extras.narrativeMicroRules,
     shotGroupingPass: extras.shotGroupingPass,
     storyQualityReport: withStoryQualityWarnings(extras.storyQualityReport, storyWarnings),
+    storySemanticReview: extras.storySemanticReview,
     anchorStateTimeline: extras.anchorStateTimeline,
     audioBible: extras.audioBible,
     candidateTimeline: extras.candidateTimeline,
@@ -3350,6 +4754,16 @@ function buildThreeStagePlan(params: {
     segments,
     shots,
   };
+  plan.boundaryContracts = deriveCanonicalBoundaryContracts(plan);
+  validateBoundaryContracts(plan, plan.boundaryContracts);
+  plan.planningPhase = {
+    semanticPlanning: "complete",
+    boundaryPlanning: "semantic_draft",
+    mediaConditionedPlanning: "pending_images",
+    finalPromptCompilation: "deferred_to_generation",
+    updatedAt: new Date().toISOString(),
+  };
+  return plan;
 }
 
 function normalizePlanStructureExtras(params: {
@@ -3366,11 +4780,13 @@ function normalizePlanStructureExtras(params: {
   const promptRoot = unwrapPlanRoot(params.promptDetailPlan, "prompt_detail_plan");
   const anchorIds = new Set(params.manifest.consistencyManifest.anchors.map((anchor) => anchor.id));
 
-  const creativeStrategy = normalizeCreativeStrategy(firstDefined(
-    readLoose(planningEnvelope, "creativeStrategy", "creative_strategy"),
-    readLoose(planningRoot, "creativeStrategy", "creative_strategy"),
-    readLoose(storyboardRoot, "creativeStrategy", "creative_strategy"),
-  ), params.manifest, warnings);
+  const creativeStrategy = normalizeCreativeStrategy(
+    Object.keys(planningCreativeStrategySource(params.planningRaw)).length
+      ? planningCreativeStrategySource(params.planningRaw)
+      : firstDefined(readLoose(storyboardRoot, "creativeStrategy", "creative_strategy")),
+    params.manifest,
+    warnings,
+  );
   const narrativeMicroRules = normalizeNarrativeMicroRules(firstDefined(
     readLoose(planningEnvelope, "narrativeMicroRules", "narrative_micro_rules"),
     readLoose(planningRoot, "narrativeMicroRules", "narrative_micro_rules"),
@@ -3494,6 +4910,10 @@ function normalizePlanStructureExtras(params: {
     params.manifest.timelineBlueprint.segments,
     warnings,
   );
+  const storySemanticReview = firstDefined(
+    readLoose(storyboardRoot, "storySemanticReview", "story_semantic_review"),
+    readLoose(promptRoot, "storySemanticReview", "story_semantic_review"),
+  );
   return {
     narrativeEvents,
     creativeStrategy,
@@ -3503,6 +4923,9 @@ function normalizePlanStructureExtras(params: {
     narrativeMicroRules,
     shotGroupingPass,
     storyQualityReport,
+    storySemanticReview: isRecord(storySemanticReview)
+      ? storySemanticReview as unknown as VideoStorySemanticReview
+      : undefined,
     anchorStateTimeline,
     audioBible: normalizeAudioBible(firstDefined(
       readLoose(planningEnvelope, "audioBible", "audio_bible"),
@@ -3553,6 +4976,15 @@ function normalizeCreativeStrategy(value: unknown, manifest: VideoPlanningManife
     templateId: route.templateId,
     templateReason: stringOr(raw.templateReason ?? raw.template_reason, ""),
     templateReasonZh: stringOr(raw.templateReasonZh ?? raw.template_reason_zh, definition.templateReasonZh),
+    chronologyMode: normalizeChronologyMode(raw.chronologyMode ?? raw.chronology_mode),
+    hookMode: normalizeHookMode(raw.hookMode ?? raw.hook_mode),
+    hookRevealLevel: normalizeHookRevealLevel(raw.hookRevealLevel ?? raw.hook_reveal_level),
+    hookEventIds: normalizeStringArray(raw.hookEventIds ?? raw.hook_event_ids) ?? [],
+    conflictEventIds: normalizeStringArray(raw.conflictEventIds ?? raw.conflict_event_ids) ?? [],
+    turningPointEventIds: normalizeStringArray(raw.turningPointEventIds ?? raw.turning_point_event_ids) ?? [],
+    payoffEventIds: normalizeStringArray(raw.payoffEventIds ?? raw.payoff_event_ids) ?? [],
+    ctaEventIds: normalizeStringArray(raw.ctaEventIds ?? raw.cta_event_ids) ?? [],
+    returnToEventId: stringOr(raw.returnToEventId ?? raw.return_to_event_id, ""),
     conversionGoal: stringOr(raw.conversionGoal ?? raw.conversion_goal, ""),
     conversionGoalZh: stringOr(raw.conversionGoalZh ?? raw.conversion_goal_zh, definition.conversionGoalZh),
     fallbackReason: stringOr(raw.fallbackReason ?? raw.fallback_reason, ""),
@@ -3585,6 +5017,26 @@ function normalizeCreativeStrategy(value: unknown, manifest: VideoPlanningManife
     risks: normalizeStringArray(raw.risks) ?? [],
     notes: normalizeStringArray(raw.notes) ?? [],
   };
+}
+
+function normalizeChronologyMode(value: unknown): NonNullable<VideoCreativeStrategy["chronologyMode"]> {
+  const raw = String(value ?? "").trim();
+  return raw === "flashforward_hook"
+    || raw === "result_first"
+    || raw === "problem_solution"
+    || raw === "demonstration"
+    ? raw
+    : "chronological";
+}
+
+function normalizeHookMode(value: unknown): NonNullable<VideoCreativeStrategy["hookMode"]> {
+  const raw = String(value ?? "").trim();
+  return raw === "pain_point" || raw === "tease" || raw === "payoff_preview" ? raw : "curiosity";
+}
+
+function normalizeHookRevealLevel(value: unknown): NonNullable<VideoCreativeStrategy["hookRevealLevel"]> {
+  const raw = String(value ?? "").trim();
+  return raw === "none" || raw === "full" ? raw : "partial";
 }
 
 function routeCreativeTemplate(
@@ -4774,6 +6226,60 @@ function normalizePlanningManifest(raw: unknown, input: PlanVideoProjectInput, f
   };
 }
 
+function mergeRepairedAssetAnchors(
+  manifest: VideoPlanningManifest,
+  repairRaw: unknown,
+): VideoPlanningManifest {
+  const root = isRecord(repairRaw) ? repairRaw : {};
+  const repaired = normalizeAnchors(
+    root.anchors
+      ?? (isRecord(root.consistency_manifest) ? root.consistency_manifest.anchors : undefined)
+      ?? (isRecord(root.consistencyManifest) ? root.consistencyManifest.anchors : undefined),
+  );
+  const repairedById = new Map(repaired.map((anchor) => [anchor.id, anchor]));
+  return {
+    ...manifest,
+    consistencyManifest: {
+      anchors: manifest.consistencyManifest.anchors.map((anchor) => {
+        const replacement = repairedById.get(anchor.id);
+        if (!replacement) return anchor;
+        return {
+          ...anchor,
+          ...replacement,
+          id: anchor.id,
+          type: anchor.type,
+          mustStayConsistent: anchor.mustStayConsistent,
+          needsReferenceImage: anchor.needsReferenceImage,
+          referenceStrength: anchor.referenceStrength,
+        };
+      }),
+    },
+  };
+}
+
+function materializePlanningAssetImagePrompts(manifest: VideoPlanningManifest): VideoPlanningManifest {
+  return {
+    ...manifest,
+    consistencyManifest: {
+      anchors: manifest.consistencyManifest.anchors.map((anchor) => {
+        if (!anchor.assetImageContract) return anchor;
+        return {
+          ...anchor,
+          imagePromptZh: compileAssetImagePromptZh(anchor),
+          imagePromptEn: compileAssetImagePromptEn(anchor),
+        };
+      }),
+    },
+  };
+}
+
+function formatAssetContractIssues(issues: AssetImageContractIssue[]): string {
+  return issues
+    .slice(0, 12)
+    .map((issue) => `${issue.anchorId}.${issue.field}: ${issue.message}`)
+    .join("；");
+}
+
 function normalizeSubtitlePolicy(raw: Record<string, unknown>, fallbackStrategyZh: string): NonNullable<VideoPlanningManifest["subtitlePolicy"]> {
   const contentRole = normalizeSubtitleContentRole(raw.contentRole ?? raw.content_role);
   const neededRaw = raw.needed ?? raw.needs_subtitles ?? raw.need_subtitles;
@@ -4821,11 +6327,25 @@ function normalizeTimelineSegments(
     const duration = durations[index];
     const end = start + duration;
     cursor = end;
+    const timingBudgetRaw = isRecord(raw.timingBudget)
+      ? raw.timingBudget
+      : isRecord(raw.timing_budget)
+        ? raw.timing_budget
+        : {};
     return {
       segmentNo,
       startTimeSeconds: start,
       endTimeSeconds: end,
       durationSeconds: duration,
+      durationReasonZh: stringOr(raw.durationReasonZh ?? raw.duration_reason_zh, ""),
+      minimumExecutableSeconds: numberFrom(raw.minimumExecutableSeconds ?? raw.minimum_executable_seconds) || undefined,
+      preferredDurationSeconds: numberFrom(raw.preferredDurationSeconds ?? raw.preferred_duration_seconds) || undefined,
+      maximumUsefulSeconds: numberFrom(raw.maximumUsefulSeconds ?? raw.maximum_useful_seconds) || undefined,
+      timingBudget: Object.keys(timingBudgetRaw).length ? {
+        setupSeconds: numberFrom(timingBudgetRaw.setupSeconds ?? timingBudgetRaw.setup_seconds),
+        actionSeconds: numberFrom(timingBudgetRaw.actionSeconds ?? timingBudgetRaw.action_seconds),
+        resultSeconds: numberFrom(timingBudgetRaw.resultSeconds ?? timingBudgetRaw.result_seconds),
+      } : undefined,
       beatRole: normalizeBeatRole(raw.beatRole ?? raw.beat_role),
       purposeZh: stringOr(raw.purposeZh ?? raw.purpose_zh ?? raw.purpose, fallbackSegment.purposeZh ?? fallbackSegment.purpose),
       purposeEn: stringOr(raw.purposeEn ?? raw.purpose_en, fallbackSegment.purposeEn ?? ""),
@@ -4840,47 +6360,19 @@ function normalizeTimelineSegments(
 }
 
 function normalizeDurations(rawSegments: Record<string, unknown>[], count: number, totalSeconds: number): number[] {
-  const durations = Array.from({ length: count }, (_, index) => {
-    const raw = rawSegments[index] ?? {};
-    const explicit = numberFrom(raw.durationSeconds ?? raw.duration_seconds);
-    const start = numberFrom(raw.startTimeSeconds ?? raw.start_time_seconds);
-    const end = numberFrom(raw.endTimeSeconds ?? raw.end_time_seconds);
-    const value = explicit || (end > start ? end - start : 0) || Math.round(totalSeconds / count);
-    return clamp(value, MIN_SEGMENT_SECONDS, MAX_SEGMENT_SECONDS);
-  });
-  let diff = totalSeconds - durations.reduce((sum, value) => sum + value, 0);
-  let guard = 0;
-  while (diff !== 0 && guard++ < 1000) {
-    let changed = false;
-    for (let index = 0; index < durations.length && diff !== 0; index += 1) {
-      if (diff > 0 && durations[index] < MAX_SEGMENT_SECONDS) {
-        durations[index] += 1;
-        diff -= 1;
-        changed = true;
-      } else if (diff < 0 && durations[index] > MIN_SEGMENT_SECONDS) {
-        durations[index] -= 1;
-        diff += 1;
-        changed = true;
-      }
-    }
-    if (!changed) break;
+  if (rawSegments.length !== count) {
+    throw new Error(`Duration contract expected ${count} segments but received ${rawSegments.length}.`);
   }
-  return durations.reduce((sum, value) => sum + value, 0) === totalSeconds
-    ? durations
-    : distributeDurations(totalSeconds, count);
-}
-
-function distributeDurations(totalSeconds: number, count: number): number[] {
-  const durations = Array.from({ length: count }, () => MIN_SEGMENT_SECONDS);
-  let remaining = totalSeconds - durations.reduce((sum, value) => sum + value, 0);
-  let index = 0;
-  while (remaining > 0 && index < durations.length * MAX_SEGMENT_SECONDS) {
-    const target = index % durations.length;
-    if (durations[target] < MAX_SEGMENT_SECONDS) {
-      durations[target] += 1;
-      remaining -= 1;
+  const durations = rawSegments.map((raw, index) => {
+    const duration = strictInteger(raw.durationSeconds ?? raw.duration_seconds);
+    if (duration === undefined || duration < MIN_SEGMENT_SECONDS || duration > MAX_SEGMENT_SECONDS) {
+      throw new Error(`Segment ${index + 1} has no valid model-allocated duration.`);
     }
-    index += 1;
+    return duration;
+  });
+  const allocatedTotal = durations.reduce((sum, value) => sum + value, 0);
+  if (allocatedTotal !== totalSeconds) {
+    throw new Error(`Model-allocated durations sum to ${allocatedTotal}; expected ${totalSeconds}.`);
   }
   return durations;
 }
@@ -4905,8 +6397,44 @@ function normalizeAnchors(value: unknown): VideoConsistencyAnchor[] {
       userEditable: item.userEditable === false || item.user_editable === false ? false : true,
       imagePromptZh: stringOr(item.imagePromptZh ?? item.image_prompt_zh, ""),
       imagePromptEn: stringOr(item.imagePromptEn ?? item.image_prompt_en, ""),
+      assetImageContract: normalizeAssetImageContract(item.assetImageContract ?? item.asset_image_contract),
     }];
   }).slice(0, 12);
+}
+
+function normalizeAssetImageContract(value: unknown): VideoConsistencyAnchor["assetImageContract"] {
+  if (!isRecord(value)) return undefined;
+  const composition = isRecord(value.composition) ? value.composition : {};
+  const environment = isRecord(value.environment) ? value.environment : {};
+  const lighting = isRecord(value.lighting) ? value.lighting : {};
+  const contract: NonNullable<VideoConsistencyAnchor["assetImageContract"]> = {
+    subjectCount: Math.max(0, Math.round(numberFrom(value.subjectCount ?? value.subject_count))),
+    subjectDescription: stringOr(value.subjectDescription ?? value.subject_description, ""),
+    composition: {
+      framing: stringOr(composition.framing, ""),
+      cameraAngle: stringOr(composition.cameraAngle ?? composition.camera_angle, ""),
+      placement: stringOr(composition.placement, ""),
+      occupancy: stringOr(composition.occupancy, ""),
+    },
+    environment: {
+      background: stringOr(environment.background, ""),
+      foreground: stringOr(environment.foreground, ""),
+      midground: stringOr(environment.midground, ""),
+      backgroundLayer: stringOr(environment.backgroundLayer ?? environment.background_layer, ""),
+      spatialRelationships: normalizeStringArray(environment.spatialRelationships ?? environment.spatial_relationships),
+    },
+    lighting: {
+      direction: stringOr(lighting.direction, ""),
+      quality: stringOr(lighting.quality, ""),
+      colorTemperature: stringOr(lighting.colorTemperature ?? lighting.color_temperature, ""),
+    },
+    palette: normalizeStringArray(value.palette),
+    materialDetails: normalizeStringArray(value.materialDetails ?? value.material_details),
+    intrinsicDetails: normalizeStringArray(value.intrinsicDetails ?? value.intrinsic_details),
+    forbiddenElements: normalizeStringArray(value.forbiddenElements ?? value.forbidden_elements),
+    acceptanceCriteria: normalizeStringArray(value.acceptanceCriteria ?? value.acceptance_criteria),
+  };
+  return contract;
 }
 
 function normalizeVisualLock(value: unknown): VideoConsistencyAnchor["visualLock"] {
@@ -5081,6 +6609,12 @@ function anchorsToConsistencyReferences(manifest: VideoPlanningManifest, styleBi
       return value;
     })();
     const lock = anchorLockText(anchor);
+    const executablePromptZh = anchor.assetImageContract
+      ? compileAssetImagePromptZh(anchor)
+      : anchor.imagePromptZh || anchor.descriptionZh || lock;
+    const executablePromptEn = anchor.assetImageContract
+      ? compileAssetImagePromptEn(anchor)
+      : anchor.imagePromptEn || anchor.descriptionEn || lock;
     return [{
       kind,
       needed: true,
@@ -5093,9 +6627,9 @@ function anchorsToConsistencyReferences(manifest: VideoPlanningManifest, styleBi
       scene: anchor.descriptionZh || anchor.descriptionEn || lock,
       characterState: kind === "character" ? lock : "",
       productState: kind !== "character" ? lock : styleBible.productLock ?? "",
-      imagePrompt: anchor.imagePromptZh || anchor.descriptionZh || lock,
-      imagePromptZh: anchor.imagePromptZh || anchor.descriptionZh || lock,
-      imagePromptEn: anchor.imagePromptEn || anchor.descriptionEn || lock,
+      imagePrompt: executablePromptZh || executablePromptEn,
+      imagePromptZh: executablePromptZh,
+      imagePromptEn: executablePromptEn,
       negativePrompt: styleBible.negativePrompt,
       negativePromptZh: styleBible.negativePromptZh,
       negativePromptEn: styleBible.negativePromptEn,
@@ -5244,6 +6778,41 @@ function jsonStageStreamingEnabled(): boolean {
   return process.env.ONE_PROMPT_VIDEO_JSON_STAGE_STREAM?.trim().toLowerCase() !== "false";
 }
 
+type JsonStageReasoningPolicy = {
+  enableThinking: boolean;
+  thinkingBudget?: number;
+};
+
+/**
+ * Keep deep reasoning for the creative decisions that establish the story, but
+ * do not make every deterministic JSON compiler wait for a hidden reasoning
+ * trace. Complex repair and critic stages retain a bounded reasoning budget.
+ */
+export function jsonStageReasoningPolicy(stage: string): JsonStageReasoningPolicy {
+  if (
+    /^(?:shot_decomposer_s\d+|prompt_detailer(?:_s\d+)?|json_repair|reference_fact_extractor|asset_prompt_contract_repair)/.test(stage)
+  ) {
+    return { enableThinking: false };
+  }
+
+  if (
+    /(?:repair|replan|rewrite|semantic_critic)/.test(stage)
+  ) {
+    return {
+      enableThinking: true,
+      thinkingBudget: complexRepairThinkingBudget(),
+    };
+  }
+
+  return { enableThinking: true };
+}
+
+function complexRepairThinkingBudget(): number {
+  const raw = Number(process.env.ONE_PROMPT_VIDEO_COMPLEX_REPAIR_THINKING_BUDGET);
+  if (!Number.isFinite(raw) || raw <= 0) return 512;
+  return Math.max(64, Math.min(4096, Math.round(raw)));
+}
+
 function jsonStageStreamIdleTimeoutMs(): number {
   const raw = Number(process.env.ONE_PROMPT_VIDEO_JSON_STAGE_STREAM_IDLE_TIMEOUT_MS);
   if (!Number.isFinite(raw) || raw <= 0) return 90000;
@@ -5282,8 +6851,8 @@ function shotDecomposerMode(): "segment" | "whole" {
 
 function shotDecomposerConcurrency(): number {
   const raw = Number(process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_CONCURRENCY);
-  if (!Number.isFinite(raw) || raw <= 0) return 3;
-  return Math.max(1, Math.min(4, Math.round(raw)));
+  if (!Number.isFinite(raw) || raw <= 0) return 10;
+  return Math.max(1, Math.min(10, Math.round(raw)));
 }
 
 function singleTakeMaxRevisions(targetedSegmentRepair: boolean): number {
@@ -5342,13 +6911,27 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
     referenceFactsRaw: envelope.referenceFactsRaw,
     referenceFactsFingerprint: typeof envelope.referenceFactsFingerprint === "string" ? envelope.referenceFactsFingerprint : undefined,
     planningRaw: envelope.planningRaw,
+    assetPromptRepairRaw: envelope.assetPromptRepairRaw,
     storyboardArtistPlan: isRecord(envelope.storyboardArtistPlan) ? envelope.storyboardArtistPlan : undefined,
     storyContractReport: isRecord(envelope.storyContractReport)
       ? envelope.storyContractReport as unknown as StoryContractGateResult
       : undefined,
+    storySemanticReview: isRecord(envelope.storySemanticReview)
+      ? envelope.storySemanticReview as unknown as VideoStorySemanticReview
+      : undefined,
     shotDecomposerSegmentPlans: segmentPlans,
     approvedShotDecomposerSegmentPlans: approvedSegmentPlans,
     promptDetailSegmentPlans,
+    timelineReplanAttempts: Math.max(0, numberFrom(envelope.timelineReplanAttempts)),
+    timelineChangeHistory: Array.isArray(envelope.timelineChangeHistory)
+      ? envelope.timelineChangeHistory.filter(
+        (item): item is TimelineChangeRequest =>
+          isRecord(item)
+          && typeof item.requestId === "string"
+          && item.source === "single_take_audit"
+          && item.changeType === "split_segment",
+      ).slice(-10)
+      : [],
     updatedAt: typeof envelope.updatedAt === "string" ? envelope.updatedAt : new Date().toISOString(),
   };
 }

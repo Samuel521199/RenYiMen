@@ -428,7 +428,7 @@ DONE           完成
 
 **（2）串行链路上还藏着好几个「隐形乘数」，平时不容易被注意到：**
 
-- **Shot Decomposer 按 segment 分批调用**：系统采用按 segment 拆分模式（`ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_MODE=segment`）。修复前默认并发为 2；现在默认提升为 3，并且每个 worker 不再只做拆解，而是连续执行该 segment 的拆解、审计和提示词编译。
+- **Shot Decomposer 按 segment 分批调用**：系统采用按 segment 拆分模式（`ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_MODE=segment`）。修复前默认并发为 2；现在默认并发为 10，并且每个 worker 不再只做拆解，而是连续执行该 segment 的拆解、审计和提示词编译。
 - **一镜到底修复循环**：修复前，任意片段失败都会把合并后的整份 Shot Decomposer 计划交给模型重写，最多初次生成加 3 轮修复。现在审计和修复范围被限制为当前失败 segment，已通过 segment 不会被重写；默认最多 2 轮定向修复，并可通过 `ONE_PROMPT_VIDEO_SINGLE_TAKE_MAX_REVISIONS` 调整。
 - **JSON 自愈重试**：任意一个阶段如果返回的内容解析不出合法 JSON（大模型输出结构复杂的长 JSON 时很常见），系统会自动再发一次「请把这段内容修成合法 JSON」的请求，这又是一次完整的网络往返，且用的是和原请求一样长的超时时间。
 - **每次调用的超时上限本身就给到 10 分钟**：修复前所有阶段共用 10 分钟硬上限。现在全局规划阶段仍可使用 `ONE_PROMPT_VIDEO_JSON_STAGE_STREAM_MAX_TIMEOUT_MS`，但 segment 拆解、segment 提示词编译和定向修复单独使用 `ONE_PROMPT_VIDEO_SEGMENT_STAGE_STREAM_MAX_TIMEOUT_MS`，默认 4 分钟，避免一个小任务长期占住 worker。

@@ -64,7 +64,8 @@ test("segment planning is a dependency pipeline instead of two global barriers",
   assert.match(planner, /expectedSegmentNos:\s*\[segment\.segmentNo\]/);
   assert.match(planner, /approvedShotDecomposerSegmentPlans/);
   assert.match(planner, /promptDetailSegmentPlans/);
-  assert.match(planner, /segmentResults\.reduce<VideoPromptDetailPlan>/);
+  assert.match(planner, /completedSegmentResults\.reduce<VideoPromptDetailPlan>/);
+  assert.match(planner, /timeline_replan_required/);
   assert.match(planner, /repair_scope:\s*"target_segments_only"/);
   assert.match(planner, /Never regenerate, alter, or repeat already approved segments/);
   assert.match(planner, /owned_keyframe_nos/);

@@ -174,7 +174,21 @@ test("planner emits story design structures as non-blocking trace metadata", () 
     assert.match(typesSource, new RegExp(`${fieldName}\\?`));
   }
 
-  assert.match(plannerSource, /First output creative_strategy before narrative_events/);
+  assert.match(plannerSource, /Then construct the causal narrative_events/);
+  const classificationIndex = plannerSource.indexOf('"classification": {');
+  const consistencyIndex = plannerSource.indexOf('"consistency_manifest": {', classificationIndex);
+  const eventsIndex = plannerSource.indexOf('"narrative_events": [', consistencyIndex);
+  const strategyIndex = plannerSource.indexOf('"creative_strategy": {', eventsIndex);
+  assert.ok(classificationIndex >= 0, "planning output must start with an explicit classification decision");
+  assert.ok(classificationIndex < consistencyIndex, "classification must be emitted before the anchor registry");
+  assert.ok(consistencyIndex < eventsIndex, "anchors must be registered before narrative events reference them");
+  assert.ok(eventsIndex < strategyIndex, "creative strategy must be derived after narrative events");
+  assert.match(plannerSource, /classification is the single source of truth/);
+  assert.match(plannerSource, /Every creative_strategy event ID must reference an event already emitted above/);
+  assert.match(plannerSource, /planningCreativeStrategySource/);
+  assert.match(plannerSource, /hook_event_ids/);
+  assert.match(plannerSource, /chronology_mode/);
+  assert.match(plannerSource, /must not fully reveal the turning point/);
   assert.match(plannerSource, /Create story_beats before or alongside storyboard_brief/);
   assert.match(plannerSource, /Every segment must include linked_beat_ids/);
   assert.match(plannerSource, /normalizeCreativeStrategy/);
@@ -256,6 +270,20 @@ test("story contract hard gate runs before shot decomposition and late gate is r
   assert.match(serviceSource, /autoRewriteAttempts: plan\.storyQualityReport\?\.autoRewriteAttempts/);
 });
 
+test("semantic story critic runs after hard contract and before shot decomposition", () => {
+  const plannerSource = readSource("src/services/video-orchestrator/three-stage-planner.ts");
+  const hardContractIndex = plannerSource.indexOf("ensureStoryboardStoryContract({");
+  const semanticCriticIndex = plannerSource.indexOf("ensureStoryboardSemanticQuality({", hardContractIndex);
+  const shotDecomposerIndex = plannerSource.indexOf("createShotDecomposerPlan({", semanticCriticIndex);
+
+  assert.ok(hardContractIndex >= 0);
+  assert.ok(hardContractIndex < semanticCriticIndex);
+  assert.ok(semanticCriticIndex < shotDecomposerIndex);
+  assert.match(plannerSource, /STORY_SEMANTIC_CRITIC_SYSTEM_PROMPT/);
+  assert.match(plannerSource, /invalidEvidenceReferences/);
+  assert.match(plannerSource, /ONE_PROMPT_VIDEO_SEMANTIC_STORY_GATE/);
+});
+
 test("prompt compiler injects narrative contracts into boundary images and segment videos", () => {
   const source = readSource("src/services/video-orchestrator/project-service.ts");
 
@@ -324,7 +352,7 @@ test("media rollback remains available for every generated media class", () => {
 test("boundary image generation remains gated on approved consistency assets", () => {
   const source = readSource("src/services/video-orchestrator/project-service.ts");
   assert.match(source, /const unapprovedConsistencyReferences = consistencyReferences\.filter/);
-  assert.match(source, /Hard consistency reference images are ready\. Lock or approve them before generating boundary keyframes\./);
+  assert.match(source, /if \(!missingConsistencyReferences\.length && unapprovedConsistencyReferences\.length\)[\s\S]*?status: VideoProjectStatus\.IMAGE_REVIEW,[\s\S]*?errorMessage: null/);
   assert.match(source, /waitingForConsistencyReferences\s*\? \[\]/);
   assert.match(source, /assetLibraryFirst/);
   assert.match(source, /asset_library\.batch/);

@@ -8,6 +8,7 @@ import {
   queryDashScopeTask,
   queryImsComposeJob,
   aliyunImageToVideoCapabilities,
+  aliyunVideoImageInputCapabilities,
   prepareAliyunImagePrompt,
   submitAliyunImageTask,
   submitAliyunImageToVideoTask,
@@ -21,11 +22,11 @@ import {
 } from "./three-stage-planner";
 import { decideStoryRewrite, markStoryRewriteRequired, withStoryQualityGate } from "./story-quality-gate";
 import { readStoryRolloutConfig, shouldEvaluateStoryQuality, shouldRequireStoryQualityReview } from "./story-rollout-config";
-import { errorForLog, logOnePromptVideo } from "./logger";
+import { errorForLog, logOnePromptVideo, withOnePromptVideoLogContext } from "./logger";
 import { composeVideoClipsLocally } from "./local-compose";
 import { isTemporaryDashScopeUrl, persistRemoteMediaToOss } from "./oss-media";
 import { appendProjectStageLog, writeProjectOverviewLog, writeScriptBreakdownLog, writeStageErrorLog } from "./stage-logger";
-import type { ArtifactMetadata, CameraRelation, CreateVideoProjectInput, FinalTransitionPlan, GeneratedBridgeArtifact, GenerationQualityReport, OnePromptVideoPlan, PlanVideoProjectInput, PromptDebugArtifact, ReferenceSelectionOutput, RollbackVideoMediaInput, TransitionReferenceArtifact, TransitionReferenceFrameCandidate, UpdateShotInput, VideoAssetCategory, VideoAssetLibrary, VideoAssetLibraryItem, VideoAssetView, VideoConsistencyAnchor, VideoConsistencyReference, VideoMediaRevision, VideoMicroShot } from "./types";
+import type { ArtifactMetadata, CameraRelation, CreateVideoProjectInput, DeferredVideoQualityCheck, FinalTransitionPlan, GeneratedBridgeArtifact, GenerationQualityReport, ImageRepairDecision, ImageRepairMode, OnePromptVideoPlan, PlanVideoProjectInput, PromptDebugArtifact, ReferenceSelectionOutput, RollbackVideoMediaInput, SegmentRenderDescription, TransitionReferenceArtifact, TransitionReferenceFrameCandidate, UpdateShotInput, VideoAssetCategory, VideoAssetLibrary, VideoAssetLibraryItem, VideoAssetView, VideoBoundaryContract, VideoConsistencyAnchor, VideoConsistencyReference, VideoMediaConditionedSegmentPlan, VideoMediaRevision, VideoMicroShot, VideoObservedBoundaryFacts } from "./types";
 import { detectReferenceOrientation, referenceRecencyScore, referenceViewMatchScore, selectReferenceCandidates, type ReferenceOrientation, type SelectableReferenceCandidate, REFERENCE_SELECTION_POLICY_VERSION } from "./reference-selector";
 import { enrichReferenceCandidatesWithVision } from "./reference-vision-evaluator";
 import { readCameraGraph, resolveCameraInheritanceContext } from "./camera-graph";
@@ -50,6 +51,26 @@ import {
   recordPlanningStageObservation,
   startPlanningPerformanceRun,
 } from "./planning-performance";
+import {
+  resolveVideoImageInputs,
+  type VideoImageInput,
+} from "@/services/providers/video-input-contract";
+import {
+  bindBoundaryContractsToApprovedAssets,
+  deriveCanonicalBoundaryContracts,
+  setBoundaryContractStatus,
+  validateBoundaryContracts,
+} from "./boundary-contract";
+import {
+  observeApprovedBoundaryFrame,
+  planMediaConditionedSegment,
+} from "./media-conditioned-planner";
+import {
+  buildGenerationInputFingerprint,
+  buildQualityEvaluationFingerprint,
+  GENERATION_INPUT_FINGERPRINT_VERSION,
+  QUALITY_EVALUATION_FINGERPRINT_VERSION,
+} from "./generation-candidate-policy";
 
 const PROJECT_INCLUDE = {
   shots: { orderBy: { shotNo: "asc" as const } },
@@ -61,7 +82,6 @@ const PROJECT_INCLUDE = {
 const DEFAULT_IMAGE_TASK_CONCURRENCY = 3;
 const DEFAULT_CLIP_TASK_CONCURRENCY = 2;
 const MAX_UPSTREAM_TASK_CONCURRENCY = 5;
-const DEFAULT_GENERATION_CANDIDATE_COUNT = 2;
 type OnePromptPlannerArch = "v1" | "v2_shadow" | "v2";
 
 export interface VideoPlanningProgress {
@@ -425,6 +445,11 @@ function extractPlanDebug(planJson: Prisma.JsonValue | null): Record<string, unk
       : isRecord(plan.story_quality_report)
         ? plan.story_quality_report
         : {},
+    storySemanticReview: isRecord(plan.storySemanticReview)
+      ? plan.storySemanticReview
+      : isRecord(plan.story_semantic_review)
+        ? plan.story_semantic_review
+        : {},
     consistencyAnchors: isRecord(consistencyManifest) && Array.isArray(consistencyManifest.anchors) ? consistencyManifest.anchors : [],
     anchorStateTimeline: Array.isArray(plan.anchorStateTimeline)
       ? plan.anchorStateTimeline
@@ -510,13 +535,16 @@ function assertPlanValidForGeneration(...args: Parameters<typeof assertPlanValid
 }
 
 function imageCandidateCount(): number {
-  // Images use a cost-saving short-circuit strategy: generate one candidate,
-  // evaluate it, and only submit another attempt when it fails.
-  return Math.max(1, Math.min(4, envInt("ONE_PROMPT_IMAGE_CANDIDATE_COUNT", 1)));
+  // Images are progressive too; environment configuration must not silently
+  // restore eager multi-candidate spending.
+  return 1;
 }
 
 function videoCandidateCount(): number {
-  return Math.max(1, Math.min(4, envInt("ONE_PROMPT_VIDEO_CANDIDATE_COUNT", DEFAULT_GENERATION_CANDIDATE_COUNT)));
+  // Video candidates are intentionally progressive: submit one paid render,
+  // expose it for review, and create another only after a meaningful input
+  // change and an explicit retry.
+  return 1;
 }
 
 function generationMaxRetries(kind?: CandidateKind): number {
@@ -604,6 +632,150 @@ function cleanInputJson(value: Record<string, unknown>): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
+function generationCandidateLogContext(params: {
+  projectId: string;
+  artifactId: string;
+  kind: string;
+  candidateNo: number;
+  candidateCount?: number;
+  attempt?: number;
+  metadata: Record<string, unknown>;
+}): Record<string, unknown> {
+  const targetContract = isRecord(params.metadata.targetContract) ? params.metadata.targetContract : {};
+  const keyframeNo = finiteNumber(params.metadata.keyframeNo);
+  const moduleNameZh = params.kind === "segment_video"
+    ? "视频片段生成"
+    : params.kind === "micro_shot_image"
+      ? "子分镜参考图生成"
+      : keyframeNo !== undefined && keyframeNo < 0
+        ? "一致性资产图片生成"
+        : "关键帧图片生成";
+  const assetLabel = firstNonEmptyString([
+    params.metadata.assetNameZh,
+    params.metadata.assetName,
+    params.metadata.displayNameZh,
+    targetContract.assetNameZh,
+    targetContract.assetName,
+    targetContract.displayNameZh,
+    targetContract.displayName,
+    targetContract.purposeZh,
+    targetContract.purpose,
+    targetContract.targetAnchorId,
+    targetContract.anchorId,
+  ]);
+  return {
+    projectId: params.projectId,
+    artifactId: params.artifactId,
+    generationKind: params.kind,
+    moduleNameZh,
+    candidateNo: params.candidateNo,
+    candidateCount: params.candidateCount,
+    attempt: params.attempt,
+    assetLabel: assetLabel || undefined,
+    assetCategory: firstNonEmptyString([
+      params.metadata.assetCategory,
+      targetContract.assetCategory,
+      targetContract.kind,
+    ]) || undefined,
+    assetView: firstNonEmptyString([
+      params.metadata.assetView,
+      targetContract.assetView,
+      targetContract.view,
+    ]) || undefined,
+    keyframeNo,
+    segmentNo: finiteNumber(params.metadata.segmentNo),
+    microShotNo: finiteNumber(params.metadata.microShotNo),
+  };
+}
+
+function firstNonEmptyString(values: unknown[]): string {
+  return values.find((value): value is string => typeof value === "string" && Boolean(value.trim()))?.trim() ?? "";
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function assetLogLabelForKeyframe(
+  project: VideoProjectWithShots,
+  keyframe: VideoProjectWithShots["keyframes"][number],
+): string {
+  const target = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo)
+    ?? readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
+  const name = readPlanShotString(target, [
+    "displayNameZh",
+    "display_name_zh",
+    "purposeZh",
+    "purpose_zh",
+    "purpose",
+  ]) || keyframe.purpose || `关键帧 ${keyframe.keyframeNo}`;
+  const view = readPlanShotString(target, ["assetView", "asset_view", "view"]);
+  const viewLabel = view === "front" ? "正面图" : view === "side" ? "侧面图" : view === "back" ? "背面图" : "";
+  return `${name}${viewLabel && !name.includes(viewLabel.slice(0, 2)) ? `（${viewLabel}）` : ""}`;
+}
+
+const ACTIVE_GENERATION_CANDIDATE_STATUSES = new Set([
+  "pending",
+  "running",
+  "succeeded",
+  "review_ready",
+  "evaluating",
+  "quality_retry",
+]);
+
+async function existingGenerationInput(params: {
+  projectId: string;
+  artifactId: string;
+  generationInputFingerprint: string;
+}): Promise<{ taskId: string | null; active: boolean; paidResultExists: boolean } | undefined> {
+  const candidates = await prisma.videoGenerationCandidate.findMany({
+    where: {
+      projectId: params.projectId,
+      artifactId: params.artifactId,
+    },
+    select: {
+      taskId: true,
+      mediaUrl: true,
+      status: true,
+      metadata: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  for (const candidate of candidates) {
+    const metadata = candidateMetadata(candidate.metadata);
+    if (metadata.generationInputFingerprint !== params.generationInputFingerprint) continue;
+    const active = ACTIVE_GENERATION_CANDIDATE_STATUSES.has(candidate.status);
+    // A transport/decoding failure is not a usable paid draw. It may retry the
+    // same semantic request without weakening the content-duplicate guard.
+    const paidResultExists = candidate.status !== "failed" && (
+      Boolean(candidate.mediaUrl)
+      || ["evaluated", "selected", "recommended"].includes(candidate.status)
+    );
+    if (active || paidResultExists) {
+      return { taskId: candidate.taskId, active, paidResultExists };
+    }
+  }
+  return undefined;
+}
+
+async function guardProgressiveCandidateSubmission(params: {
+  projectId: string;
+  artifactId: string;
+  generationInputFingerprint: string;
+}): Promise<string | undefined> {
+  const existing = await existingGenerationInput(params);
+  if (!existing) return undefined;
+  if (existing.active && existing.taskId) {
+    await logOnePromptVideo("generation_candidate.submit.reused_active", params);
+    return existing.taskId;
+  }
+  throw new Error(
+    "生成输入没有发生实质变化。请先修改 Prompt、参考图或生成参数，再生成下一候选。",
+  );
+}
+
 async function createImageCandidateBatch(params: {
   project: VideoProjectWithShots;
   artifactId: string;
@@ -616,39 +788,119 @@ async function createImageCandidateBatch(params: {
   seedBase?: number;
   candidateCount?: number;
 }): Promise<string> {
+  const generationInputFingerprint = buildGenerationInputFingerprint({
+    kind: params.kind,
+    prompt: params.prompt,
+    negativePrompt: params.negativePrompt,
+    referenceImageUrls: params.referenceImageUrls,
+    parameters: {
+      model: "aliyun-image",
+      aspectRatio: params.project.aspectRatio,
+    },
+  });
+  const reusedTaskId = await guardProgressiveCandidateSubmission({
+    projectId: params.project.id,
+    artifactId: params.artifactId,
+    generationInputFingerprint,
+  });
+  if (reusedTaskId) return reusedTaskId;
   const batchId = randomUUID();
   const requestedRetryCycleId = typeof params.metadata.retryCycleId === "string" ? params.metadata.retryCycleId : undefined;
   const { attempt, retryCycleId } = nextGenerationCandidateAttempt(params.project.generationCandidates, params.artifactId, requestedRetryCycleId);
   const historicalCandidateCount = await prisma.videoGenerationCandidate.count({
     where: { projectId: params.project.id, artifactId: params.artifactId },
   });
-  const candidateCount = Math.max(1, Math.min(4, params.candidateCount ?? imageCandidateCount()));
+  const candidateCount = imageCandidateCount();
   const referenceUsageNotes = Array.isArray(params.metadata.referenceUsageNotes)
     ? params.metadata.referenceUsageNotes.filter((item): item is string => typeof item === "string")
     : [];
   let firstTaskId = "";
+  const previousRejectedCandidate = params.project.generationCandidates
+    .filter((candidate) =>
+      candidate.artifactId === params.artifactId
+      && candidate.passed === false
+      && candidate.qualityReport
+    )
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  const repairTimingMetadata = previousRejectedCandidate
+    ? {
+        repairOriginCandidateId: previousRejectedCandidate.id,
+        repairOriginQualityCompletedAt: previousRejectedCandidate.updatedAt.toISOString(),
+      }
+    : {};
+  if (attempt > 1 && previousRejectedCandidate) {
+    const repairDecision = isRecord(previousRejectedCandidate.qualityReport)
+      && isRecord(previousRejectedCandidate.qualityReport.repairDecision)
+      ? previousRejectedCandidate.qualityReport.repairDecision
+      : {};
+    await logOnePromptVideo("production.step.completed", {
+      ...generationCandidateLogContext({
+        projectId: params.project.id,
+        artifactId: params.artifactId,
+        kind: params.kind,
+        candidateNo: historicalCandidateCount + 1,
+        candidateCount: historicalCandidateCount + candidateCount,
+        attempt,
+        metadata: params.metadata,
+      }),
+      stepNameZh: "质检打回后等待返修任务重新提交",
+      executionMethod: "program",
+      durationMs: Math.max(0, Date.now() - previousRejectedCandidate.updatedAt.getTime()),
+      waitingAfterQcMs: Math.max(0, Date.now() - previousRejectedCandidate.updatedAt.getTime()),
+      repairMode: firstNonEmptyString([params.metadata.repairMode, repairDecision.mode]),
+      resultZh: "开始提交新一轮候选图",
+    });
+  }
   for (let localCandidateNo = 1; localCandidateNo <= candidateCount; localCandidateNo += 1) {
     const candidateNo = historicalCandidateCount + localCandidateNo;
+    const finalPromptStartedAtMs = Date.now();
     const submittedPrompt = prepareAliyunImagePrompt(
       params.prompt,
       params.negativePrompt,
       params.referenceImageUrls,
       referenceUsageNotes,
     );
-    try {
-      const taskId = await submitAliyunImageTask({
-        prompt: params.prompt,
-        negativePrompt: params.negativePrompt,
-        referenceImageUrls: params.referenceImageUrls,
-        referenceUsageNotes,
-        aspectRatio: params.project.aspectRatio as "9:16" | "16:9" | "1:1",
-        seed: Math.abs((params.seedBase ?? Date.now()) + candidateNo * 7919) % 2147483647,
+    await withOnePromptVideoLogContext(generationCandidateLogContext({
+      projectId: params.project.id,
+      artifactId: params.artifactId,
+      kind: params.kind,
+      candidateNo,
+      candidateCount: historicalCandidateCount + candidateCount,
+      attempt,
+      metadata: params.metadata,
+    }), async () => {
+      await logOnePromptVideo("production.step.completed", {
+        stepNameZh: "整理本张候选图最终提交提示词",
+        executionMethod: "program",
+        durationMs: Date.now() - finalPromptStartedAtMs,
+        repairMode: firstNonEmptyString([params.metadata.repairMode]),
+        resultZh: submittedPrompt !== params.prompt ? "提示词已按模型限制压缩并组装" : "提示词已组装，无需压缩",
       });
-      if (!firstTaskId) firstTaskId = taskId;
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, taskId, status: "running", prompt: submittedPrompt, negativePrompt: params.negativePrompt ?? "", metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, sourcePrompt: params.prompt, submittedPromptCompacted: submittedPrompt !== params.prompt }) } });
-    } catch (error) {
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, status: "failed", prompt: submittedPrompt, negativePrompt: params.negativePrompt ?? "", errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, sourcePrompt: params.prompt, submittedPromptCompacted: submittedPrompt !== params.prompt }) } });
-    }
+      await logOnePromptVideo("generation_candidate.image.submit.start");
+      try {
+        const submitStartedAtMs = Date.now();
+        const taskId = await submitAliyunImageTask({
+          prompt: params.prompt,
+          negativePrompt: params.negativePrompt,
+          referenceImageUrls: params.referenceImageUrls,
+          referenceUsageNotes,
+          aspectRatio: params.project.aspectRatio as "9:16" | "16:9" | "1:1",
+          seed: Math.abs((params.seedBase ?? Date.now()) + candidateNo * 7919) % 2147483647,
+        });
+        await logOnePromptVideo("production.step.completed", {
+          stepNameZh: "把提示词和参考图提交给图片生成模型",
+          executionMethod: "image_model",
+          durationMs: Date.now() - submitStartedAtMs,
+          resultZh: "图片生成任务已受理，开始等待渲染",
+        });
+        if (!firstTaskId) firstTaskId = taskId;
+        await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, taskId, status: "running", prompt: submittedPrompt, negativePrompt: params.negativePrompt ?? "", metadata: cleanInputJson({ ...params.metadata, ...repairTimingMetadata, attempt, retryCycleId, historicalCandidateCount, sourcePrompt: params.prompt, submittedPromptCompacted: submittedPrompt !== params.prompt, generationInputFingerprint, generationInputFingerprintVersion: GENERATION_INPUT_FINGERPRINT_VERSION }) } });
+        await logOnePromptVideo("generation_candidate.image.submit.success", { taskId });
+      } catch (error) {
+        await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId: params.artifactId, targetId: params.targetId, kind: params.kind, batchId, candidateNo, status: "failed", prompt: submittedPrompt, negativePrompt: params.negativePrompt ?? "", errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, ...repairTimingMetadata, attempt, retryCycleId, historicalCandidateCount, sourcePrompt: params.prompt, submittedPromptCompacted: submittedPrompt !== params.prompt, generationInputFingerprint, generationInputFingerprintVersion: GENERATION_INPUT_FINGERPRINT_VERSION }) } });
+        await logOnePromptVideo("generation_candidate.image.submit.error", errorForLog(error), "error");
+      }
+    });
   }
   if (!firstTaskId) throw new Error("All image candidate submissions failed");
   return firstTaskId;
@@ -660,6 +912,7 @@ async function createVideoCandidateBatch(params: {
   prompt: string;
   startFrameUrl: string;
   endFrameUrl: string;
+  imageInputs: VideoImageInput[];
   metadata: Record<string, unknown>;
 }): Promise<string> {
   const artifactId = videoArtifactIdForSegmentNo(params.segment.segmentNo);
@@ -672,21 +925,66 @@ async function createVideoCandidateBatch(params: {
     aliyunImageToVideoCapabilities(),
     "happyhorse-1.1-i2v",
   );
+  const providerImageCapabilities = aliyunVideoImageInputCapabilities();
+  const resolvedVideoImages = resolveVideoImageInputs({
+    inputs: params.imageInputs,
+    capabilities: providerImageCapabilities,
+    endFrameRequirementLevel,
+  });
+  const generationInputFingerprint = buildGenerationInputFingerprint({
+    kind: "segment_video",
+    prompt: params.prompt,
+    negativePrompt: params.segment.negativePrompt,
+    referenceImageUrls: resolvedVideoImages.transported.map((item) => item.url),
+    parameters: {
+      model: "happyhorse-1.1-i2v",
+      durationSeconds: params.segment.durationSeconds,
+      startFrameUrl: params.startFrameUrl,
+      endFrameUrl: params.endFrameUrl,
+      endFrameRequirementLevel,
+      transportedVideoImageInputs: resolvedVideoImages.transported,
+    },
+  });
+  const reusedTaskId = await guardProgressiveCandidateSubmission({
+    projectId: params.project.id,
+    artifactId,
+    generationInputFingerprint,
+  });
+  if (reusedTaskId) return reusedTaskId;
+  const historicalCandidateCount = await prisma.videoGenerationCandidate.count({
+    where: { projectId: params.project.id, artifactId },
+  });
   let firstTaskId = "";
-  for (let candidateNo = 1; candidateNo <= videoCandidateCount(); candidateNo += 1) {
-    try {
-      const taskId = await submitAliyunImageToVideoTask({
-        imageUrl: params.startFrameUrl,
-        lastFrameUrl: params.endFrameUrl,
-        prompt: params.prompt,
-        durationSeconds: params.segment.durationSeconds,
-        endFrameRequirementLevel,
-      });
-      if (!firstTaskId) firstTaskId = taskId;
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, taskId, status: "running", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, videoModel: "happyhorse-1.1-i2v", endFrameRequirementLevel, endFrameConstraintMode: "strong_prompt_target_and_visual_check", endFramePromptEnforced: true }) } });
-    } catch (error) {
-      await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, status: "failed", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl }) } });
-    }
+  const candidateCount = videoCandidateCount();
+  for (let localCandidateNo = 1; localCandidateNo <= candidateCount; localCandidateNo += 1) {
+    const candidateNo = historicalCandidateCount + localCandidateNo;
+    await withOnePromptVideoLogContext(generationCandidateLogContext({
+      projectId: params.project.id,
+      artifactId,
+      kind: "segment_video",
+      candidateNo,
+      candidateCount,
+      attempt,
+      metadata: { ...params.metadata, segmentNo: params.segment.segmentNo },
+    }), async () => {
+      await logOnePromptVideo("generation_candidate.video.submit.start");
+      try {
+        const taskId = await submitAliyunImageToVideoTask({
+          imageUrl: params.startFrameUrl,
+          lastFrameUrl: params.endFrameUrl,
+          imageInputs: params.imageInputs,
+          prompt: params.prompt,
+          durationSeconds: params.segment.durationSeconds,
+          endFrameRequirementLevel,
+        });
+        if (!firstTaskId) firstTaskId = taskId;
+        await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, taskId, status: "running", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, videoModel: "happyhorse-1.1-i2v", endFrameRequirementLevel, endFrameConstraintMode: resolvedVideoImages.nativeLastFrame ? "native_last_frame" : "semantic_prompt_and_visual_check", endFramePromptEnforced: true, videoImageInputCapabilities: providerImageCapabilities, requestedVideoImageInputs: params.imageInputs, transportedVideoImageInputs: resolvedVideoImages.transported, evaluationOnlyVideoImageInputs: resolvedVideoImages.evaluationOnly, rejectedVideoImageInputs: resolvedVideoImages.rejected, generationInputFingerprint, generationInputFingerprintVersion: GENERATION_INPUT_FINGERPRINT_VERSION }) } });
+        await logOnePromptVideo("generation_candidate.video.submit.success", { taskId });
+      } catch (error) {
+        await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, status: "failed", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, generationInputFingerprint, generationInputFingerprintVersion: GENERATION_INPUT_FINGERPRINT_VERSION }) } });
+        await logOnePromptVideo("generation_candidate.video.submit.error", errorForLog(error), "error");
+      }
+    });
   }
   if (!firstTaskId) throw new Error("All video candidate submissions failed");
   return firstTaskId;
@@ -778,6 +1076,248 @@ function readPlanSegmentRenderDescriptionMap(planJson: Prisma.JsonValue | null):
     if (Number.isInteger(n) && n > 0) map.set(n, description);
   }
   return map;
+}
+
+function canonicalBoundaryContractsFromPlan(
+  planJson: Prisma.JsonValue | null,
+): VideoBoundaryContract[] {
+  const plan = planRecord(planJson);
+  if (Array.isArray(plan.boundaryContracts) && plan.boundaryContracts.length) {
+    return plan.boundaryContracts.filter(isRecord) as unknown as VideoBoundaryContract[];
+  }
+  const typedPlan = plan as unknown as OnePromptVideoPlan;
+  if (!Array.isArray(typedPlan.keyframes) || !Array.isArray(typedPlan.segments)) {
+    throw new Error("The video plan is missing keyframes or segments required for boundary contracts.");
+  }
+  const contracts = deriveCanonicalBoundaryContracts(typedPlan);
+  validateBoundaryContracts(typedPlan, contracts);
+  return contracts;
+}
+
+function canonicalBoundaryContractMap(
+  planJson: Prisma.JsonValue | null,
+): Map<number, VideoBoundaryContract> {
+  return new Map(
+    canonicalBoundaryContractsFromPlan(planJson)
+      .map((contract) => [contract.keyframeNo, contract]),
+  );
+}
+
+async function bindApprovedAssetsIntoBoundaryPlan(
+  project: VideoProjectWithShots,
+): Promise<void> {
+  const plan = cloneJsonRecord(project.planJson ?? {});
+  const contracts = canonicalBoundaryContractsFromPlan(project.planJson);
+  const referenceMap = readPlanConsistencyReferenceMap(project.planJson);
+  const approvedIds = project.keyframes
+    .filter((keyframe) => keyframe.keyframeNo < 0 && Boolean(keyframe.imageUrl))
+    .flatMap((keyframe) => {
+      const reference = referenceMap.get(keyframe.keyframeNo);
+      return [
+        readPlanShotString(reference, ["anchorId", "anchor_id"]),
+        readPlanShotString(reference, ["assetId", "asset_id"]),
+      ].filter(Boolean);
+    });
+  plan.boundaryContracts = bindBoundaryContractsToApprovedAssets(
+    contracts,
+    approvedIds,
+  );
+  plan.planningPhase = {
+    semanticPlanning: "complete",
+    boundaryPlanning: "asset_bound",
+    mediaConditionedPlanning: "pending_images",
+    finalPromptCompilation: "deferred_to_generation",
+    updatedAt: new Date().toISOString(),
+  };
+  await prisma.videoProject.update({
+    where: { id: project.id },
+    data: { planJson: cleanInputJson(plan) },
+  });
+}
+
+async function runMediaConditionedPlanningAfterImageApproval(
+  project: VideoProjectWithShots,
+): Promise<{
+  observedFacts: VideoObservedBoundaryFacts[];
+  segmentPlans: VideoMediaConditionedSegmentPlan[];
+}> {
+  const plan = cloneJsonRecord(project.planJson ?? {});
+  const typedPlan = plan as unknown as OnePromptVideoPlan;
+  const contracts = setBoundaryContractStatus(
+    canonicalBoundaryContractsFromPlan(project.planJson),
+    "image_approved",
+  );
+  validateBoundaryContracts(typedPlan, contracts);
+  const contractMap = new Map(contracts.map((contract) => [contract.keyframeNo, contract]));
+  const boundaryKeyframes = project.keyframes
+    .filter((keyframe) => keyframe.keyframeNo > 0 && Boolean(keyframe.imageUrl))
+    .sort((a, b) => a.keyframeNo - b.keyframeNo);
+  const observedFacts = await Promise.all(boundaryKeyframes.map((keyframe) =>
+    observeApprovedBoundaryFrame({
+      contract: requiredMapValue(
+        contractMap,
+        keyframe.keyframeNo,
+        `Missing canonical boundary contract for KF${keyframe.keyframeNo}.`,
+      ),
+      imageUrl: keyframe.imageUrl as string,
+    })
+  ));
+  const factsMap = new Map(observedFacts.map((facts) => [facts.keyframeNo, facts]));
+  const dbKeyframes = new Map(boundaryKeyframes.map((keyframe) => [keyframe.keyframeNo, keyframe]));
+  const provisionalMap = readPlanSegmentRenderDescriptionMap(project.planJson);
+  const planSegments = new Map(typedPlan.segments.map((segment) => [segment.segmentNo, segment]));
+  const segmentPlans = await Promise.all(project.segments
+    .sort((a, b) => a.segmentNo - b.segmentNo)
+    .map((dbSegment) => {
+      const segment = requiredMapValue(
+        planSegments,
+        dbSegment.segmentNo,
+        `Missing semantic segment ${dbSegment.segmentNo}.`,
+      );
+      const startKeyframe = requiredMapValue(
+        dbKeyframes,
+        segment.startKeyframeNo,
+        `Missing approved start image KF${segment.startKeyframeNo}.`,
+      );
+      const endKeyframe = requiredMapValue(
+        dbKeyframes,
+        segment.endKeyframeNo,
+        `Missing approved end image KF${segment.endKeyframeNo}.`,
+      );
+      return planMediaConditionedSegment({
+        segment,
+        startContract: requiredMapValue(contractMap, segment.startKeyframeNo, "Missing start boundary contract."),
+        endContract: requiredMapValue(contractMap, segment.endKeyframeNo, "Missing end boundary contract."),
+        startFacts: requiredMapValue(factsMap, segment.startKeyframeNo, "Missing observed start facts."),
+        endFacts: requiredMapValue(factsMap, segment.endKeyframeNo, "Missing observed end facts."),
+        startImageUrl: startKeyframe.imageUrl as string,
+        endImageUrl: endKeyframe.imageUrl as string,
+        provisional: provisionalMap.get(segment.segmentNo) as unknown as SegmentRenderDescription | undefined,
+      });
+    }));
+
+  const mediaPlanBySegment = new Map(segmentPlans.map((item) => [item.segmentNo, item]));
+  const existingRenderDescriptions = Array.isArray(plan.segmentRenderDescriptions)
+    ? plan.segmentRenderDescriptions.filter(isRecord)
+    : [];
+  plan.boundaryContracts = contracts;
+  plan.observedBoundaryFacts = observedFacts;
+  plan.mediaConditionedSegmentPlans = segmentPlans;
+  plan.segmentRenderDescriptions = typedPlan.segments.map((segment) => {
+    const existing = existingRenderDescriptions.find((item) =>
+      Number(item.segmentNo ?? item.segment_no) === segment.segmentNo
+    ) ?? {};
+    const media = requiredMapValue(mediaPlanBySegment, segment.segmentNo, "Missing media-conditioned segment plan.");
+    return {
+      ...existing,
+      segmentNo: segment.segmentNo,
+      startFrameContract: media.startFrameContract,
+      endFrameContract: media.endFrameContract,
+      motionContract: media.motionContract,
+      singleTakeContract: media.singleTakeContract,
+      motionCheckpoints: media.motionCheckpoints,
+      videoPromptContract: media.videoPromptContract,
+      warnings: uniqueStrings([
+        ...readPlanStringArray(existing, ["warnings"]),
+        ...media.warnings,
+      ]),
+      planningSource: media.planningStatus,
+      refinedAt: media.refinedAt,
+    };
+  });
+  const fallbackCount = segmentPlans.filter((item) => item.planningStatus === "fallback").length;
+  plan.planningPhase = {
+    semanticPlanning: "complete",
+    boundaryPlanning: "image_approved",
+    mediaConditionedPlanning: fallbackCount ? "partial" : "complete",
+    finalPromptCompilation: "deferred_to_generation",
+    updatedAt: new Date().toISOString(),
+  };
+  await prisma.videoProject.update({
+    where: { id: project.id },
+    data: { planJson: cleanInputJson(plan) },
+  });
+  await Promise.all(segmentPlans.map((media) =>
+    prisma.videoSegment.updateMany({
+      where: { projectId: project.id, segmentNo: media.segmentNo },
+      data: {
+        motion: compactJsonLine("motion", media.motionContract),
+        camera: compactJsonLine("single_take", media.singleTakeContract),
+        subjectMotion: readPlanShotString(media.motionContract, ["subjectMotion", "subject_motion", "subjectPath", "subject_path"]),
+        environmentMotion: readPlanShotString(media.motionContract, ["environmentMotion", "environment_motion"]),
+      },
+    })
+  ));
+  return { observedFacts, segmentPlans };
+}
+
+function requiredMapValue<K, V>(map: Map<K, V>, key: K, message: string): V {
+  const value = map.get(key);
+  if (value === undefined) throw new Error(message);
+  return value;
+}
+
+async function invalidateMediaPlanningForBoundary(
+  projectId: string,
+  keyframeNo: number,
+): Promise<void> {
+  if (keyframeNo <= 0) return;
+  const project = await prisma.videoProject.findUnique({
+    where: { id: projectId },
+    select: { planJson: true },
+  });
+  if (!project?.planJson) return;
+  const plan = cloneJsonRecord(project.planJson);
+  const adjacentSegmentNos = new Set(
+    (Array.isArray(plan.segments) ? plan.segments : [])
+      .filter(isRecord)
+      .filter((segment) =>
+        Number(segment.startKeyframeNo ?? segment.start_keyframe_no) === keyframeNo
+        || Number(segment.endKeyframeNo ?? segment.end_keyframe_no) === keyframeNo
+      )
+      .map((segment) => Number(segment.segmentNo ?? segment.segment_no))
+      .filter((segmentNo) => Number.isInteger(segmentNo) && segmentNo > 0),
+  );
+  plan.observedBoundaryFacts = (Array.isArray(plan.observedBoundaryFacts)
+    ? plan.observedBoundaryFacts
+    : []).filter((item) => !isRecord(item) || Number(item.keyframeNo) !== keyframeNo);
+  plan.mediaConditionedSegmentPlans = (Array.isArray(plan.mediaConditionedSegmentPlans)
+    ? plan.mediaConditionedSegmentPlans
+    : []).filter((item) =>
+      !isRecord(item) || !adjacentSegmentNos.has(Number(item.segmentNo))
+    );
+  plan.segmentRenderDescriptions = (Array.isArray(plan.segmentRenderDescriptions)
+    ? plan.segmentRenderDescriptions
+    : []).map((item) => {
+      if (!isRecord(item) || !adjacentSegmentNos.has(Number(item.segmentNo ?? item.segment_no))) {
+        return item;
+      }
+      const next = { ...item };
+      for (const key of [
+        "startFrameContract",
+        "endFrameContract",
+        "motionContract",
+        "singleTakeContract",
+        "motionCheckpoints",
+        "videoPromptContract",
+        "planningSource",
+        "refinedAt",
+      ]) {
+        delete next[key];
+      }
+      return next;
+    });
+  plan.planningPhase = {
+    semanticPlanning: "complete",
+    boundaryPlanning: "asset_bound",
+    mediaConditionedPlanning: "pending_images",
+    finalPromptCompilation: "deferred_to_generation",
+    updatedAt: new Date().toISOString(),
+  };
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: cleanInputJson(plan) },
+  });
 }
 
 function readFinalTransitionPlan(planJson: Prisma.JsonValue | null): FinalTransitionPlan[] {
@@ -935,7 +1475,10 @@ async function createPlanForPlannerArch(
   if (arch === "v2_shadow") {
     const localPlan = createVideoPlan(input);
     try {
-      const shadowPlan = await createAliyunStoryboardPlan(input, plannerOptions);
+      const shadowPlan = await withOnePromptVideoLogContext(
+        { ...context, atomicFunction: "脚本拆解", workflowStage: "planning" },
+        () => createAliyunStoryboardPlan(input, plannerOptions),
+      );
       await logOnePromptVideo("project.plan.arch.shadow_success", {
         ...context,
         localSegmentCount: localPlan.segmentCount,
@@ -956,7 +1499,10 @@ async function createPlanForPlannerArch(
     }
   }
 
-  return withPlannerArchMetadata(await createAliyunStoryboardPlan(input, plannerOptions), "v2");
+  return withPlannerArchMetadata(await withOnePromptVideoLogContext(
+    { ...context, atomicFunction: "脚本拆解", workflowStage: "planning" },
+    () => createAliyunStoryboardPlan(input, plannerOptions),
+  ), "v2");
 }
 
 function withPlannerArchMetadata(plan: OnePromptVideoPlan, arch: OnePromptPlannerArch, warning?: string): OnePromptVideoPlan {
@@ -1862,6 +2408,69 @@ function generationQualityReportForActiveMedia(
   return value && isRecord(value) ? value as unknown as GenerationQualityReport : undefined;
 }
 
+function deferredVideoQualityChecksForSegment(
+  project: Pick<VideoProjectWithShots, "planJson">,
+  segment: Pick<VideoProjectWithShots["segments"][number], "segmentNo">,
+  startKeyframe: Pick<VideoProjectWithShots["keyframes"][number], "keyframeNo" | "imageUrl">,
+  endKeyframe: Pick<VideoProjectWithShots["keyframes"][number], "keyframeNo" | "imageUrl">,
+): DeferredVideoQualityCheck[] {
+  const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
+  const sources: Array<{ artifactId: string; mediaUrl?: string | null }> = [
+    { artifactId: imageArtifactIdForKeyframeNo(startKeyframe.keyframeNo), mediaUrl: startKeyframe.imageUrl },
+    { artifactId: imageArtifactIdForKeyframeNo(endKeyframe.keyframeNo), mediaUrl: endKeyframe.imageUrl },
+    ...readPlanMicroShots(planSegment).map((microShot) => ({
+      artifactId: imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo),
+      mediaUrl: microShot.imageUrl,
+    })),
+  ];
+  const checks = sources.flatMap(({ artifactId, mediaUrl }) => {
+    if (!mediaUrl) return [];
+    const report = generationQualityReportForActiveMedia(project.planJson, artifactId, mediaUrl);
+    return (report?.issueLedger ?? [])
+      .filter((issue) => issue.status === "invalid_for_stage" && issue.applicableStage === "video")
+      .map((issue) => ({
+        sourceIssueId: `${artifactId}::${issue.issueId}`,
+        sourceArtifactId: artifactId,
+        category: issue.category,
+        region: issue.region,
+        requiredVideoCheck: issue.target
+          ? `${issue.summary}. Required visible video state: ${issue.target}`
+          : issue.summary,
+        expectedState: issue.target,
+      } satisfies DeferredVideoQualityCheck));
+  });
+  return [...new Map(checks.map((check) => [check.sourceIssueId, check])).values()];
+}
+
+function deferredVideoQualityChecksFromUnknown(value: unknown): DeferredVideoQualityCheck[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const sourceIssueId = readPlanShotString(item, ["sourceIssueId", "source_issue_id"]);
+    const sourceArtifactId = readPlanShotString(item, ["sourceArtifactId", "source_artifact_id"]);
+    const requiredVideoCheck = readPlanShotString(item, ["requiredVideoCheck", "required_video_check"]);
+    if (!sourceIssueId || !sourceArtifactId || !requiredVideoCheck) return [];
+    const categoryValue = readPlanShotString(item, ["category"]);
+    const category: DeferredVideoQualityCheck["category"] =
+      categoryValue === "text_brand"
+      || categoryValue === "game_ui"
+      || categoryValue === "anatomy"
+      || categoryValue === "identity"
+      || categoryValue === "layout"
+      || categoryValue === "continuity"
+        ? categoryValue
+        : "artifact";
+    return [{
+      sourceIssueId,
+      sourceArtifactId,
+      category,
+      region: readPlanShotString(item, ["region"]) || undefined,
+      requiredVideoCheck,
+      expectedState: readPlanShotString(item, ["expectedState", "expected_state"]) || undefined,
+    }];
+  });
+}
+
 export function hasUsableVideoCandidateForActiveClip(
   candidates: Array<{
     kind: string;
@@ -2048,6 +2657,115 @@ function selectedReferenceUrlsForPromptTarget(planJson: Prisma.JsonValue | null,
       : {};
   const artifact = isRecord(debugArtifacts[targetArtifactId]) ? debugArtifacts[targetArtifactId] : undefined;
   return readPlanStringArray(artifact, ["selectedReferenceUrls", "selected_reference_urls"]);
+}
+
+function buildSegmentVideoImageInputs(
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes">,
+  segment: VideoProjectWithShots["segments"][number],
+  startKeyframe: VideoProjectWithShots["keyframes"][number],
+  endKeyframe: VideoProjectWithShots["keyframes"][number],
+): VideoImageInput[] {
+  if (!startKeyframe.imageUrl || !endKeyframe.imageUrl) {
+    throw new Error(`Segment ${segment.segmentNo} requires approved first and last boundary images.`);
+  }
+  const inputs: VideoImageInput[] = [{
+    id: `segment:${segment.segmentNo}:first_frame`,
+    role: "first_frame",
+    url: startKeyframe.imageUrl,
+    authority: "native_boundary",
+    sourceArtifactId: imageArtifactIdForKeyframeNo(startKeyframe.keyframeNo),
+    instruction: "This is the exact approved first frame. Start the video from this image.",
+    allowedUse: ["initial composition", "initial pose", "initial camera", "initial scene and product state"],
+    forbiddenUse: ["do not treat it as style-only evidence", "do not swap it with the last frame"],
+  }, {
+    id: `segment:${segment.segmentNo}:last_frame`,
+    role: "last_frame",
+    url: endKeyframe.imageUrl,
+    authority: "native_boundary",
+    sourceArtifactId: imageArtifactIdForKeyframeNo(endKeyframe.keyframeNo),
+    instruction: "This is the exact approved last frame. Reach it through one continuous physically plausible take.",
+    allowedUse: ["terminal composition", "terminal pose", "terminal scene and product state"],
+    forbiddenUse: ["do not reveal it at the start", "do not reach it by cut, dissolve, teleportation, or pasted freeze-frame"],
+  }];
+
+  const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
+  const requiredAnchors = new Set(effectiveRequiredAnchorIds(planSegment));
+  const referenceMap = readPlanConsistencyReferenceMap(project.planJson);
+  for (const keyframe of project.keyframes) {
+    if (keyframe.keyframeNo >= 0 || !keyframe.imageUrl || !isApprovedConsistencyReference(keyframe)) continue;
+    const reference = referenceMap.get(keyframe.keyframeNo);
+    const anchorId = readPlanShotString(reference, ["anchorId", "anchor_id"]);
+    if (requiredAnchors.size && anchorId && !requiredAnchors.has(anchorId)) continue;
+    const category = readPlanShotString(reference, ["assetCategory", "asset_category"]);
+    const kind = readPlanShotString(reference, ["kind"]);
+    const role = videoReferenceRole(category, kind);
+    inputs.push({
+      id: `segment:${segment.segmentNo}:asset:${keyframe.keyframeNo}`,
+      role,
+      url: keyframe.imageUrl,
+      authority: "reference_only",
+      sourceArtifactId: imageArtifactIdForKeyframeNo(keyframe.keyframeNo),
+      instruction: videoReferenceInstruction(role, anchorId),
+      allowedUse: videoReferenceAllowedUse(role),
+      forbiddenUse: ["do not copy pose, framing, background, or unrelated objects unless this image is explicitly a scene-layout reference"],
+    });
+  }
+
+  for (const microShot of readPlanMicroShots(planSegment)) {
+    if (!microShot.imageUrl) continue;
+    inputs.push({
+      id: `segment:${segment.segmentNo}:checkpoint:${microShot.microShotNo}`,
+      role: "motion_checkpoint",
+      url: microShot.imageUrl,
+      authority: "reference_only",
+      sourceArtifactId: imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo),
+      instruction: `Use only as ordered motion checkpoint ${microShot.microShotNo} at approximately ${microShot.localTimeSeconds}s.`,
+      allowedUse: ["intermediate pose", "intermediate object state", "motion order"],
+      forbiddenUse: ["do not use as first or last frame", "do not insert it as a cutaway or frozen frame"],
+    });
+  }
+  return uniqueVideoImageInputs(inputs).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+}
+
+function videoReferenceRole(
+  category: string,
+  kind: string,
+): VideoImageInput["role"] {
+  if (category === "person" || kind === "character") return "character_identity";
+  if (category === "product" || category === "prop" || kind === "product" || kind === "prop") return "product_identity";
+  if (category === "scene" || kind === "scene" || kind === "space_layout") return "scene_layout";
+  if (category === "style") return "style_reference";
+  return "custom_reference";
+}
+
+function videoReferenceInstruction(
+  role: VideoImageInput["role"],
+  anchorId: string,
+): string {
+  const target = anchorId ? ` for anchor ${anchorId}` : "";
+  if (role === "character_identity") return `Preserve character identity only${target}.`;
+  if (role === "product_identity") return `Preserve product or prop appearance only${target}.`;
+  if (role === "scene_layout") return `Preserve approved spatial layout only${target}.`;
+  if (role === "style_reference") return "Preserve only the approved rendering style.";
+  return `Use only as scoped consistency evidence${target}.`;
+}
+
+function videoReferenceAllowedUse(role: VideoImageInput["role"]): string[] {
+  if (role === "character_identity") return ["face", "hair", "clothing", "body proportions"];
+  if (role === "product_identity") return ["shape", "material", "color", "required markings"];
+  if (role === "scene_layout") return ["spatial relationships", "camera axis", "stable background geometry"];
+  if (role === "style_reference") return ["rendering style", "texture", "color treatment"];
+  return ["attributes explicitly named in its instruction"];
+}
+
+function uniqueVideoImageInputs(inputs: VideoImageInput[]): VideoImageInput[] {
+  const seen = new Set<string>();
+  return inputs.filter((input) => {
+    const fingerprint = `${input.role}:${input.url}`;
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    return true;
+  });
 }
 
 function normalizeRetryFromStage(value: unknown): ArtifactRetryFromStage | undefined {
@@ -3191,7 +3909,26 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
     keyframe.status !== VideoShotStatus.IMAGE_APPROVED
   );
   if (dirtyKeyframe) {
-    await logOnePromptVideo("project.resume.dirty_keyframe", { userId, projectId, keyframeNo: dirtyKeyframe.keyframeNo, retryFromStage: recoveryMetadata[imageArtifactIdForKeyframeNo(dirtyKeyframe.keyframeNo)]?.retryFromStage });
+    const dirtyTarget = readPlanKeyframeMap(project.planJson).get(dirtyKeyframe.keyframeNo)
+      ?? readPlanConsistencyReferenceMap(project.planJson).get(dirtyKeyframe.keyframeNo);
+    const dirtyScope = resolveImageTargetDependencyScope(project.planJson, dirtyTarget, dirtyKeyframe.keyframeNo);
+    await logOnePromptVideo("project.resume.dirty_keyframe", {
+      userId,
+      ...generationCandidateLogContext({
+        projectId,
+        artifactId: imageArtifactIdForKeyframeNo(dirtyKeyframe.keyframeNo),
+        kind: "keyframe_image",
+        candidateNo: project.generationCandidates.filter((item) => item.artifactId === imageArtifactIdForKeyframeNo(dirtyKeyframe.keyframeNo)).length + 1,
+        metadata: {
+          keyframeNo: dirtyKeyframe.keyframeNo,
+          assetNameZh: readPlanShotString(dirtyTarget, ["displayNameZh", "display_name_zh", "purposeZh", "purpose_zh", "purpose"]),
+          assetCategory: dirtyScope.assetCategory,
+          assetView: dirtyScope.assetView,
+          targetContract: dirtyTarget ?? { purpose: dirtyKeyframe.purpose },
+        },
+      }),
+      retryFromStage: recoveryMetadata[imageArtifactIdForKeyframeNo(dirtyKeyframe.keyframeNo)]?.retryFromStage,
+    });
     return regenerateShotImage(userId, projectId, dirtyKeyframe.id, { recovery: true });
   }
   for (const segment of project.segments) {
@@ -3272,6 +4009,20 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
         missingKeyframeCount: missingKeyframes.length,
       });
       return updated;
+    }
+    if (project.errorMessage) {
+      const resumedReview = await prisma.videoProject.update({
+        where: { id: projectId },
+        data: { errorMessage: null },
+        include: PROJECT_INCLUDE,
+      });
+      await logOnePromptVideo("project.resume.image_review_clear_recoverable_error", {
+        userId,
+        projectId,
+        missingKeyframeCount: missingKeyframes.length,
+        reason: "review remains actionable even when no dependency-ready image task can be submitted yet",
+      });
+      return resumedReview;
     }
   }
 
@@ -4134,6 +4885,7 @@ export async function updateVideoShot(
     updatedFields,
   });
   if (unlockedParentKeyframeNo !== undefined) {
+    await invalidateMediaPlanningForBoundary(projectId, unlockedParentKeyframeNo);
     await invalidateTransitionReferencesForParent(projectId, unlockedParentKeyframeNo, "Parent-camera keyframe was unlocked; transition reference approval must be renewed.");
   }
   let updatedProject = await requireVideoProject(userId, projectId);
@@ -4282,6 +5034,7 @@ export async function approveAssetLibrary(userId: string, projectId: string): Pr
     "approved",
     { retryFromStage: "generation" },
   );
+  await bindApprovedAssetsIntoBoundaryPlan(project);
 
   const latest = await requireVideoProject(userId, projectId);
   const missingBoundaryKeyframes = latest.keyframes.filter((keyframe) => !isConsistencyKeyframeNo(keyframe.keyframeNo) && !keyframe.imageUrl);
@@ -4334,11 +5087,84 @@ export async function approveAssetLibrary(userId: string, projectId: string): Pr
 type ImageCandidateLearningSummary = {
   historicalCandidateCount: number;
   sourceCandidateIds: string[];
+  repairMode: ImageRepairMode;
+  repairDecision?: ImageRepairDecision;
+  baselineSelection: ImageBaselineSelectionDecision;
   promptAddon: string;
   referenceImageUrls: string[];
   referenceUsageNotes: string[];
   debugSummary: Record<string, unknown>;
 };
+
+export type ImageBaselineCandidateSnapshot = {
+  id: string;
+  candidateNo: number;
+  createdAtMs: number;
+  parentCandidateId?: string;
+  structurallyUsable: boolean;
+  catastrophicRegressionReasons: string[];
+  regressionAgainstParent: boolean;
+};
+
+export type ImageBaselineSelectionDecision = {
+  latestCandidateId?: string;
+  baselineCandidateId?: string;
+  baselineUsable: boolean;
+  regressionAgainstParent: boolean;
+  catastrophicRegressionReasons: string[];
+  fallbackDepth: number;
+  selectionRule: "latest_usable_candidate_then_nearest_usable_ancestor";
+};
+
+export function selectLatestUsableImageBaseline(
+  candidates: ImageBaselineCandidateSnapshot[],
+): ImageBaselineSelectionDecision {
+  const ordered = [...candidates].sort((a, b) =>
+    b.candidateNo - a.candidateNo || b.createdAtMs - a.createdAtMs
+  );
+  const latest = ordered[0];
+  if (!latest) {
+    return {
+      baselineUsable: false,
+      regressionAgainstParent: false,
+      catastrophicRegressionReasons: [],
+      fallbackDepth: 0,
+      selectionRule: "latest_usable_candidate_then_nearest_usable_ancestor",
+    };
+  }
+
+  const byId = new Map(ordered.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set<string>();
+  let cursor: ImageBaselineCandidateSnapshot | undefined = latest;
+  let fallbackDepth = 0;
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
+    if (cursor.structurallyUsable && cursor.catastrophicRegressionReasons.length === 0) {
+      return {
+        latestCandidateId: latest.id,
+        baselineCandidateId: cursor.id,
+        baselineUsable: true,
+        regressionAgainstParent: latest.regressionAgainstParent,
+        catastrophicRegressionReasons: latest.catastrophicRegressionReasons,
+        fallbackDepth,
+        selectionRule: "latest_usable_candidate_then_nearest_usable_ancestor",
+      };
+    }
+    const explicitParent: ImageBaselineCandidateSnapshot | undefined =
+      cursor.parentCandidateId ? byId.get(cursor.parentCandidateId) : undefined;
+    cursor = explicitParent ?? ordered.find((candidate) => candidate.candidateNo < cursor!.candidateNo);
+    fallbackDepth += 1;
+  }
+
+  return {
+    latestCandidateId: latest.id,
+    baselineUsable: false,
+    regressionAgainstParent: latest.regressionAgainstParent,
+    catastrophicRegressionReasons: latest.catastrophicRegressionReasons,
+    fallbackDepth,
+    selectionRule: "latest_usable_candidate_then_nearest_usable_ancestor",
+  };
+}
 
 function buildImageCandidateLearningSummary(
   project: VideoProjectWithShots,
@@ -4350,29 +5176,24 @@ function buildImageCandidateLearningSummary(
     if (!candidate.qualityReport || !isRecord(candidate.qualityReport)) return [];
     return [{ candidate, report: candidate.qualityReport as unknown as GenerationQualityReport }];
   });
-  const ranked = [...evaluated]
-    .filter(({ candidate }) => Boolean(candidate.mediaUrl))
-    .sort((a, b) => {
-      const scoreDelta =
-        (b.candidate.compositeScore ?? generationQualityCompositeScore(b.report) ?? -1) -
-        (a.candidate.compositeScore ?? generationQualityCompositeScore(a.report) ?? -1);
-      if (scoreDelta !== 0) return scoreDelta;
-      const createdDelta = b.candidate.createdAt.getTime() - a.candidate.createdAt.getTime();
-      return createdDelta !== 0 ? createdDelta : b.candidate.candidateNo - a.candidate.candidateNo;
-    });
-  const strongest = ranked[0];
   const latestEvaluated = [...evaluated].sort((a, b) => b.candidate.candidateNo - a.candidate.candidateNo)[0];
+  const repairDecision = latestEvaluated?.report.repairDecision;
+  const repairMode: ImageRepairMode = historical.length === 0
+    ? "full_regenerate"
+    : repairDecision?.mode
+      ?? (latestEvaluated?.report.passed ? "guided_regenerate" : "full_regenerate");
   const activeLedgerIssues = (latestEvaluated?.report.issueLedger ?? []).filter((issue) =>
     (issue.status === "open" || issue.status === "regressed")
     && issue.applicableStage === "static_image"
     && issue.severity !== "advisory"
   );
-  const strongDimensions = strongest ? [
-    typeof strongest.report.identityScore === "number" && strongest.report.identityScore >= 80 ? `identity ${strongest.report.identityScore.toFixed(1)}` : "",
-    typeof strongest.report.layoutScore === "number" && strongest.report.layoutScore >= 80 ? `layout ${strongest.report.layoutScore.toFixed(1)}` : "",
-    typeof strongest.report.promptAlignmentScore === "number" && strongest.report.promptAlignmentScore >= 80 ? `prompt alignment ${strongest.report.promptAlignmentScore.toFixed(1)}` : "",
-    typeof strongest.report.continuityScore === "number" && strongest.report.continuityScore >= 80 ? `continuity ${strongest.report.continuityScore.toFixed(1)}` : "",
-  ].filter(Boolean) : [];
+  const preservedResolvedStates = uniqueStrings((latestEvaluated?.report.issueLedger ?? [])
+    .filter((issue) => issue.status === "resolved" && issue.applicableStage === "static_image")
+    .map((issue) => issue.target
+      ? `${issue.region ? `${issue.region}: ` : ""}${issue.target}`
+      : `Preserve the currently verified ${issue.category}${issue.region ? ` state at ${issue.region}` : " state"}.`
+    ))
+    .slice(0, 12);
   const failureIssues = uniqueStrings((activeLedgerIssues.length
     ? activeLedgerIssues.map((issue) => issue.summary)
     : latestEvaluated?.report.passed === false ? latestEvaluated.report.artifactIssues ?? [] : [])
@@ -4410,61 +5231,165 @@ function buildImageCandidateLearningSummary(
       const createdDelta = b.createdAt.getTime() - a.createdAt.getTime();
       return createdDelta !== 0 ? createdDelta : b.candidateNo - a.candidateNo;
     })[0];
-  // Continue from the strongest structurally usable result. A failed isolated
-  // asset that contains scenery, UI, or extra subjects must not be fed back as
-  // an image reference because visual conditioning would reinforce the defect.
-  const baselineCandidate = strongest && isStructurallyUsableImageBaseline(strongest.candidate, strongest.report)
-    ? strongest.candidate
-    : evaluated.length === 0
+  const evaluatedById = new Map(evaluated.map((item) => [item.candidate.id, item]));
+  const baselineSnapshots = evaluated
+    .filter(({ candidate }) => Boolean(candidate.mediaUrl))
+    .map(({ candidate, report }) => {
+      const metadata = candidateMetadata(candidate.metadata);
+      const parentCandidateId = typeof metadata.parentCandidateId === "string"
+        ? metadata.parentCandidateId
+        : undefined;
+      const parent = parentCandidateId ? evaluatedById.get(parentCandidateId) : undefined;
+      const catastrophicRegressionReasons = catastrophicImageBaselineReasons(candidate, report, parent?.report);
+      return {
+        id: candidate.id,
+        candidateNo: candidate.candidateNo,
+        createdAtMs: candidate.createdAt.getTime(),
+        parentCandidateId,
+        structurallyUsable: isStructurallyUsableImageBaseline(candidate, report),
+        catastrophicRegressionReasons,
+        regressionAgainstParent: imageCandidateRegressedAgainstParent(candidate, report, parent?.report),
+      } satisfies ImageBaselineCandidateSnapshot;
+    });
+  const lineageSelection = selectLatestUsableImageBaseline(baselineSnapshots);
+  const lineageBaseline = lineageSelection.baselineCandidateId
+    ? evaluatedById.get(lineageSelection.baselineCandidateId)
+    : undefined;
+  const mayReuseBaseline = repairMode === "local_edit" || repairMode === "guided_regenerate";
+  const baselineCandidate = mayReuseBaseline && lineageBaseline
+    && (repairDecision?.baselineUsable ?? true)
+    ? lineageBaseline.candidate
+    : mayReuseBaseline && evaluated.length === 0
       ? latestWithMedia
       : undefined;
-  const baselineUrl = baselineCandidate?.mediaUrl || currentImageUrl || "";
+  const baselineUrl = mayReuseBaseline
+    ? baselineCandidate?.mediaUrl || (historical.length > 0 && evaluated.length === 0 ? currentImageUrl : "") || ""
+    : "";
+  const baselineSelection: ImageBaselineSelectionDecision = {
+    ...lineageSelection,
+    baselineCandidateId: baselineCandidate?.id,
+    baselineUsable: Boolean(baselineUrl),
+  };
+  const baselineReport = baselineCandidate ? evaluatedById.get(baselineCandidate.id)?.report : undefined;
+  const strongDimensions = baselineReport ? [
+    typeof baselineReport.identityScore === "number" && baselineReport.identityScore >= 80 ? `identity ${baselineReport.identityScore.toFixed(1)}` : "",
+    typeof baselineReport.layoutScore === "number" && baselineReport.layoutScore >= 80 ? `layout ${baselineReport.layoutScore.toFixed(1)}` : "",
+    typeof baselineReport.promptAlignmentScore === "number" && baselineReport.promptAlignmentScore >= 80 ? `prompt alignment ${baselineReport.promptAlignmentScore.toFixed(1)}` : "",
+    typeof baselineReport.continuityScore === "number" && baselineReport.continuityScore >= 80 ? `continuity ${baselineReport.continuityScore.toFixed(1)}` : "",
+  ].filter(Boolean) : [];
   const sourceCandidateIds = uniqueStrings([
     ...evaluated.map(({ candidate }) => candidate.id),
     ...historical.filter((candidate) => candidate.errorMessage).map((candidate) => candidate.id),
   ]);
   const promptAddon = historical.length ? [
-    "INCREMENTAL CANDIDATE IMPROVEMENT — LEARN FROM ALL PRIOR ATTEMPTS",
+    repairMode === "local_edit"
+      ? "LOCAL IMAGE REPAIR — MODIFY ONLY THE LISTED REGIONS"
+      : repairMode === "guided_regenerate"
+        ? "GUIDED IMAGE REGENERATION — PRESERVE VERIFIED STRENGTHS"
+        : "FULL IMAGE REGENERATION — DO NOT COPY THE FAILED BASELINE",
     `This is candidate #${historical.length + 1}. Preserve every earlier candidate as history; do not restart the exploration from scratch.`,
+    `Deterministic repair mode: ${repairMode}.`,
     `Prior attempts reviewed: ${historical.length}; visually evaluated: ${evaluated.length}; system-passed: ${passedCount}; manually accepted: ${acceptedCount}.`,
-    strongDimensions.length
-      ? `Preserve the strongest verified qualities from earlier attempts: ${strongDimensions.join(", ")}.`
-      : "Preserve any correct identity, composition, subject count, and scene structure visible in the strongest earlier attempt.",
+    mayReuseBaseline && strongDimensions.length
+      ? `Preserve the verified qualities from the latest usable lineage state: ${strongDimensions.join(", ")}.`
+      : mayReuseBaseline
+        ? "Preserve any correct identity, composition, subject count, and scene structure visible in the latest usable lineage state."
+        : "Start from the authoritative contract and approved references. Do not imitate the failed candidate's scene, layout, subject count, or identity.",
     failureIssues.length ? "Do not repeat these observed failures:\n" + failureIssues.map((issue) => `- ${issue}`).join("\n") : "",
     correctionActions.length ? "Execute these accumulated, spatially precise corrections:\n" + correctionActions.map((action) => `- ${action}`).join("\n") : "",
     retryInstructions.length ? "Apply the accumulated visual-judge corrections:\n" + retryInstructions.map((instruction) => `- ${instruction}`).join("\n") : "",
+    preservedResolvedStates.length
+      ? "RESOLVED-STATE PRESERVATION LOCK — these verified improvements must not regress:\n" + preservedResolvedStates.map((state) => `- ${state}`).join("\n")
+      : "",
     "Concretize any older vague feedback before rendering: turn words such as near, proper, improve, fix, or more accurate into one exact visible target supported by the authoritative frame contract. Use viewer-left/viewer-right only, never character-relative direction; normalized coordinates use top-left=(0,0), bottom-right=(1,1). Specify the region, target point, angle range/count/format/pose/color, tolerance, and keep-unmodified surroundings; never invent a target that conflicts with the contract.",
     contractConflicts.length ? "Previously detected contract conflicts must be resolved using the authoritative frame contract before rendering; never obey both sides:\n" + contractConflicts.map((conflict) => `- ${conflict}`).join("\n") : "",
     baselineUrl
       ? "The historical baseline image is provided only for its successful identity, composition, and scene structure. Correct its known logic, text, timer, score, lighting, anatomy, and artifact defects instead of copying them."
       : "",
-    "The new candidate must be a measurable improvement over the strongest prior candidate while still obeying the authoritative frame and narrative contracts.",
+    repairMode === "local_edit"
+      ? "Change only the listed normalized regions. Keep every unlisted pixel-level subject attribute, identity feature, pose, composition, background structure, lighting direction, and color relationship as stable as the provider permits."
+      : "The new candidate must be a measurable improvement over the strongest prior candidate while still obeying the authoritative frame and narrative contracts.",
   ].filter(Boolean).join("\n") : "";
   return {
     historicalCandidateCount: historical.length,
     sourceCandidateIds,
+    repairMode,
+    repairDecision,
+    baselineSelection,
     promptAddon,
     referenceImageUrls: baselineUrl ? [baselineUrl] : [],
     referenceUsageNotes: baselineUrl
-      ? ["Latest historical candidate is an improvement baseline only. Preserve its verified strengths and apply the requested delta corrections; never treat its defective score, timer, text, lighting, anatomy, or narrative state as authoritative."]
+      ? ["The latest usable candidate in the repair lineage is the improvement baseline. Preserve its verified strengths and apply only the requested delta corrections; never replace it with an older candidate merely because that candidate has a higher aggregate score."]
       : [],
     debugSummary: {
       historicalCandidateCount: historical.length,
       evaluatedCandidateCount: evaluated.length,
       passedCandidateCount: passedCount,
       manuallyAcceptedCandidateCount: acceptedCount,
-      strongestCandidateId: strongest?.candidate.id,
+      latestEvaluatedCandidateId: latestEvaluated?.candidate.id,
       baselineCandidateId: baselineCandidate?.id,
-      baselineSelectionRule: "strongest_structurally_usable_candidate_then_unscored_latest_fallback",
+      parentCandidateId: baselineCandidate ? candidateMetadata(baselineCandidate.metadata).parentCandidateId : undefined,
+      baselineSelectionRule: baselineSelection.selectionRule,
+      baselineSelection,
+      repairMode,
+      repairDecision,
       strongDimensions,
       accumulatedFailureIssues: failureIssues,
       accumulatedRetryInstructions: retryInstructions,
       accumulatedCorrectionActions: correctionActions,
+      preservedResolvedStates,
       accumulatedContractConflicts: contractConflicts,
       ignoredUnverifiedContractSuspicions: suspectedContractConflicts,
       sourceCandidateIds,
     },
   };
+}
+
+function buildImageAttemptPrompt(
+  compiled: CompiledPrompt,
+  learning: ImageCandidateLearningSummary,
+): string {
+  if (learning.historicalCandidateCount === 0) return compiled.prompt;
+  if (learning.repairMode === "full_regenerate") {
+    return [compiled.prompt, learning.promptAddon].filter(Boolean).join("\n\n");
+  }
+  if (learning.repairMode !== "local_edit" && learning.repairMode !== "guided_regenerate") {
+    // Modes such as reevaluate_only/reference_reselect/stage repair should not
+    // normally reach paid image submission. Keep the full contract if a manual
+    // user action explicitly resubmits anyway.
+    return [compiled.prompt, learning.promptAddon].filter(Boolean).join("\n\n");
+  }
+
+  const inputs = compiled.debugArtifact.inputs;
+  const minimalContract = {
+    targetArtifactId: compiled.debugArtifact.targetArtifactId,
+    targetType: compiled.debugArtifact.targetType,
+    frameContract: inputs.frameContract,
+    targetContract: inputs.targetContract,
+    dependencyScope: inputs.dependencyScope,
+    visualContract: inputs.visualContract,
+    visibleAnchorIds: inputs.visibleAnchorIds,
+  };
+  const guidedContext = learning.repairMode === "guided_regenerate"
+    ? {
+        narrativeContext: inputs.narrativeContext,
+        cameraGraph: inputs.cameraGraph,
+      }
+    : undefined;
+  const referenceRoles = (compiled.debugArtifact.referenceUsageNotes ?? []).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  return [
+    learning.repairMode === "local_edit"
+      ? "LOCAL IMAGE REPAIR PACKET — THE BASELINE IMAGE IS THE PRIMARY VISUAL STATE"
+      : "GUIDED IMAGE REGENERATION PACKET — REUSE ONLY VERIFIED BASELINE STRENGTHS",
+    learning.repairMode === "local_edit"
+      ? "Do not redesign the shot. Apply only the confirmed deltas below and preserve all unlisted content."
+      : "Rerender the image under the compact authoritative contract while preserving verified identity and composition from the baseline.",
+    `Minimal immutable contract:\n${clipText(JSON.stringify(minimalContract), 2100)}`,
+    guidedContext ? `Relevant narrative and camera context:\n${clipText(JSON.stringify(guidedContext), 900)}` : "",
+    referenceRoles.length ? `Approved reference roles:\n${referenceRoles.map((note, index) => `- INPUT ${index + 1}: ${clipText(note, 260)}`).join("\n")}` : "",
+    learning.promptAddon,
+    "Authority rule: the minimal immutable contract and approved references outrank the historical baseline wherever they conflict.",
+  ].filter(Boolean).join("\n\n");
 }
 
 function isStructurallyUsableImageBaseline(
@@ -4490,6 +5415,80 @@ function isStructurallyUsableImageBaseline(
     && (report.identityScore ?? 0) >= 55
     && (report.layoutScore ?? 0) >= 55
     && (report.promptAlignmentScore ?? 0) >= 55;
+}
+
+function imageCandidateRegressedAgainstParent(
+  candidate: VideoProjectWithShots["generationCandidates"][number],
+  report: GenerationQualityReport,
+  parentReport?: GenerationQualityReport,
+): boolean {
+  if (!parentReport) return false;
+  const scorePairs = [
+    [report.identityScore, parentReport.identityScore],
+    [report.layoutScore, parentReport.layoutScore],
+    [report.promptAlignmentScore, parentReport.promptAlignmentScore],
+    [report.continuityScore, parentReport.continuityScore],
+  ] as const;
+  const dimensionRegressed = scorePairs.some(([current, parent]) =>
+    typeof current === "number" && typeof parent === "number" && parent - current >= 15
+  );
+  const currentComposite = candidate.compositeScore ?? generationQualityCompositeScore(report);
+  const parentComposite = generationQualityCompositeScore(parentReport);
+  return dimensionRegressed
+    || (typeof currentComposite === "number" && typeof parentComposite === "number" && parentComposite - currentComposite >= 15);
+}
+
+function catastrophicImageBaselineReasons(
+  candidate: VideoProjectWithShots["generationCandidates"][number],
+  report: GenerationQualityReport,
+  parentReport?: GenerationQualityReport,
+): string[] {
+  const reasons: string[] = [];
+  if (isTechnicalQualityEvaluationFailure(report) || report.contentBased === false) {
+    reasons.push("technical_or_non_visual_evaluation");
+  }
+  if (report.repairDecision?.baselineUsable === false
+    && (report.repairDecision.mode === "local_edit" || report.repairDecision.mode === "guided_regenerate")) {
+    reasons.push("deterministic_router_rejected_baseline");
+  }
+  const scores = [
+    report.identityScore,
+    report.layoutScore,
+    report.promptAlignmentScore,
+    report.continuityScore,
+  ].filter((score): score is number => typeof score === "number");
+  if (scores.length === 4 && Math.min(...scores) < 40) {
+    reasons.push("catastrophic_dimension_score");
+  }
+  const hardRegressedIssue = (report.issueLedger ?? []).some((issue) =>
+    issue.status === "regressed" && issue.severity === "hard"
+  );
+  if (hardRegressedIssue) reasons.push("hard_issue_regressed");
+
+  const issueText = [
+    ...(report.artifactIssues ?? []),
+    ...(report.hardFailureReasons ?? []),
+    ...(report.correctionActions ?? []).flatMap((action) => [
+      action.region,
+      action.element,
+      action.observed,
+      action.instruction,
+    ]),
+  ].join(" ");
+  if (/black image|blank image|corrupt(?:ed)? image|identity (?:collapse|failure|replacement)|wrong (?:main )?subject|missing (?:main )?(?:person|character|product)|extra (?:person|character|product)|entire (?:scene|composition|layout).*(?:wrong|destroyed|replaced)|scene replacement|严重身份漂移|身份崩坏|主体缺失|主体错误|额外人物|额外角色|画面损坏|黑图|空白图|构图崩坏|场景被替换/i.test(issueText)) {
+    reasons.push("explicit_catastrophic_visual_failure");
+  }
+  if (!isStructurallyUsableImageBaseline(candidate, report)) {
+    reasons.push("structurally_unusable_baseline");
+  }
+
+  // A score drop is diagnostic only. It never causes rollback by itself,
+  // because evaluator scores can fluctuate even when the intended edit improved.
+  if (imageCandidateRegressedAgainstParent(candidate, report, parentReport)
+    && (hardRegressedIssue || reasons.includes("explicit_catastrophic_visual_failure"))) {
+    reasons.push("confirmed_regression_against_parent");
+  }
+  return uniqueStrings(reasons);
 }
 
 function effectiveRequiredAnchorIds(source: Record<string, unknown> | undefined): string[] {
@@ -4591,7 +5590,7 @@ export async function regenerateShotImage(
   shotId: string,
   options: { recovery?: boolean } = {},
 ): Promise<VideoProjectWithShots> {
-  const project = await requireVideoProject(userId, projectId);
+  let project = await requireVideoProject(userId, projectId);
   const segment = project.segments.find((item) => item.id === shotId);
   const keyframe = project.keyframes.find((item) => item.id === shotId) ??
     (segment ? project.keyframes.find((item) => item.keyframeNo === segment.startKeyframeNo) : undefined);
@@ -4599,31 +5598,72 @@ export async function regenerateShotImage(
   if (options.recovery && keyframe.imageUrl && (keyframe.status === VideoShotStatus.IMAGE_READY || keyframe.status === VideoShotStatus.IMAGE_APPROVED)) {
     return project;
   }
+  if (keyframe.keyframeNo > 0) {
+    await invalidateMediaPlanningForBoundary(projectId, keyframe.keyframeNo);
+    project = await requireVideoProject(userId, projectId);
+  }
 
-  await logOnePromptVideo("image.regenerate.start", {
-    userId,
-    projectId,
-    keyframeId: keyframe.id,
-    keyframeNo: keyframe.keyframeNo,
-    wasLocked: keyframe.locked,
-  });
   const artifactId = imageArtifactIdForKeyframeNo(keyframe.keyframeNo);
   const learning = buildImageCandidateLearningSummary(project, artifactId, keyframe.imageUrl);
+  const planTarget = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo)
+    ?? readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
+  const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planTarget, keyframe.keyframeNo);
+  const regenerationContext = generationCandidateLogContext({
+    projectId,
+    artifactId,
+    kind: "keyframe_image",
+    candidateNo: learning.historicalCandidateCount + 1,
+    candidateCount: learning.historicalCandidateCount + 1,
+    metadata: {
+      keyframeNo: keyframe.keyframeNo,
+      assetNameZh: readPlanShotString(planTarget, ["displayNameZh", "display_name_zh", "purposeZh", "purpose_zh", "purpose"]),
+      assetCategory: dependencyScope.assetCategory,
+      assetView: dependencyScope.assetView,
+      targetContract: planTarget ?? { purpose: keyframe.purpose },
+    },
+  });
+  await logOnePromptVideo("image.regenerate.start", {
+    userId,
+    ...regenerationContext,
+    keyframeId: keyframe.id,
+    wasLocked: keyframe.locked,
+  });
+  const draftPromptStartedAtMs = Date.now();
   const draftPrompt = compileImagePromptForKeyframe(project, keyframe);
+  await logOnePromptVideo("production.step.completed", {
+    ...regenerationContext,
+    stepNameZh: "程序根据脚本、画面合同和上一轮问题起草图片提示词",
+    executionMethod: "program",
+    durationMs: Date.now() - draftPromptStartedAtMs,
+    resultZh: learning.historicalCandidateCount > 0 ? "已把上一轮质检问题写入返修提示词" : "首轮生成提示词已起草",
+  });
+  const referenceSelectionStartedAtMs = Date.now();
   const referenceSelection = await selectReferenceImagesForKeyframe(project, keyframe, draftPrompt.prompt);
+  await logOnePromptVideo("production.step.completed", {
+    ...regenerationContext,
+    stepNameZh: "为这张图选择一致性参考资产",
+    executionMethod: "program",
+    durationMs: Date.now() - referenceSelectionStartedAtMs,
+    resultZh: `选中 ${referenceSelection.output.selectedReferenceUrls?.length ?? 0} 张参考图`,
+  });
+  const compileStartedAtMs = Date.now();
   const compiled = compileImagePromptForKeyframe(project, keyframe, {
     ...referenceSelection.output,
     finalTextPrompt: draftPrompt.prompt,
   });
   assertCompiledVisualContractReady(compiled);
-  const learnedPrompt = [compiled.prompt, learning.promptAddon].filter(Boolean).join("\n\n");
+  const learnedPrompt = buildImageAttemptPrompt(compiled, learning);
+  await logOnePromptVideo("production.step.completed", {
+    ...regenerationContext,
+    stepNameZh: "编译最终图片提示词并做合同冲突检查",
+    executionMethod: "deterministic_program",
+    durationMs: Date.now() - compileStartedAtMs,
+    resultZh: "最终提示词通过程序合同检查",
+  });
   const learnedReferenceUrls = uniqueStrings([
     ...learning.referenceImageUrls,
     ...(compiled.referenceImageUrls ?? []),
   ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
-  const planTarget = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo)
-    ?? readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
-  const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planTarget, keyframe.keyframeNo);
   const authoritativeAnchorLocks = consistencyAnchorLocksForPrompt(
     project.planJson,
     dependencyScope.requiredAnchorIds,
@@ -4633,12 +5673,12 @@ export async function regenerateShotImage(
     ...(referenceSelection.output.usageNotes ?? []),
     authoritativeAnchorLocks ? `AUTHORITATIVE ANCHOR CONTRACTS — visible words and markings in these locks are required, not forbidden:\n${authoritativeAnchorLocks}` : "",
   ]);
-  await saveReferenceSelectionOutput(projectId, {
+  await withOnePromptVideoLogContext(regenerationContext, () => saveReferenceSelectionOutput(projectId, {
     ...referenceSelection.output,
     selectedReferenceUrls: learnedReferenceUrls,
     finalTextPrompt: learnedPrompt,
-  });
-  await savePromptDebugArtifact(projectId, {
+  }));
+  await withOnePromptVideoLogContext(regenerationContext, () => savePromptDebugArtifact(projectId, {
     ...compiled.debugArtifact,
     inputs: {
       ...compiled.debugArtifact.inputs,
@@ -4648,7 +5688,7 @@ export async function regenerateShotImage(
     referenceUsageNotes: learnedReferenceUsageNotes,
     finalPrompt: learnedPrompt,
     rules: uniqueStrings([...compiled.debugArtifact.rules, "incremental_candidate_learning", "preserve_candidate_history"]),
-  });
+  }));
   if (options.recovery) {
     const claim = await prisma.videoKeyframe.updateMany({
       where: {
@@ -4680,7 +5720,14 @@ export async function regenerateShotImage(
       incrementalRegeneration: true,
       historicalCandidateCount: learning.historicalCandidateCount,
       learnedFromCandidateIds: learning.sourceCandidateIds,
+      repairMode: learning.repairMode,
+      repairDecision: learning.repairDecision,
+      parentCandidateId: learning.baselineSelection.baselineCandidateId,
+      baselineSelection: learning.baselineSelection,
       keyframeNo: keyframe.keyframeNo,
+      assetNameZh: readPlanShotString(planTarget, ["displayNameZh", "display_name_zh", "purposeZh", "purpose_zh", "purpose"]),
+      assetCategory: dependencyScope.assetCategory,
+      assetView: dependencyScope.assetView,
       targetContract: scopedTargetContractFromCompiled(
         compiled,
         planTarget ?? { purpose: keyframe.purpose, imagePrompt: keyframe.imagePrompt },
@@ -4707,7 +5754,7 @@ export async function regenerateShotImage(
     data: { status: VideoProjectStatus.IMAGE_GENERATING, errorMessage: null },
     include: PROJECT_INCLUDE,
   });
-      await logOnePromptVideo("image.regenerate.success", { userId, projectId, keyframeId: keyframe.id, keyframeNo: keyframe.keyframeNo, imageTaskId: taskId });
+  await logOnePromptVideo("image.regenerate.success", { userId, ...regenerationContext, keyframeId: keyframe.id, imageTaskId: taskId });
   await appendProjectStageLog({
     projectId,
     title: updated.title,
@@ -4768,26 +5815,47 @@ export async function regenerateMicroShotImage(
   });
   const latest = await requireVideoProject(userId, projectId);
   const latestSegment = latest.segments.find((item) => item.id === shotId) ?? segment;
+  const artifactId = imageArtifactIdForMicroShot(segment.segmentNo, microShotNo);
+  const learning = buildImageCandidateLearningSummary(latest, artifactId, existing?.imageUrl);
   const draftPrompt = compileImagePromptForMicroShot(latest, latestSegment, merged);
   const referenceSelection = await selectReferenceImagesForMicroShot(latest, latestSegment, merged, draftPrompt.prompt);
   const compiled = compileImagePromptForMicroShot(latest, latestSegment, merged, {
     ...referenceSelection.output,
     finalTextPrompt: draftPrompt.prompt,
   });
+  const learnedPrompt = buildImageAttemptPrompt(compiled, learning);
+  const learnedReferenceUrls = uniqueStrings([
+    ...learning.referenceImageUrls,
+    ...(compiled.referenceImageUrls ?? []),
+  ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  const learnedReferenceUsageNotes = uniqueStrings([
+    ...learning.referenceUsageNotes,
+    ...(referenceSelection.output.usageNotes ?? []),
+  ]);
   await saveReferenceSelectionOutput(projectId, {
     ...referenceSelection.output,
-    selectedReferenceUrls: referenceSelection.urls,
-    finalTextPrompt: compiled.prompt,
+    selectedReferenceUrls: learnedReferenceUrls,
+    finalTextPrompt: learnedPrompt,
   });
-  await savePromptDebugArtifact(projectId, compiled.debugArtifact);
+  await savePromptDebugArtifact(projectId, {
+    ...compiled.debugArtifact,
+    inputs: {
+      ...compiled.debugArtifact.inputs,
+      incrementalCandidateLearning: learning.debugSummary,
+    },
+    selectedReferenceUrls: learnedReferenceUrls,
+    referenceUsageNotes: learnedReferenceUsageNotes,
+    finalPrompt: learnedPrompt,
+    rules: uniqueStrings([...compiled.debugArtifact.rules, "incremental_candidate_learning", "repair_mode_routing"]),
+  });
   const taskId = await createImageCandidateBatch({
     project: latest,
-    artifactId: imageArtifactIdForMicroShot(segment.segmentNo, microShotNo),
+    artifactId,
     targetId: segment.id,
     kind: "micro_shot_image",
-    prompt: compiled.prompt,
+    prompt: learnedPrompt,
     negativePrompt: compiled.negativePrompt,
-    referenceImageUrls: compiled.referenceImageUrls ?? [],
+    referenceImageUrls: learnedReferenceUrls,
     seedBase: Math.abs(segment.segmentNo * 100 + microShotNo + Date.now()) % 2147483647,
     metadata: {
       isRegeneration: Boolean(existing?.imageUrl),
@@ -4795,8 +5863,13 @@ export async function regenerateMicroShotImage(
       segmentNo: segment.segmentNo,
       microShotNo,
       targetContract: merged as unknown as Record<string, unknown>,
-      selectedReferenceUrls: compiled.referenceImageUrls ?? [],
-      referenceUsageNotes: referenceSelection.output.usageNotes ?? [],
+      visualContract: compiled.debugArtifact.inputs.visualContract,
+      selectedReferenceUrls: learnedReferenceUrls,
+      referenceUsageNotes: learnedReferenceUsageNotes,
+      repairMode: learning.repairMode,
+      repairDecision: learning.repairDecision,
+      parentCandidateId: learning.baselineSelection.baselineCandidateId,
+      baselineSelection: learning.baselineSelection,
     },
   });
 
@@ -4808,7 +5881,7 @@ export async function regenerateMicroShotImage(
     imageUrl: existing?.imageUrl ?? "",
     errorMessage: "",
   });
-  await updateProjectArtifactStatus(projectId, [imageArtifactIdForMicroShot(segment.segmentNo, microShotNo)], "generating", { retryFromStage: "generation" });
+  await updateProjectArtifactStatus(projectId, [artifactId], "generating", { retryFromStage: "generation" });
   await logOnePromptVideo("micro_shot.image.regenerate.success", {
     userId,
     projectId,
@@ -4853,6 +5926,7 @@ export async function regenerateShotClip(
     prompt: compiled.prompt,
     startFrameUrl: startKeyframe.imageUrl,
     endFrameUrl: endKeyframe.imageUrl,
+    imageInputs: buildSegmentVideoImageInputs(project, segment, startKeyframe, endKeyframe),
     metadata: {
       isRegeneration: Boolean(segment.clipUrl),
       retryCycleId: randomUUID(),
@@ -5057,33 +6131,68 @@ async function submitRequiredMicroShotImageTasks(
       try {
         const latest = await requireVideoProject(userId, projectId);
         const latestSegment = latest.segments.find((item) => item.id === segment.id) ?? segment;
+        const artifactId = imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo);
+        const learning = buildImageCandidateLearningSummary(latest, artifactId, microShot.imageUrl);
         const draftPrompt = compileImagePromptForMicroShot(latest, latestSegment, microShot);
         const referenceSelection = await selectReferenceImagesForMicroShot(latest, latestSegment, microShot, draftPrompt.prompt);
         const compiled = compileImagePromptForMicroShot(latest, latestSegment, microShot, {
           ...referenceSelection.output,
           finalTextPrompt: draftPrompt.prompt,
         });
-        await saveReferenceSelectionOutput(projectId, {
+        const learnedPrompt = buildImageAttemptPrompt(compiled, learning);
+        const learnedReferenceUrls = uniqueStrings([
+          ...learning.referenceImageUrls,
+          ...(compiled.referenceImageUrls ?? []),
+        ]).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+        const learnedReferenceUsageNotes = uniqueStrings([
+          ...learning.referenceUsageNotes,
+          ...(referenceSelection.output.usageNotes ?? []),
+        ]);
+        const microShotLogContext = {
+          projectId,
+          artifactId,
+          generationKind: "micro_shot_image",
+          assetLabel: microShot.purposeZh || microShot.purpose,
+          segmentNo: segment.segmentNo,
+          microShotNo: microShot.microShotNo,
+        };
+        await withOnePromptVideoLogContext(microShotLogContext, () => saveReferenceSelectionOutput(projectId, {
           ...referenceSelection.output,
-          selectedReferenceUrls: referenceSelection.urls,
-          finalTextPrompt: compiled.prompt,
-        });
-        await savePromptDebugArtifact(projectId, compiled.debugArtifact);
+          selectedReferenceUrls: learnedReferenceUrls,
+          finalTextPrompt: learnedPrompt,
+        }));
+        await withOnePromptVideoLogContext(microShotLogContext, () => savePromptDebugArtifact(projectId, {
+          ...compiled.debugArtifact,
+          inputs: {
+            ...compiled.debugArtifact.inputs,
+            incrementalCandidateLearning: learning.debugSummary,
+          },
+          selectedReferenceUrls: learnedReferenceUrls,
+          referenceUsageNotes: learnedReferenceUsageNotes,
+          finalPrompt: learnedPrompt,
+          rules: uniqueStrings([...compiled.debugArtifact.rules, "incremental_candidate_learning", "repair_mode_routing"]),
+        }));
         const taskId = await createImageCandidateBatch({
           project: latest,
-          artifactId: imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo),
+          artifactId,
           targetId: segment.id,
           kind: "micro_shot_image",
-          prompt: compiled.prompt,
+          prompt: learnedPrompt,
           negativePrompt: compiled.negativePrompt,
-          referenceImageUrls: compiled.referenceImageUrls ?? [],
+          referenceImageUrls: learnedReferenceUrls,
           seedBase: Math.abs(segment.segmentNo * 100 + microShot.microShotNo) || 1,
           metadata: {
             segmentNo: segment.segmentNo,
             microShotNo: microShot.microShotNo,
+            assetNameZh: microShot.purposeZh || microShot.purpose,
             targetContract: microShot as unknown as Record<string, unknown>,
-            selectedReferenceUrls: compiled.referenceImageUrls ?? [],
-            referenceUsageNotes: referenceSelection.output.usageNotes ?? [],
+            visualContract: compiled.debugArtifact.inputs.visualContract,
+            selectedReferenceUrls: learnedReferenceUrls,
+            referenceUsageNotes: learnedReferenceUsageNotes,
+            repairMode: learning.repairMode,
+            repairDecision: learning.repairDecision,
+            parentCandidateId: learning.baselineSelection.baselineCandidateId,
+            baselineSelection: learning.baselineSelection,
           },
         });
         await updatePlanMicroShot(projectId, segment.segmentNo, microShot.microShotNo, {
@@ -5093,7 +6202,7 @@ async function submitRequiredMicroShotImageTasks(
           imageUrl: "",
           errorMessage: "",
         });
-        await updateProjectArtifactStatus(projectId, [imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo)], "generating", { retryFromStage: "generation" });
+        await updateProjectArtifactStatus(projectId, [artifactId], "generating", { retryFromStage: "generation" });
         await logOnePromptVideo("micro_shot.image.submit.success", {
           userId,
           projectId,
@@ -5111,14 +6220,14 @@ async function submitRequiredMicroShotImageTasks(
             `Segment: ${segment.purpose || "untitled"}`,
             `Micro-shot: ${microShot.purposeZh || microShot.purpose || "untitled"}`,
             `Task ID: ${taskId}`,
-            `Prompt: ${compiled.prompt.slice(0, 360)}`,
+            `Prompt: ${learnedPrompt.slice(0, 360)}`,
           ],
           data: {
             userId,
             segmentNo: segment.segmentNo,
             microShotNo: microShot.microShotNo,
             imageTaskId: taskId,
-            referenceImageCount: (compiled.referenceImageUrls ?? []).length,
+            referenceImageCount: learnedReferenceUrls.length,
           },
         });
       } catch (error) {
@@ -5235,12 +6344,25 @@ export async function approveShotImages(userId: string, projectId: string): Prom
   const project = await requireVideoProject(userId, projectId);
   const missing = project.keyframes.filter((keyframe) => !keyframe.imageUrl);
   if (missing.length) throw new Error("All keyframe images must be generated before approval");
+  const mediaPlanning = await runMediaConditionedPlanningAfterImageApproval(project);
+  const unreachable = mediaPlanning.segmentPlans.filter(
+    (item) => item.singleTakeContract.physicallyReachable === false,
+  );
+  if (unreachable.length) {
+    throw new Error(
+      "Approved boundary images cannot form a physically reachable single take for segment(s): "
+      + unreachable.map((item) => item.segmentNo).join(", ")
+      + ". Regenerate an adjacent boundary image or return to timeline planning.",
+    );
+  }
   await logOnePromptVideo("micro_shot.review.start", {
     userId,
     projectId,
     keyframeCount: project.keyframes.length,
     segmentCount: project.segments.length,
     status: project.status,
+    observedBoundaryCount: mediaPlanning.observedFacts.length,
+    mediaConditionedSegmentCount: mediaPlanning.segmentPlans.length,
   });
   await appendProjectStageLog({
     projectId,
@@ -6057,6 +7179,68 @@ function candidateMetadata(value: Prisma.JsonValue | null): Record<string, unkno
   return isRecord(value) ? value : {};
 }
 
+function qualityEvaluationFingerprintForCandidate(
+  candidate: Pick<
+    VideoProjectWithShots["generationCandidates"][number],
+    "kind" | "mediaUrl" | "prompt" | "negativePrompt" | "metadata"
+  >,
+): string | undefined {
+  if (!candidate.mediaUrl) return undefined;
+  const metadata = candidateMetadata(candidate.metadata);
+  const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
+  const visualContract = isRecord(metadata.visualContract) ? metadata.visualContract : {};
+  return buildQualityEvaluationFingerprint({
+    kind: candidate.kind,
+    mediaUrl: candidate.mediaUrl,
+    prompt: candidate.prompt,
+    negativePrompt: candidate.negativePrompt,
+    selectedReferenceUrls: stringArrayValue(metadata.selectedReferenceUrls),
+    targetContract,
+    visualContract,
+    parameters: {
+      policyVersion: "quality-policy-v3",
+      keyframeNo: finiteNumber(metadata.keyframeNo),
+      segmentNo: finiteNumber(metadata.segmentNo),
+      microShotNo: finiteNumber(metadata.microShotNo),
+      durationSeconds: finiteNumber(metadata.durationSeconds),
+      startFrameUrl: firstNonEmptyString([metadata.startFrameUrl]),
+      endFrameUrl: firstNonEmptyString([metadata.endFrameUrl]),
+      motionCheckpoints: Array.isArray(metadata.motionCheckpoints) ? metadata.motionCheckpoints : [],
+      deferredVideoQualityChecks: Array.isArray(metadata.deferredVideoQualityChecks) ? metadata.deferredVideoQualityChecks : [],
+    },
+  });
+}
+
+function reusableQualityEvaluation(
+  candidate: VideoProjectWithShots["generationCandidates"][number],
+  candidates: VideoProjectWithShots["generationCandidates"],
+): { report: GenerationQualityReport; sourceCandidateId: string; fingerprint: string } | undefined {
+  const fingerprint = qualityEvaluationFingerprintForCandidate(candidate);
+  if (!fingerprint) return undefined;
+  for (const source of candidates) {
+    if (
+      source.id === candidate.id
+      || !source.qualityReport
+      || !isRecord(source.qualityReport)
+      || isTechnicalQualityEvaluationFailure(source.qualityReport as unknown as GenerationQualityReport)
+      || qualityEvaluationFingerprintForCandidate(source) !== fingerprint
+    ) continue;
+    const sourceReport = source.qualityReport as unknown as GenerationQualityReport;
+    return {
+      fingerprint,
+      sourceCandidateId: source.id,
+      report: {
+        ...sourceReport,
+        assetId: candidate.artifactId,
+        candidateId: candidate.id,
+        candidateNo: candidate.candidateNo,
+        mediaUrl: candidate.mediaUrl ?? undefined,
+      },
+    };
+  }
+  return undefined;
+}
+
 async function patchTransitionReferenceArtifact(projectId: string, artifactId: string, patch: Partial<TransitionReferenceArtifact>): Promise<void> {
   const project = await prisma.videoProject.findUnique({ where: { id: projectId } });
   if (!project?.planJson) throw new Error("Project plan is missing");
@@ -6451,6 +7635,22 @@ async function upgradeLegacyImageQualityReports(project: VideoProjectWithShots):
 async function syncGenerationCandidates(project: VideoProjectWithShots): Promise<void> {
   await upgradeLegacyImageQualityReports(project);
   const coreKinds = new Set(["keyframe_image", "micro_shot_image", "segment_video"]);
+  // Recover candidates created by the former automatic video-vision pipeline.
+  // A persisted segment video is governed by its deterministic inspection;
+  // stale advisory states must not keep the project waiting forever.
+  await prisma.videoGenerationCandidate.updateMany({
+    where: {
+      projectId: project.id,
+      kind: "segment_video",
+      mediaUrl: { not: null },
+      status: { in: ["succeeded", "evaluating", "evaluated", "quality_retry", "quality_failed"] },
+    },
+    data: {
+      status: "review_ready",
+      passed: null,
+      errorMessage: null,
+    },
+  });
   await prisma.videoGenerationCandidate.updateMany({
     where: {
       projectId: project.id,
@@ -6461,25 +7661,66 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
   });
   const running = project.generationCandidates.filter((candidate) => coreKinds.has(candidate.kind) && candidate.status === "running" && candidate.taskId);
   for (const candidate of running) {
-    const result = await queryDashScopeTask(candidate.taskId as string);
+    const runningMetadata = candidateMetadata(candidate.metadata);
+    const candidateLogContext = generationCandidateLogContext({
+      projectId: project.id,
+      artifactId: candidate.artifactId,
+      kind: candidate.kind,
+      candidateNo: candidate.candidateNo,
+      metadata: runningMetadata,
+    });
+    const result = await withOnePromptVideoLogContext(candidateLogContext, () =>
+      queryDashScopeTask(candidate.taskId as string));
     if (result.status === "succeeded" && result.resultUrl) {
-      const metadata = candidateMetadata(candidate.metadata);
+      const metadata = runningMetadata;
+      const resultUrl = result.resultUrl;
+      await logOnePromptVideo("production.step.completed", {
+        ...candidateLogContext,
+        stepNameZh: candidate.kind === "segment_video"
+          ? "视频生成模型完成候选视频"
+          : "图片生成模型完成候选图",
+        executionMethod: candidate.kind === "segment_video" ? "video_model" : "image_model",
+        durationMs: Math.max(0, Date.now() - candidate.createdAt.getTime()),
+        resultZh: "上游已生成完成（耗时包含任务排队和本系统轮询发现结果的时间）",
+      });
+      const repairOriginQualityCompletedAt = Date.parse(String(metadata.repairOriginQualityCompletedAt || ""));
+      if (candidate.kind !== "segment_video" && Number.isFinite(repairOriginQualityCompletedAt)) {
+        await logOnePromptVideo("production.step.completed", {
+          ...candidateLogContext,
+          stepNameZh: "上一轮质检打回到本轮返修候选图生成完成",
+          executionMethod: "program",
+          durationMs: Math.max(0, Date.now() - repairOriginQualityCompletedAt),
+          repairMode: firstNonEmptyString([metadata.repairMode]),
+          resultZh: "返修候选图已经生成，接下来重新质检",
+        });
+      }
+      const persistStartedAtMs = Date.now();
       const mediaUrl = candidate.kind === "segment_video"
-        ? await persistRemoteMediaToOss({
-            url: result.resultUrl,
+        ? await withOnePromptVideoLogContext(candidateLogContext, () => persistRemoteMediaToOss({
+            url: resultUrl,
             key: `one-prompt-video/candidates/${project.id}/${candidate.artifactId.replace(/[^a-z0-9_-]+/gi, "-")}-${candidate.batchId}-${candidate.candidateNo}.mp4`,
             fallbackContentType: "video/mp4",
-          })
-        : await persistGeneratedImageUrl({
+          }))
+        : await withOnePromptVideoLogContext(candidateLogContext, () => persistGeneratedImageUrl({
             projectId: project.id,
-            sourceUrl: result.resultUrl,
+            sourceUrl: resultUrl,
             kind: candidate.kind === "keyframe_image" ? "keyframe" : "micro-shot",
             keyframeNo: Number(metadata.keyframeNo),
             segmentNo: Number(metadata.segmentNo),
             microShotNo: Number(metadata.microShotNo),
-          });
+          }));
+      await logOnePromptVideo("production.step.completed", {
+        ...candidateLogContext,
+        stepNameZh: candidate.kind === "segment_video"
+          ? "保存候选视频到项目存储"
+          : "保存候选图到项目存储",
+        executionMethod: "program",
+        durationMs: Date.now() - persistStartedAtMs,
+        resultZh: "已保存，可进入质检",
+      });
       if (candidate.kind === "segment_video") {
-        const technical = await inspectGeneratedVideoTechnicalQuality(mediaUrl);
+        const technical = await withOnePromptVideoLogContext(candidateLogContext, () =>
+          inspectGeneratedVideoTechnicalQuality(mediaUrl));
         await prisma.videoGenerationCandidate.update({
           where: { id: candidate.id },
           data: technical.valid
@@ -6490,7 +7731,6 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
                 metadata: cleanInputJson({
                   ...metadata,
                   technicalInspection: technical,
-                  advisoryNextEvalAt: new Date(Date.now() + 2000).toISOString(),
                 }),
               }
             : {
@@ -6504,6 +7744,16 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
         await prisma.videoGenerationCandidate.update({ where: { id: candidate.id }, data: { mediaUrl, status: "succeeded", errorMessage: null } });
       }
     } else if (result.status === "failed") {
+      await logOnePromptVideo("production.step.completed", {
+        ...candidateLogContext,
+        stepNameZh: candidate.kind === "segment_video"
+          ? "视频生成模型生成候选视频"
+          : "图片生成模型生成候选图",
+        executionMethod: candidate.kind === "segment_video" ? "video_model" : "image_model",
+        durationMs: Math.max(0, Date.now() - candidate.createdAt.getTime()),
+        resultZh: "上游生成失败",
+        errorMessage: result.errorMessage || "上游生成失败",
+      }, "error");
       await prisma.videoGenerationCandidate.update({ where: { id: candidate.id }, data: { status: "failed", errorMessage: result.errorMessage || "Upstream generation failed" } });
     }
   }
@@ -6511,6 +7761,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
   let fresh = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, kind: { in: [...coreKinds] } }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
   let requeuedHistoricalTechnicalFailures = false;
   for (const candidate of fresh) {
+    if (candidate.kind === "segment_video") continue;
     if (!candidate.mediaUrl || !candidate.qualityReport || !isRecord(candidate.qualityReport)) continue;
     const report = candidate.qualityReport as unknown as GenerationQualityReport;
     if (!isTechnicalQualityEvaluationFailure(report) || candidate.status === "quality_retry" || candidate.status === "quality_failed") continue;
@@ -6538,6 +7789,8 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
   }
   for (const candidate of fresh) {
     if (
+      candidate.kind === "segment_video"
+      ||
       candidate.status !== "quality_retry"
       || !candidate.qualityReport
       || !isRecord(candidate.qualityReport)
@@ -6548,11 +7801,6 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     await updateProjectArtifactStatus(project.id, [candidate.artifactId], "generating", { retryFromStage: "generation" });
   }
   const artifactIds = [...new Set(fresh.map((candidate) => candidate.artifactId))];
-  const hasActiveVideoGenerationTasks = fresh.some((candidate) =>
-    candidate.kind === "segment_video"
-    && (candidate.status === "running" || candidate.status === "pending")
-    && Boolean(candidate.taskId)
-  );
   let evaluationsStarted = 0;
   for (const artifactId of artifactIds) {
     const artifactCandidates = fresh.filter((candidate) => candidate.artifactId === artifactId);
@@ -6562,14 +7810,10 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     // in the quality pool and must not remain permanently at `succeeded`.
     const qualityWorkItems = artifactCandidates.filter((item) => {
       if (!item.mediaUrl) return false;
-      if (item.kind === "segment_video" && item.status === "review_ready" && !item.qualityReport) {
-        // Keep upstream task polling fast while any segment video is still
-        // rendering. Advisory analysis can run after generation settles.
-        if (hasActiveVideoGenerationTasks) return false;
-        const metadata = candidateMetadata(item.metadata);
-        const advisoryNextEvalAt = Date.parse(String(metadata.advisoryNextEvalAt || ""));
-        return !Number.isFinite(advisoryNextEvalAt) || advisoryNextEvalAt <= Date.now();
-      }
+      // Segment videos leave the critical path after deterministic file/decode
+      // validation. Multi-frame vision review is available only by explicit
+      // user request and never runs from the sync loop.
+      if (item.kind === "segment_video") return false;
       if (item.status === "succeeded" && !item.qualityReport) return true;
       if (item.status !== "quality_retry") return false;
       const metadata = candidateMetadata(item.metadata);
@@ -6601,8 +7845,38 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
             data: { status: "evaluating", errorMessage: null },
           });
       if (evaluationClaim.count !== 1) continue;
-      evaluationsStarted += 1;
       const metadata = candidateMetadata(candidate.metadata);
+      const reusableEvaluation = reusableQualityEvaluation(candidate, artifactCandidates);
+      if (reusableEvaluation) {
+        const cachedReport = candidate.kind === "segment_video"
+          ? { ...reusableEvaluation.report, advisoryOnly: true }
+          : reusableEvaluation.report;
+        await prisma.videoGenerationCandidate.update({
+          where: { id: candidate.id },
+          data: {
+            status: "evaluated",
+            qualityReport: cleanInputJson(cachedReport as unknown as Record<string, unknown>),
+            compositeScore: generationQualityCompositeScore(cachedReport),
+            passed: candidate.kind === "segment_video" ? null : cachedReport.passed,
+            retryInstruction: cachedReport.retryInstruction ?? null,
+            metadata: cleanInputJson({
+              ...metadata,
+              qualityEvaluationFingerprint: reusableEvaluation.fingerprint,
+              qualityEvaluationFingerprintVersion: QUALITY_EVALUATION_FINGERPRINT_VERSION,
+              qualityReportReusedFromCandidateId: reusableEvaluation.sourceCandidateId,
+            }),
+          },
+        });
+        await logOnePromptVideo("generation_quality.report_reused", {
+          projectId: project.id,
+          artifactId,
+          candidateId: candidate.id,
+          sourceCandidateId: reusableEvaluation.sourceCandidateId,
+          qualityEvaluationFingerprint: reusableEvaluation.fingerprint,
+        });
+        continue;
+      }
+      evaluationsStarted += 1;
       const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
       const visualContract = isRecord(metadata.visualContract)
         ? metadata.visualContract as unknown as AuthoritativeVisualContract
@@ -6631,27 +7905,23 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
         previousCandidateUrl: previousCandidate?.mediaUrl ?? undefined,
       };
       try {
-        const report = candidate.kind === "segment_video"
-          ? await evaluateGeneratedVideoQuality({
-              ...common,
-              purpose: "video_segment",
-              durationSeconds: Number(metadata.durationSeconds) || 0,
-              motionCheckpoints: Array.isArray(metadata.motionCheckpoints) ? metadata.motionCheckpoints : [],
-              startFrameUrl: String(metadata.startFrameUrl || ""),
-              endFrameUrl: String(metadata.endFrameUrl || ""),
-            })
-          : await evaluateGeneratedImageQuality({
-              ...common,
-              purpose: candidate.kind === "micro_shot_image"
-                ? "motion_checkpoint_image"
-                : Number(metadata.keyframeNo) < 0 ? "anchor_reference_image" : "boundary_keyframe",
-              assetCategory: assetCategory || undefined,
-              requiresExactBrandText: brandVisualAsset,
-            });
-        const videoAdvisoryOnly = candidate.kind === "segment_video";
-        const effectiveReport: GenerationQualityReport = videoAdvisoryOnly
-          ? { ...report, advisoryOnly: true }
-          : report;
+        const evaluationLogContext = generationCandidateLogContext({
+          projectId: project.id,
+          artifactId: candidate.artifactId,
+          kind: candidate.kind,
+          candidateNo: candidate.candidateNo,
+          metadata,
+        });
+        const report = await withOnePromptVideoLogContext(evaluationLogContext, () =>
+          evaluateGeneratedImageQuality({
+                ...common,
+                purpose: candidate.kind === "micro_shot_image"
+                  ? "motion_checkpoint_image"
+                  : Number(metadata.keyframeNo) < 0 ? "anchor_reference_image" : "boundary_keyframe",
+                assetCategory: assetCategory || undefined,
+                requiresExactBrandText: brandVisualAsset,
+              }));
+        const effectiveReport: GenerationQualityReport = report;
         const technicalFailure = isTechnicalQualityEvaluationFailure(effectiveReport);
         const compositeScore = technicalFailure ? null : generationQualityCompositeScore(report);
         const technicalAttempts = Math.max(0, Number(metadata.qualityTechnicalAttempts) || 0) + 1;
@@ -6660,6 +7930,13 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
           ...metadata,
           qualityTechnicalAttempts: technicalAttempts,
           qualityNextRetryAt: new Date(Date.now() + qualityTechnicalRetryDelayMs(technicalAttempts)).toISOString(),
+          qualityEvaluationFingerprint: qualityEvaluationFingerprintForCandidate(candidate),
+          qualityEvaluationFingerprintVersion: QUALITY_EVALUATION_FINGERPRINT_VERSION,
+        }) as Prisma.InputJsonValue;
+        const completedMetadata = cleanInputJson({
+          ...metadata,
+          qualityEvaluationFingerprint: qualityEvaluationFingerprintForCandidate(candidate),
+          qualityEvaluationFingerprintVersion: QUALITY_EVALUATION_FINGERPRINT_VERSION,
         }) as Prisma.InputJsonValue;
         const persistedEvaluation = await prisma.videoGenerationCandidate.updateMany({
           where: candidate.status === "quality_retry"
@@ -6672,15 +7949,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
                 status: "evaluating",
                 qualityReport: { equals: Prisma.DbNull },
               },
-          data: videoAdvisoryOnly
-            ? {
-                qualityReport: cleanInputJson(effectiveReport as unknown as Record<string, unknown>),
-                compositeScore,
-                passed: null,
-                retryInstruction: effectiveReport.retryInstruction ?? null,
-                status: "evaluated",
-              }
-            : technicalFailure
+          data: technicalFailure
             ? {
                 qualityReport: cleanInputJson(effectiveReport as unknown as Record<string, unknown>),
                 compositeScore: null,
@@ -6695,6 +7964,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
                 passed: report.passed,
                 retryInstruction: report.retryInstruction ?? null,
                 status: "evaluated",
+                metadata: completedMetadata,
               },
         });
         if (persistedEvaluation.count !== 1) {
@@ -6705,15 +7975,7 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
           }, "warn");
           continue;
         }
-        if (videoAdvisoryOnly) {
-          await logOnePromptVideo("generation_quality.video_advisory_ready", {
-            projectId: project.id,
-            artifactId,
-            candidateId: candidate.id,
-            modelPassed: report.passed,
-            technicalFailure,
-          });
-        } else if (!technicalFailure) {
+        if (!technicalFailure) {
           await saveGenerationQualityReport(project.id, effectiveReport);
         } else {
           const issue = report.artifactIssues.join("；") || "画面质检服务暂不可用";
@@ -6773,7 +8035,9 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
     allArtifactCandidates = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, artifactId }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
     // Do not rank a partial pool or start another paid retry while any submitted
     // task is still generating, persisting, or waiting for visual evaluation.
-    const unsettledStatuses = new Set(["running", "pending", "succeeded", "review_ready", "evaluating", "quality_retry"]);
+    const unsettledStatuses = allArtifactCandidates[0]?.kind === "segment_video"
+      ? new Set(["running", "pending", "succeeded", "evaluating", "quality_retry"])
+      : new Set(["running", "pending", "succeeded", "review_ready", "evaluating", "quality_retry"]);
     if (allArtifactCandidates.some((candidate) => unsettledStatuses.has(candidate.status))) continue;
 
     if (allArtifactCandidates[0]?.kind === "segment_video") {
@@ -6816,6 +8080,50 @@ async function syncGenerationCandidates(project: VideoProjectWithShots): Promise
         const technicalErrors = allArtifactCandidates
           .map((candidate) => candidate.errorMessage)
           .filter((value): value is string => Boolean(value));
+        const newestMetadata = candidateMetadata(allArtifactCandidates[0]?.metadata ?? null);
+        const retryCycleId = typeof newestMetadata.retryCycleId === "string"
+          ? newestMetadata.retryCycleId
+          : "";
+        const retryCycleCandidates = retryCycleId
+          ? allArtifactCandidates.filter((candidate) =>
+              candidateMetadata(candidate.metadata).retryCycleId === retryCycleId
+            )
+          : allArtifactCandidates;
+        const failedAttempts = new Set(
+          retryCycleCandidates
+            .filter((candidate) => candidate.status === "failed")
+            .map((candidate) => Math.max(1, Number(candidateMetadata(candidate.metadata).attempt) || 1)),
+        ).size;
+        const canRetryTechnicalVideoFailure = failedAttempts <= generationMaxRetries("segment_video");
+        if (canRetryTechnicalVideoFailure) {
+          await prisma.videoSegment.update({
+            where: { id: segment.id },
+            data: {
+              status: VideoShotStatus.CLIP_PENDING,
+              clipTaskId: null,
+              errorMessage: null,
+            },
+          });
+          await prisma.videoProject.update({
+            where: { id: project.id },
+            data: {
+              status: VideoProjectStatus.CLIP_GENERATING,
+              errorMessage: null,
+            },
+          });
+          await updateProjectArtifactStatus(project.id, [artifactId], "dirty", {
+            dirtyReason: technicalErrors.join("；") || "Video candidate failed deterministic technical validation; submitting the next progressive candidate.",
+            retryFromStage: "generation",
+          });
+          await logOnePromptVideo("generation_candidate.video.progressive_retry_scheduled", {
+            projectId: project.id,
+            artifactId,
+            segmentNo: segment.segmentNo,
+            failedAttempts,
+            maxRetries: generationMaxRetries("segment_video"),
+          });
+          continue;
+        }
         await prisma.videoSegment.update({
           where: { id: segment.id },
           data: {
@@ -7197,6 +8505,19 @@ async function applySelectedGenerationCandidate(
     const keyframe = project.keyframes.find((item) => item.id === candidate.targetId);
     if (keyframe) await reconcileTransitionReferencesForAcceptedParent(project.id, keyframe.keyframeNo, candidate.mediaUrl);
   }
+  await logOnePromptVideo("generation_candidate.selected", {
+    ...generationCandidateLogContext({
+      projectId: project.id,
+      artifactId: candidate.artifactId,
+      kind: candidate.kind,
+      candidateNo: candidate.candidateNo,
+      metadata,
+    }),
+    candidateId: candidate.id,
+    passed: candidate.passed,
+    userAccepted,
+    automaticallySelected: !userApproved,
+  });
 }
 
 function activeDependencyRevisionIds(project: VideoProjectWithShots, kind: string, targetId: string, candidateMetadataValue: Record<string, unknown>): string[] {
@@ -7343,6 +8664,77 @@ export async function retryGenerationCandidateQuality(
   await prisma.videoProject.update({
     where: { id: project.id },
     data: { errorMessage: null },
+  });
+  return requireVideoProject(userId, projectId);
+}
+
+export async function analyzeSegmentVideoCandidate(
+  userId: string,
+  projectId: string,
+  candidateId: string,
+): Promise<VideoProjectWithShots> {
+  const project = await requireVideoProject(userId, projectId);
+  const candidate = project.generationCandidates.find((item) => item.id === candidateId);
+  if (!candidate || candidate.kind !== "segment_video") {
+    throw new Error("Segment video candidate not found");
+  }
+  if (!candidate.mediaUrl) throw new Error("Segment video is not ready");
+
+  const technical = await inspectGeneratedVideoTechnicalQuality(candidate.mediaUrl);
+  if (!technical.valid) {
+    throw new Error(`视频文件技术检查失败：${technical.errorMessage || "无法解码视频"}`);
+  }
+  const metadata = candidateMetadata(candidate.metadata);
+  const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
+  const visualContract = isRecord(metadata.visualContract)
+    ? metadata.visualContract as unknown as AuthoritativeVisualContract
+    : undefined;
+  const report = await evaluateGeneratedVideoQuality({
+    assetId: candidate.artifactId,
+    candidateId: candidate.id,
+    candidateNo: candidate.candidateNo,
+    mediaUrl: candidate.mediaUrl,
+    targetContract,
+    selectedReferenceUrls: stringArrayValue(metadata.selectedReferenceUrls),
+    referenceUsageNotes: stringArrayValue(metadata.referenceUsageNotes),
+    prompt: candidate.prompt,
+    negativePrompt: candidate.negativePrompt,
+    visualContract,
+    authoritativeContractConflicts: visualContract?.verifiedConflicts,
+    purpose: "video_segment",
+    durationSeconds: Number(metadata.durationSeconds) || 0,
+    motionCheckpoints: Array.isArray(metadata.motionCheckpoints) ? metadata.motionCheckpoints : [],
+    deferredVideoQualityChecks: deferredVideoQualityChecksFromUnknown(metadata.deferredVideoQualityChecks),
+    startFrameUrl: String(metadata.startFrameUrl || ""),
+    endFrameUrl: String(metadata.endFrameUrl || ""),
+  });
+  const advisoryReport: GenerationQualityReport = {
+    ...report,
+    advisoryOnly: true,
+    manualVideoQualityChecks: deferredVideoQualityChecksFromUnknown(metadata.deferredVideoQualityChecks),
+  };
+  await prisma.videoGenerationCandidate.update({
+    where: { id: candidate.id },
+    data: {
+      status: "review_ready",
+      qualityReport: cleanInputJson(advisoryReport as unknown as Record<string, unknown>),
+      compositeScore: generationQualityCompositeScore(advisoryReport),
+      passed: null,
+      retryInstruction: advisoryReport.retryInstruction ?? null,
+      errorMessage: null,
+      metadata: cleanInputJson({
+        ...metadata,
+        technicalInspection: technical,
+        videoAdvisoryAnalyzedAt: new Date().toISOString(),
+      }),
+    },
+  });
+  await logOnePromptVideo("generation_quality.video_advisory_requested", {
+    userId,
+    projectId,
+    artifactId: candidate.artifactId,
+    candidateId: candidate.id,
+    modelPassed: report.passed,
   });
   return requireVideoProject(userId, projectId);
 }
@@ -7693,7 +9085,7 @@ async function submitNextImageTask(params: {
         where: { id: params.projectId },
         data: {
           status: VideoProjectStatus.IMAGE_REVIEW,
-          errorMessage: "Approve and lock each person front view before generating its side and back views.",
+          errorMessage: null,
         },
       });
     }
@@ -7702,6 +9094,7 @@ async function submitNextImageTask(params: {
       projectId: params.projectId,
       runningCount: running.length,
       concurrency,
+      waitingAssets: missingConsistencyReferences.map((keyframe) => assetLogLabelForKeyframe(project, keyframe)),
       consistencyReferences: consistencyReferences.map((keyframe) => ({
         keyframeNo: keyframe.keyframeNo,
         status: keyframe.status,
@@ -7717,12 +9110,13 @@ async function submitNextImageTask(params: {
       where: { id: params.projectId },
       data: {
         status: VideoProjectStatus.IMAGE_REVIEW,
-        errorMessage: "Hard consistency reference images are ready. Lock or approve them before generating boundary keyframes.",
+        errorMessage: null,
       },
     });
     await logOnePromptVideo(params.logEventPrefix + ".submit.wait_consistency_approval", {
       userId: params.userId,
       projectId: params.projectId,
+      waitingAssets: unapprovedConsistencyReferences.map((keyframe) => assetLogLabelForKeyframe(project, keyframe)),
       consistencyReferences: unapprovedConsistencyReferences.map((keyframe) => ({
         keyframeNo: keyframe.keyframeNo,
         status: keyframe.status,
@@ -7774,14 +9168,48 @@ async function submitNextImageTask(params: {
     try {
       const artifactId = imageArtifactIdForKeyframeNo(nextKeyframe.keyframeNo);
       const learning = buildImageCandidateLearningSummary(project, artifactId, nextKeyframe.imageUrl);
+      const earlyTargetLogContext = {
+        projectId: params.projectId,
+        artifactId,
+        generationKind: "keyframe_image",
+        keyframeNo: nextKeyframe.keyframeNo,
+        assetLabel: assetLogLabelForKeyframe(project, nextKeyframe),
+        candidateNo: learning.historicalCandidateCount + 1,
+        candidateCount: learning.historicalCandidateCount + 1,
+        moduleNameZh: nextKeyframe.keyframeNo < 0 ? "一致性资产图片生成" : "关键帧图片生成",
+      };
+      const draftPromptStartedAtMs = Date.now();
       const draftPrompt = compileImagePromptForKeyframe(project, nextKeyframe);
+      await logOnePromptVideo("production.step.completed", {
+        ...earlyTargetLogContext,
+        stepNameZh: "程序根据脚本、画面合同和上一轮问题起草图片提示词",
+        executionMethod: "program",
+        durationMs: Date.now() - draftPromptStartedAtMs,
+        resultZh: learning.historicalCandidateCount > 0 ? "已把上一轮质检问题写入返修提示词" : "首轮生成提示词已起草",
+      });
+      const referenceSelectionStartedAtMs = Date.now();
       const referenceSelection = await selectReferenceImagesForKeyframe(project, nextKeyframe, draftPrompt.prompt);
+      await logOnePromptVideo("production.step.completed", {
+        ...earlyTargetLogContext,
+        stepNameZh: "为这张图选择一致性参考资产",
+        executionMethod: "program",
+        durationMs: Date.now() - referenceSelectionStartedAtMs,
+        resultZh: `选中 ${referenceSelection.output.selectedReferenceUrls?.length ?? 0} 张参考图`,
+      });
+      const compileStartedAtMs = Date.now();
       const compiled = compileImagePromptForKeyframe(project, nextKeyframe, {
         ...referenceSelection.output,
         finalTextPrompt: draftPrompt.prompt,
       });
       assertCompiledVisualContractReady(compiled);
-      const learnedPrompt = [compiled.prompt, learning.promptAddon].filter(Boolean).join("\n\n");
+      const learnedPrompt = buildImageAttemptPrompt(compiled, learning);
+      await logOnePromptVideo("production.step.completed", {
+        ...earlyTargetLogContext,
+        stepNameZh: "编译最终图片提示词并做合同冲突检查",
+        executionMethod: "deterministic_program",
+        durationMs: Date.now() - compileStartedAtMs,
+        resultZh: "最终提示词通过程序合同检查",
+      });
       const learnedReferenceUrls = uniqueStrings([
         ...learning.referenceImageUrls,
         ...(compiled.referenceImageUrls ?? []),
@@ -7798,12 +9226,26 @@ async function submitNextImageTask(params: {
         ...(referenceSelection.output.usageNotes ?? []),
         authoritativeAnchorLocks ? `AUTHORITATIVE ANCHOR CONTRACTS — visible words and markings in these locks are required, not forbidden:\n${authoritativeAnchorLocks}` : "",
       ]);
-      await saveReferenceSelectionOutput(params.projectId, {
+      const targetLogContext = generationCandidateLogContext({
+        projectId: params.projectId,
+        artifactId,
+        kind: "keyframe_image",
+        candidateNo: learning.historicalCandidateCount + 1,
+        candidateCount: learning.historicalCandidateCount + 1,
+        metadata: {
+          keyframeNo: nextKeyframe.keyframeNo,
+          assetNameZh: readPlanShotString(planTarget, ["displayNameZh", "display_name_zh", "purposeZh", "purpose_zh", "purpose"]),
+          assetCategory: dependencyScope.assetCategory,
+          assetView: dependencyScope.assetView,
+          targetContract: planTarget ?? { purpose: nextKeyframe.purpose },
+        },
+      });
+      await withOnePromptVideoLogContext(targetLogContext, () => saveReferenceSelectionOutput(params.projectId, {
         ...referenceSelection.output,
         selectedReferenceUrls: learnedReferenceUrls,
         finalTextPrompt: learnedPrompt,
-      });
-      await savePromptDebugArtifact(params.projectId, {
+      }));
+      await withOnePromptVideoLogContext(targetLogContext, () => savePromptDebugArtifact(params.projectId, {
         ...compiled.debugArtifact,
         inputs: {
           ...compiled.debugArtifact.inputs,
@@ -7813,7 +9255,7 @@ async function submitNextImageTask(params: {
         referenceUsageNotes: learnedReferenceUsageNotes,
         finalPrompt: learnedPrompt,
         rules: uniqueStrings([...compiled.debugArtifact.rules, "incremental_candidate_learning", "preserve_candidate_history"]),
-      });
+      }));
       const claim = await prisma.videoKeyframe.updateMany({
         where: {
           id: nextKeyframe.id,
@@ -7850,7 +9292,14 @@ async function submitNextImageTask(params: {
           incrementalRegeneration: learning.historicalCandidateCount > 0,
           historicalCandidateCount: learning.historicalCandidateCount,
           learnedFromCandidateIds: learning.sourceCandidateIds,
+          repairMode: learning.repairMode,
+          repairDecision: learning.repairDecision,
+          parentCandidateId: learning.baselineSelection.baselineCandidateId,
+          baselineSelection: learning.baselineSelection,
           keyframeNo: nextKeyframe.keyframeNo,
+          assetNameZh: readPlanShotString(planTarget, ["displayNameZh", "display_name_zh", "purposeZh", "purpose_zh", "purpose"]),
+          assetCategory: dependencyScope.assetCategory,
+          assetView: dependencyScope.assetView,
           targetContract: scopedTargetContractFromCompiled(
             compiled,
             planTarget ?? { purpose: nextKeyframe.purpose, imagePrompt: nextKeyframe.imagePrompt },
@@ -8023,6 +9472,19 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
         });
         continue;
       }
+      const technical = await inspectGeneratedVideoTechnicalQuality(clipUrl);
+      if (!technical.valid) {
+        const message = `视频文件技术检查失败：${technical.errorMessage || "无法解码视频"}`;
+        await prisma.videoSegment.update({
+          where: { id: segment.id },
+          data: { clipUrl, clipTaskId: null, status: VideoShotStatus.FAILED, errorMessage: message },
+        });
+        await updateProjectArtifactStatus(project.id, [artifactId], "failed", {
+          dirtyReason: message,
+          retryFromStage: "generation",
+        });
+        continue;
+      }
       const renderDescription = readPlanSegmentRenderDescriptionMap(project.planJson).get(segment.segmentNo);
       const continuity = await evaluateEndFrameContinuity({
         projectId: project.id,
@@ -8035,36 +9497,37 @@ async function syncClipTasks(project: VideoProjectWithShots): Promise<void> {
       });
       const previousReport = latestGenerationQualityReport(project.planJson, artifactId);
       const continuityRetryCount = (previousReport?.continuityRetryCount ?? 0) + (continuity.decision === "retry_generation" ? 1 : 0);
-      const actualReport = await evaluateGeneratedVideoQuality({
+      const manualVideoQualityChecks = startKeyframe && endKeyframe
+        ? deferredVideoQualityChecksForSegment(project, segment, startKeyframe, endKeyframe)
+        : [];
+      const evaluationNeedsReview = continuity.decision === "manual_review"
+        || continuity.decision === "evaluation_failed";
+      const continuityPassed = continuity.decision === "pass";
+      const report: GenerationQualityReport = {
         assetId: artifactId,
         mediaUrl: clipUrl,
-        prompt: qualityPrompt,
-        purpose: "video_segment",
-        targetContract: renderDescription ?? {},
-        selectedReferenceUrls: selectedReferenceUrlsForPromptTarget(project.planJson, `segment:${segment.segmentNo}`),
-        referenceUsageNotes: [],
-        durationSeconds: segment.durationSeconds,
-        motionCheckpoints: readPlanMicroShots(readPlanSegmentMap(project.planJson).get(segment.segmentNo)),
-        startFrameUrl: startKeyframe?.imageUrl ?? "",
-        endFrameUrl: endKeyframe?.imageUrl ?? "",
-      });
-      const report: GenerationQualityReport = {
-        ...actualReport,
+        evaluationStatus: continuity.decision === "evaluation_failed" ? "partial" : "completed",
+        identityScore: null,
+        layoutScore: null,
+        promptAlignmentScore: null,
+        continuityScore: continuity.similarityScore == null ? null : Math.round(continuity.similarityScore * 100),
+        artifactIssues: continuityPassed ? [] : continuity.reasons,
+        passed: continuityPassed,
+        originalPassed: continuityPassed,
+        contentBased: true,
+        evaluationModel: "end-frame-continuity",
         endFrameDecision: continuity.decision,
         endFrameSimilarityScore: continuity.similarityScore,
         endFrameReasons: continuity.reasons,
         continuityRetryCount,
-        passed: actualReport.passed && continuity.decision === "pass",
-        advisoryOnly: continuity.decision === "manual_review" || continuity.decision === "evaluation_failed" ? true : actualReport.advisoryOnly,
-        qualityDecision: continuity.decision === "manual_review" || continuity.decision === "evaluation_failed" ? "review" : actualReport.qualityDecision,
-        retryInstruction: actualReport.retryInstruction || continuity.retryInstruction,
-        retryFromStage: actualReport.retryFromStage === "stage2b" || continuity.decision === "return_stage_2b" ? "stage2b" : actualReport.retryFromStage,
+        advisoryOnly: evaluationNeedsReview,
+        qualityDecision: evaluationNeedsReview ? "review" : continuityPassed ? "pass" : continuity.decision === "return_stage_2b" ? "blocked" : "retry",
+        retryInstruction: continuity.retryInstruction,
+        retryFromStage: continuity.decision === "return_stage_2b" ? "stage2b" : continuityPassed ? undefined : "generation",
+        manualVideoQualityChecks,
       };
       const compositeScore = generationQualityCompositeScore(report);
       await saveGenerationQualityReport(project.id, report);
-      const evaluationNeedsReview = continuity.decision === "manual_review"
-        || continuity.decision === "evaluation_failed"
-        || isTechnicalQualityEvaluationFailure(actualReport);
       const mayRetry = !evaluationNeedsReview && report.passed === false && report.retryFromStage === "generation" && continuityRetryCount <= maxEndFrameContinuityRetries();
       await appendVideoMediaRevision(project.id, {
         kind: "segment_clip",
@@ -8279,15 +9742,23 @@ async function submitNextClipTask(params: {
       const compiled = compileVideoPromptForSegment(project, nextSegment, startKeyframe, endKeyframe);
       await savePromptDebugArtifact(params.projectId, compiled.debugArtifact);
       const renderDescription = readPlanSegmentRenderDescriptionMap(project.planJson).get(nextSegment.segmentNo) ?? {};
+      const deferredVideoQualityChecks = deferredVideoQualityChecksForSegment(
+        project,
+        nextSegment,
+        startKeyframe,
+        endKeyframe,
+      );
       const taskId = await createVideoCandidateBatch({
         project,
         segment: nextSegment,
         prompt: compiled.prompt,
         startFrameUrl: startKeyframe.imageUrl,
         endFrameUrl: endKeyframe.imageUrl,
+        imageInputs: buildSegmentVideoImageInputs(project, nextSegment, startKeyframe, endKeyframe),
         metadata: {
           targetContract: renderDescription,
           motionCheckpoints: readPlanMicroShots(readPlanSegmentMap(project.planJson).get(nextSegment.segmentNo)),
+          deferredVideoQualityChecks,
           selectedReferenceUrls: selectedReferenceUrlsForPromptTarget(project.planJson, `segment:${nextSegment.segmentNo}`),
           referenceUsageNotes: [],
         },
@@ -8729,7 +10200,7 @@ function buildBoundaryStoryMomentText(
 }
 
 function compileVideoPromptForSegment(
-  project: Pick<VideoProjectWithShots, "planJson">,
+  project: Pick<VideoProjectWithShots, "planJson" | "keyframes">,
   segment: VideoProjectWithShots["segments"][number],
   startKeyframe: VideoProjectWithShots["keyframes"][number],
   endKeyframe: VideoProjectWithShots["keyframes"][number],
@@ -8740,6 +10211,26 @@ function compileVideoPromptForSegment(
   const singleTakeContract = readLooseRecord(renderDescription ?? {}, ["singleTakeContract", "single_take_contract"]);
   const startFrameContract = readLooseRecord(renderDescription ?? {}, ["startFrameContract", "start_frame_contract"]);
   const endFrameContract = readLooseRecord(renderDescription ?? {}, ["endFrameContract", "end_frame_contract"]);
+  const planRoot = planRecord(project.planJson);
+  const mediaConditionedPlan = (Array.isArray(planRoot.mediaConditionedSegmentPlans)
+    ? planRoot.mediaConditionedSegmentPlans
+    : [])
+    .filter(isRecord)
+    .find((item) => Number(item.segmentNo ?? item.segment_no) === segment.segmentNo);
+  const observedBoundaryFacts = (Array.isArray(planRoot.observedBoundaryFacts)
+    ? planRoot.observedBoundaryFacts
+    : [])
+    .filter(isRecord)
+    .filter((item) =>
+      Number(item.keyframeNo ?? item.keyframe_no) === startKeyframe.keyframeNo
+      || Number(item.keyframeNo ?? item.keyframe_no) === endKeyframe.keyframeNo
+    );
+  const requestedVideoImageInputs = buildSegmentVideoImageInputs(
+    project,
+    segment,
+    startKeyframe,
+    endKeyframe,
+  );
   const checkpointRecords = readLooseArray(renderDescription ?? {}, ["motionCheckpoints", "motion_checkpoints"])
     .filter(hasMeaningfulMotionCheckpoint);
   const microShots = readPlanMicroShots(planSegment);
@@ -8749,6 +10240,12 @@ function compileVideoPromptForSegment(
     : effectiveRequiredAnchorIds(planSegment);
   const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, segmentAnchorIds);
   const cameraInheritance = resolveCameraInheritanceContext(planRecord(project.planJson), segment.segmentNo);
+  const deferredVideoQualityChecks = deferredVideoQualityChecksForSegment(
+    project,
+    segment,
+    startKeyframe,
+    endKeyframe,
+  );
   const previousQualityReport = latestGenerationQualityReport(project.planJson, videoArtifactIdForSegmentNo(segment.segmentNo));
   const beforePrompt = generationPromptForSegment(project, segment);
   const narrativeContext = narrativePromptContextForSegment(project.planJson, segment.segmentNo);
@@ -8809,6 +10306,9 @@ function compileVideoPromptForSegment(
         ? [previousQualityReport.retryInstruction]
         : []
     : [];
+  const imageToVideoHandoffRequirements = deferredVideoQualityChecks.map((check) =>
+    `IMAGE-TO-VIDEO HANDOFF [${check.sourceIssueId}]: ${check.requiredVideoCheck}`
+  );
   const compiledVideoPrompt = compileHappyHorseVideoPrompt({
     durationSeconds: segment.durationSeconds,
     requirementLevel: endFrameRequirementLevel,
@@ -8818,14 +10318,18 @@ function compileVideoPromptForSegment(
       || (startKeyframe.purpose + ". " + startKeyframe.scene),
     ),
     contract: modelPromptContract ?? compatibilityPromptContract,
-    retryCorrections,
+    retryCorrections: uniqueStrings([...retryCorrections, ...imageToVideoHandoffRequirements]),
+    firstFrameIsNativeInput:
+      aliyunVideoImageInputCapabilities().roleBindings.first_frame?.nativeBoundaryControl === true,
+    lastFrameIsNativeInput:
+      aliyunVideoImageInputCapabilities().roleBindings.last_frame?.nativeBoundaryControl === true,
   });
   const finalPrompt = compiledVideoPrompt.prompt;
   const negativePrompt = compileVideoNegativePrompt(generationNegativePromptForSegment(project, segment));
   return {
     prompt: finalPrompt,
     negativePrompt,
-    referenceImageUrls: [startKeyframe.imageUrl, endKeyframe.imageUrl].filter((url): url is string => Boolean(url)),
+    referenceImageUrls: requestedVideoImageInputs.map((input) => input.url),
     debugArtifact: {
       targetArtifactId: "segment:" + segment.segmentNo,
       targetType: "segment",
@@ -8841,14 +10345,22 @@ function compileVideoPromptForSegment(
         previousEndFrameQualityReport: previousQualityReport,
         narrativeContext,
         endFrameRequirementLevel,
-        videoPromptContractSource: modelPromptContract ? "planner_model" : "legacy_compatibility",
+        videoPromptContractSource: modelPromptContract
+          ? mediaConditionedPlan
+            ? "post_keyframe_media_conditioned_planner"
+            : "pre_image_provisional_planner"
+          : "legacy_compatibility",
         videoPromptContract: modelPromptContract ?? compatibilityPromptContract,
+        observedBoundaryFacts,
+        mediaConditionedPlan,
+        requestedVideoImageInputs,
+        deferredVideoQualityChecks,
+        providerImageCapabilities: aliyunVideoImageInputCapabilities(),
       },
-      selectedReferenceUrls: [startKeyframe.imageUrl, endKeyframe.imageUrl].filter((url): url is string => Boolean(url)),
-      referenceUsageNotes: [
-        "The first boundary frame is the hard first_frame image input accepted by happyhorse-1.1-i2v.",
-        "The approved end boundary is compiled into a mandatory, detailed terminal-state prompt contract and independently checked against the generated last sampled frame.",
-      ],
+      selectedReferenceUrls: requestedVideoImageInputs.map((input) => input.url),
+      referenceUsageNotes: requestedVideoImageInputs.map((input) =>
+        `${input.role}: ${input.instruction} Authority=${input.authority}.`
+      ),
       beforePrompt,
       finalPrompt,
       finalNegativePrompt: negativePrompt,
@@ -8862,6 +10374,8 @@ function compileVideoPromptForSegment(
         "model_must_not_invent_story",
         "no_embedded_subtitles_or_audio",
         "camera_graph_inheritance_enforced",
+        "deferred_image_issues_handed_to_video_generation_and_quality",
+        mediaConditionedPlan ? "actual_boundary_images_observed_before_motion_planning" : "legacy_or_provisional_motion_fallback",
       ],
       warnings: compiledVideoPrompt.warnings,
       createdAt: new Date().toISOString(),
@@ -8898,6 +10412,9 @@ function compileImagePromptForKeyframe(
   const planKeyframe = readPlanKeyframeMap(project.planJson).get(keyframe.keyframeNo) ??
     readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
   const isConsistencyReference = isConsistencyKeyframeNo(keyframe.keyframeNo);
+  const canonicalBoundaryContract = isConsistencyReference
+    ? undefined
+    : canonicalBoundaryContractMap(project.planJson).get(keyframe.keyframeNo);
   const stylePreset = readStylePresetFromPlan(project.planJson);
   const dependencyScope = resolveImageTargetDependencyScope(project.planJson, planKeyframe, keyframe.keyframeNo);
   const targetArtifactId = dependencyScope.targetArtifactId;
@@ -8954,6 +10471,7 @@ function compileImagePromptForKeyframe(
       : "",
     "Frame contract:",
     ...frameContract.map((line) => "- " + line),
+    canonicalBoundaryContract ? "Canonical shared-boundary contract (single source of truth):\n" + JSON.stringify(canonicalBoundaryContract) : "",
     narrativeContextLines.length ? "Narrative boundary contract (must be visible in this still image):" : "",
     ...narrativeContextLines.map((line) => "- " + clipText(line, 900)),
     anchorLock ? "Visible anchor locks:\n" + anchorLock : "",
@@ -9000,6 +10518,7 @@ function compileImagePromptForKeyframe(
       inputs: {
         frameContract,
         targetContract,
+        canonicalBoundaryContract,
         dependencyScope,
         visualContract,
         narrativeContext,
@@ -9034,7 +10553,19 @@ function compileImagePromptForMicroShot(
 ): CompiledPrompt {
   const targetArtifactId = "segment:" + segment.segmentNo + ":micro_shot:" + microShot.microShotNo;
   const visibleAnchorIds = microShot.usesConsistencyAnchors ?? [];
-  const sourceImagePrompt = microShot.imagePrompt ?? microShot.imagePromptZh ?? microShot.imagePromptEn ?? "";
+  const rawSourceImagePrompt = microShot.imagePrompt ?? microShot.imagePromptZh ?? microShot.imagePromptEn ?? "";
+  const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, visibleAnchorIds);
+  const targetContract = microShot as unknown as Record<string, unknown>;
+  const baseNegativePrompt = generationNegativePromptForSegment(project, segment);
+  const visualContract = buildAuthoritativeVisualContract({
+    targetContract,
+    anchorContractText: anchorLock,
+    prompt: rawSourceImagePrompt,
+    negativePrompt: baseNegativePrompt,
+    mediaStage: "static_image",
+    hasApprovedReferences: Boolean(referenceSelection?.selectedReferenceUrls?.length),
+  });
+  const sourceImagePrompt = repairPromptAgainstVisualContract(rawSourceImagePrompt, visualContract);
   const frameContract = [
     "target: " + targetArtifactId,
     "segment: " + segment.segmentNo,
@@ -9046,7 +10577,6 @@ function compileImagePromptForMicroShot(
     sourceImagePrompt ? "source_image_prompt: " + clipText(sourceImagePrompt, 1200) : "",
     visibleAnchorIds.length ? "visible_anchors: " + visibleAnchorIds.join(", ") : "",
   ].filter(Boolean);
-  const anchorLock = consistencyAnchorLocksForPrompt(project.planJson, visibleAnchorIds);
   const cameraInheritance = resolveCameraInheritanceContext(planRecord(project.planJson), segment.segmentNo);
   const referenceNotes = referenceSelection?.usageNotes ?? [];
   const previousQualityReport = latestGenerationQualityReport(project.planJson, imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo));
@@ -9057,6 +10587,7 @@ function compileImagePromptForMicroShot(
     "Frame contract:",
     ...frameContract.map((line) => "- " + line),
     anchorLock ? "Visible anchor locks:\n" + anchorLock : "",
+    "Authoritative visual contract:\n" + JSON.stringify(visualContract),
     cameraInheritance.inheritanceDirectives.length ? "Camera Graph inheritance contract:\n" + cameraInheritance.inheritanceDirectives.map((item) => "- " + item).join("\n") : "",
     referenceNotes.length ? "Selected reference usage:" : "",
     ...referenceNotes.map((note) => "- " + note + " Inherit only the stated identity, layout, product, or style signal; ignore unrelated pose, crop, artifacts, and accidental text."),
@@ -9069,7 +10600,10 @@ function compileImagePromptForMicroShot(
     "- Do not render subtitles, captions, UI overlays, watermarks, timecodes, random letters, or misspelled text.",
     "- Preserve same scene, camera-axis family, lighting direction, color tone, identity, clothing, product instance, and prop layout.",
   ].filter(Boolean).join("\n");
-  const negativePrompt = compileImageNegativePrompt(generationNegativePromptForSegment(project, segment));
+  const negativePrompt = repairNegativePromptAgainstVisualContract(
+    compileImageNegativePrompt(baseNegativePrompt),
+    visualContract,
+  );
   return {
     prompt: finalPrompt,
     negativePrompt,
@@ -9080,6 +10614,8 @@ function compileImagePromptForMicroShot(
       compilerVersion: "prompt-compiler-v1",
       inputs: {
         frameContract,
+        targetContract,
+        visualContract,
         visibleAnchorIds,
         cameraGraph: cameraInheritance,
         referenceCandidateCount: referenceSelection?.candidates.length ?? 0,

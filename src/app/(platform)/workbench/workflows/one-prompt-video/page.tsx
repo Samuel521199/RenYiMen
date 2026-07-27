@@ -82,7 +82,7 @@ interface WorkflowProgressView {
 interface PlannerProgress {
   taskId: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
-  stage: "queued" | "reference_fact_extractor" | "planning_architect" | "storyboard_artist" | "story_contract_gate" | "story_contract_repair" | "shot_decomposer" | "single_take_audit" | "split_repair" | "json_repair" | "prompt_detailer" | "story_quality_gate" | "complete" | "failed";
+  stage: "queued" | "reference_fact_extractor" | "planning_architect" | "asset_prompt_contract_gate" | "asset_prompt_contract_repair" | "storyboard_artist" | "story_contract_gate" | "story_contract_repair" | "shot_decomposer" | "single_take_audit" | "split_repair" | "json_repair" | "prompt_detailer" | "story_quality_gate" | "complete" | "failed";
   completedSteps: number;
   totalSteps: number;
   currentSegmentNo?: number;
@@ -295,6 +295,7 @@ interface PlanDebugData {
   artifactMetadata?: Record<string, ArtifactMetadata>;
   generationQualityReports?: GenerationQualityReport[];
   storyQualityReport?: StoryQualityReport;
+  storySemanticReview?: Record<string, unknown>;
   plannerShadow?: Record<string, unknown>;
   plannerWarnings?: unknown[];
 }
@@ -1099,6 +1100,17 @@ function localizeWorkflowError(message: string, lang: PageLang): string {
   const normalized = message.trim();
   if (!normalized) return "";
 
+  if (/Approve and lock each person front view before generating its side and back views/i.test(normalized)) {
+    return lang === "zh"
+      ? "请先确认并锁定每个人物的正面参考图，侧面和背面图会在此后自动继续生成。"
+      : "Approve and lock each person's front reference image. Side and back views will continue automatically afterward.";
+  }
+  if (/Hard consistency reference images are ready\. Lock or approve them before generating boundary keyframes/i.test(normalized)) {
+    return lang === "zh"
+      ? "资产参考图已经生成，请确认并锁定后再继续生成边界关键帧。"
+      : "Asset references are ready. Approve and lock them before boundary-keyframe generation continues.";
+  }
+
   const transitionMatch = normalized.match(/Required transition scene-layout reference was not selected:\s*transition_reference:camera_(\d+):(\d+)/i);
   if (transitionMatch) {
     const cameraNo = String(Number(transitionMatch[1])).padStart(2, "0");
@@ -1159,6 +1171,28 @@ function localizeWorkflowError(message: string, lang: PageLang): string {
 }
 
 function workflowNoticeForMessage(message: string, lang: PageLang): { title: string; detail: string } | null {
+  if (/Approve and lock each person front view before generating its side and back views/i.test(message)) {
+    return lang === "zh"
+      ? {
+          title: "等待人物正面图确认",
+          detail: "请在资产库中确认并锁定每个人物的正面参考图。对应侧面和背面图随后会自动继续生成。",
+        }
+      : {
+          title: "Waiting for front-view approval",
+          detail: "Approve and lock each person's front reference image. The corresponding side and back views will continue automatically.",
+        };
+  }
+  if (/Hard consistency reference images are ready\. Lock or approve them before generating boundary keyframes/i.test(message)) {
+    return lang === "zh"
+      ? {
+          title: "等待资产参考图确认",
+          detail: "资产参考图已经生成。确认并锁定它们后，系统会继续生成边界关键帧。",
+        }
+      : {
+          title: "Waiting for asset-reference approval",
+          detail: "Asset references are ready. Approve and lock them to continue boundary-keyframe generation.",
+        };
+  }
   const frontierMatch = message.match(/当前生成前沿为 KF(\d+)(?:，依赖 KF(\d+))?/);
   if (!frontierMatch) return null;
   const frontier = `KF${Number(frontierMatch[1])}`;
@@ -1342,6 +1376,7 @@ export default function OnePromptVideoPage() {
     ? project.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
     : project?.shots.filter((shot) => Boolean(shot.imageUrl)).length ?? 0;
   const completeAssets = assetKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl) && (keyframe.locked || keyframe.status === "IMAGE_APPROVED")).length;
+  const generatedAssets = assetKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length;
   const completeBoundaryImages = boundaryKeyframes.length
     ? boundaryKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
     : project?.shots.filter((shot) => Boolean(shot.imageUrl)).length ?? 0;
@@ -1414,8 +1449,33 @@ export default function OnePromptVideoPage() {
     if (effectiveProjectStatus === "PLANNING") {
       return plannerWorkflowProgressView(project.plannerProgress, pageLang);
     }
-    return projectWorkflowProgressView(project, projectProgress(project, effectiveProjectStatus), pageLang, effectiveProjectStatus);
-  }, [effectiveProjectStatus, optimisticProgress, pageLang, progressNow, project]);
+    return projectWorkflowProgressView(
+      project,
+      projectProgress(project, effectiveProjectStatus),
+      pageLang,
+      effectiveProjectStatus,
+      {
+        assetTotal,
+        generatedAssets,
+        approvedAssets: completeAssets,
+        assetsApproved: consistencyKeyframesApproved,
+        boundaryTotal,
+        generatedBoundaryImages: completeBoundaryImages,
+      },
+    );
+  }, [
+    assetTotal,
+    boundaryTotal,
+    completeAssets,
+    completeBoundaryImages,
+    consistencyKeyframesApproved,
+    effectiveProjectStatus,
+    generatedAssets,
+    optimisticProgress,
+    pageLang,
+    progressNow,
+    project,
+  ]);
   const workflowProgressBarClass =
     workflowProgress?.tone === "failed"
       ? "bg-red-400"
@@ -1441,8 +1501,15 @@ export default function OnePromptVideoPage() {
   const visibleProjectError = project?.errorMessage && !isManualStopProject(project) && !generationRecoveryActive
     ? project.errorMessage
     : null;
-  const localizedActionError = error ? localizeWorkflowError(error, pageLang) : null;
   const projectWorkflowNotice = visibleProjectError ? workflowNoticeForMessage(visibleProjectError, pageLang) : null;
+  const canResumeRecoverableImageReview = Boolean(
+    project
+    && project.status === "IMAGE_REVIEW"
+    && visibleProjectError
+    && !projectWorkflowNotice
+    && !generationRecoveryActive,
+  );
+  const localizedActionError = error ? localizeWorkflowError(error, pageLang) : null;
   const localizedProjectError = visibleProjectError && !projectWorkflowNotice ? localizeWorkflowError(visibleProjectError, pageLang) : null;
 
   useEffect(() => {
@@ -2464,6 +2531,22 @@ export default function OnePromptVideoPage() {
     });
   }
 
+  async function analyzeVideoCandidate(candidate: GenerationCandidate) {
+    if (!project || candidate.kind !== "segment_video") return;
+    await runAction(async () => {
+      const res = await fetchJson(
+        `/api/video-projects/${project.id}/generation-candidates/${candidate.id}/analyze-video`,
+        copy,
+        { method: "POST" },
+      );
+      if (!res.project) throw new Error(copy.actionFailed);
+      rememberProject(res.project);
+      setMessage(pageLang === "zh"
+        ? "按需视频分析已完成；结果仅供人工选择参考"
+        : "On-demand video analysis completed; the result is advisory only");
+    });
+  }
+
   async function toggleLock(shot: Pick<VideoShot | VideoKeyframe, "id" | "locked">) {
     if (!project) return;
     await runAction(async () => {
@@ -2599,6 +2682,14 @@ export default function OnePromptVideoPage() {
       };
     }
     if (project.status === "FAILED") {
+      return {
+        label: copy.resumeGeneration,
+        icon: <RefreshCw className="h-4 w-4" />,
+        onClick: resumeProject,
+        className: "border-amber-300/30 bg-amber-300/10 text-amber-100 hover:bg-amber-300/15",
+      };
+    }
+    if (canResumeRecoverableImageReview) {
       return {
         label: copy.resumeGeneration,
         icon: <RefreshCw className="h-4 w-4" />,
@@ -2927,7 +3018,7 @@ export default function OnePromptVideoPage() {
           </div>
         )}
 
-        {localizedProjectError && visibleProjectError !== error && (
+        {localizedProjectError && localizedProjectError !== localizedActionError && (
           <div className="rounded-md border border-rose-300/15 bg-rose-400/[0.06] px-4 py-3 text-sm text-rose-200">
             {localizedProjectError}
           </div>
@@ -3464,6 +3555,7 @@ export default function OnePromptVideoPage() {
                     onSelect={chooseGenerationCandidate}
                     onRetry={() => regenerateClip(selectedShot!.id)}
                     onRecheck={recheckGenerationCandidate}
+                    onAnalyzeVideo={analyzeVideoCandidate}
                   />
                   <p className="text-sm leading-6 text-slate-300">{localizedShotPurpose(selectedShot!, pageLang)}</p>
                   <button
@@ -4214,7 +4306,7 @@ function LegacyNarrativeSkeletonJsonReview({
   );
 }
 
-function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, selectingCandidateId = "", onSelect, onRetry, onRecheck }: {
+function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, selectingCandidateId = "", onSelect, onRetry, onRecheck, onAnalyzeVideo }: {
   projectId: string;
   candidates: GenerationCandidate[];
   lang: "zh" | "en";
@@ -4224,11 +4316,13 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
   onSelect: (candidate: GenerationCandidate) => void;
   onRetry?: (retryInstruction: string) => void;
   onRecheck?: (candidate: GenerationCandidate) => void;
+  onAnalyzeVideo?: (candidate: GenerationCandidate) => Promise<void>;
 }) {
   const [previewCandidate, setPreviewCandidate] = useState<GenerationCandidate | null>(null);
   const [expandedIssueCandidateIds, setExpandedIssueCandidateIds] = useState<Set<string>>(() => new Set());
   const [qualitySummaryOverrides, setQualitySummaryOverrides] = useState<Record<string, QualityDisplaySummary>>({});
   const [qualitySummaryLoadingIds, setQualitySummaryLoadingIds] = useState<Set<string>>(() => new Set());
+  const [analyzingVideoCandidateId, setAnalyzingVideoCandidateId] = useState("");
   const qualitySummaryRequestsRef = useRef<Set<string>>(new Set());
   const candidateOrdinals = useMemo(() => {
     const fallbackOrder = new Map(candidates.map((candidate, index) => [candidate.id, candidates.length - index]));
@@ -4288,8 +4382,8 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           <p className="mt-1 text-[11px] text-slate-500">
             {onlyVideoCandidates
               ? (lang === "zh"
-                  ? "视频可直接预览和人工选择，自动分析仅供参考"
-                  : "Preview and choose directly; automated analysis is advisory")
+                  ? "视频通过技术检查后即可预览和人工选择；多帧 AI 分析只在你主动触发时运行"
+                  : "Videos are ready after technical validation; multi-frame AI analysis runs only when requested")
               : (lang === "zh"
                   ? "已按画面质量排序，你可以随时改选"
                   : "Ranked by visual quality; you can switch anytime")}
@@ -4315,7 +4409,7 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
             : isVideo && report
               ? (lang === "zh" ? "可采用 · 有分析建议" : "Usable · analysis available")
               : isVideo && candidate.mediaUrl
-                ? (lang === "zh" ? "可预览 · 分析中" : "Preview ready · analyzing")
+                ? (lang === "zh" ? "技术检查通过 · 可预览" : "Technical check passed · preview ready")
                 : technicalQualityFailure
             ? candidate.status === "quality_failed"
               ? (lang === "zh" ? "质检暂不可用" : "Review unavailable")
@@ -4367,6 +4461,9 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           const qualitySummary = qualitySummaryOverrides[qualitySummaryKey]
             ?? (storedQualitySummary?.version === "quality-summary-v2" ? storedQualitySummary : undefined);
           const qualitySummaryLoading = qualitySummaryLoadingIds.has(qualitySummaryKey);
+          const manualVideoChecks = isVideo && Array.isArray(candidate.metadata?.deferredVideoQualityChecks)
+            ? candidate.metadata.deferredVideoQualityChecks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+            : [];
           return (
             <div key={candidate.id} className={`group/card overflow-hidden rounded-lg border bg-slate-950/75 transition duration-200 ${candidate.selected ? "border-cyan-300/50 shadow-[0_0_0_1px_rgba(103,232,249,0.08),0_12px_30px_rgba(8,145,178,0.08)]" : "border-white/[0.09] hover:border-white/20"}`}>
               <div className="relative aspect-[4/5] overflow-hidden bg-black/25">
@@ -4469,6 +4566,35 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                     {lang === "zh" ? "摘要暂未生成，点击重试" : "Summary unavailable. Click to retry."}
                   </button>}
                 </div> : null}
+                {manualVideoChecks.length ? <div className="rounded-md border border-amber-300/10 bg-amber-300/[0.04] px-2 py-2 text-[10px] leading-4 text-amber-50/80">
+                  <p className="font-medium text-amber-100">{lang === "zh" ? "人工视频检查清单" : "Manual video checklist"}</p>
+                  <ul className="mt-1.5 space-y-1">
+                    {manualVideoChecks.map((item, index) => <li key={`${String(item.sourceIssueId || index)}`} className="flex gap-1.5">
+                      <span>□</span>
+                      <span>{String(item.requiredVideoCheck || item.expectedState || item.sourceIssueId || "-")}</span>
+                    </li>)}
+                  </ul>
+                </div> : null}
+                {isVideo && candidate.mediaUrl && onAnalyzeVideo ? <button
+                  type="button"
+                  disabled={loading || analyzingVideoCandidateId === candidate.id}
+                  onClick={async () => {
+                    setAnalyzingVideoCandidateId(candidate.id);
+                    try {
+                      await onAnalyzeVideo(candidate);
+                    } finally {
+                      setAnalyzingVideoCandidateId("");
+                    }
+                  }}
+                  className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-cyan-300/15 bg-cyan-300/[0.04] text-[11px] text-cyan-100/80 transition hover:border-cyan-300/30 hover:bg-cyan-300/[0.08] disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3 w-3 ${analyzingVideoCandidateId === candidate.id ? "animate-spin" : ""}`} />
+                  {analyzingVideoCandidateId === candidate.id
+                    ? (lang === "zh" ? "多帧分析中" : "Analyzing frames")
+                    : report
+                      ? (lang === "zh" ? "重新运行按需 AI 分析" : "Run AI analysis again")
+                      : (lang === "zh" ? "按需运行多帧 AI 分析" : "Run on-demand AI analysis")}
+                </button> : null}
                 {!candidate.selected && candidate.mediaUrl && (report || isVideo) && candidate.status !== "failed" ? <button type="button" disabled={loading} onClick={() => onSelect(candidate)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] text-[11px] font-medium text-slate-200 transition hover:border-white/20 hover:bg-white/[0.08] disabled:opacity-50">
                   {selectingCandidateId === candidate.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
                   {selectingCandidateId === candidate.id
@@ -6154,6 +6280,8 @@ function plannerWorkflowProgressView(progress: PlannerProgress | undefined, lang
     queued: { zh: "剧本规划任务已入队", en: "Planning job queued" },
     reference_fact_extractor: { zh: "正在提取参考图客观事实", en: "Extracting objective reference facts" },
     planning_architect: { zh: "正在理解创意与规划时间轴", en: "Understanding the brief and timeline" },
+    asset_prompt_contract_gate: { zh: "正在检查资产图片合同", en: "Validating asset image contracts" },
+    asset_prompt_contract_repair: { zh: "正在返修空泛的资产描述", en: "Repairing vague asset specifications" },
     storyboard_artist: { zh: "正在设计剧情节拍与广告因果", en: "Designing story beats and ad causality" },
     story_contract_gate: { zh: "正在校验剧情合同", en: "Validating the story contract" },
     story_contract_repair: { zh: "正在定向修复剧情合同", en: "Repairing the story contract" },
@@ -6254,11 +6382,70 @@ function projectWorkflowProgressView(
   progress: ReturnType<typeof projectProgress>,
   lang: PageLang,
   status: ProjectStatus = project.status,
+  phase?: {
+    assetTotal: number;
+    generatedAssets: number;
+    approvedAssets: number;
+    assetsApproved: boolean;
+    boundaryTotal: number;
+    generatedBoundaryImages: number;
+  },
 ): WorkflowProgressView {
   if (isManualStopProject(project)) {
     return lang === "en"
       ? { percent: progress.percent, title: "Generation stopped", detail: "You stopped this generation. Adjust the brief and generate again when ready.", tone: "idle" }
       : { percent: progress.percent, title: "\u751f\u6210\u5df2\u505c\u6b62", detail: "\u4f60\u5df2\u624b\u52a8\u505c\u6b62\u672c\u6b21\u751f\u6210\uff0c\u53ef\u4ee5\u8c03\u6574\u5185\u5bb9\u540e\u91cd\u65b0\u751f\u6210\u3002", tone: "idle" };
+  }
+  if (
+    phase
+    && phase.assetTotal > 0
+    && !phase.assetsApproved
+    && (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW")
+  ) {
+    const assetProgress = Math.min(1, phase.generatedAssets / phase.assetTotal);
+    const approvalProgress = Math.min(1, phase.approvedAssets / phase.assetTotal);
+    const percent = Math.round(20 + assetProgress * 10 + approvalProgress * 10);
+    const waitingForApproval = status === "IMAGE_REVIEW";
+    return lang === "en"
+      ? {
+          percent,
+          title: waitingForApproval ? "Asset library awaiting review" : "Generating asset library",
+          detail: `${phase.generatedAssets}/${phase.assetTotal} asset references generated; ${phase.approvedAssets}/${phase.assetTotal} approved. Approve each person's front view before its side and back views continue.`,
+          tone: waitingForApproval ? "idle" : "running",
+        }
+      : {
+          percent,
+          title: waitingForApproval ? "资产库待审核" : "正在生成资产库",
+          detail: `${phase.generatedAssets}/${phase.assetTotal} 张资产参考图已生成，${phase.approvedAssets}/${phase.assetTotal} 张已确认。请先确认每个人物的正面图，系统才会继续生成对应侧面和背面图。`,
+          tone: waitingForApproval ? "idle" : "running",
+        };
+  }
+  if (
+    phase
+    && phase.assetsApproved
+    && phase.boundaryTotal > 0
+    && (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW")
+  ) {
+    const boundaryProgress = Math.min(1, phase.generatedBoundaryImages / phase.boundaryTotal);
+    const allBoundaryImagesReady = phase.generatedBoundaryImages === phase.boundaryTotal;
+    const percent = Math.round(40 + boundaryProgress * 10);
+    return lang === "en"
+      ? {
+          percent,
+          title: allBoundaryImagesReady ? "Boundary keyframes awaiting review" : "Generating boundary keyframes",
+          detail: allBoundaryImagesReady
+            ? `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes are ready. Approve them before internal micro-shot review.`
+            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes generated. Internal micro-shot review is not available yet.`,
+          tone: allBoundaryImagesReady ? "idle" : "running",
+        }
+      : {
+          percent,
+          title: allBoundaryImagesReady ? "边界关键帧待审核" : "正在生成边界关键帧",
+          detail: allBoundaryImagesReady
+            ? `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已就绪，全部确认后才能进入内部子分镜审核。`
+            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已生成，当前尚不能进入内部子分镜审核。`,
+          tone: allBoundaryImagesReady ? "idle" : "running",
+        };
   }
   const zh: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
     DRAFT: ["\u7b49\u5f85\u5f00\u59cb", "\u586b\u5199\u4e00\u53e5\u8bdd\u9700\u6c42\u540e\u5373\u53ef\u751f\u6210\u5206\u955c\u8ba1\u5212\u3002", "idle"],
@@ -6431,19 +6618,83 @@ function microShotImageProgress(project: VideoProject): { required: number; read
 }
 
 async function fetchJson(path: string, copy: Copy, init?: RequestInit): Promise<ApiResponse> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  const text = await res.text();
-  let json: ApiResponse;
+  const traceId = crypto.randomUUID();
+  const startedAt = performance.now();
+  let responseAt = startedAt;
+  let bodyReadAt = startedAt;
+  let status = 0;
+  let ok = false;
+  let errorType: string | undefined;
   try {
-    json = text ? (JSON.parse(text) as ApiResponse) : { ok: false, error: copy.emptyServer };
-  } catch {
-    json = { ok: false, error: text.slice(0, 240) || copy.nonJsonServer };
+    const res = await fetch(path, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        "X-One-Prompt-Trace-Id": traceId,
+        ...(init?.headers ?? {}),
+      },
+    });
+    responseAt = performance.now();
+    status = res.status;
+    const text = await res.text();
+    bodyReadAt = performance.now();
+    let json: ApiResponse;
+    try {
+      json = text ? (JSON.parse(text) as ApiResponse) : { ok: false, error: copy.emptyServer };
+    } catch {
+      errorType = "invalid_json";
+      json = { ok: false, error: text.slice(0, 240) || copy.nonJsonServer };
+    }
+    ok = res.ok && json.ok;
+    if (!ok) throw new Error(json.error || copy.requestFailed(res.status));
+    return json;
+  } catch (error) {
+    errorType ??= error instanceof Error ? error.name : "unknown";
+    throw error;
+  } finally {
+    const completedAt = performance.now();
+    reportOnePromptApiTiming({
+      event: "frontend.api.request.completed",
+      traceId,
+      projectId: projectIdFromApiPath(path),
+      route: normalizedApiRoute(path),
+      method: init?.method ?? "GET",
+      status,
+      ok,
+      durationMs: Math.round(completedAt - startedAt),
+      responseWaitMs: Math.round(responseAt - startedAt),
+      bodyReadMs: Math.round(bodyReadAt - responseAt),
+      jsonParseMs: Math.round(completedAt - bodyReadAt),
+      ...(errorType ? { errorType } : {}),
+    });
   }
-  if (!res.ok || !json.ok) throw new Error(json.error || copy.requestFailed(res.status));
-  return json;
+}
+
+function reportOnePromptApiTiming(data: Record<string, unknown>): void {
+  const body = JSON.stringify(data);
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon("/api/video-projects/telemetry", new Blob([body], { type: "application/json" }));
+    return;
+  }
+  void fetch("/api/video-projects/telemetry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
+function projectIdFromApiPath(path: string): string | undefined {
+  return path.match(/^\/api\/video-projects\/([^/?]+)/)?.[1];
+}
+
+function normalizedApiRoute(path: string): string {
+  return path
+    .split("?")[0]
+    .replace(/^\/api\/video-projects\/[^/]+/, "/api/video-projects/:projectId")
+    .replace(/\/shots\/[^/]+/, "/shots/:shotId")
+    .replace(/\/generation-candidates\/[^/]+/, "/generation-candidates/:candidateId")
+    .replace(/\/(transition-references|generated-bridges)\/[^/]+/, "/$1/:artifactId");
 }
 
 async function uploadReferenceImage(file: File): Promise<string> {

@@ -4,7 +4,16 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import { logOnePromptVideo } from "./logger";
-import type { GenerationCorrectionAction, GenerationQualityReport } from "./types";
+import type {
+  DeferredVideoIssueResult,
+  DeferredVideoQualityCheck,
+  GenerationCorrectionAction,
+  GenerationQualityReport,
+  ImageCorrectionScope,
+  ImageRepairContextSection,
+  ImageRepairDecision,
+  ImageRepairMode,
+} from "./types";
 import { onePromptRolloutEnabled } from "./rollout-flags";
 import type { AuthoritativeVisualContract } from "./visual-quality-contract";
 import { isMotionOnlyStillIssue, reconcileGenerationIssueLedger } from "./visual-quality-contract";
@@ -20,6 +29,8 @@ const IMAGE_QUALITY_SYSTEM_PROMPT = [
   "For head or eye direction, specify a viewer-relative direction, an approximate yaw/pitch range when useful, and a normalized gaze target point. A turned head is not automatically a failed gaze; cite visible pupil/head evidence.",
   "For countable UI or product elements, specify an exact count, normalized placement, spacing or size tolerance, and the surrounding elements that must remain unchanged.",
   "Return at most three highest-impact correction actions. Avoid false precision and never invent geometry unsupported by the contract or visible image.",
+  "Also suggest a repair mode: local_edit for a few spatially bounded defects on an otherwise strong image; guided_regenerate for broader but recoverable changes; full_regenerate when the baseline structure, identity, subject count, scene, or composition is fundamentally wrong. This suggestion is advisory; deterministic orchestration rules make the final decision.",
+  "For local_edit, every required correction must have a normalizedRegion, and you must list the content that should remain unchanged. Never suggest local_edit for wrong subject count, wrong scene, severe identity failure, global layout failure, or contradictory requirements.",
   "Output strict JSON only.",
 ].join("\n");
 
@@ -64,13 +75,35 @@ interface BaseEvaluationParams {
   visualContract?: AuthoritativeVisualContract;
   previousQualityReport?: GenerationQualityReport;
   previousCandidateUrl?: string;
+  deferredVideoQualityChecks?: DeferredVideoQualityCheck[];
 }
 
 export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams): Promise<GenerationQualityReport> {
+  const moduleNameZh = imageQualityModuleNameZh(params.purpose);
+  const referenceCheckStartedAtMs = Date.now();
   const referenceGate = missingReferenceQualityReport(params);
-  if (referenceGate) return referenceGate;
+  if (referenceGate) {
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh,
+      stepNameZh: "程序检查质检所需参考图是否齐全",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - referenceCheckStartedAtMs,
+      passed: false,
+      resultZh: "参考图不齐，打回参考图选择阶段",
+    });
+    return referenceGate;
+  }
+  await logOnePromptVideo("production.step.completed", {
+    moduleNameZh,
+    stepNameZh: "程序检查质检所需参考图是否齐全",
+    executionMethod: "deterministic_program",
+    durationMs: Date.now() - referenceCheckStartedAtMs,
+    passed: true,
+    resultZh: "质检输入齐全",
+  });
   if (!onePromptRolloutEnabled("ONE_PROMPT_VISUAL_QUALITY_EVAL")) return legacyQualityFallback(params, false);
   if (!qualityVisionEnabled()) return evaluationFailure(params, "真实图片视觉质量评估未启用或缺少 DashScope API Key。", "manual");
+  const qualityPromptStartedAtMs = Date.now();
   const content: Array<Record<string, unknown>> = [{
     type: "text",
     text: [
@@ -85,7 +118,7 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
       params.visualContract ? `Authoritative visual contract: ${JSON.stringify(params.visualContract)}` : "",
       params.previousQualityReport ? `Previous issue ledger to compare and close: ${JSON.stringify(params.previousQualityReport.issueLedger ?? [])}` : "",
-      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation, suggestedRepairMode local_edit|guided_regenerate|full_regenerate, correctionScope local|regional|global, baselineUsable, and repairReasonCodes[].",
       "For EVERY confirmed failed issue, correctionActions must contain one executable object: {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. evidenceStatus is confirmed|uncertain and confidence is 0..1. normalizedRegion is {xMin,yMin,xMax,yMax} in the top-left-origin 0..1 coordinate system; targetPoint is {x,y} in the same system. executionParameters contains only contract-supported measurable controls such as viewerRelativeDirection, yawDegrees, pitchDegrees, exactCount, spacingRatio, sizeRatio, color, or textValue. tolerance states the acceptable visible range.",
       "region must identify a concrete visual location. observed states exactly what is visibly wrong and cites visible evidence rather than inferred intent. target states one concrete desired result, including exact value/count/format/color/pose/size when the contract supports it. instruction must be imperative and ready to paste into the next generation prompt; never merely repeat the diagnosis.",
       "retryInstruction must consolidate correctionActions into a precise redraw specification: say WHAT to change, WHERE to change it, the exact TARGET state, and what nearby/strong-scoring content must remain unchanged. Prefer concrete renderable values over vague words such as improve, fix, proper, near, appropriate, or more accurate.",
@@ -95,6 +128,7 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       "Authority rule for exact appearance and text: an approved reference image outranks planner-written descriptions. Compare the generated logo, UI, product, and character directly with the corresponding approved reference. Do not invent forbidden or required wording that is absent from the authoritative source.",
       "Game-ad rule: authorized logo text, game title, score, timer, multiplier, buttons, and contract-required UI are allowed and often required. Fail only for missing required content, wrong spelling/value/state, gibberish, unauthorized extra copy, subtitles, or watermarks—not merely because text or UI exists.",
       "For anchors prioritize isolated identity accuracy. For boundary keyframes prioritize contract/layout/identity. For motion checkpoints prioritize same-path state and continuity.",
+      "Repair-mode guidance: local_edit means the current image is a safe visual baseline and only a few bounded regions need changes; guided_regenerate means the baseline may guide identity/composition but broader rerendering is needed; full_regenerate means the current image must not be reused as a visual baseline. The application independently verifies this classification.",
       "For a still image, never fail because motion itself is not visible. A static score, timer, glow, or pose may represent one instant; motion, jumping digits, countdown change, and animation belong to later video evaluation.",
       "Compare against the previous issue ledger when provided. For each prior issue, explicitly decide resolved, still_open, regressed, or invalid_for_stage. Do not silently repeat old feedback.",
       "A prior issue is resolved only when the current pixels visibly fix it. If the shot's core purpose or requiredVisibleEvidence is absent (for example social feedback in a social-feedback shot), that is a blocking failure even when numeric scores are high.",
@@ -135,14 +169,47 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     });
     content.push({ type: "image_url", image_url: { url: params.previousCandidateUrl } });
   }
+  await logOnePromptVideo("production.step.completed", {
+    moduleNameZh,
+    stepNameZh: "编写本张候选图的视觉质检提示词",
+    executionMethod: "program",
+    durationMs: Date.now() - qualityPromptStartedAtMs,
+    model: qualityVisionModel(),
+    resultZh: "已写入目标合同、参考图、上一轮问题和当前候选图",
+  });
   const evaluationStartedAt = Date.now();
   try {
+    await logOnePromptVideo("production.step.start", {
+      moduleNameZh,
+      stepNameZh: "视觉大模型检查候选图",
+      executionMethod: "vision_model",
+      model: qualityVisionModel(),
+    });
     const raw = await callVision(content, IMAGE_QUALITY_SYSTEM_PROMPT);
+    const modelDurationMs = Date.now() - evaluationStartedAt;
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh,
+      stepNameZh: "视觉大模型检查候选图",
+      executionMethod: "vision_model",
+      model: qualityVisionModel(),
+      durationMs: modelDurationMs,
+      resultZh: "视觉大模型已返回质检意见",
+    });
+    const decisionStartedAtMs = Date.now();
     const report = {
       ...normalizeImageQualityResponse(raw, params),
       evaluationModel: qualityVisionModel(),
       evaluationDurationMs: Date.now() - evaluationStartedAt,
     };
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh,
+      stepNameZh: report.passed ? "程序整理质检结果并作出通过决定" : "程序整理质检结果并制定返修方案",
+      executionMethod: "program",
+      durationMs: Date.now() - decisionStartedAtMs,
+      passed: report.passed,
+      repairMode: report.repairDecision?.mode,
+      resultZh: report.passed ? "通过，进入候选结果池" : "未通过，已生成返修路径和修改要求",
+    });
     await logOnePromptVideo("generation_quality.image_eval_completed", {
       assetId: params.assetId,
       candidateId: params.candidateId,
@@ -169,6 +236,14 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
   }
 }
 
+function imageQualityModuleNameZh(purpose: BaseEvaluationParams["purpose"]): string {
+  if (purpose === "anchor_reference_image") return "一致性资产图片质检";
+  if (purpose === "boundary_keyframe") return "关键帧图片质检";
+  if (purpose === "motion_checkpoint_image") return "子分镜参考图质检";
+  if (purpose === "transition_reference_frame") return "转场参考帧质检";
+  return "图片质量检查";
+}
+
 export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams & {
   durationSeconds: number;
   motionCheckpoints: unknown[];
@@ -181,10 +256,27 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
   const clipPath = path.join(workDir, "candidate.mp4");
   await mkdir(workDir, { recursive: true });
   try {
+    const downloadStartedAtMs = Date.now();
     await download(params.mediaUrl, clipPath);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "程序下载候选视频供质检",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - downloadStartedAtMs,
+      resultZh: "视频文件下载完成",
+    });
+    const probeStartedAtMs = Date.now();
     const metadata = await probeVideo(clipPath);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "程序读取视频时长、尺寸和帧率",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - probeStartedAtMs,
+      resultZh: `${metadata.width}×${metadata.height}，${metadata.durationSeconds.toFixed(2)} 秒`,
+    });
     const sampleTimes = sampleTimesForDuration(metadata.durationSeconds || params.durationSeconds, metadata.frameRate);
     const frames: Array<{ time: number; dataUrl: string }> = [];
+    const frameExtractionStartedAtMs = Date.now();
     for (const [index, time] of sampleTimes.entries()) {
       const outputPath = path.join(workDir, `frame-${index}.png`);
       frames.push(await extractFrameDataUrlWithFallback(
@@ -195,6 +287,14 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
         metadata.frameRate,
       ));
     }
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "程序抽取多帧质检样本",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - frameExtractionStartedAtMs,
+      resultZh: `抽取 ${frames.length} 帧`,
+    });
+    const qualityPromptStartedAtMs = Date.now();
     const content: Array<Record<string, unknown>> = [{
       type: "text",
       text: [
@@ -204,8 +304,10 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
         `Generation prompt: ${params.prompt.slice(0, 2400)}`,
         `Negative prompt: ${(params.negativePrompt ?? "").slice(0, 1200)}`,
         `Motion checkpoints in required order: ${JSON.stringify(params.motionCheckpoints)}`,
+        `DEFERRED IMAGE ISSUES — REQUIRED VIDEO CHECK CONTRACT: ${JSON.stringify(params.deferredVideoQualityChecks ?? [])}`,
         `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
-        "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], correctionActions[], contractConflicts[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+        "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore, firstFrameConsistencyScore, checkpointOrderScore, singleTakeScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], metadataIssues[], correctionActions[], contractConflicts[], deferredVideoIssueResults[], passed, retryInstruction, retryFromStage stage2b|stage3|generation.",
+        "For every item in DEFERRED IMAGE ISSUES, return exactly one deferredVideoIssueResults item with the same sourceIssueId and status resolved|open|unverifiable. resolved requires visible evidence in the sampled video frames; open means the required motion/state is visibly absent or wrong; unverifiable means the samples do not contain enough evidence. Include concise evidence and the observed timeRange when available. Never silently omit a deferred check.",
         "Return at most 3 unique correctionActions, limited to the highest-impact confirmed deltas for this candidate only; do not repeat diagnosis history or restate the unchanged base contract. Each correctionActions[] item must specify {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. Make each action spatially and temporally precise and directly renderable in the next attempt. Include exact state/value/count/timing/viewer-relative direction/pose when supported by the contract, and state which successful content must remain unchanged.",
         "retryInstruction must be a consolidated shot-level modification plan, not a diagnosis. Resolve requirements using target contract and explicit visible evidence above generic negative defaults. List possible contradictions in contractConflicts[] as advisory evidence; only the compiler can authorize stage-3 routing.",
         "Detect identity drift, abnormal duplicate instances, spatial layout drift, jump cuts, teleportation, melting, scene replacement, out-of-order checkpoints, first-frame mismatch and ending-state mismatch.",
@@ -226,8 +328,41 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
       content.push({ type: "text", text: `Identity/layout reference ${index + 1}: ${params.referenceUsageNotes[index] ?? "approved reference"}` });
       content.push({ type: "image_url", image_url: { url } });
     }
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "编写候选视频的多帧质检提示词",
+      executionMethod: "program",
+      durationMs: Date.now() - qualityPromptStartedAtMs,
+      model: qualityVisionModel(),
+      resultZh: "已写入动作检查点、首尾帧、参考图和抽样画面",
+    });
+    await logOnePromptVideo("production.step.start", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "视觉大模型检查候选视频",
+      executionMethod: "vision_model",
+      model: qualityVisionModel(),
+    });
+    const modelStartedAtMs = Date.now();
     const raw = await callVision(content, VIDEO_QUALITY_SYSTEM_PROMPT);
-    return normalizeVideoQualityResponse(raw, params, metadata);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "视觉大模型检查候选视频",
+      executionMethod: "vision_model",
+      model: qualityVisionModel(),
+      durationMs: Date.now() - modelStartedAtMs,
+      resultZh: "视觉大模型已返回多帧质检意见",
+    });
+    const normalizeStartedAtMs = Date.now();
+    const report = normalizeVideoQualityResponse(raw, params, metadata);
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "程序整理视频质检结果",
+      executionMethod: "program",
+      durationMs: Date.now() - normalizeStartedAtMs,
+      passed: report.passed,
+      resultZh: report.passed ? "模型建议通过（视频最终仍由人工审核）" : "模型发现问题（作为人工审核建议）",
+    });
+    return report;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await logOnePromptVideo("generation_quality.video_eval_failed", { assetId: params.assetId, candidateId: params.candidateId, message }, "error");
@@ -256,6 +391,7 @@ export async function inspectGeneratedVideoTechnicalQuality(mediaUrl: string): P
   const clipPath = path.join(workDir, "candidate.mp4");
   const framePath = path.join(workDir, "decode-check.png");
   await mkdir(workDir, { recursive: true });
+  const inspectionStartedAtMs = Date.now();
   try {
     await download(mediaUrl, clipPath);
     const metadata = await probeVideo(clipPath);
@@ -265,15 +401,48 @@ export async function inspectGeneratedVideoTechnicalQuality(mediaUrl: string): P
       || metadata.height <= 0
       || metadata.frameRate <= 0
     ) {
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "视频片段质检",
+        stepNameZh: "程序硬检查视频文件可下载、可读取、可解码",
+        executionMethod: "deterministic_program",
+        durationMs: Date.now() - inspectionStartedAtMs,
+        passed: false,
+        resultZh: "视频元数据无效，打回重新生成",
+      });
       return { valid: false, ...metadata, errorMessage: "视频时长、尺寸或帧率元数据无效。" };
     }
     await extractFrame(clipPath, framePath, Math.min(metadata.durationSeconds * 0.5, Math.max(0, metadata.durationSeconds - 0.08)));
     const frame = await readFile(framePath);
     if (frame.byteLength < 1024) {
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "视频片段质检",
+        stepNameZh: "程序硬检查视频文件可下载、可读取、可解码",
+        executionMethod: "deterministic_program",
+        durationMs: Date.now() - inspectionStartedAtMs,
+        passed: false,
+        resultZh: "检测帧为空或损坏，打回重新生成",
+      });
       return { valid: false, ...metadata, errorMessage: "视频可解码，但抽取的检测帧为空或损坏。" };
     }
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "程序硬检查视频文件可下载、可读取、可解码",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - inspectionStartedAtMs,
+      passed: true,
+      resultZh: `${metadata.width}×${metadata.height}，${metadata.durationSeconds.toFixed(2)} 秒，可正常解码`,
+    });
     return { valid: true, ...metadata };
   } catch (error) {
+    await logOnePromptVideo("production.step.completed", {
+      moduleNameZh: "视频片段质检",
+      stepNameZh: "程序硬检查视频文件可下载、可读取、可解码",
+      executionMethod: "deterministic_program",
+      durationMs: Date.now() - inspectionStartedAtMs,
+      passed: false,
+      resultZh: "程序硬检查失败，打回重新生成",
+      message: error instanceof Error ? error.message : String(error),
+    }, "error");
     return {
       valid: false,
       durationSeconds: 0,
@@ -288,14 +457,161 @@ export async function inspectGeneratedVideoTechnicalQuality(mediaUrl: string): P
 }
 
 export function normalizeImageQualityResponse(value: unknown, params: BaseEvaluationParams): GenerationQualityReport {
-  const report = normalizeReport(value, params);
+  let report = normalizeReport(value, params);
   // Stage 2B owns shot/motion decomposition. It cannot repair a generated
   // consistency asset (logo, character sheet, product lock, and so on), so a
   // visible defect in such an image must stay in the generation retry loop.
   if (!report.passed && params.purpose === "anchor_reference_image" && report.retryFromStage === "stage2b") {
-    return { ...report, retryFromStage: "generation" };
+    report = { ...report, retryFromStage: "generation" };
   }
-  return report;
+  return {
+    ...report,
+    repairDecision: report.passed ? undefined : decideImageRepair(report, params),
+  };
+}
+
+function decideImageRepair(
+  report: GenerationQualityReport,
+  params: BaseEvaluationParams,
+): ImageRepairDecision {
+  const actions = (report.correctionActions ?? []).filter((action) =>
+    action.evidenceStatus !== "uncertain" && action.priority !== "recommended"
+  );
+  const editRegions = actions.flatMap((action) => action.normalizedRegion ? [action.normalizedRegion] : []);
+  const preserve = uniqueStrings(actions.flatMap((action) => action.preserve ?? [])).slice(0, 20);
+  const issueText = [
+    ...report.artifactIssues,
+    ...(report.hardFailureReasons ?? []),
+    ...actions.flatMap((action) => [action.region, action.element, action.observed, action.target, action.instruction]),
+  ].join(" ");
+  const scores = [
+    report.identityScore,
+    report.layoutScore,
+    report.promptAlignmentScore,
+    report.continuityScore,
+  ].filter((score): score is number => typeof score === "number");
+  const minimumScore = scores.length === 4 ? Math.min(...scores) : null;
+  const globalStructuralFailure =
+    /wrong (?:scene|subject count|person count|product count)|extra (?:person|people|character|subject|product)|multiple (?:people|characters|subjects)|missing (?:main )?(?:person|character|product|scene)|entire (?:scene|composition|layout)|identity (?:failure|mismatch)|unrelated (?:background|scene)|scene replacement|background contamination|asset isolation|全局|整体|错误场景|主体数量|人物数量|产品数量|额外人物|额外角色|缺少主体|身份严重|背景污染|资产隔离/i.test(issueText);
+  const isolatedAssetContamination = params.purpose === "anchor_reference_image"
+    && /background|scenery|environment|poster|ui|title|extra character|second character|multiple (?:people|characters|subjects)|场景|背景|海报|界面|标题|其他角色|多个角色/i.test(issueText);
+  const severeScoreFailure = minimumScore != null && minimumScore < 55;
+  const incompleteEvaluation =
+    report.evaluationStatus === "partial"
+    || report.evaluationStatus === "technical_failed"
+    || report.evaluationStatus === "unavailable"
+    || report.contentBased === false;
+  const regressedIssues = (report.issueLedger ?? []).filter((issue) =>
+    issue.status === "regressed" && issue.applicableStage === "static_image"
+  );
+  const hardRegressedIssue = regressedIssues.some((issue) => issue.severity === "hard");
+  const repeatedlyRegressedIssue = regressedIssues.some((issue) => issue.occurrenceCount >= 3);
+
+  let mode: ImageRepairMode;
+  let correctionScope: ImageCorrectionScope;
+  let baselineUsable = false;
+  let reasonCodes: string[];
+  let requiredContextSections: ImageRepairContextSection[];
+  let confidence: number;
+
+  if (report.evaluationStatus === "reference_missing" || report.retryFromStage === "reference_selector") {
+    mode = "reference_reselect";
+    correctionScope = "global";
+    reasonCodes = ["required_reference_missing"];
+    requiredContextSections = ["minimal_contract", "approved_references"];
+    confidence = 1;
+  } else if (incompleteEvaluation) {
+    mode = "reevaluate_only";
+    correctionScope = "global";
+    reasonCodes = ["quality_evaluation_incomplete"];
+    requiredContextSections = [];
+    confidence = 1;
+  } else if (report.contractConflictsVerified || report.retryFromStage === "stage3") {
+    mode = "contract_recompile";
+    correctionScope = "global";
+    reasonCodes = ["verified_contract_conflict"];
+    requiredContextSections = ["full_original_prompt", "minimal_contract"];
+    confidence = 1;
+  } else if (report.retryFromStage === "stage2b") {
+    mode = "storyboard_replan";
+    correctionScope = "global";
+    reasonCodes = ["structural_or_unreachable_frame_contract"];
+    requiredContextSections = ["narrative_boundary", "camera_graph", "full_original_prompt"];
+    confidence = 0.98;
+  } else if (report.retryFromStage === "manual") {
+    mode = "manual_review";
+    correctionScope = "global";
+    reasonCodes = ["automatic_repair_not_reliable"];
+    requiredContextSections = ["minimal_contract"];
+    confidence = 0.95;
+  } else if (severeScoreFailure || globalStructuralFailure || isolatedAssetContamination || hardRegressedIssue || repeatedlyRegressedIssue) {
+    mode = "full_regenerate";
+    correctionScope = "global";
+    reasonCodes = uniqueStrings([
+      severeScoreFailure ? "severe_score_failure" : "",
+      globalStructuralFailure ? "global_structure_failure" : "",
+      isolatedAssetContamination ? "isolated_asset_contamination" : "",
+      hardRegressedIssue ? "hard_issue_regressed" : "",
+      repeatedlyRegressedIssue ? "issue_regressed_multiple_times" : "",
+    ]);
+    requiredContextSections = [
+      "minimal_contract",
+      "asset_locks",
+      ...(params.purpose === "boundary_keyframe" ? ["narrative_boundary", "camera_graph"] as ImageRepairContextSection[] : []),
+      "approved_references",
+      "full_original_prompt",
+    ];
+    confidence = 0.95;
+  } else {
+    const localEligible =
+      minimumScore != null
+      && minimumScore >= 75
+      && actions.length >= 1
+      && actions.length <= 3
+      && editRegions.length === actions.length
+      && report.wrongTextDetected !== true
+      && regressedIssues.length === 0;
+    if (localEligible) {
+      mode = "local_edit";
+      correctionScope = "local";
+      baselineUsable = true;
+      reasonCodes = ["bounded_confirmed_corrections", "strong_baseline_scores"];
+      requiredContextSections = ["minimal_contract", "approved_references"];
+      confidence = 0.92;
+    } else {
+      mode = "guided_regenerate";
+      correctionScope = editRegions.length ? "regional" : "global";
+      baselineUsable = minimumScore == null || minimumScore >= 55;
+      reasonCodes = uniqueStrings([
+        actions.length === 0 ? "no_bounded_correction_actions" : "",
+        editRegions.length !== actions.length ? "corrections_not_fully_localized" : "",
+        minimumScore != null && minimumScore < 75 ? "baseline_scores_below_local_edit_threshold" : "",
+        report.wrongTextDetected ? "locked_text_requires_rerender" : "",
+        regressedIssues.length ? "regressed_issue_requires_broader_regeneration" : "",
+      ]);
+      requiredContextSections = [
+        "minimal_contract",
+        "asset_locks",
+        ...(params.purpose === "boundary_keyframe" ? ["narrative_boundary", "camera_graph"] as ImageRepairContextSection[] : []),
+        "approved_references",
+      ];
+      confidence = 0.85;
+    }
+  }
+
+  return {
+    mode,
+    reasonCodes: uniqueStrings([...reasonCodes, ...(report.suggestedRepairReasonCodes ?? []).map((code) => `model:${code}`)]),
+    baselineUsable,
+    baselineCandidateId: baselineUsable ? report.candidateId : undefined,
+    correctionScope,
+    editRegions,
+    preserve,
+    requiredContextSections,
+    confidence: Math.min(confidence, report.evaluationConfidence ?? 1),
+    decidedBy: "deterministic_router",
+    suggestedMode: report.suggestedRepairMode,
+  };
 }
 
 export function normalizeVideoQualityResponse(value: unknown, params: BaseEvaluationParams, metadata?: { durationSeconds: number; width: number; height: number; frameRate: number }): GenerationQualityReport {
@@ -305,6 +621,14 @@ export function normalizeVideoQualityResponse(value: unknown, params: BaseEvalua
   const firstFrameConsistencyScore = optionalScore(source.firstFrameConsistencyScore ?? source.first_frame_consistency_score);
   const checkpointOrderScore = optionalScore(source.checkpointOrderScore ?? source.checkpoint_order_score);
   const metadataIssues = strings(source.metadataIssues ?? source.metadata_issues);
+  const deferredVideoIssueResults = normalizeDeferredVideoIssueResults(
+    source.deferredVideoIssueResults ?? source.deferred_video_issue_results,
+    params.deferredVideoQualityChecks ?? [],
+  );
+  const unresolvedDeferredChecks = deferredVideoIssueResults.filter((item) => item.status === "open");
+  const unverifiableDeferredChecks = deferredVideoIssueResults.filter((item) => item.status === "unverifiable");
+  const resolvedDeferredVideoIssueIds = deferredVideoIssueResults.filter((item) => item.status === "resolved").map((item) => item.sourceIssueId);
+  const openDeferredVideoIssueIds = unresolvedDeferredChecks.map((item) => item.sourceIssueId);
   const videoScoresComplete = singleTakeScore != null && firstFrameConsistencyScore != null && checkpointOrderScore != null;
   const passed = report.passed
     && videoScoresComplete
@@ -312,8 +636,37 @@ export function normalizeVideoQualityResponse(value: unknown, params: BaseEvalua
     && firstFrameConsistencyScore >= 65
     && checkpointOrderScore >= 60
     && metadataIssues.length === 0
+    && unresolvedDeferredChecks.length === 0
+    && unverifiableDeferredChecks.length === 0
     && (!metadata || metadata.durationSeconds > 0);
-  const needsReEvaluation = report.evaluationStatus === "partial" || !videoScoresComplete;
+  const needsReEvaluation = report.evaluationStatus === "partial" || !videoScoresComplete || unverifiableDeferredChecks.length > 0;
+  const deferredRetryInstruction = unresolvedDeferredChecks.length
+    ? "Resolve these image-to-video handoff checks: " + unresolvedDeferredChecks.map((result) => {
+        const contract = params.deferredVideoQualityChecks?.find((item) => item.sourceIssueId === result.sourceIssueId);
+        return `[${result.sourceIssueId}] ${contract?.requiredVideoCheck ?? "deferred motion requirement"}${result.evidence ? `; observed: ${result.evidence}` : ""}`;
+      }).join("; ")
+    : "";
+  const deferredLedgerEntries = deferredVideoIssueResults.map((result) => {
+    const contract = params.deferredVideoQualityChecks?.find((item) => item.sourceIssueId === result.sourceIssueId);
+    return {
+      issueId: result.sourceIssueId,
+      fingerprint: `deferred_video:${result.sourceIssueId}`,
+      category: contract?.category ?? "artifact",
+      region: contract?.region,
+      summary: result.evidence || contract?.requiredVideoCheck || "Deferred image issue requires video verification",
+      target: contract?.expectedState,
+      severity: result.status === "unverifiable" ? "advisory" as const : "soft" as const,
+      applicableStage: "video" as const,
+      status: result.status === "resolved" ? "resolved" as const : "open" as const,
+      firstSeenCandidateNo: params.candidateNo,
+      lastSeenCandidateNo: params.candidateNo,
+      occurrenceCount: 1,
+    };
+  });
+  const issueLedger = [...new Map([
+    ...(report.issueLedger ?? []),
+    ...deferredLedgerEntries,
+  ].map((item) => [item.issueId, item])).values()];
   return {
     ...report,
     evaluationStatus: needsReEvaluation ? "partial" : report.evaluationStatus,
@@ -322,15 +675,57 @@ export function normalizeVideoQualityResponse(value: unknown, params: BaseEvalua
     firstFrameConsistencyScore,
     checkpointOrderScore,
     metadataIssues,
+    deferredVideoIssueResults,
+    resolvedDeferredVideoIssueIds,
+    openDeferredVideoIssueIds,
+    issueLedger,
+    resolvedIssueIds: uniqueStrings([...(report.resolvedIssueIds ?? []), ...resolvedDeferredVideoIssueIds]),
+    softSuggestions: uniqueStrings([
+      ...(report.softSuggestions ?? []),
+      ...deferredLedgerEntries.filter((item) => item.status === "open").map((item) => item.summary),
+    ]),
     passed,
     originalPassed: passed,
-    qualityDecision: needsReEvaluation ? "review" : report.qualityDecision,
+    qualityDecision: needsReEvaluation ? "review" : unresolvedDeferredChecks.length ? "retry" : report.qualityDecision,
     retryFromStage: needsReEvaluation ? "manual" : report.retryFromStage,
     retryInstruction: needsReEvaluation
-      ? "Retry visual quality evaluation for this existing candidate because one or more required video metrics were not returned. Do not regenerate the media."
-      : report.retryInstruction || (!passed ? `Improve the same-take result using the observed scores: first-frame ${firstFrameConsistencyScore}, checkpoint order ${checkpointOrderScore}, single-take ${singleTakeScore}.` : undefined),
-    artifactIssues: uniqueStrings([...report.artifactIssues, ...metadataIssues, ...(metadata && metadata.durationSeconds <= 0 ? ["invalid video duration metadata"] : [])]),
+      ? "Retry visual quality evaluation for this existing candidate because one or more required video metrics or deferred issue results were not returned. Do not regenerate the media."
+      : deferredRetryInstruction || report.retryInstruction || (!passed ? `Improve the same-take result using the observed scores: first-frame ${firstFrameConsistencyScore}, checkpoint order ${checkpointOrderScore}, single-take ${singleTakeScore}.` : undefined),
+    artifactIssues: uniqueStrings([
+      ...report.artifactIssues,
+      ...metadataIssues,
+      ...unresolvedDeferredChecks.map((result) => {
+        const contract = params.deferredVideoQualityChecks?.find((item) => item.sourceIssueId === result.sourceIssueId);
+        return `Deferred image issue remains open [${result.sourceIssueId}]: ${contract?.requiredVideoCheck ?? result.evidence ?? "required video evidence missing"}`;
+      }),
+      ...(metadata && metadata.durationSeconds <= 0 ? ["invalid video duration metadata"] : []),
+    ]),
   };
+}
+
+function normalizeDeferredVideoIssueResults(
+  value: unknown,
+  checks: DeferredVideoQualityCheck[],
+): DeferredVideoIssueResult[] {
+  if (!checks.length) return [];
+  const rawResults = Array.isArray(value) ? value.map(record) : [];
+  return checks.map((check) => {
+    const source = rawResults.find((item) =>
+      text(item.sourceIssueId ?? item.source_issue_id) === check.sourceIssueId
+    );
+    const rawStatus = text(source?.status).toLowerCase();
+    const status: DeferredVideoIssueResult["status"] = rawStatus === "resolved"
+      ? "resolved"
+      : rawStatus === "open"
+        ? "open"
+        : "unverifiable";
+    return {
+      sourceIssueId: check.sourceIssueId,
+      status,
+      evidence: text(source?.evidence) || undefined,
+      timeRange: text(source?.timeRange ?? source?.time_range) || undefined,
+    };
+  });
 }
 
 export function generationQualityCompositeScore(report: GenerationQualityReport): number | null {
@@ -373,6 +768,12 @@ export async function extractVideoFrameDataUrls(mediaUrl: string, fractions = [0
 function normalizeReport(value: unknown, params: BaseEvaluationParams): GenerationQualityReport {
   const source = record(value);
   const originalPassed = source.passed === true;
+  const suggestedRepairMode = imageRepairMode(source.suggestedRepairMode ?? source.suggested_repair_mode);
+  const suggestedCorrectionScope = imageCorrectionScope(source.correctionScope ?? source.correction_scope);
+  const suggestedBaselineUsable = typeof (source.baselineUsable ?? source.baseline_usable) === "boolean"
+    ? Boolean(source.baselineUsable ?? source.baseline_usable)
+    : undefined;
+  const suggestedRepairReasonCodes = strings(source.repairReasonCodes ?? source.repair_reason_codes);
   const evaluationConfidence = optionalUnitScore(source.evaluationConfidence ?? source.evaluation_confidence);
   const identityScore = optionalScore(source.identityScore ?? source.identity_score);
   const layoutScore = optionalScore(source.layoutScore ?? source.layout_score);
@@ -475,6 +876,10 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     evaluationStatus: scoreSetComplete && !lowConfidence ? "completed" : "partial",
     technicalRetryable: scoreSetComplete && !lowConfidence ? undefined : true,
     evaluationConfidence: evaluationConfidence ?? undefined,
+    suggestedRepairMode,
+    suggestedCorrectionScope,
+    suggestedBaselineUsable,
+    suggestedRepairReasonCodes,
     referenceComparable,
     identityScoreApplicable: expectedAnchorIds.length > 0 && selectedReferenceCount > 0,
     productConsistencyScoreApplicable: comparableChecks.includes("product"),
@@ -605,6 +1010,19 @@ function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFro
     contentBased: false,
     retryInstruction: "Retry visual quality evaluation for this existing candidate. Do not regenerate the media.",
     retryFromStage,
+    repairDecision: params.purpose === "video_segment" || params.purpose === "generated_bridge"
+      ? undefined
+      : {
+          mode: "reevaluate_only",
+          reasonCodes: ["quality_evaluation_technical_failure"],
+          baselineUsable: false,
+          correctionScope: "global",
+          editRegions: [],
+          preserve: [],
+          requiredContextSections: [],
+          confidence: 1,
+          decidedBy: "deterministic_router",
+        },
   };
 }
 
@@ -650,6 +1068,17 @@ function missingReferenceQualityReport(params: BaseEvaluationParams): Generation
     qualityDecision: "blocked",
     retryInstruction: "先回到资产参考选择，补齐合同要求的已批准参考图，再对当前候选重新质检；不要重新生成媒体。",
     retryFromStage: "reference_selector",
+    repairDecision: {
+      mode: "reference_reselect",
+      reasonCodes: ["required_reference_missing"],
+      baselineUsable: false,
+      correctionScope: "global",
+      editRegions: [],
+      preserve: [],
+      requiredContextSections: ["minimal_contract", "approved_references"],
+      confidence: 1,
+      decidedBy: "deterministic_router",
+    },
   };
 }
 
@@ -708,6 +1137,26 @@ async function callVision(content: Array<Record<string, unknown>>, system: strin
     }
     throw lastError;
   });
+}
+
+/**
+ * Shared structured-vision gateway for post-approval planning. Keeping it here
+ * makes observation and quality evaluation use the same model, retry, timeout,
+ * and concurrency policy.
+ */
+export async function callStructuredVisionModel(
+  content: Array<Record<string, unknown>>,
+  system: string,
+): Promise<unknown> {
+  return callVision(content, system);
+}
+
+export function structuredVisionModelName(): string {
+  return qualityVisionModel();
+}
+
+export function structuredVisionAvailable(): boolean {
+  return qualityVisionEnabled();
 }
 
 async function callVisionOnce(content: Array<Record<string, unknown>>, system: string): Promise<unknown> {
@@ -827,6 +1276,21 @@ function requireApiKey(): string { const key = process.env.DASHSCOPE_API_KEY || 
 function parseContent(raw: Record<string, unknown>): unknown { const choices = Array.isArray(raw.choices) ? raw.choices : []; const first = record(choices[0]); const message = record(first.message); const content = message.content; if (typeof content !== "string") return {}; return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
 function extractError(raw: Record<string, unknown>): string { if (typeof raw.message === "string") return raw.message; const error = record(raw.error); return typeof error.message === "string" ? error.message : ""; }
 function retryStage(value: unknown): GenerationQualityReport["retryFromStage"] { return value === "stage2b" || value === "stage3" || value === "generation" ? value : "generation"; }
+function imageRepairMode(value: unknown): ImageRepairMode | undefined {
+  return value === "reevaluate_only"
+    || value === "local_edit"
+    || value === "guided_regenerate"
+    || value === "full_regenerate"
+    || value === "reference_reselect"
+    || value === "contract_recompile"
+    || value === "storyboard_replan"
+    || value === "manual_review"
+    ? value
+    : undefined;
+}
+function imageCorrectionScope(value: unknown): ImageCorrectionScope | undefined {
+  return value === "local" || value === "regional" || value === "global" ? value : undefined;
+}
 function frameRate(value: unknown): number { const [a, b] = String(value ?? "0/1").split("/").map(Number); return b ? a / b : a || 0; }
 function record(value: unknown): Record<string, unknown> { return value != null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }

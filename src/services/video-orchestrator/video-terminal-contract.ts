@@ -20,6 +20,8 @@ export interface HappyHorsePromptInput {
   startState: string;
   contract: VideoPromptContract;
   retryCorrections: string[];
+  firstFrameIsNativeInput?: boolean;
+  lastFrameIsNativeInput?: boolean;
 }
 
 export interface CompiledHappyHorsePrompt {
@@ -141,12 +143,20 @@ export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): Comp
   validateVideoPromptContract(input.contract, input.retryCorrections);
   const settleStart = Math.max(1, Number((input.durationSeconds * 0.7).toFixed(1)));
   const blocks = [
+    input.firstFrameIsNativeInput
+      ? "START CONTROL: the approved first image is a native FIRST_FRAME input."
+      : "START CONTROL: the approved first image is a role-labeled reference image, not a native hard first frame.",
     [
       "HAPPYHORSE FIRST-FRAME I2V — VALIDATED MODEL CONTRACT",
-      `CONTROL LEVEL: ${input.requirementLevel}. The approved last image is not a native model input.`,
+      input.lastFrameIsNativeInput
+        ? `CONTROL LEVEL: ${input.requirementLevel}. The approved last image is the native LAST_FRAME image input and every terminal requirement describes how to reach it.`
+        : `CONTROL LEVEL: ${input.requirementLevel}. The approved last image is not a native model input and is enforced as a reviewed semantic target.`,
       `DURATION: ${input.durationSeconds}s. Complete the main action by ${settleStart}s, then decelerate and hold the terminal state through the final visible moment.`,
     ].join("\n"),
-    ["1. HARD START INPUT", input.startState].join("\n"),
+    [
+      input.firstFrameIsNativeInput ? "1. HARD START INPUT" : "1. APPROVED START REFERENCE TARGET",
+      input.startState,
+    ].join("\n"),
     [
       "2. MANDATORY FINAL-FRAME CONTRACT",
       ...input.contract.terminalRequirements.map((item) => [

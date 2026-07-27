@@ -1,4 +1,32 @@
-import type { VideoCreativeTemplateId, VideoStoryFunction } from "./types";
+import type {
+  VideoCreativeStrategy,
+  VideoCreativeTemplateId,
+  NarrativeEvent,
+  VideoStoryFunction,
+  VideoTimelineBlueprintSegment,
+} from "./types";
+
+export type PlanningNarrativeContractIssueCode =
+  | "STRATEGY_EVENT_BINDING_MISSING"
+  | "STRATEGY_EVENT_REFERENCE_INVALID"
+  | "STRATEGY_FUNCTION_ORDER_INVALID"
+  | "HOOK_TURNING_POINT_EVENT_OVERLAP"
+  | "CHRONOLOGICAL_HOOK_FULL_REVEAL"
+  | "FLASHFORWARD_RETURN_EVENT_MISSING"
+  | "TIMELINE_SOURCE_EVENT_MISSING";
+
+export interface PlanningNarrativeContractIssue {
+  code: PlanningNarrativeContractIssueCode;
+  path: string;
+  messageZh: string;
+  repairHint: string;
+}
+
+export interface PlanningNarrativeContractResult {
+  passed: boolean;
+  issues: PlanningNarrativeContractIssue[];
+  contractVersion: "planning-narrative-contract-v1";
+}
 
 export type StoryContractIssueCode =
   | "STORY_BEATS_MISSING"
@@ -57,6 +85,106 @@ const REQUIRED_FUNCTIONS: Record<VideoCreativeTemplateId, VideoStoryFunction[]> 
 
 export function requiredStoryFunctionsForTemplate(templateId: VideoCreativeTemplateId): VideoStoryFunction[] {
   return [...REQUIRED_FUNCTIONS[templateId]];
+}
+
+export function validatePlanningNarrativeContract(params: {
+  creativeStrategy: VideoCreativeStrategy;
+  narrativeEvents: NarrativeEvent[];
+  timelineSegments: VideoTimelineBlueprintSegment[];
+}): PlanningNarrativeContractResult {
+  const issues: PlanningNarrativeContractIssue[] = [];
+  const eventOrder = new Map(params.narrativeEvents.map((event, index) => [event.eventId, index + 1]));
+  const chronologyMode = params.creativeStrategy.chronologyMode ?? "chronological";
+  const bindings = [
+    ["hook", params.creativeStrategy.hookEventIds ?? []],
+    ["conflict", params.creativeStrategy.conflictEventIds ?? []],
+    ["turning_point", params.creativeStrategy.turningPointEventIds ?? []],
+    ["payoff", params.creativeStrategy.payoffEventIds ?? []],
+    ["cta", params.creativeStrategy.ctaEventIds ?? []],
+  ] as const;
+
+  for (const [storyFunction, eventIds] of bindings) {
+    const hasStrategyText = strategyFunctionHasText(params.creativeStrategy, storyFunction);
+    if (hasStrategyText && !eventIds.length) {
+      planningIssue(
+        issues,
+        "STRATEGY_EVENT_BINDING_MISSING",
+        `creative_strategy.${storyFunction}_event_ids`,
+        `${storyFunction} 已定义文案，但没有绑定 narrative_event。`,
+        `为 ${storyFunction} 填写真实 event_id；创意策略只能总结绑定事件，不能独立创造剧情。`,
+      );
+    }
+    for (const eventId of eventIds) {
+      if (!eventOrder.has(eventId)) {
+        planningIssue(
+          issues,
+          "STRATEGY_EVENT_REFERENCE_INVALID",
+          `creative_strategy.${storyFunction}_event_ids`,
+          `${storyFunction} 引用了不存在的事件 ${eventId}。`,
+          "只引用 narrative_events 中已经定义的 event_id。",
+        );
+      }
+    }
+  }
+
+  const hookEvents = new Set(params.creativeStrategy.hookEventIds ?? []);
+  const turningPointEvents = params.creativeStrategy.turningPointEventIds ?? [];
+  if (turningPointEvents.some((eventId) => hookEvents.has(eventId)) && chronologyMode === "chronological") {
+    planningIssue(
+      issues,
+      "HOOK_TURNING_POINT_EVENT_OVERLAP",
+      "creative_strategy.hook_event_ids",
+      "顺叙结构中，hook 与 turning_point 绑定了同一完整事件。",
+      "让 hook 只绑定更早的悬念/痛点事件；若确需高潮预告，改用 flashforward_hook 并定义回归事件。",
+    );
+  }
+  if (chronologyMode === "chronological" && params.creativeStrategy.hookRevealLevel === "full") {
+    planningIssue(
+      issues,
+      "CHRONOLOGICAL_HOOK_FULL_REVEAL",
+      "creative_strategy.hook_reveal_level",
+      "顺叙结构的 hook 不得完整揭示 turning point 或 payoff。",
+      "将 hook_reveal_level 改为 none/partial，并删除对核心转折结果的完整展示。",
+    );
+  }
+  if (chronologyMode === "flashforward_hook") {
+    const returnToEventId = params.creativeStrategy.returnToEventId ?? "";
+    if (!returnToEventId || !eventOrder.has(returnToEventId)) {
+      planningIssue(
+        issues,
+        "FLASHFORWARD_RETURN_EVENT_MISSING",
+        "creative_strategy.return_to_event_id",
+        "高潮预告模式没有定义返回主时间线的有效事件。",
+        "填写一个存在的较早 event_id，明确预告结束后从哪里恢复顺叙。",
+      );
+    }
+  }
+
+  if (chronologyMode === "chronological") {
+    validateStrategyOrder(issues, eventOrder, "hook", params.creativeStrategy.hookEventIds, "turning_point", turningPointEvents);
+    validateStrategyOrder(issues, eventOrder, "conflict", params.creativeStrategy.conflictEventIds, "turning_point", turningPointEvents);
+    validateStrategyOrder(issues, eventOrder, "turning_point", turningPointEvents, "payoff", params.creativeStrategy.payoffEventIds);
+    validateStrategyOrder(issues, eventOrder, "payoff", params.creativeStrategy.payoffEventIds, "cta", params.creativeStrategy.ctaEventIds);
+  }
+
+  const timelineEventIds = new Set(params.timelineSegments.flatMap((segment) => segment.sourceEventIds ?? []));
+  for (const event of params.narrativeEvents) {
+    if (!timelineEventIds.has(event.eventId)) {
+      planningIssue(
+        issues,
+        "TIMELINE_SOURCE_EVENT_MISSING",
+        "planning_manifest.timeline_blueprint.segments",
+        `事件 ${event.eventId} 没有被任何 segment 的 source_event_ids 引用。`,
+        "将事件绑定到负责呈现它的 segment，或删除不进入时间线的事件。",
+      );
+    }
+  }
+
+  return {
+    passed: issues.length === 0,
+    issues,
+    contractVersion: "planning-narrative-contract-v1",
+  };
 }
 
 export function validateStoryboardStoryContract(params: {
@@ -267,6 +395,55 @@ function issue(
   context: Pick<StoryContractIssue, "beatId" | "segmentNo"> = {},
 ): void {
   issues.push({ code, path, messageZh, repairHint, ...context });
+}
+
+function strategyFunctionHasText(
+  strategy: VideoCreativeStrategy,
+  storyFunction: "hook" | "conflict" | "turning_point" | "payoff" | "cta",
+): boolean {
+  if (storyFunction === "turning_point") {
+    return Boolean(text(strategy.turningPoint) || text(strategy.turningPointZh) || text(strategy.turningPointEn));
+  }
+  const values = storyFunction === "hook"
+    ? [strategy.hook, strategy.hookZh, strategy.hookEn]
+    : storyFunction === "conflict"
+      ? [strategy.conflict, strategy.conflictZh, strategy.conflictEn]
+      : storyFunction === "payoff"
+        ? [strategy.payoff, strategy.payoffZh, strategy.payoffEn]
+        : [strategy.cta, strategy.ctaZh, strategy.ctaEn];
+  return values.some((value) => Boolean(text(value)));
+}
+
+function validateStrategyOrder(
+  issues: PlanningNarrativeContractIssue[],
+  eventOrder: Map<string, number>,
+  earlierName: string,
+  earlierEventIds: string[] | undefined,
+  laterName: string,
+  laterEventIds: string[] | undefined,
+): void {
+  const earlierOrders = (earlierEventIds ?? []).map((eventId) => eventOrder.get(eventId)).filter((value): value is number => value != null);
+  const laterOrders = (laterEventIds ?? []).map((eventId) => eventOrder.get(eventId)).filter((value): value is number => value != null);
+  if (!earlierOrders.length || !laterOrders.length) return;
+  if (Math.min(...earlierOrders) >= Math.min(...laterOrders)) {
+    planningIssue(
+      issues,
+      "STRATEGY_FUNCTION_ORDER_INVALID",
+      `creative_strategy.${earlierName}_event_ids`,
+      `顺叙结构中 ${earlierName} 没有发生在 ${laterName} 之前。`,
+      `重新绑定事件，使 ${earlierName} 的事件顺序严格早于 ${laterName}。`,
+    );
+  }
+}
+
+function planningIssue(
+  issues: PlanningNarrativeContractIssue[],
+  code: PlanningNarrativeContractIssueCode,
+  path: string,
+  messageZh: string,
+  repairHint: string,
+): void {
+  issues.push({ code, path, messageZh, repairHint });
 }
 
 function record(value: unknown): JsonRecord {

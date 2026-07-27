@@ -1,4 +1,5 @@
 import type { TaskStatusPollData } from "@/types/task-status";
+import type { VideoProviderInputCapabilities } from "./video-input-contract";
 
 /**
  * 中转站内部标准提交结构（不包含任何具体厂商字段名）。
@@ -57,6 +58,9 @@ export interface RunningHubRunWorkflowWatermarkKnobs {
  * 多模型上游适配器：提单与任务查询。
  */
 export interface IProviderAdapter {
+  /** Optional declaration for video adapters that consume role-scoped images. */
+  getVideoInputCapabilities?(payload: StandardPayload): VideoProviderInputCapabilities;
+
   /** 根据标准负载估算成本与售价（同步，无 I/O） */
   calculateCost(payload: StandardPayload): ProviderCostResult;
 

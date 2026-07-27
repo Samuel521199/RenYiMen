@@ -12,6 +12,14 @@ const projectServiceSource = readFileSync(
   "utf8",
 );
 
+test("recoverable image-review failures keep an explicit resume action", () => {
+  assert.match(pageSource, /canResumeRecoverableImageReview/);
+  assert.match(pageSource, /project\.status === "IMAGE_REVIEW"[\s\S]*visibleProjectError/);
+  assert.match(pageSource, /if \(canResumeRecoverableImageReview\)[\s\S]*onClick: resumeProject/);
+  assert.match(projectServiceSource, /project\.resume\.image_review_clear_recoverable_error/);
+  assert.match(projectServiceSource, /review remains actionable even when no dependency-ready image task can be submitted yet/);
+});
+
 test("three-view review keeps independent cards and front-view generation gating without debug decorations", () => {
   assert.match(pageSource, /orderedAssetKeyframes\.map\(\(keyframe\)/);
   assert.match(pageSource, /personDerivedViewWaitReason/);
@@ -73,7 +81,9 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.doesNotMatch(pageSource, /adoptAvailableMicroShotsAndContinue/);
   assert.doesNotMatch(pageSource, /采用现有最佳原图并继续/);
   assert.match(pageSource, /const acceptFailed = candidate\.kind !== "segment_video" && candidate\.passed !== true/);
-  assert.match(picker, /视频可直接预览和人工选择，自动分析仅供参考/);
+  assert.match(picker, /multi-frame AI analysis runs only when requested/);
+  assert.match(picker, /Manual video checklist/);
+  assert.match(picker, /Run on-demand AI analysis/);
   assert.match(picker, /采用这个视频/);
   assert.match(picker, /identityScore/);
   assert.match(picker, /singleTakeScore/);
@@ -332,7 +342,7 @@ test("a previous project error is hidden while a new generation cycle is active"
   assert.match(pageSource, /const visibleProjectError = project\?\.errorMessage[\s\S]*?!generationRecoveryActive/);
   assert.match(pageSource, /\{localizedActionError && \(/);
   assert.match(pageSource, /\{projectWorkflowNotice && \(/);
-  assert.match(pageSource, /\{localizedProjectError && visibleProjectError !== error && \(/);
+  assert.match(pageSource, /\{localizedProjectError && localizedProjectError !== localizedActionError && \(/);
   assert.doesNotMatch(pageSource, /\{\(error \|\| \(project\?\.errorMessage/);
 });
 
@@ -370,6 +380,31 @@ test("generation-frontier waiting state is presented as a calm workflow notice i
   assert.doesNotMatch(pageSource, /projectWorkflowNotice[\s\S]{0,240}text-amber/);
 });
 
+test("front-view dependency waits are notices, not generation failures", () => {
+  const noticeFormatter = pageSource.slice(
+    pageSource.indexOf("function workflowNoticeForMessage"),
+    pageSource.indexOf("function localizeQualityIssue"),
+  );
+  assert.match(noticeFormatter, /Approve and lock each person front view/);
+  assert.match(noticeFormatter, /等待人物正面图确认/);
+  assert.match(pageSource, /canResumeRecoverableImageReview[\s\S]*?!projectWorkflowNotice/);
+  assert.match(projectServiceSource, /blockedDerivedViews\.length && !running\.length[\s\S]*?errorMessage: null/);
+});
+
+test("workflow progress does not announce micro-shot review while assets are incomplete", () => {
+  const progressFormatter = pageSource.slice(
+    pageSource.indexOf("function projectWorkflowProgressView"),
+    pageSource.indexOf("function projectProgress"),
+  );
+  assert.match(progressFormatter, /phase\.assetTotal > 0/);
+  assert.match(progressFormatter, /!phase\.assetsApproved/);
+  assert.match(progressFormatter, /资产库待审核/);
+  assert.match(progressFormatter, /请先确认每个人物的正面图/);
+  assert.match(progressFormatter, /phase\.assetsApproved[\s\S]*?phase\.boundaryTotal > 0/);
+  assert.match(progressFormatter, /当前尚不能进入内部子分镜审核/);
+  assert.match(progressFormatter, /全部确认后才能进入内部子分镜审核/);
+});
+
 test("keyframe regeneration preserves history and adds one learned candidate at a time", () => {
   const service = readFileSync(
     path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"),
@@ -401,6 +436,21 @@ test("keyframe regeneration preserves history and adds one learned candidate at 
   assert.match(sequentialSubmission, /buildImageCandidateLearningSummary\(project, artifactId/);
   assert.match(sequentialSubmission, /candidateCount: 1/);
   assert.match(sequentialSubmission, /incremental candidate #/);
+});
+
+test("image and video candidates are progressive, fingerprinted, and reuse unchanged quality reports", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"),
+    "utf8",
+  );
+  assert.match(service, /function imageCandidateCount\(\): number \{[\s\S]{0,240}return 1/);
+  assert.match(service, /function videoCandidateCount\(\): number \{[\s\S]{0,320}return 1/);
+  assert.match(service, /guardProgressiveCandidateSubmission/);
+  assert.match(service, /generationInputFingerprint/);
+  assert.match(service, /生成输入没有发生实质变化/);
+  assert.match(service, /reusableQualityEvaluation/);
+  assert.match(service, /generation_quality\.report_reused/);
+  assert.match(service, /qualityReportReusedFromCandidateId/);
 });
 
 test("keyframe regeneration gives immediate target-level progress feedback", () => {

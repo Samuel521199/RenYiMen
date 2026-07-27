@@ -151,7 +151,7 @@ test("project integration preserves front-first derivation and approved media", 
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /onePromptRolloutEnabled\("ONE_PROMPT_THREE_VIEW_DERIVATION"\) && category === "person" && view !== "front" \? "derived_from_front" : "primary"/);
   assert.match(source, /if \(!onePromptRolloutEnabled\("ONE_PROMPT_THREE_VIEW_DERIVATION"\)\) return true/);
-  assert.match(source, /Approve and lock each person front view before generating its side and back views/);
+  assert.match(source, /blockedDerivedViews\.length && !running\.length[\s\S]*?status: VideoProjectStatus\.IMAGE_REVIEW,[\s\S]*?errorMessage: null/);
   assert.match(source, /candidate\.assetView === "front"/);
   assert.match(source, /NOT: \{ locked: true, imageUrl: \{ not: null \} \}/);
 });

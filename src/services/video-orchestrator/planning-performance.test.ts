@@ -24,6 +24,12 @@ test("normalizes segment and repair stage names for stable production percentile
     attempt: 1,
     kind: "repair",
   });
+  assert.deepEqual(normalizePlanningStage("planning_duration_repair_r1"), {
+    stage: "planning_duration_repair",
+    segmentNo: undefined,
+    attempt: 2,
+    kind: "repair",
+  });
 });
 
 test("performance persistence stores timings and counters without prompts or media", async () => {

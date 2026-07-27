@@ -43,8 +43,17 @@ export function normalizePlanningStage(rawStage: string): {
   if (stage.startsWith("json_repair_")) {
     normalized = "json_repair";
     kind = "repair";
+  } else if (stage.startsWith("asset_prompt_contract_repair")) {
+    normalized = "asset_prompt_contract_repair";
+    kind = "repair";
   } else if (stage.startsWith("story_contract_repair")) {
     normalized = "story_contract_repair";
+    kind = "repair";
+  } else if (stage.startsWith("planning_duration_repair")) {
+    normalized = "planning_duration_repair";
+    kind = "repair";
+  } else if (stage.startsWith("timeline_replan")) {
+    normalized = "timeline_replan";
     kind = "repair";
   } else if (stage.startsWith("split_repair")) {
     normalized = "split_repair";

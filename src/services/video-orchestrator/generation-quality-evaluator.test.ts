@@ -9,6 +9,7 @@ import {
   generationTransportAttemptsUsed,
   hasUsableVideoCandidateForActiveClip,
   nextGenerationCandidateAttempt,
+  selectLatestUsableImageBaseline,
 } from "./project-service.ts";
 import { mediaKeyMatchingContentType } from "./oss-media.ts";
 import { fitAliyunImagePrompt, prepareAliyunImagePrompt } from "./aliyun-workflow.ts";
@@ -100,13 +101,17 @@ test("video frame extraction uses PNG and cleanup cannot overwrite a valid evalu
   assert.match(source, /Cleanup must never overwrite an otherwise valid visual-evaluation result/);
 });
 
-test("video candidates use deterministic technical validation while visual review remains advisory", () => {
+test("segment video sync uses deterministic validation and keeps visual review explicitly on demand", () => {
   const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(evaluator, /inspectGeneratedVideoTechnicalQuality/);
   assert.match(evaluator, /does[\s*]+not make any aesthetic or semantic judgement/i);
-  assert.match(service, /videoAdvisoryOnly = candidate\.kind === "segment_video"/);
+  assert.match(service, /if \(item\.kind === "segment_video"\) return false/);
+  assert.match(service, /export async function analyzeSegmentVideoCandidate/);
+  assert.match(service, /generation_quality\.video_advisory_requested/);
   assert.match(service, /advisoryOnly: true/);
+  assert.match(service, /status: \{ in: \["succeeded", "evaluating", "evaluated", "quality_retry", "quality_failed"\] \}/);
+  assert.match(service, /status: "review_ready",[\s\S]{0,80}passed: null/);
   assert.match(service, /Video candidates are ready for user review; automated visual analysis is advisory only/);
   assert.match(service, /candidate\.kind !== "segment_video" && candidate\.passed !== true/);
   assert.match(service, /reconcileSegmentVideoProjectStatus\(project\.id\)/);
@@ -115,8 +120,7 @@ test("video candidates use deterministic technical validation while visual revie
   assert.match(service, /recoverableLegacyFailure/);
   assert.match(service, /const hasActiveVideoCandidate/);
   assert.match(service, /\|\| hasActiveVideoCandidate/);
-  assert.match(service, /const hasActiveVideoGenerationTasks/);
-  assert.match(service, /if \(hasActiveVideoGenerationTasks\) return false/);
+  assert.doesNotMatch(service, /const hasActiveVideoGenerationTasks/);
   assert.match(service, /activeCandidate \? "ready" : "generating"/);
   assert.match(service, /Video visual analysis[\s\S]{0,120}must never turn an existing playable result into FAILED/);
   assert.match(service, /const recoverableClipBackedSegments = clipBackedUnreadySegments/);
@@ -202,6 +206,166 @@ test("failed visual evaluations produce a spatially precise next-generation corr
   assert.match(report.retryInstruction ?? "", /Acceptance tolerance:/);
   assert.match(report.retryInstruction ?? "", /Preserve unchanged: character face, board layout/);
   assert.doesNotMatch(report.retryInstruction ?? "", /^fix the score$/);
+});
+
+test("bounded high-score defects route to local edit with the current candidate as baseline", () => {
+  const report = normalizeImageQualityResponse({
+    evaluationConfidence: 0.94,
+    identityScore: 92,
+    layoutScore: 88,
+    promptAlignmentScore: 86,
+    continuityScore: 90,
+    passed: false,
+    suggestedRepairMode: "local_edit",
+    correctionScope: "local",
+    baselineUsable: true,
+    repairReasonCodes: ["localized_gaze_error"],
+    artifactIssues: ["pupils point forward instead of viewer-right"],
+    correctionActions: [{
+      region: "eye region",
+      element: "pupil direction",
+      observed: "both pupils point forward",
+      target: "both pupils point viewer-right",
+      instruction: "Move only both pupils toward viewer-right",
+      evidenceStatus: "confirmed",
+      confidence: 0.94,
+      normalizedRegion: { xMin: 0.4, yMin: 0.16, xMax: 0.61, yMax: 0.35 },
+      preserve: ["face identity", "head angle", "clothing", "background"],
+    }],
+    retryFromStage: "generation",
+  }, base);
+  assert.equal(report.repairDecision?.mode, "local_edit");
+  assert.equal(report.repairDecision?.baselineUsable, true);
+  assert.equal(report.repairDecision?.baselineCandidateId, "candidate-2");
+  assert.deepEqual(report.repairDecision?.requiredContextSections, ["minimal_contract", "approved_references"]);
+  assert.deepEqual(report.repairDecision?.preserve, ["face identity", "head angle", "clothing", "background"]);
+  assert.equal(report.repairDecision?.suggestedMode, "local_edit");
+});
+
+test("deterministic routing rejects local edit for global structural failures", () => {
+  const report = normalizeImageQualityResponse({
+    evaluationConfidence: 0.98,
+    identityScore: 48,
+    layoutScore: 40,
+    promptAlignmentScore: 51,
+    continuityScore: 62,
+    passed: false,
+    suggestedRepairMode: "local_edit",
+    correctionScope: "local",
+    baselineUsable: true,
+    artifactIssues: ["wrong scene and extra character contaminate the isolated asset"],
+    correctionActions: [{
+      region: "full frame",
+      element: "scene and subject count",
+      observed: "an unrelated background and extra character are visible",
+      target: "one isolated character on white",
+      instruction: "Regenerate the isolated asset from the authoritative contract",
+      normalizedRegion: { xMin: 0, yMin: 0, xMax: 1, yMax: 1 },
+    }],
+    retryFromStage: "generation",
+  }, { ...base, purpose: "anchor_reference_image" });
+  assert.equal(report.repairDecision?.mode, "full_regenerate");
+  assert.equal(report.repairDecision?.baselineUsable, false);
+  assert.equal(report.repairDecision?.suggestedMode, "local_edit");
+  assert.ok(report.repairDecision?.reasonCodes.includes("severe_score_failure"));
+});
+
+test("incomplete quality evidence re-evaluates the same media instead of regenerating", () => {
+  const report = normalizeImageQualityResponse({ passed: false }, base);
+  assert.equal(report.repairDecision?.mode, "reevaluate_only");
+  assert.equal(report.repairDecision?.baselineUsable, false);
+  assert.deepEqual(report.repairDecision?.requiredContextSections, []);
+});
+
+test("a resolved image issue that returns upgrades local editing to guided regeneration", () => {
+  const previousQualityReport = {
+    assetId: base.assetId,
+    identityScore: 90,
+    layoutScore: 90,
+    promptAlignmentScore: 90,
+    continuityScore: 90,
+    artifactIssues: [],
+    passed: true,
+    issueLedger: [{
+      issueId: "issue_hand",
+      fingerprint: "anatomy:right",
+      category: "anatomy" as const,
+      region: "right hand",
+      summary: "right hand fingers overlap",
+      target: "five clearly separated fingers",
+      severity: "soft" as const,
+      applicableStage: "static_image" as const,
+      status: "resolved" as const,
+      firstSeenCandidateNo: 1,
+      lastSeenCandidateNo: 2,
+      occurrenceCount: 1,
+    }],
+  };
+  const report = normalizeImageQualityResponse({
+    evaluationConfidence: 0.96,
+    identityScore: 90,
+    layoutScore: 88,
+    promptAlignmentScore: 89,
+    continuityScore: 90,
+    passed: false,
+    artifactIssues: ["right hand fingers overlap"],
+    correctionActions: [{
+      region: "right hand",
+      element: "hand anatomy",
+      observed: "right hand fingers overlap",
+      target: "five clearly separated fingers",
+      instruction: "Restore five clearly separated fingers",
+      normalizedRegion: { xMin: 0.55, yMin: 0.45, xMax: 0.72, yMax: 0.7 },
+    }],
+    retryFromStage: "generation",
+  }, { ...base, previousQualityReport });
+  assert.equal(report.issueLedger?.find((issue) => issue.issueId === "issue_hand")?.status, "regressed");
+  assert.equal(report.repairDecision?.mode, "guided_regenerate");
+  assert.ok(report.repairDecision?.reasonCodes.includes("regressed_issue_requires_broader_regeneration"));
+});
+
+test("an image issue that regresses repeatedly forces full regeneration", () => {
+  const previousQualityReport = {
+    assetId: base.assetId,
+    identityScore: 90,
+    layoutScore: 90,
+    promptAlignmentScore: 90,
+    continuityScore: 90,
+    artifactIssues: [],
+    passed: true,
+    issueLedger: [{
+      issueId: "issue_hand",
+      fingerprint: "anatomy:right",
+      category: "anatomy" as const,
+      region: "right hand",
+      summary: "right hand fingers overlap",
+      target: "five clearly separated fingers",
+      severity: "soft" as const,
+      applicableStage: "static_image" as const,
+      status: "resolved" as const,
+      occurrenceCount: 2,
+    }],
+  };
+  const report = normalizeImageQualityResponse({
+    evaluationConfidence: 0.96,
+    identityScore: 90,
+    layoutScore: 88,
+    promptAlignmentScore: 89,
+    continuityScore: 90,
+    passed: false,
+    artifactIssues: ["right hand fingers overlap"],
+    correctionActions: [{
+      region: "right hand",
+      element: "hand anatomy",
+      observed: "right hand fingers overlap",
+      target: "five clearly separated fingers",
+      instruction: "Restore five clearly separated fingers",
+      normalizedRegion: { xMin: 0.55, yMin: 0.45, xMax: 0.72, yMax: 0.7 },
+    }],
+    retryFromStage: "generation",
+  }, { ...base, previousQualityReport });
+  assert.equal(report.repairDecision?.mode, "full_regenerate");
+  assert.ok(report.repairDecision?.reasonCodes.includes("issue_regressed_multiple_times"));
 });
 
 test("uncertain visual findings become recommended rather than required corrections", () => {
@@ -333,6 +497,79 @@ test("video composite includes first-frame, checkpoint-order and single-take evi
   assert.equal(report.checkpointOrderScore, 40);
 });
 
+test("video quality closes deferred image issues by source issue id", () => {
+  const deferredVideoQualityChecks = [{
+    sourceIssueId: "keyframe:1:image::issue_timer",
+    sourceArtifactId: "keyframe:1:image",
+    category: "game_ui" as const,
+    region: "timer",
+    requiredVideoCheck: "timer visibly counts down from 10 to 7",
+    expectedState: "10 to 7 countdown",
+  }];
+  const report = normalizeVideoQualityResponse({
+    evaluationConfidence: 0.95,
+    identityScore: 90,
+    layoutScore: 90,
+    promptAlignmentScore: 90,
+    continuityScore: 90,
+    firstFrameConsistencyScore: 90,
+    checkpointOrderScore: 90,
+    singleTakeScore: 90,
+    deferredVideoIssueResults: [{
+      sourceIssueId: "keyframe:1:image::issue_timer",
+      status: "resolved",
+      evidence: "timer reads 10, 9, 8, then 7 across ordered samples",
+      timeRange: "0.0s-2.4s",
+    }],
+    passed: true,
+  }, { ...base, purpose: "video_segment", deferredVideoQualityChecks });
+  assert.equal(report.passed, true);
+  assert.deepEqual(report.resolvedDeferredVideoIssueIds, ["keyframe:1:image::issue_timer"]);
+  assert.equal(report.issueLedger?.find((issue) => issue.issueId === "keyframe:1:image::issue_timer")?.status, "resolved");
+});
+
+test("open or omitted deferred video checks cannot silently pass", () => {
+  const deferredVideoQualityChecks = [{
+    sourceIssueId: "keyframe:1:image::issue_timer",
+    sourceArtifactId: "keyframe:1:image",
+    category: "game_ui" as const,
+    requiredVideoCheck: "timer visibly counts down from 10 to 7",
+  }];
+  const commonResult = {
+    evaluationConfidence: 0.95,
+    identityScore: 90,
+    layoutScore: 90,
+    promptAlignmentScore: 90,
+    continuityScore: 90,
+    firstFrameConsistencyScore: 90,
+    checkpointOrderScore: 90,
+    singleTakeScore: 90,
+    passed: true,
+  };
+  const open = normalizeVideoQualityResponse({
+    ...commonResult,
+    deferredVideoIssueResults: [{
+      sourceIssueId: "keyframe:1:image::issue_timer",
+      status: "open",
+      evidence: "timer remains fixed at 10",
+    }],
+  }, { ...base, purpose: "video_segment", deferredVideoQualityChecks });
+  assert.equal(open.passed, false);
+  assert.equal(open.qualityDecision, "retry");
+  assert.deepEqual(open.openDeferredVideoIssueIds, ["keyframe:1:image::issue_timer"]);
+  assert.match(open.retryInstruction ?? "", /timer visibly counts down from 10 to 7/);
+
+  const omitted = normalizeVideoQualityResponse(commonResult, {
+    ...base,
+    purpose: "video_segment",
+    deferredVideoQualityChecks,
+  });
+  assert.equal(omitted.passed, false);
+  assert.equal(omitted.evaluationStatus, "partial");
+  assert.equal(omitted.qualityDecision, "review");
+  assert.match(omitted.retryInstruction ?? "", /Do not regenerate the media/);
+});
+
 test("exact brand logo assets fail when the evaluator detects wrong text", () => {
   const report = normalizeImageQualityResponse({
     identityScore: 82,
@@ -415,7 +652,8 @@ test("candidate orchestration evaluates all batches, waits for the complete pool
   assert.match(source, /protectLockedSelection/);
   assert.match(source, /selected: true, userAccepted: true/);
   assert.match(source, /locked: false, NOT: \{ status: VideoShotStatus\.IMAGE_APPROVED \}/);
-  assert.match(source, /ONE_PROMPT_IMAGE_CANDIDATE_COUNT", 1/);
+  assert.match(source, /function imageCandidateCount\(\): number \{[\s\S]{0,240}return 1/);
+  assert.match(source, /function videoCandidateCount\(\): number \{[\s\S]{0,320}return 1/);
   const claimIndex = source.indexOf("const claim = await prisma.videoKeyframe.updateMany");
   const submitIndex = source.indexOf("const taskId = await createImageCandidateBatch", claimIndex);
   assert.ok(claimIndex >= 0 && submitIndex > claimIndex);
@@ -431,6 +669,37 @@ test("candidate orchestration evaluates all batches, waits for the complete pool
   assert.match(source, /where: candidate\.status === "quality_retry"/);
   assert.match(source, /id: candidate\.id,[\s\S]{0,80}status: "evaluating"/);
   assert.doesNotMatch(source, /wasIncorrectlyPromoted[\s\S]{0,240}evaluateGeneratedImageQuality/);
+});
+
+test("image retries use repair-mode prompt packets for keyframes, assets and micro-shots", () => {
+  const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const workflow = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/aliyun-workflow.ts"), "utf8");
+  assert.match(service, /function buildImageAttemptPrompt/);
+  assert.match(service, /LOCAL IMAGE REPAIR PACKET/);
+  assert.match(service, /GUIDED IMAGE REGENERATION PACKET/);
+  assert.match(service, /FULL IMAGE REGENERATION/);
+  assert.match(service, /RESOLVED-STATE PRESERVATION LOCK/);
+  assert.match(service, /const mayReuseBaseline = repairMode === "local_edit" \|\| repairMode === "guided_regenerate"/);
+  assert.match(service, /const baselineUrl = mayReuseBaseline/);
+  assert.match(service, /repairMode: learning\.repairMode/);
+  assert.match(service, /kind: "micro_shot_image"[\s\S]{0,1000}prompt: learnedPrompt/);
+  assert.match(workflow, /"LOCAL IMAGE REPAIR"/);
+  assert.match(workflow, /"GUIDED IMAGE REGENERATION"/);
+  assert.match(workflow, /"FULL IMAGE REGENERATION"/);
+  assert.match(workflow, /"RESOLVED-STATE PRESERVATION LOCK"/);
+});
+
+test("deferred still-image issues become a generation handoff and manual or on-demand checklist", () => {
+  const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  assert.match(service, /function deferredVideoQualityChecksForSegment/);
+  assert.match(service, /IMAGE-TO-VIDEO HANDOFF/);
+  assert.match(service, /deferredVideoQualityChecks,/);
+  assert.match(service, /manualVideoQualityChecks/);
+  assert.match(service, /analyzeSegmentVideoCandidate/);
+  assert.match(evaluator, /DEFERRED IMAGE ISSUES — REQUIRED VIDEO CHECK CONTRACT/);
+  assert.match(evaluator, /deferredVideoIssueResults/);
+  assert.match(evaluator, /Never silently omit a deferred check/);
 });
 
 test("overlength image prompts keep retry corrections ahead of descriptive detail", () => {
@@ -487,14 +756,109 @@ test("image evaluator localizes current output and prevents reference-pixel leak
   assert.match(source, /seenReferenceUrls\.has\(url\)/);
 });
 
-test("candidate learning rejects structurally polluted asset baselines and keeps latest diagnostics", () => {
+test("candidate learning uses latest lineage state instead of historical highest score", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(source, /baselineSelectionRule: "strongest_structurally_usable_candidate_then_unscored_latest_fallback"/);
+  assert.match(source, /latest_usable_candidate_then_nearest_usable_ancestor/);
+  assert.doesNotMatch(source, /strongest_structurally_usable_candidate_then_unscored_latest_fallback/);
   assert.match(source, /isStructurallyUsableImageBaseline/);
   assert.match(source, /hasIsolationViolation/);
   assert.match(source, /report\.layoutScore \?\? 0\) >= 55/);
   assert.match(source, /latestEvaluated\?\.report\.issueLedger/);
+  assert.match(source, /parentCandidateId: learning\.baselineSelection\.baselineCandidateId/);
   assert.doesNotMatch(source, /const baselineUrl = currentImageUrl \|\| selected\?\.mediaUrl/);
+});
+
+test("latest usable image stays the baseline even when an older image may have scored higher", () => {
+  const selected = selectLatestUsableImageBaseline([
+    {
+      id: "older-high-score",
+      candidateNo: 1,
+      createdAtMs: 1,
+      structurallyUsable: true,
+      catastrophicRegressionReasons: [],
+      regressionAgainstParent: false,
+    },
+    {
+      id: "latest-improved-state",
+      candidateNo: 2,
+      createdAtMs: 2,
+      parentCandidateId: "older-high-score",
+      structurallyUsable: true,
+      catastrophicRegressionReasons: [],
+      regressionAgainstParent: true,
+    },
+  ]);
+  assert.equal(selected.latestCandidateId, "latest-improved-state");
+  assert.equal(selected.baselineCandidateId, "latest-improved-state");
+  assert.equal(selected.fallbackDepth, 0);
+});
+
+test("catastrophic latest image falls back only to its nearest usable ancestor", () => {
+  const selected = selectLatestUsableImageBaseline([
+    {
+      id: "root",
+      candidateNo: 1,
+      createdAtMs: 1,
+      structurallyUsable: true,
+      catastrophicRegressionReasons: [],
+      regressionAgainstParent: false,
+    },
+    {
+      id: "nearest-parent",
+      candidateNo: 2,
+      createdAtMs: 2,
+      parentCandidateId: "root",
+      structurallyUsable: true,
+      catastrophicRegressionReasons: [],
+      regressionAgainstParent: false,
+    },
+    {
+      id: "newer-sibling-not-in-lineage",
+      candidateNo: 3,
+      createdAtMs: 3,
+      parentCandidateId: "root",
+      structurallyUsable: true,
+      catastrophicRegressionReasons: [],
+      regressionAgainstParent: false,
+    },
+    {
+      id: "latest-broken",
+      candidateNo: 4,
+      createdAtMs: 4,
+      parentCandidateId: "nearest-parent",
+      structurallyUsable: false,
+      catastrophicRegressionReasons: ["explicit_catastrophic_visual_failure"],
+      regressionAgainstParent: true,
+    },
+  ]);
+  assert.equal(selected.latestCandidateId, "latest-broken");
+  assert.equal(selected.baselineCandidateId, "nearest-parent");
+  assert.equal(selected.fallbackDepth, 1);
+  assert.deepEqual(selected.catastrophicRegressionReasons, ["explicit_catastrophic_visual_failure"]);
+});
+
+test("baseline selection stops when the whole image lineage is unusable", () => {
+  const selected = selectLatestUsableImageBaseline([
+    {
+      id: "broken-root",
+      candidateNo: 1,
+      createdAtMs: 1,
+      structurallyUsable: false,
+      catastrophicRegressionReasons: ["structurally_unusable_baseline"],
+      regressionAgainstParent: false,
+    },
+    {
+      id: "broken-latest",
+      candidateNo: 2,
+      createdAtMs: 2,
+      parentCandidateId: "broken-root",
+      structurallyUsable: false,
+      catastrophicRegressionReasons: ["hard_issue_regressed"],
+      regressionAgainstParent: true,
+    },
+  ]);
+  assert.equal(selected.baselineUsable, false);
+  assert.equal(selected.baselineCandidateId, undefined);
 });
 
 test("isolated asset compilation uses one target anchor and rejects global-anchor leakage", () => {

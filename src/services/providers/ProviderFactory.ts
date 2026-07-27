@@ -1,4 +1,5 @@
-import type { IProviderAdapter } from "./types";
+import type { IProviderAdapter, StandardPayload } from "./types";
+import type { VideoProviderInputCapabilities } from "./video-input-contract";
 import { ProviderError } from "./types";
 import { BailianAdapter } from "./BailianAdapter";
 import { GptImage2Adapter } from "./GptImage2Adapter";
@@ -87,4 +88,19 @@ export function getProviderAdapter(providerCode: string): IProviderAdapter {
     default:
       throw new ProviderError(`不支持的 providerCode: ${providerCode}`, "UNKNOWN_PROVIDER", 400);
   }
+}
+
+export function getProviderVideoInputCapabilities(
+  providerCode: string,
+  payload: StandardPayload,
+): VideoProviderInputCapabilities {
+  const adapter = getProviderAdapter(providerCode);
+  if (!adapter.getVideoInputCapabilities) {
+    throw new ProviderError(
+      `providerCode ${providerCode} has not declared a video image input protocol.`,
+      "VIDEO_INPUT_CAPABILITIES_MISSING",
+      400,
+    );
+  }
+  return adapter.getVideoInputCapabilities(payload);
 }

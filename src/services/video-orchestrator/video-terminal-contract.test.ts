@@ -99,6 +99,55 @@ test("HappyHorse compiler serializes the model contract without truncating, dedu
   assert.deepEqual(compiled.warnings, []);
 });
 
+test("compiler states whether the approved last image is a real native model input", () => {
+  const contract = buildLegacyVideoPromptContract({
+    terminalState: "The approved terminal composition is visible.",
+    motionPath: "Move continuously into the terminal composition.",
+    preserveRequirements: [],
+    narrativeBoundary: "",
+    shotIntent: "",
+  });
+  const native = compileHappyHorseVideoPrompt({
+    durationSeconds: 5,
+    requirementLevel: "hard_exact",
+    startState: "approved start",
+    contract,
+    retryCorrections: [],
+    lastFrameIsNativeInput: true,
+  });
+  assert.match(native.prompt, /native LAST_FRAME image input/);
+  const semantic = compileHappyHorseVideoPrompt({
+    durationSeconds: 5,
+    requirementLevel: "hard_semantic",
+    startState: "approved start",
+    contract,
+    retryCorrections: [],
+  });
+  assert.match(semantic.prompt, /not a native model input/);
+});
+
+test("compiler does not label an R2V start reference as a hard native first frame", () => {
+  const contract = buildLegacyVideoPromptContract({
+    terminalState: "approved end reference",
+    motionPath: "continuous motion",
+    preserveRequirements: [],
+    narrativeBoundary: "",
+    shotIntent: "",
+  });
+  const compiled = compileHappyHorseVideoPrompt({
+    durationSeconds: 5,
+    requirementLevel: "hard_semantic",
+    startState: "approved start reference",
+    contract,
+    retryCorrections: [],
+    firstFrameIsNativeInput: false,
+    lastFrameIsNativeInput: false,
+  });
+  assert.match(compiled.prompt, /role-labeled reference image/);
+  assert.match(compiled.prompt, /APPROVED START REFERENCE TARGET/);
+  assert.doesNotMatch(compiled.prompt, /1\. HARD START INPUT/);
+});
+
 test("invalid, duplicate, or over-budget model contracts fail instead of being rewritten", () => {
   const contract = buildLegacyVideoPromptContract({
     terminalState: "The product is visible.",

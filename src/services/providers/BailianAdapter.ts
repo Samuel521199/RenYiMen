@@ -6,6 +6,7 @@ import type {
   StandardPayload,
 } from "./types";
 import { ProviderError } from "./types";
+import type { VideoProviderInputCapabilities } from "./video-input-contract";
 
 const DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
@@ -280,9 +281,9 @@ function resolveRatio(payload: StandardPayload, inputNode: Record<string, unknow
   return "16:9";
 }
 
-const R2V_MAX_IMAGES = 5;
+const R2V_MAX_IMAGES = 9;
 
-/** Reference-to-Video（r2v）：每张参考图为 `reference_image`，上游限制最多 5 张 */
+/** Reference-to-Video（r2v）：每张参考图为 `reference_image`，HappyHorse 官方上限为 9 张。 */
 function buildR2vReferenceMediaList(
   singleImageUrl: string | undefined,
   imageUrls: string[]
@@ -351,6 +352,58 @@ export type BailianVideoSynthesisRequestBody =
  * - `queryTask`：GET `/api/v1/tasks/{task_id}` 轮询。
  */
 export class BailianAdapter implements IProviderAdapter {
+  getVideoInputCapabilities(payload: StandardPayload): VideoProviderInputCapabilities {
+    const requestedModel = resolveDashScopeModel(payload);
+    const targetModel = shouldForceHappyHorseModel()
+      ? forceHappyHorseModel(requestedModel, payload)
+      : requestedModel;
+    const isR2v = targetModel.toLowerCase().includes("r2v");
+    if (isR2v) {
+      const referenceBinding = {
+        transportRole: "reference_image",
+        nativeBoundaryControl: false,
+      };
+      return {
+        providerId: "ALIYUN_BAILIAN",
+        modelId: targetModel,
+        transportSchema: "dashscope_media",
+        maxImages: R2V_MAX_IMAGES,
+        maxPromptCharacters: 5000,
+        supportsSemanticEndFramePrompt: true,
+        promptCanAddressInputOrder: true,
+        roleBindings: {
+          first_frame: referenceBinding,
+          last_frame: referenceBinding,
+          character_identity: referenceBinding,
+          product_identity: referenceBinding,
+          scene_layout: referenceBinding,
+          motion_checkpoint: referenceBinding,
+          style_reference: referenceBinding,
+          custom_reference: referenceBinding,
+        },
+      };
+    }
+    return {
+      providerId: "ALIYUN_BAILIAN",
+      modelId: targetModel,
+      transportSchema: targetModel.toLowerCase().includes("wan2") || targetModel.toLowerCase().includes("happyhorse")
+        ? "dashscope_media"
+        : "named_fields",
+      maxImages: 1,
+      maxPromptCharacters: 5000,
+      supportsSemanticEndFramePrompt: true,
+      promptCanAddressInputOrder: true,
+      roleBindings: {
+        first_frame: {
+          transportRole: "first_frame",
+          fieldName: "image_url",
+          nativeBoundaryControl: true,
+          maxCount: 1,
+        },
+      },
+    };
+  }
+
   calculateCost(payload: StandardPayload): ProviderCostResult {
     const f = payload.flags;
     const secs = resolveRequestedVideoDurationSec(payload);

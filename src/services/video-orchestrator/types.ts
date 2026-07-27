@@ -26,6 +26,34 @@ export type VideoConsistencyAnchorType =
   | "space_layout"
   | "custom";
 
+export interface VideoAssetImageContract {
+  subjectCount?: number;
+  subjectDescription?: string;
+  composition?: {
+    framing?: string;
+    cameraAngle?: string;
+    placement?: string;
+    occupancy?: string;
+  };
+  environment?: {
+    background?: string;
+    foreground?: string;
+    midground?: string;
+    backgroundLayer?: string;
+    spatialRelationships?: string[];
+  };
+  lighting?: {
+    direction?: string;
+    quality?: string;
+    colorTemperature?: string;
+  };
+  palette?: string[];
+  materialDetails?: string[];
+  intrinsicDetails?: string[];
+  forbiddenElements?: string[];
+  acceptanceCriteria?: string[];
+}
+
 export interface VideoConsistencyAnchor {
   id: string;
   type: VideoConsistencyAnchorType;
@@ -49,6 +77,7 @@ export interface VideoConsistencyAnchor {
   userEditable?: boolean;
   imagePromptZh?: string;
   imagePromptEn?: string;
+  assetImageContract?: VideoAssetImageContract;
 }
 
 export interface VideoTimelineBlueprintSegment {
@@ -56,6 +85,15 @@ export interface VideoTimelineBlueprintSegment {
   startTimeSeconds: number;
   endTimeSeconds: number;
   durationSeconds: number;
+  durationReasonZh?: string;
+  minimumExecutableSeconds?: number;
+  preferredDurationSeconds?: number;
+  maximumUsefulSeconds?: number;
+  timingBudget?: {
+    setupSeconds: number;
+    actionSeconds: number;
+    resultSeconds: number;
+  };
   beatRole?: "hook" | "setup" | "interaction" | "proof" | "payoff" | "ending" | "custom";
   purposeZh?: string;
   purposeEn?: string;
@@ -516,12 +554,36 @@ export type VideoCreativeTemplateId =
   | "short_drama_conflict_twist"
   | "generic_brand_story";
 
+export type VideoChronologyMode =
+  | "chronological"
+  | "flashforward_hook"
+  | "result_first"
+  | "problem_solution"
+  | "demonstration";
+
+export type VideoHookMode =
+  | "pain_point"
+  | "curiosity"
+  | "tease"
+  | "payoff_preview";
+
+export type VideoHookRevealLevel = "none" | "partial" | "full";
+
 export interface VideoCreativeStrategy {
   videoType?: "game_ad" | "product_ad" | "ecommerce_ad" | "food_ad" | "short_drama" | "brand_film" | "tutorial" | "custom";
   videoCategory?: VideoCreativeCategory;
   templateId?: VideoCreativeTemplateId;
   templateReason?: string;
   templateReasonZh?: string;
+  chronologyMode?: VideoChronologyMode;
+  hookMode?: VideoHookMode;
+  hookRevealLevel?: VideoHookRevealLevel;
+  hookEventIds?: string[];
+  conflictEventIds?: string[];
+  turningPointEventIds?: string[];
+  payoffEventIds?: string[];
+  ctaEventIds?: string[];
+  returnToEventId?: string;
   conversionGoal?: string;
   conversionGoalZh?: string;
   fallbackReason?: string;
@@ -704,6 +766,52 @@ export interface VideoStoryQualityReport {
   summaryZh?: string;
 }
 
+export type VideoStorySemanticDimension =
+  | "audience_fit"
+  | "hook_strength"
+  | "conflict_clarity"
+  | "causal_coherence"
+  | "escalation"
+  | "turning_point_quality"
+  | "payoff_strength"
+  | "emotional_progression"
+  | "selling_point_proof"
+  | "cta_fit"
+  | "reference_transformation"
+  | "visual_storytelling"
+  | "originality";
+
+export interface VideoStorySemanticIssue {
+  code: string;
+  severity: "warning" | "error";
+  confidence: number;
+  dimension: VideoStorySemanticDimension;
+  claimZh: string;
+  evidenceEventIds: string[];
+  evidenceBeatIds: string[];
+  whyItHurtsZh: string;
+  repairInstructionZh: string;
+  rewriteFromStage: "creative_strategy" | "beat_sheet" | "storyboard";
+}
+
+export interface VideoStorySemanticStrength {
+  claimZh: string;
+  evidenceEventIds: string[];
+  evidenceBeatIds: string[];
+}
+
+export interface VideoStorySemanticReview {
+  passed: boolean;
+  dimensionScores: Partial<Record<VideoStorySemanticDimension, number>>;
+  issues: VideoStorySemanticIssue[];
+  strengths: VideoStorySemanticStrength[];
+  summaryZh: string;
+  blockingIssueCodes: string[];
+  invalidEvidenceReferences: string[];
+  repairAttempts?: number;
+  modelName?: string;
+}
+
 export interface AnchorStateTimelineEntry {
   eventId?: string;
   segmentNo: number;
@@ -755,6 +863,86 @@ export interface SegmentRenderDescription {
   timelineChangeRequest?: Record<string, unknown>;
   recommendedSplit?: unknown[];
   warnings?: string[];
+}
+
+export type VideoBoundaryContractStatus =
+  | "semantic_draft"
+  | "asset_bound"
+  | "image_approved";
+
+/**
+ * The canonical, single-owner contract for one shared segment boundary.
+ * Adjacent segments consume this record instead of independently rewriting
+ * the same keyframe.
+ */
+export interface VideoBoundaryContract {
+  version: "boundary-contract-v1";
+  keyframeNo: number;
+  timeSeconds: number;
+  ownerSegmentNo: number;
+  previousSegmentNo?: number;
+  nextSegmentNo?: number;
+  sourceEventIds: string[];
+  linkedBeatIds: string[];
+  requiredAnchorIds: string[];
+  approvedAssetReferenceIds: string[];
+  storyState: string;
+  scene: string;
+  cameraId?: string;
+  characterState: string;
+  productState: string;
+  compositionIntent?: string;
+  immutableFields: string[];
+  forbiddenStoryStates: string[];
+  status: VideoBoundaryContractStatus;
+}
+
+/** Pixel-grounded facts extracted only after the user approves a boundary image. */
+export interface VideoObservedBoundaryFacts {
+  version: "observed-boundary-facts-v1";
+  keyframeNo: number;
+  imageUrl: string;
+  observedAt: string;
+  observationModel?: string;
+  contractPassed: boolean;
+  scene: string;
+  cameraView: string;
+  composition: string;
+  characterState: string;
+  productState: string;
+  anchorPositions: Record<string, string>;
+  occlusions: string[];
+  lighting: string;
+  uncertainties: string[];
+}
+
+export interface VideoMediaConditionedSegmentPlan {
+  version: "media-conditioned-segment-v1";
+  segmentNo: number;
+  startKeyframeNo: number;
+  endKeyframeNo: number;
+  startBoundaryImageUrl: string;
+  endBoundaryImageUrl: string;
+  startFrameContract: Record<string, unknown>;
+  endFrameContract: Record<string, unknown>;
+  motionContract: Record<string, unknown>;
+  singleTakeContract: Record<string, unknown> & {
+    physicallyReachable: boolean;
+  };
+  motionCheckpoints: VideoMicroShot[];
+  videoPromptContract: VideoPromptContract;
+  planningStatus: "media_conditioned" | "fallback";
+  warnings: string[];
+  refinedAt: string;
+  modelName?: string;
+}
+
+export interface VideoPlanningPhaseState {
+  semanticPlanning: "complete";
+  boundaryPlanning: "semantic_draft" | "asset_bound" | "image_approved";
+  mediaConditionedPlanning: "pending_images" | "complete" | "partial";
+  finalPromptCompilation: "deferred_to_generation";
+  updatedAt: string;
 }
 
 export interface VideoPromptTerminalRequirement {
@@ -991,6 +1179,11 @@ export interface GenerationQualityReport {
   issueLedger?: GenerationIssueLedgerEntry[];
   resolvedIssueIds?: string[];
   openHardIssueIds?: string[];
+  deferredVideoIssueResults?: DeferredVideoIssueResult[];
+  resolvedDeferredVideoIssueIds?: string[];
+  openDeferredVideoIssueIds?: string[];
+  /** Image-stage findings carried forward as a human/on-demand video review checklist. */
+  manualVideoQualityChecks?: DeferredVideoQualityCheck[];
   qualityDecision?: "pass" | "recommended" | "retry" | "blocked" | "review";
   hardFailureReasons?: string[];
   softSuggestions?: string[];
@@ -1003,7 +1196,68 @@ export interface GenerationQualityReport {
   evaluationModel?: string;
   evaluationDurationMs?: number;
   evaluationConfidence?: number;
+  /** Visual-model suggestion only. The orchestration router makes the final decision. */
+  suggestedRepairMode?: ImageRepairMode;
+  suggestedCorrectionScope?: ImageCorrectionScope;
+  suggestedBaselineUsable?: boolean;
+  suggestedRepairReasonCodes?: string[];
+  repairDecision?: ImageRepairDecision;
   displaySummaries?: Partial<Record<QualityDisplayLanguage, QualityDisplaySummary>>;
+}
+
+export interface DeferredVideoQualityCheck {
+  sourceIssueId: string;
+  sourceArtifactId: string;
+  category: GenerationIssueLedgerEntry["category"];
+  region?: string;
+  requiredVideoCheck: string;
+  expectedState?: string;
+}
+
+export interface DeferredVideoIssueResult {
+  sourceIssueId: string;
+  status: "resolved" | "open" | "unverifiable";
+  evidence?: string;
+  timeRange?: string;
+}
+
+export type ImageRepairMode =
+  | "reevaluate_only"
+  | "local_edit"
+  | "guided_regenerate"
+  | "full_regenerate"
+  | "reference_reselect"
+  | "contract_recompile"
+  | "storyboard_replan"
+  | "manual_review";
+
+export type ImageCorrectionScope = "local" | "regional" | "global";
+
+export type ImageRepairContextSection =
+  | "minimal_contract"
+  | "asset_locks"
+  | "narrative_boundary"
+  | "camera_graph"
+  | "approved_references"
+  | "full_original_prompt";
+
+export interface ImageRepairDecision {
+  mode: ImageRepairMode;
+  reasonCodes: string[];
+  baselineUsable: boolean;
+  baselineCandidateId?: string;
+  correctionScope: ImageCorrectionScope;
+  editRegions: Array<{
+    xMin: number;
+    yMin: number;
+    xMax: number;
+    yMax: number;
+  }>;
+  preserve: string[];
+  requiredContextSections: ImageRepairContextSection[];
+  confidence: number;
+  decidedBy: "deterministic_router";
+  suggestedMode?: ImageRepairMode;
 }
 
 export type QualityDisplayLanguage = "zh" | "en";
@@ -1095,6 +1349,7 @@ export interface OnePromptVideoPlan {
   narrativeMicroRules?: VideoNarrativeMicroRules;
   shotGroupingPass?: VideoShotGroupingPass;
   storyQualityReport?: VideoStoryQualityReport;
+  storySemanticReview?: VideoStorySemanticReview;
   anchorStateTimeline?: AnchorStateTimeline[];
   audioBible?: Record<string, unknown>;
   assetLibrary?: VideoAssetLibrary;
@@ -1115,6 +1370,10 @@ export interface OnePromptVideoPlan {
   plannerWarnings?: string[];
   storyboardPlan?: unknown;
   promptDetailPlan?: VideoPromptDetailPlan;
+  boundaryContracts?: VideoBoundaryContract[];
+  observedBoundaryFacts?: VideoObservedBoundaryFacts[];
+  mediaConditionedSegmentPlans?: VideoMediaConditionedSegmentPlan[];
+  planningPhase?: VideoPlanningPhaseState;
   consistencyReferences?: VideoConsistencyReference[];
   keyframes: VideoPlanKeyframe[];
   segments: VideoPlanSegment[];

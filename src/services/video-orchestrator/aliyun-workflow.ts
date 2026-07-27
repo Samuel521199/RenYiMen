@@ -9,11 +9,17 @@ import {
   assertEndFrameRequirementSupported,
   type EndFrameRequirementLevel,
 } from "./video-terminal-contract";
+import {
+  mapResolvedVideoImagesToTransport,
+  resolveVideoImageInputs,
+  type VideoImageInput,
+  type VideoProviderInputCapabilities,
+} from "@/services/providers/video-input-contract";
 
 const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
 const VIDEO_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
-const ONE_PROMPT_VIDEO_MODEL = "happyhorse-1.1-i2v";
+const ONE_PROMPT_VIDEO_MODEL = "happyhorse-1.1-r2v";
 type DashScopeTaskStatus = "pending" | "running" | "succeeded" | "failed";
 
 export interface DashScopeTaskResult {
@@ -59,7 +65,13 @@ function model(name: string, fallback: string): string {
 }
 
 function onePromptI2vModel(): string {
-  return ONE_PROMPT_VIDEO_MODEL;
+  return customI2vModelEnabled()
+    ? process.env.ALIYUN_I2V_MODEL?.trim() || ONE_PROMPT_VIDEO_MODEL
+    : ONE_PROMPT_VIDEO_MODEL;
+}
+
+function customI2vModelEnabled(): boolean {
+  return process.env.ALIYUN_I2V_ALLOW_CUSTOM_MODEL?.trim().toLowerCase() === "true";
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -147,6 +159,10 @@ const PRIORITY_PROMPT_MARKERS = [
   "MULTI-IMAGE INPUT MAP",
   "MANDATORY RETRY CORRECTION",
   "INCREMENTAL CANDIDATE IMPROVEMENT",
+  "LOCAL IMAGE REPAIR",
+  "GUIDED IMAGE REGENERATION",
+  "FULL IMAGE REGENERATION",
+  "RESOLVED-STATE PRESERVATION LOCK",
   "AUTHORITATIVE ANCHOR CONTRACTS",
   "AUTHORITATIVE VISUAL CONTRACT",
 ] as const;
@@ -242,22 +258,93 @@ export function prepareAliyunImagePrompt(
 }
 
 export interface ImageToVideoProviderCapabilities {
-  acceptsFirstFrameImage: true;
+  acceptsFirstFrameImage: boolean;
   acceptsLastFrameImage: boolean;
   endFrameSemanticMode: "soft_prompt_target" | "native_last_frame";
 }
 
 export function aliyunImageToVideoCapabilities(): ImageToVideoProviderCapabilities {
+  const imageCapabilities = aliyunVideoImageInputCapabilities();
+  const nativeFirstFrame = imageCapabilities.roleBindings.first_frame?.nativeBoundaryControl === true;
+  const nativeLastFrame = imageCapabilities.roleBindings.last_frame?.nativeBoundaryControl === true;
   return {
-    acceptsFirstFrameImage: true,
-    acceptsLastFrameImage: false,
-    endFrameSemanticMode: "soft_prompt_target",
+    acceptsFirstFrameImage: nativeFirstFrame,
+    acceptsLastFrameImage: nativeLastFrame,
+    endFrameSemanticMode: nativeLastFrame ? "native_last_frame" : "soft_prompt_target",
+  };
+}
+
+export function aliyunVideoImageInputCapabilities(): VideoProviderInputCapabilities {
+  const modelId = onePromptI2vModel();
+  const requestedMode = customI2vModelEnabled()
+    ? process.env.ALIYUN_I2V_INPUT_MODE?.trim().toLowerCase()
+    : "";
+  const defaultMode = modelId.toLowerCase().includes("r2v")
+    ? "multi_reference"
+    : "first_frame_only";
+  const mode = requestedMode === "multi_reference"
+    || requestedMode === "native_first_last"
+    || requestedMode === "native_first_last_plus_references"
+    ? requestedMode
+    : defaultMode;
+  const configuredMax = Number(process.env.ALIYUN_I2V_MAX_IMAGES);
+  const maxImages = mode === "first_frame_only"
+    ? 1
+    : Number.isInteger(configuredMax) && configuredMax >= 2
+      ? Math.min(ONE_PROMPT_MAX_REFERENCE_IMAGES, configuredMax)
+      : mode === "native_first_last"
+        ? 2
+        : ONE_PROMPT_MAX_REFERENCE_IMAGES;
+  const referenceBinding = {
+    transportRole: "reference_image",
+    nativeBoundaryControl: false,
+  };
+  return {
+    providerId: "ALIYUN_BAILIAN",
+    modelId,
+    transportSchema: "dashscope_media",
+    maxImages,
+    maxPromptCharacters: 5000,
+    supportsSemanticEndFramePrompt: true,
+    promptCanAddressInputOrder: true,
+    roleBindings: mode === "multi_reference" ? {
+      first_frame: referenceBinding,
+      last_frame: referenceBinding,
+      character_identity: referenceBinding,
+      product_identity: referenceBinding,
+      scene_layout: referenceBinding,
+      motion_checkpoint: referenceBinding,
+      style_reference: referenceBinding,
+      custom_reference: referenceBinding,
+    } : {
+      first_frame: {
+        transportRole: "first_frame",
+        nativeBoundaryControl: true,
+        maxCount: 1,
+      },
+      ...(mode !== "first_frame_only" ? {
+        last_frame: {
+          transportRole: "last_frame",
+          nativeBoundaryControl: true,
+          maxCount: 1,
+        },
+      } : {}),
+      ...(mode === "native_first_last_plus_references" ? {
+        character_identity: referenceBinding,
+        product_identity: referenceBinding,
+        scene_layout: referenceBinding,
+        motion_checkpoint: referenceBinding,
+        style_reference: referenceBinding,
+        custom_reference: referenceBinding,
+      } : {}),
+    },
   };
 }
 
 export async function submitAliyunImageToVideoTask(params: {
   imageUrl: string;
   lastFrameUrl: string;
+  imageInputs?: VideoImageInput[];
   prompt: string;
   durationSeconds: number;
   endFrameRequirementLevel?: EndFrameRequirementLevel;
@@ -267,19 +354,35 @@ export async function submitAliyunImageToVideoTask(params: {
     throw new Error("HappyHorse generation requires an approved end-frame reference for the semantic target and continuity evaluation.");
   }
   const capabilities = aliyunImageToVideoCapabilities();
+  const imageInputCapabilities = aliyunVideoImageInputCapabilities();
   const endFrameRequirementLevel = params.endFrameRequirementLevel ?? "hard_semantic";
   assertEndFrameRequirementSupported(endFrameRequirementLevel, capabilities, i2vModel);
-  const prompt = params.prompt;
+  const resolvedImages = resolveVideoImageInputs({
+    inputs: params.imageInputs?.length
+      ? params.imageInputs
+      : defaultBoundaryVideoImageInputs(params.imageUrl, params.lastFrameUrl),
+    capabilities: imageInputCapabilities,
+    endFrameRequirementLevel,
+  });
+  const prompt = [resolvedImages.promptRoleMap, params.prompt].filter(Boolean).join("\n\n");
+  if (
+    imageInputCapabilities.maxPromptCharacters
+    && prompt.length > imageInputCapabilities.maxPromptCharacters
+  ) {
+    throw new Error(
+      `Video image role map and prompt total ${prompt.length} characters, exceeding `
+      + `${i2vModel}'s declared limit of ${imageInputCapabilities.maxPromptCharacters}. `
+      + "Reduce optional reference images or return to prompt compilation; hard boundary requirements will not be silently truncated.",
+    );
+  }
   const duration = clamp(params.durationSeconds, 3, 15);
   const resolution = process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P";
   const generateAudio = process.env.ALIYUN_I2V_AUDIO?.trim().toLowerCase() !== "false";
   const body = {
     model: i2vModel,
     input: {
-      prompt: prompt.slice(0, 5000),
-      // HappyHorse 1.1 I2V accepts exactly one first_frame. The approved end
-      // boundary remains a reviewed semantic target and evaluation reference.
-      media: [{ type: "first_frame", url: params.imageUrl }],
+      prompt,
+      media: mapResolvedVideoImagesToTransport(resolvedImages, imageInputCapabilities),
     },
     parameters: {
       resolution,
@@ -292,12 +395,27 @@ export async function submitAliyunImageToVideoTask(params: {
   await logOnePromptVideo("aliyun.i2v.submit.prepare", {
     model: i2vModel,
     configuredModel: process.env.ALIYUN_I2V_MODEL?.trim() || null,
-    forcedModel: true,
+    forcedModel: !customI2vModelEnabled(),
     imageUrl: params.imageUrl,
     lastFrameUrl: params.lastFrameUrl,
     lastFrameMode: capabilities.endFrameSemanticMode,
     endFrameRequirementLevel,
     providerCapabilities: capabilities,
+    videoImageInputCapabilities: imageInputCapabilities,
+    transportedVideoImages: resolvedImages.transported.map((input, index) => ({
+      imageNo: index + 1,
+      role: input.role,
+      authority: input.authority,
+      sourceArtifactId: input.sourceArtifactId,
+    })),
+    evaluationOnlyVideoImages: resolvedImages.evaluationOnly.map((input) => ({
+      role: input.role,
+      sourceArtifactId: input.sourceArtifactId,
+    })),
+    rejectedVideoImageInputs: resolvedImages.rejected.map((input) => ({
+      role: input.role,
+      reason: input.reason,
+    })),
     promptLength: prompt.length,
     requestedDurationSeconds: params.durationSeconds,
     durationSeconds: duration,
@@ -305,6 +423,29 @@ export async function submitAliyunImageToVideoTask(params: {
     generateAudio,
   });
   return submitDashScopeAsync(VIDEO_PATH, body, "阿里云万相图生视频");
+}
+
+function defaultBoundaryVideoImageInputs(
+  firstFrameUrl: string,
+  lastFrameUrl: string,
+): VideoImageInput[] {
+  return [{
+    id: "first_frame",
+    role: "first_frame",
+    url: firstFrameUrl,
+    authority: "native_boundary",
+    instruction: "Start from this exact approved boundary frame.",
+    allowedUse: ["initial composition", "initial pose", "initial scene and product state"],
+    forbiddenUse: ["do not reinterpret this image as a style-only reference"],
+  }, {
+    id: "last_frame",
+    role: "last_frame",
+    url: lastFrameUrl,
+    authority: "evaluation_only",
+    instruction: "Approved end boundary used by the semantic terminal contract and post-generation evaluation.",
+    allowedUse: ["terminal-state evaluation"],
+    forbiddenUse: ["this provider does not receive the image as a native last-frame input"],
+  }];
 }
 
 export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskResult> {

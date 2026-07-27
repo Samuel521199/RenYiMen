@@ -1,6 +1,7 @@
 import type { TaskStatusPollData } from "@/types/task-status";
 import type { IProviderAdapter, ProviderCostResult, ProviderResponse, StandardPayload } from "./types";
 import { ProviderError } from "./types";
+import type { VideoProviderInputCapabilities } from "./video-input-contract";
 
 /**
  * 302.ai Kling 视频生成适配器。
@@ -150,6 +151,25 @@ export class KlingAdapter implements IProviderAdapter {
     /** 读取 API Key 的环境变量名，默认 KLING_302AI_API_KEY */
     private readonly apiKeyEnvVar: string = "KLING_302AI_API_KEY"
   ) {}
+
+  getVideoInputCapabilities(): VideoProviderInputCapabilities {
+    return {
+      providerId: "KLING_302AI",
+      modelId: this.modelPath,
+      transportSchema: "named_fields",
+      maxImages: 1,
+      maxPromptCharacters: 2500,
+      supportsSemanticEndFramePrompt: true,
+      promptCanAddressInputOrder: true,
+      roleBindings: {
+        first_frame: {
+          fieldName: "image",
+          nativeBoundaryControl: true,
+          maxCount: 1,
+        },
+      },
+    };
+  }
 
   calculateCost(_payload: StandardPayload): ProviderCostResult {
     return { cost: this.creditsPerGeneration, sellPrice: this.creditsPerGeneration };

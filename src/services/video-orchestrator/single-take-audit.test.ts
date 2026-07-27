@@ -132,20 +132,26 @@ test("end-frame evaluator maps small gap, prompt-fixable gap and unreachable gap
   assert.equal(uncertain.decision, "manual_review");
 });
 
-test("HappyHorse uses a hard first frame and a mandatory end-state prompt without pasted end-frame dissolve", () => {
+test("HappyHorse truthfully transports only the first frame and keeps the approved end frame for semantic evaluation", () => {
   const root = process.cwd();
   const workflow = readFileSync(path.join(root, "src/services/video-orchestrator/aliyun-workflow.ts"), "utf8");
   const service = readFileSync(path.join(root, "src/services/video-orchestrator/project-service.ts"), "utf8");
   const compiler = readFileSync(path.join(root, "src/services/video-orchestrator/video-terminal-contract.ts"), "utf8");
   const compose = readFileSync(path.join(root, "src/services/video-orchestrator/local-compose.ts"), "utf8");
-  assert.match(workflow, /acceptsLastFrameImage: false/);
-  assert.match(workflow, /media: \[\{ type: "first_frame", url: params\.imageUrl \}\]/);
+  const videoInputs = readFileSync(path.join(root, "src/services/providers/video-input-contract.ts"), "utf8");
+  assert.match(workflow, /customI2vModelEnabled\(\)/);
+  assert.match(workflow, /"first_frame_only"/);
+  assert.match(workflow, /acceptsLastFrameImage: nativeLastFrame/);
+  assert.match(workflow, /mapResolvedVideoImagesToTransport/);
+  assert.match(workflow, /transportRole: "first_frame"/);
+  assert.match(videoInputs, /hard_exact end-frame control/);
+  assert.match(videoInputs, /evaluationOnly/);
   assert.match(compiler, /MANDATORY FINAL-FRAME CONTRACT/);
   assert.match(service, /endFramePromptEnforced: true/);
   assert.doesNotMatch(service, /enforceSegmentEndFrameLocally|deterministic_exact_end_frame_postprocess|stripVideoForbiddenTerms/);
   assert.doesNotMatch(compose, /one-prompt-boundary|approved-end-frame|clip\.boundary_enforce/);
   assert.match(compose, /item\?\.visualMode \?\? "hard_cut"/);
-  assert.match(service, /endFrameSemanticMode: "strong_prompt_target_and_visual_check"/);
+  assert.match(service, /"native_last_frame" : "semantic_prompt_and_visual_check"/);
 });
 
 test("planning, runtime validator and failure recovery share the audit service", () => {

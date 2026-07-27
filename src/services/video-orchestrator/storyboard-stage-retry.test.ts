@@ -124,7 +124,7 @@ test("legacy planner checkpoints are invalidated when the prompt contract versio
     },
   }, input);
 
-  assert.equal(legacy.version, 2);
+  assert.equal(legacy.version, 8);
   assert.equal(legacy.planningRaw, undefined);
   assert.deepEqual(legacy.shotDecomposerSegmentPlans, {});
 });
