@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   assertEndFrameRequirementSupported,
   buildLegacyVideoPromptContract,
+  compileHappyHorseAudioContract,
   compileHappyHorseVideoPrompt,
+  resolveVideoAudioStrategy,
   resolveEndFrameRequirementLevel,
   validateVideoPromptContract,
   videoPromptContractFromUnknown,
@@ -146,6 +148,94 @@ test("compiler does not label an R2V start reference as a hard native first fram
   assert.match(compiled.prompt, /role-labeled reference image/);
   assert.match(compiled.prompt, /APPROVED START REFERENCE TARGET/);
   assert.doesNotMatch(compiled.prompt, /1\. HARD START INPUT/);
+});
+
+test("HappyHorse audio contract defaults to native ambience and forbids accidental speech", () => {
+  assert.equal(resolveVideoAudioStrategy(undefined), "native_ambience");
+  const contract = compileHappyHorseAudioContract({
+    mode: "ambient",
+    needsVoiceover: false,
+    needsDialogue: false,
+    soundEffects: [{
+      timingSeconds: 1.2,
+      source: "product lid",
+      action: "snaps closed",
+      description: "a clean close click",
+    }],
+  }, 5);
+  assert.match(contract, /Strategy: native_ambience/);
+  assert.match(contract, /synchronized diegetic ambience and action sound effects/);
+  assert.match(contract, /At approximately 1\.2s, product lid snaps closed: a clean close click/);
+  assert.match(contract, /No dialogue\. No voice-over\. No background music/);
+});
+
+test("HappyHorse native-full audio contract carries exact short dialogue and lip sync", () => {
+  const contract = compileHappyHorseAudioContract({
+    mode: "dialogue",
+    strategy: "native_full",
+    needsVoiceover: false,
+    needsDialogue: true,
+    language: "Mandarin Chinese",
+    speaker: "woman",
+    voiceStyle: "warm and confident",
+    exactTextRequired: true,
+    lines: ["现在就试试。"],
+    backgroundMusic: {
+      source: "native",
+      style: "light electronic",
+      mood: "optimistic",
+      intensity: "low",
+    },
+  }, 5);
+  assert.match(contract, /Strategy: native_full/);
+  assert.match(contract, /The speaker \(woman\) says exactly: "现在就试试。"/);
+  assert.match(contract, /Language: Mandarin Chinese/);
+  assert.match(contract, /Synchronize visible mouth movement naturally/);
+  assert.match(contract, /Generate background music in a light electronic style with a optimistic mood/);
+});
+
+test("post-only audio contract suppresses all provider audio", () => {
+  assert.equal(resolveVideoAudioStrategy({
+    mode: "silent",
+    needsVoiceover: false,
+    needsDialogue: false,
+  }), "post_only");
+  assert.match(
+    compileHappyHorseAudioContract({
+      mode: "voiceover",
+      strategy: "post_only",
+      needsVoiceover: true,
+      needsDialogue: false,
+    }, 5),
+    /Do not generate dialogue, voice-over, background music, or intentional sound effects/,
+  );
+});
+
+test("HappyHorse R2V compiler identifies the audio-capable model and embeds the audio contract", () => {
+  const contract = buildLegacyVideoPromptContract({
+    terminalState: "The product remains visible.",
+    motionPath: "The character closes the product lid.",
+    preserveRequirements: ["same character", "same product"],
+    narrativeBoundary: "",
+    shotIntent: "Show a satisfying close.",
+  });
+  const compiled = compileHappyHorseVideoPrompt({
+    modelId: "happyhorse-1.1-r2v",
+    durationSeconds: 5,
+    requirementLevel: "hard_semantic",
+    startState: "The character holds the open product.",
+    contract,
+    retryCorrections: [],
+    audioPlan: {
+      mode: "ambient",
+      strategy: "native_ambience",
+      needsVoiceover: false,
+      needsDialogue: false,
+    },
+  });
+  assert.match(compiled.prompt, /HAPPYHORSE REFERENCE-TO-VIDEO — VALIDATED MODEL CONTRACT/);
+  assert.match(compiled.prompt, /9\. AUDIO CONTRACT/);
+  assert.match(compiled.prompt, /Strategy: native_ambience/);
 });
 
 test("invalid, duplicate, or over-budget model contracts fail instead of being rewritten", () => {

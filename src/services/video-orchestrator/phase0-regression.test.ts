@@ -349,12 +349,13 @@ test("media rollback remains available for every generated media class", () => {
   }
 });
 
-test("boundary image generation remains gated on approved consistency assets", () => {
+test("boundary image generation unlocks per approved asset subset", () => {
   const source = readSource("src/services/video-orchestrator/project-service.ts");
   assert.match(source, /const unapprovedConsistencyReferences = consistencyReferences\.filter/);
-  assert.match(source, /if \(!missingConsistencyReferences\.length && unapprovedConsistencyReferences\.length\)[\s\S]*?status: VideoProjectStatus\.IMAGE_REVIEW,[\s\S]*?errorMessage: null/);
-  assert.match(source, /waitingForConsistencyReferences\s*\? \[\]/);
+  assert.match(source, /function isBoundaryAssetDependencyReady/);
+  assert.match(source, /const dependencyReadyBoundaryKeyframes = nextKeyframes\.filter/);
+  assert.match(source, /\.\.\.dependencyReadyBoundaryKeyframes,[\s\S]*?\.\.\.dependencyReadyAssetKeyframes/);
+  assert.match(source, /Each boundary keyframe starts as soon as its own required assets are approved/);
   assert.match(source, /assetLibraryFirst/);
   assert.match(source, /asset_library\.batch/);
-  assert.match(source, /Boundary keyframes start only after asset approval/);
 });

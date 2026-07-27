@@ -1,4 +1,5 @@
 import type {
+  VideoAudioPlan,
   VideoPromptContract,
   VideoPromptTerminalRequirement,
 } from "./types";
@@ -20,6 +21,8 @@ export interface HappyHorsePromptInput {
   startState: string;
   contract: VideoPromptContract;
   retryCorrections: string[];
+  modelId?: string;
+  audioPlan?: VideoAudioPlan;
   firstFrameIsNativeInput?: boolean;
   lastFrameIsNativeInput?: boolean;
 }
@@ -142,12 +145,13 @@ export function buildLegacyVideoPromptContract(input: LegacyVideoPromptContractI
 export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): CompiledHappyHorsePrompt {
   validateVideoPromptContract(input.contract, input.retryCorrections);
   const settleStart = Math.max(1, Number((input.durationSeconds * 0.7).toFixed(1)));
+  const isReferenceToVideo = input.modelId?.toLowerCase().includes("r2v") === true;
   const blocks = [
     input.firstFrameIsNativeInput
       ? "START CONTROL: the approved first image is a native FIRST_FRAME input."
       : "START CONTROL: the approved first image is a role-labeled reference image, not a native hard first frame.",
     [
-      "HAPPYHORSE FIRST-FRAME I2V — VALIDATED MODEL CONTRACT",
+      `HAPPYHORSE ${isReferenceToVideo ? "REFERENCE-TO-VIDEO" : "FIRST-FRAME I2V"} — VALIDATED MODEL CONTRACT`,
       input.lastFrameIsNativeInput
         ? `CONTROL LEVEL: ${input.requirementLevel}. The approved last image is the native LAST_FRAME image input and every terminal requirement describes how to reach it.`
         : `CONTROL LEVEL: ${input.requirementLevel}. The approved last image is not a native model input and is enforced as a reviewed semantic target.`,
@@ -185,8 +189,9 @@ export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): Comp
     input.retryCorrections.length
       ? ["8. STRUCTURED RETRY DELTA — APPLY WITHOUT CHANGING OTHER CONTRACT ITEMS", ...input.retryCorrections.map((item) => `- ${item}`)].join("\n")
       : "",
+    compileHappyHorseAudioContract(input.audioPlan, input.durationSeconds),
     [
-      "9. OUTPUT RULE",
+      "10. OUTPUT RULE",
       "Use one physically plausible uninterrupted take. The last stable frames must satisfy every hard terminal requirement.",
     ].join("\n"),
   ].filter(Boolean);
@@ -198,6 +203,80 @@ export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): Comp
     );
   }
   return { prompt, requirementLevel: input.requirementLevel, compacted: false, warnings: [] };
+}
+
+export function resolveVideoAudioStrategy(
+  audioPlan: VideoAudioPlan | undefined,
+): NonNullable<VideoAudioPlan["strategy"]> {
+  if (
+    audioPlan?.strategy === "native_ambience"
+    || audioPlan?.strategy === "native_full"
+    || audioPlan?.strategy === "post_only"
+  ) {
+    return audioPlan.strategy;
+  }
+  if (audioPlan?.mode === "silent") return "post_only";
+  // Legacy plans did not distinguish exact post-produced speech from model
+  // speech. Keep synchronized ambience by default without risking invented ad
+  // copy or a different music bed in every segment.
+  return "native_ambience";
+}
+
+export function compileHappyHorseAudioContract(
+  audioPlan: VideoAudioPlan | undefined,
+  durationSeconds: number,
+): string {
+  const strategy = resolveVideoAudioStrategy(audioPlan);
+  const lines = [
+    ...(audioPlan?.linesEn ?? []),
+    ...(audioPlan?.linesZh ?? []),
+    ...(audioPlan?.lines ?? []),
+  ].map((line) => line.trim()).filter(Boolean);
+  const effects = (audioPlan?.soundEffects ?? []).slice(0, 4);
+  const music = audioPlan?.backgroundMusic;
+  const block = ["9. AUDIO CONTRACT", `Strategy: ${strategy}.`];
+
+  if (strategy === "post_only") {
+    block.push(
+      "Do not generate dialogue, voice-over, background music, or intentional sound effects.",
+      "The final soundtrack is authored in post-production.",
+    );
+    return block.join("\n");
+  }
+
+  if (strategy === "native_ambience") {
+    block.push(
+      "Generate synchronized diegetic ambience and action sound effects only.",
+      "No dialogue. No voice-over. No background music. Do not invent speech.",
+    );
+  } else {
+    block.push("Generate a synchronized native soundtrack for this video.");
+    if (lines.length) {
+      block.push(
+        `The speaker ${audioPlan?.speaker ? `(${audioPlan.speaker}) ` : ""}says exactly: ${lines.map((line) => `"${line}"`).join(" / ")}`,
+        audioPlan?.language ? `Language: ${audioPlan.language}.` : "",
+        audioPlan?.voiceStyle ? `Voice style: ${audioPlan.voiceStyle}.` : "",
+        "Synchronize visible mouth movement naturally with the spoken line. Do not add unrelated speech.",
+      );
+    } else {
+      block.push("No dialogue or voice-over. Do not invent speech.");
+    }
+    if (music?.source === "native") {
+      block.push(
+        `Generate background music${music.style ? ` in a ${music.style} style` : ""}${music.mood ? ` with a ${music.mood} mood` : ""}.`,
+      );
+    } else {
+      block.push("No background music; project-wide music is handled in post-production.");
+    }
+  }
+
+  for (const effect of effects) {
+    const timing = Number.isFinite(effect.timingSeconds)
+      ? `At approximately ${Math.max(0, Math.min(durationSeconds, Number(effect.timingSeconds))).toFixed(1)}s, `
+      : "";
+    block.push(`${timing}${effect.source} ${effect.action}: ${effect.description}.`);
+  }
+  return block.filter(Boolean).join("\n");
 }
 
 export function validateVideoPromptContract(contract: VideoPromptContract, retryCorrections: string[] = []): void {

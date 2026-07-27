@@ -102,12 +102,15 @@ export function bindBoundaryContractsToApprovedAssets(
   return contracts.map((contract) => {
     const scoped = requiredAssetsByBoundary?.get(contract.keyframeNo)
       ?? contract.requiredAnchorIds;
+    const approvedForBoundary = unique(
+      scoped.filter((assetId) => approved.has(assetId)),
+    );
     return {
       ...contract,
-      approvedAssetReferenceIds: unique(
-        scoped.filter((assetId) => approved.has(assetId)),
-      ),
-      status: "asset_bound",
+      approvedAssetReferenceIds: approvedForBoundary,
+      status: approvedForBoundary.length === unique(scoped).length
+        ? "asset_bound"
+        : "semantic_draft",
     };
   });
 }

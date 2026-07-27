@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { errorForLog, logOnePromptVideo } from "./logger";
-import type { FinalTransitionPlan, VideoAspectRatio } from "./types";
+import type { FinalTransitionPlan, VideoAspectRatio, VideoAudioPlan } from "./types";
 
 interface LocalComposeParams {
   projectId: string;
@@ -15,6 +15,7 @@ interface LocalComposeParams {
   aspectRatio: VideoAspectRatio;
   transitionPlan?: FinalTransitionPlan[];
   audioBible?: Record<string, unknown>;
+  clipAudioStrategies?: Array<NonNullable<VideoAudioPlan["strategy"]>>;
 }
 
 interface LocalComposeSubtitle {
@@ -75,15 +76,20 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
     const transitionPlan = normalizeComposeTransitionPlan(params.transitionPlan ?? [], params.clipUrls.length, effectiveClipDurations);
     assertNoUnresolvedGeneratedBridge(transitionPlan);
     const transitionSeconds = maxTransitionSeconds(transitionPlan);
-    const stripSourceAudio = shouldStripSourceAudio(params.audioBible);
+    const stripSourceAudio = shouldStripSourceAudio(params.audioBible, params.clipAudioStrategies);
     const audioPresence = await Promise.all(clipPaths.map((clipPath, index) =>
       timedComposeStep(params.projectId, "clip_audio_probe", { clipIndex: index + 1 }, () =>
         probeClipHasAudio(ffmpegPath, clipPath))));
+    const effectiveAudioPresence = audioPresence.map((present, index) =>
+      present && params.clipAudioStrategies?.[index] !== "post_only"
+    );
     await logOnePromptVideo("compose.local.audio_probe", {
       projectId: params.projectId,
       clipCount: clipPaths.length,
       clipsWithAudio: audioPresence.filter(Boolean).length,
       audioPresence,
+      effectiveAudioPresence,
+      clipAudioStrategies: params.clipAudioStrategies ?? [],
       stripSourceAudio,
       plannedDurations: params.clipDurations ?? [],
       probedDurations: probedClipDurations,
@@ -95,9 +101,17 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
       clipCount: clipPaths.length,
     }, async () => {
       if (clipPaths.length > 1 && hasExplicitVisualBlend && transitionSeconds > 0) {
-        await composeWithPlannedXfade(ffmpegPath, clipPaths, effectiveClipDurations, transitionPlan, composedPath, audioPresence, stripSourceAudio);
+        await composeWithPlannedXfade(ffmpegPath, clipPaths, effectiveClipDurations, transitionPlan, composedPath, effectiveAudioPresence, stripSourceAudio);
       } else {
-        await composeWithConcat(ffmpegPath, clipPaths, path.join(workDir, "concat.txt"), composedPath, stripSourceAudio);
+        await composeWithConcat(
+          ffmpegPath,
+          clipPaths,
+          effectiveClipDurations,
+          effectiveAudioPresence,
+          path.join(workDir, "concat.txt"),
+          composedPath,
+          stripSourceAudio,
+        );
       }
     });
     const expectedVideoDuration = Math.max(
@@ -128,6 +142,8 @@ export async function composeVideoClipsLocally(params: LocalComposeParams): Prom
         workDir,
         projectId: params.projectId,
         audioBible: params.audioBible,
+        inputHasAudio: !stripSourceAudio && effectiveAudioPresence.some(Boolean),
+        clipAudioStrategies: params.clipAudioStrategies,
       }));
     const outputPath = await timedComposeStep(params.projectId, "subtitle_burn", {
       subtitleCount: params.subtitles?.length ?? 0,
@@ -380,7 +396,52 @@ function toFfmpegConcatPath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/'/g, "'\\''");
 }
 
-async function composeWithConcat(ffmpegPath: string, clipPaths: string[], listPath: string, outputPath: string, stripAudio: boolean): Promise<void> {
+async function composeWithConcat(
+  ffmpegPath: string,
+  clipPaths: string[],
+  durations: number[],
+  audioPresence: boolean[],
+  listPath: string,
+  outputPath: string,
+  stripAudio: boolean,
+): Promise<void> {
+  if (!stripAudio && audioPresence.some(Boolean)) {
+    const args = ["-y", ...clipPaths.flatMap((clipPath) => ["-i", clipPath])];
+    const filters = clipPaths.flatMap((_, index) => {
+      const video = `[${index}:v]fps=${COMPOSE_FRAME_RATE},settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v${index}]`;
+      const duration = Number.isFinite(durations[index]) && durations[index] > 0 ? durations[index] : 5;
+      const audio = audioPresence[index]
+        ? `[${index}:a]asetpts=PTS-STARTPTS,aformat=sample_rates=44100:channel_layouts=stereo[a${index}]`
+        : `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=${duration.toFixed(3)},asetpts=PTS-STARTPTS[a${index}]`;
+      return [video, audio];
+    });
+    const concatInputs = clipPaths.map((_, index) => `[v${index}][a${index}]`).join("");
+    filters.push(`${concatInputs}concat=n=${clipPaths.length}:v=1:a=1[outv][outa]`);
+    await runFfmpeg(ffmpegPath, [
+      ...args,
+      "-filter_complex",
+      filters.join(";"),
+      "-map",
+      "[outv]",
+      "-map",
+      "[outa]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+    return;
+  }
+
   await writeFile(listPath, clipPaths.map((clipPath) => `file '${toFfmpegConcatPath(clipPath)}'`).join("\n"), "utf8");
   await runFfmpeg(ffmpegPath, [
     "-y",
@@ -538,7 +599,13 @@ function clampTransitionSeconds(value: number, durations: number[] | undefined):
   return Math.max(MIN_XFADE_SECONDS, Math.min(value, maxSafe, 1.5));
 }
 
-function shouldStripSourceAudio(audioBible: Record<string, unknown> | undefined): boolean {
+function shouldStripSourceAudio(
+  audioBible: Record<string, unknown> | undefined,
+  clipAudioStrategies?: Array<NonNullable<VideoAudioPlan["strategy"]>>,
+): boolean {
+  if (clipAudioStrategies?.length) {
+    return clipAudioStrategies.every((strategy) => strategy === "post_only");
+  }
   const raw = audioBible?.stripSourceAudio ?? audioBible?.strip_source_audio ?? audioBible?.removeOriginalAudio ?? audioBible?.remove_original_audio;
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "string") return raw.toLowerCase() !== "false";
@@ -551,6 +618,8 @@ async function applyUnifiedAudioIfNeeded(params: {
   workDir: string;
   projectId: string;
   audioBible?: Record<string, unknown>;
+  inputHasAudio: boolean;
+  clipAudioStrategies?: Array<NonNullable<VideoAudioPlan["strategy"]>>;
 }): Promise<string> {
   const outputPath = path.join(params.workDir, "final-with-unified-audio.mp4");
   const bgmSource = audioSourceFromBible(params.audioBible);
@@ -561,12 +630,30 @@ async function applyUnifiedAudioIfNeeded(params: {
     bgmSource: bgmSource ? maskAudioSourceForLog(bgmSource) : null,
     loudnorm,
     volume,
-    stripSourceAudio: shouldStripSourceAudio(params.audioBible),
+    sourceAudioPolicy: params.inputHasAudio ? "mix" : "strip",
+    clipAudioStrategies: params.clipAudioStrategies ?? [],
   });
 
   if (bgmSource) {
     const bgmPath = path.join(params.workDir, "bgm-source");
     await resolveAudioSourceToFile(bgmSource, bgmPath);
+    const audioArgs = params.inputHasAudio
+      ? [
+          "-filter_complex",
+          [
+            "[0:a]aformat=sample_rates=44100:channel_layouts=stereo[native]",
+            `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${volume.toFixed(2)}[bgm]`,
+            `[native][bgm]amix=inputs=2:duration=first:dropout_transition=2${loudnorm ? ",loudnorm=I=-16:TP=-1.5:LRA=11" : ""}[mixed]`,
+          ].join(";"),
+          "-map",
+          "[mixed]",
+        ]
+      : [
+          "-map",
+          "1:a:0",
+          "-af",
+          `${loudnorm ? "loudnorm=I=-16:TP=-1.5:LRA=11," : ""}volume=${volume.toFixed(2)}`,
+        ];
     await runFfmpeg(params.ffmpegPath, [
       "-y",
       "-i",
@@ -577,13 +664,10 @@ async function applyUnifiedAudioIfNeeded(params: {
       bgmPath,
       "-map",
       "0:v:0",
-      "-map",
-      "1:a:0",
+      ...audioArgs,
       "-shortest",
       "-c:v",
       "copy",
-      "-af",
-      `${loudnorm ? "loudnorm=I=-16:TP=-1.5:LRA=11," : ""}volume=${volume.toFixed(2)}`,
       "-c:a",
       "aac",
       "-b:a",

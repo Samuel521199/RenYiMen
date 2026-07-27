@@ -6410,13 +6410,13 @@ function projectWorkflowProgressView(
       ? {
           percent,
           title: waitingForApproval ? "Asset library awaiting review" : "Generating asset library",
-          detail: `${phase.generatedAssets}/${phase.assetTotal} asset references generated; ${phase.approvedAssets}/${phase.assetTotal} approved. Approve each person's front view before its side and back views continue.`,
+          detail: `${phase.generatedAssets}/${phase.assetTotal} asset references generated; ${phase.approvedAssets}/${phase.assetTotal} approved. ${phase.generatedBoundaryImages}/${phase.boundaryTotal} dependency-ready boundary keyframes have already generated in parallel.`,
           tone: waitingForApproval ? "idle" : "running",
         }
       : {
           percent,
           title: waitingForApproval ? "资产库待审核" : "正在生成资产库",
-          detail: `${phase.generatedAssets}/${phase.assetTotal} 张资产参考图已生成，${phase.approvedAssets}/${phase.assetTotal} 张已确认。请先确认每个人物的正面图，系统才会继续生成对应侧面和背面图。`,
+          detail: `${phase.generatedAssets}/${phase.assetTotal} 张资产参考图已生成，${phase.approvedAssets}/${phase.assetTotal} 张已确认；已有 ${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张依赖满足的边界关键帧并行完成。人物侧面和背面图仍需先确认对应正面图。`,
           tone: waitingForApproval ? "idle" : "running",
         };
   }

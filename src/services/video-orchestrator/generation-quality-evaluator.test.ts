@@ -12,7 +12,17 @@ import {
   selectLatestUsableImageBaseline,
 } from "./project-service.ts";
 import { mediaKeyMatchingContentType } from "./oss-media.ts";
-import { fitAliyunImagePrompt, prepareAliyunImagePrompt } from "./aliyun-workflow.ts";
+import {
+  fitAliyunImagePrompt,
+  fitAliyunImagePromptWithReport,
+  fitAliyunNegativePrompt,
+  prepareAliyunImagePrompt,
+  validateModelImagePromptCompaction,
+} from "./aliyun-workflow.ts";
+import {
+  ONE_PROMPT_IMAGE_PROMPT_COMPACTION_THRESHOLD_CHARS,
+  ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS,
+} from "../../lib/one-prompt-video-limits.ts";
 
 const base = {
   assetId: "keyframe:1:image",
@@ -124,6 +134,9 @@ test("segment video sync uses deterministic validation and keeps visual review e
   assert.match(service, /activeCandidate \? "ready" : "generating"/);
   assert.match(service, /Video visual analysis[\s\S]{0,120}must never turn an existing playable result into FAILED/);
   assert.match(service, /const recoverableClipBackedSegments = clipBackedUnreadySegments/);
+  assert.match(evaluator, /audioStreamPresent: Boolean\(audioStream\)/);
+  assert.match(service, /generation_quality\.video_audio_technical/);
+  assert.match(service, /nativeAudioExpected && !technical\.audioStreamPresent \? "warn" : "info"/);
 });
 
 test("an active clip backed by a technically usable video candidate does not require a visual pass", () => {
@@ -716,6 +729,100 @@ test("overlength image prompts keep retry corrections ahead of descriptive detai
   assert.match(fitted, /Do not repeat the missing logo/);
 });
 
+test("image prompt compiler starts semantic compaction at the soft budget and keeps whole units", () => {
+  const prompt = Array.from(
+    { length: 240 },
+    (_, index) => `Visible scene fact ${index + 1}: the subject occupies a concrete position in the frame.`,
+  ).join("\n");
+  const report = fitAliyunImagePromptWithReport(prompt);
+  assert.equal(report.exceededSoftBudget, true);
+  assert.equal(report.compacted, true);
+  assert.ok(report.prompt.length <= ONE_PROMPT_IMAGE_PROMPT_COMPACTION_THRESHOLD_CHARS);
+  assert.ok(report.omittedUnits > 0);
+  assert.match(report.prompt, /\.$/);
+});
+
+test("image prompt compiler preserves tail repair and forbidden facts before decorative prose", () => {
+  const prompt = [
+    Array.from({ length: 180 }, (_, index) => `Decorative beautiful atmosphere variation ${index + 1}.`).join("\n"),
+    "MANDATORY RETRY CORRECTION\nThe approved character must hold exactly two red cards in the viewer-left hand.",
+    "Avoid: duplicate people, a third card, altered clothing, watermark, subtitles, and UI.",
+  ].join("\n\n");
+  const report = fitAliyunImagePromptWithReport(prompt);
+  assert.ok(report.prompt.length <= ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS);
+  assert.ok(report.prompt.startsWith("CRITICAL GENERATION CONTRACT"));
+  assert.match(report.prompt, /exactly two red cards/);
+  assert.match(report.prompt, /a third card/);
+  assert.doesNotMatch(report.prompt, /variation 180/);
+});
+
+test("image prompt compiler exposes when critical units do not fit the hard provider budget", () => {
+  const prompt = Array.from(
+    { length: 48 },
+    (_, index) => [
+      `MANDATORY RETRY CORRECTION ${index + 1}`,
+      `Required visible invariant ${index + 1}: preserve UNIQUE_${index + 1} exactly; ${`specific_${index + 1}_identity_detail `.repeat(10)}`,
+    ].join("\n"),
+  ).join("\n\n");
+  const report = fitAliyunImagePromptWithReport(prompt);
+  assert.ok(report.prompt.length <= ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS);
+  assert.ok(report.omittedCriticalUnits > 0);
+});
+
+test("model prompt compaction validation requires every fact id and protected literal", () => {
+  const facts = [
+    {
+      id: "fact_001",
+      text: "Show exactly 2 cards labeled BRAND_X.",
+      requiredLiterals: ["2", "BRAND_X"],
+    },
+    {
+      id: "fact_002",
+      text: "INPUT IMAGE 9 supplies identity only.",
+      requiredLiterals: ["9", "INPUT", "IMAGE"],
+    },
+  ];
+  const valid = validateModelImagePromptCompaction({
+    compressed_prompt: "Show exactly 2 cards labeled BRAND_X. INPUT IMAGE 9 supplies identity only.",
+    preserved_fact_ids: ["fact_001", "fact_002"],
+  }, facts);
+  assert.equal(valid.ok, true);
+  const missingFact = validateModelImagePromptCompaction({
+    compressed_prompt: "Show exactly 2 cards labeled BRAND_X. INPUT IMAGE 9 supplies identity only.",
+    preserved_fact_ids: ["fact_001"],
+  }, facts);
+  assert.deepEqual(missingFact, { ok: false, reason: "missing_fact_ids:fact_002" });
+  const missingLiteral = validateModelImagePromptCompaction({
+    compressed_prompt: "Show the cards. INPUT IMAGE 9 supplies identity only.",
+    preserved_fact_ids: ["fact_001", "fact_002"],
+  }, facts);
+  assert.equal(missingLiteral.ok, false);
+  if (!missingLiteral.ok) assert.match(missingLiteral.reason, /missing_protected_literals/);
+});
+
+test("hybrid image prompt compaction calls a non-thinking model only for omitted critical units", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "src/services/video-orchestrator/aliyun-workflow.ts"),
+    "utf8",
+  );
+  assert.match(source, /if \(!detail\.omittedCriticalUnits\.length\) return base/);
+  assert.match(source, /enable_thinking: false/);
+  assert.match(source, /preserved_fact_ids/);
+  assert.match(source, /validateModelImagePromptCompaction/);
+  assert.match(source, /fallback: "deterministic_semantic_unit_compaction"/);
+});
+
+test("negative prompt compaction keeps complete constraints instead of slicing a sentence", () => {
+  const prompt = Array.from(
+    { length: 100 },
+    (_, index) => `Never render forbidden artifact ${index + 1} or its duplicate.`,
+  ).join("\n");
+  const fitted = fitAliyunNegativePrompt(prompt);
+  assert.ok(fitted.length <= 1500);
+  assert.match(fitted, /\.$/);
+  assert.doesNotMatch(fitted, /artifact 100/);
+});
+
 test("image generation prompt maps every uploaded reference to a narrow role", () => {
   const prepared = prepareAliyunImagePrompt(
     "Render the approved character holding the product.",
@@ -744,7 +851,21 @@ test("nine-image role map survives prompt compaction together with retry correct
   );
   assert.match(prepared, /INPUT IMAGE 9/);
   assert.match(prepared, /Show exactly two approved like icons/);
+  assert.match(prepared, /Long scene detail/);
   assert.ok(prepared.length <= 5000);
+});
+
+test("reference role notes are not silently cut at the former 220-character boundary", () => {
+  const distinctiveTail = "FINAL_ROLE_FACT_MUST_SURVIVE";
+  const roleNote = `${"identity evidence, ".repeat(14)}${distinctiveTail}.`;
+  assert.ok(roleNote.length > 220);
+  const prepared = prepareAliyunImagePrompt(
+    "Render exactly one approved subject.",
+    undefined,
+    ["https://example.test/person.jpg"],
+    [roleNote],
+  );
+  assert.match(prepared, new RegExp(distinctiveTail));
 });
 
 test("image evaluator localizes current output and prevents reference-pixel leakage", () => {
@@ -1032,4 +1153,20 @@ test("manual boundary candidate acceptance immediately continues the next frame"
   assert.match(selection, /image\.continue_after_manual_candidate_selection/);
   assert.match(selection, /micro_shot\.manual_candidate\.auto_continue/);
   assert.match(selection, /requiredMicroShotImageIssues\(selectedProject\)\.length === 0/);
+});
+
+test("asset generation prepares dependency-ready targets in parallel with a five-task render cap", () => {
+  const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const envExample = readFileSync(path.join(process.cwd(), ".env.example"), "utf8");
+  const localEnvExample = readFileSync(path.join(process.cwd(), ".env.local.example"), "utf8");
+  assert.match(service, /const DEFAULT_IMAGE_TASK_CONCURRENCY = 5/);
+  assert.match(service, /const MAX_UPSTREAM_TASK_CONCURRENCY = 5/);
+  assert.match(envExample, /ONE_PROMPT_VIDEO_IMAGE_CONCURRENCY=5/);
+  assert.match(localEnvExample, /ONE_PROMPT_VIDEO_IMAGE_CONCURRENCY=5/);
+  assert.match(service, /const preparedSubmissions = await Promise\.allSettled\(/);
+  assert.match(service, /prepareKeyframeImageSubmission\(project, nextKeyframe\)/);
+  assert.match(service, /planJson persistence and task claiming ordered to prevent lost updates/);
+  assert.match(service, /isAssetViewGenerationReady\(project, keyframe\.keyframeNo\)/);
+  assert.match(service, /return Boolean\(frontKeyframe && isApprovedConsistencyReference\(frontKeyframe\)\)/);
+  assert.match(service, /All asset-library images must be generated before approval/);
 });

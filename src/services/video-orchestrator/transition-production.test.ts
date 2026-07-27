@@ -80,7 +80,7 @@ test("generated bridges use a distinct artifact state and block composition unti
   assert.match(service, /kind: "generated_bridge"/);
   assert.match(service, /purpose: "generated_bridge"/);
   assert.match(service, /must be generated, quality-passed, reviewed and locked before final composition/);
-  assert.match(service, /entries\.push\(\{ url: bridge\.selectedVideoUrl/);
+  assert.match(service, /entries\.push\(\{[\s\S]{0,120}url: bridge\.selectedVideoUrl/);
   assert.doesNotMatch(service, /transition_reference:[^\n]{0,120}entersFinalComposition: true/);
 });
 

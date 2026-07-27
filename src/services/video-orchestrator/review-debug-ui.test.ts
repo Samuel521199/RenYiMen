@@ -388,7 +388,7 @@ test("front-view dependency waits are notices, not generation failures", () => {
   assert.match(noticeFormatter, /Approve and lock each person front view/);
   assert.match(noticeFormatter, /等待人物正面图确认/);
   assert.match(pageSource, /canResumeRecoverableImageReview[\s\S]*?!projectWorkflowNotice/);
-  assert.match(projectServiceSource, /blockedDerivedViews\.length && !running\.length[\s\S]*?errorMessage: null/);
+  assert.match(projectServiceSource, /waitingForConsistencyReferences && !running\.length[\s\S]*?errorMessage: null/);
 });
 
 test("workflow progress does not announce micro-shot review while assets are incomplete", () => {
@@ -399,7 +399,8 @@ test("workflow progress does not announce micro-shot review while assets are inc
   assert.match(progressFormatter, /phase\.assetTotal > 0/);
   assert.match(progressFormatter, /!phase\.assetsApproved/);
   assert.match(progressFormatter, /资产库待审核/);
-  assert.match(progressFormatter, /请先确认每个人物的正面图/);
+  assert.match(progressFormatter, /依赖满足的边界关键帧并行完成/);
+  assert.match(progressFormatter, /人物侧面和背面图仍需先确认对应正面图/);
   assert.match(progressFormatter, /phase\.assetsApproved[\s\S]*?phase\.boundaryTotal > 0/);
   assert.match(progressFormatter, /当前尚不能进入内部子分镜审核/);
   assert.match(progressFormatter, /全部确认后才能进入内部子分镜审核/);
@@ -433,7 +434,8 @@ test("keyframe regeneration preserves history and adds one learned candidate at 
   assert.match(regeneration, /learnedFromCandidateIds: learning\.sourceCandidateIds/);
   assert.doesNotMatch(regeneration, /videoGenerationCandidate\.delete/);
   assert.doesNotMatch(regeneration, /imageUrl: null/);
-  assert.match(sequentialSubmission, /buildImageCandidateLearningSummary\(project, artifactId/);
+  assert.match(service, /buildImageCandidateLearningSummary\(project, artifactId/);
+  assert.match(sequentialSubmission, /prepareKeyframeImageSubmission\(project, nextKeyframe\)/);
   assert.match(sequentialSubmission, /candidateCount: 1/);
   assert.match(sequentialSubmission, /incremental candidate #/);
 });

@@ -422,6 +422,7 @@ export interface VideoMicroShot extends VideoAssetDependencyFields {
 
 export interface VideoAudioPlan {
   mode: "ambient" | "voiceover" | "dialogue" | "mixed" | "silent";
+  strategy?: "native_ambience" | "native_full" | "post_only";
   needsVoiceover: boolean;
   needsDialogue: boolean;
   language?: string;
@@ -430,6 +431,20 @@ export interface VideoAudioPlan {
   lines?: string[];
   linesZh?: string[];
   linesEn?: string[];
+  exactTextRequired?: boolean;
+  preserveNativeAudio?: boolean;
+  soundEffects?: Array<{
+    timingSeconds?: number;
+    source: string;
+    action: string;
+    description: string;
+  }>;
+  backgroundMusic?: {
+    source: "native" | "post" | "none";
+    style?: string;
+    mood?: string;
+    intensity?: string;
+  };
   rationale?: string;
 }
 

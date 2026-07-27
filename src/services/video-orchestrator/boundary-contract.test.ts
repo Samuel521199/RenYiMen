@@ -73,3 +73,22 @@ test("asset binding does not rewrite the canonical story state", () => {
   assert.deepEqual(bound[1].approvedAssetReferenceIds, ["hero", "game_ui"]);
   assert.equal(bound[1].storyState, contracts[1].storyState);
 });
+
+test("partial asset binding only unlocks boundaries whose scoped assets are approved", () => {
+  const contracts = deriveCanonicalBoundaryContracts(fixture());
+  const requiredAssetsByBoundary = new Map([
+    [1, ["hero"]],
+    [2, ["hero", "game_ui"]],
+    [3, []],
+  ]);
+  const bound = bindBoundaryContractsToApprovedAssets(
+    contracts,
+    ["hero"],
+    requiredAssetsByBoundary,
+  );
+
+  assert.equal(bound[0].status, "asset_bound");
+  assert.equal(bound[1].status, "semantic_draft");
+  assert.equal(bound[2].status, "asset_bound");
+  assert.deepEqual(bound[1].approvedAssetReferenceIds, ["hero"]);
+});

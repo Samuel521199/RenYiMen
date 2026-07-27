@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
+import {
+  ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS,
+  ONE_PROMPT_MAX_REFERENCE_IMAGES,
+} from "@/lib/one-prompt-video-limits";
 import type {
   AnchorStateTimeline,
   ArtifactMetadata,
@@ -321,6 +324,7 @@ Hard rules:
 - Every asset_image_contract must make the result mechanically checkable: exact subject count; concrete subject description; framing; camera angle; placement; frame occupancy; named background; lighting direction and quality; forbidden elements; and at least two acceptance criteria.
 - Person/product/prop/task-object/vehicle/food contracts must list concrete identity, geometry, clothing, marking, or material details. Scene/location/space-layout contracts must separately specify foreground, midground, far background, and at least two explicit spatial relationships or distances.
 - image_prompt_zh/image_prompt_en must faithfully serialize asset_image_contract. Do not shorten it into a category template or style summary.
+- Keep each individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses and remove explanations, repetition, synonyms, and ornamental quality phrases without dropping any contract fact.
 - A prop prompt must be operationally specific rather than generic: state the exact object count, named variants, face/orientation, arrangement, material, colors, intrinsic markings, and forbidden extra objects. If the prop is a playing card, explicitly name every required rank and suit and require matching corner indices; never combine "A/K must be visible" with a blanket "no text" instruction.
 - For a person anchor, image_prompt_zh/image_prompt_en must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
 - Reference images may contain a finished poster or advertisement. Extract the anchor's stable identity only; never copy the reference image's background, typography, logo placement, framing, or full composition into a person asset prompt.
@@ -829,6 +833,7 @@ For each anchor:
 - For location or space_layout, also fill environment.foreground, midground, background_layer, and at least two measurable or directional spatial_relationships.
 - For person, prop, product, task_object, vehicle, or food, isolate the asset and forbid unrelated story characters, scenery, props, typography, logos, UI, frames, collages, and duplicates unless intrinsically required.
 - Write complete image_prompt_zh and image_prompt_en that serialize all contract facts. Do not use placeholders such as "fixed layout", "lighting direction", "color atmosphere", "main background structure", "clear", "high quality", or "detailed" without concrete visible values.
+- Keep each individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Compress wording, not facts: preserve subject identity/count, geometry/markings, composition, lighting, spatial relationships, acceptance criteria, and forbidden elements.
 - Do not add narrative actions, scene events, ad typography, or assets from other anchors.
 - Preserve intrinsic markings such as playing-card ranks/suits; distinguish them from incidental text.
 `;
@@ -867,6 +872,9 @@ Your only job in stage 2B:
 - Follow planning_manifest.timeline_blueprint exactly for segment count, start time, end time, and duration.
 - Convert every storyboard brief into executable start/end frame contracts, motion contracts, single-take contracts, boundary keyframe descriptions, segment descriptions, subtitles, audio_plan, and same-take motion checkpoints.
 - Follow planning_manifest.subtitle_policy. If subtitles are not needed, leave segment.subtitle empty. If subtitles are needed, generate concise editable overlay subtitles for each appropriate segment.
+- Choose an audio_plan.strategy for every segment. Use native_ambience by default so the video model generates synchronized room tone and action SFX while exact speech and project-wide music stay in post-production. Use native_full only for short expressive dialogue where lip sync matters and wording is not legally or commercially sensitive. Use post_only for silent visuals or fully post-produced soundtracks.
+- Any price, number, offer, brand slogan, legal copy, CTA, or otherwise exact wording must set exact_text_required=true and must not use native_full. Put the exact line in lines_zh/lines_en for downstream TTS, set background_music.source=post, and use native_ambience or post_only.
+- For native_ambience, list up to four visible action-linked sound_effects and set preserve_native_audio=true. For native_full, specify language, speaker, voice_style, exact short lines, and whether background music is native. Never leave the model free to invent dialogue.
 - Do not compile final generation prompts yet; write structured content and contracts only.
 
 Hard rules:
@@ -982,6 +990,7 @@ Return this JSON shape:
         "subtitle": "",
         "audio_plan": {
           "mode": "ambient",
+          "strategy": "native_ambience",
           "needs_voiceover": false,
           "needs_dialogue": false,
           "language": "",
@@ -989,6 +998,15 @@ Return this JSON shape:
           "voice_style": "",
           "lines_zh": [],
           "lines_en": [],
+          "exact_text_required": false,
+          "preserve_native_audio": true,
+          "sound_effects": [],
+          "background_music": {
+            "source": "post",
+            "style": "",
+            "mood": "",
+            "intensity": ""
+          },
           "rationale": ""
         },
         "output_mode": "mixed",
@@ -1124,6 +1142,7 @@ Return this JSON shape, containing only the target segment, its render descripti
         "subtitle": "",
         "audio_plan": {
           "mode": "ambient",
+          "strategy": "native_ambience",
           "needs_voiceover": false,
           "needs_dialogue": false,
           "language": "",
@@ -1131,6 +1150,15 @@ Return this JSON shape, containing only the target segment, its render descripti
           "voice_style": "",
           "lines_zh": [],
           "lines_en": [],
+          "exact_text_required": false,
+          "preserve_native_audio": true,
+          "sound_effects": [],
+          "background_music": {
+            "source": "post",
+            "style": "",
+            "mood": "",
+            "intensity": ""
+          },
           "rationale": ""
         },
         "output_mode": "mixed",
@@ -1173,6 +1201,8 @@ Your only job:
 - Preserve the exact camera-graph inheritance scope and every referenced consistency anchor.
 - Compile a keyframe prompt only for owned_keyframe_nos. This prevents adjacent segment workers from producing conflicting prompts for the same shared boundary frame.
 - Keyframe and micro-shot image prompts describe static images only, with no subtitles, watermark, or generated UI text.
+- Keep every individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses; remove explanations, repeated facts, synonyms, and ornamental quality phrases.
+- Within that budget, preserve in this order: exact subject identity/count, required action or state, key props/markings, composition/camera, consistency inheritance, and forbidden outcomes. Never shorten by dropping a hard user, identity, product, or boundary requirement.
 - Return only the target segment, its owned keyframe prompts, and its own micro-shot prompts. Do not repeat other segments.
 
 Return this JSON shape:
@@ -1300,6 +1330,8 @@ Your only job in stage 3:
 - Segment prompts describe one continuous unbroken camera take from start boundary frame to end boundary frame.
 - Segment prompts must explicitly forbid internal cuts, jump cuts, fades, dissolves, crossfades, montage edits, ghost overlays, scene swaps, teleportation, and hard visual transitions inside the clip.
 - Micro-shot image prompts describe one static internal reference image that belongs to the same continuous take and same scene, not a separate shot or scene.
+- Keep every individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses; remove explanations, repeated facts, synonyms, and ornamental quality phrases.
+- Within that budget, preserve in this order: exact subject identity/count, required action or state, key props/markings, composition/camera, consistency inheritance, and forbidden outcomes. Never shorten by dropping a hard user, identity, product, or boundary requirement.
 
 Return this JSON shape:
 {
@@ -7444,8 +7476,47 @@ function normalizeFrameRole(value: unknown, keyframeNo: number, keyframeCount: n
 function normalizeAudioPlan(value: unknown, fallback: VideoAudioPlan | undefined): VideoAudioPlan | undefined {
   const source = isRecord(value) ? value : {};
   const mode = source.mode === "voiceover" || source.mode === "dialogue" || source.mode === "mixed" || source.mode === "silent" ? source.mode : "ambient";
+  const strategyValue = source.strategy ?? source.generationStrategy ?? source.generation_strategy;
+  const strategy = strategyValue === "native_ambience" || strategyValue === "native_full" || strategyValue === "post_only"
+    ? strategyValue
+    : fallback?.strategy ?? (mode === "silent" ? "post_only" : "native_ambience");
+  const soundEffectsSource = Array.isArray(source.soundEffects)
+    ? source.soundEffects
+    : Array.isArray(source.sound_effects)
+      ? source.sound_effects
+      : [];
+  const soundEffects = soundEffectsSource.filter(isRecord).flatMap((effect) => {
+    const effectSource = stringOr(effect.source, "");
+    const action = stringOr(effect.action, "");
+    const description = stringOr(effect.description, "");
+    if (!effectSource || !action || !description) return [];
+    const timing = Number(effect.timingSeconds ?? effect.timing_seconds);
+    return [{
+      timingSeconds: Number.isFinite(timing) ? timing : undefined,
+      source: effectSource,
+      action,
+      description,
+    }];
+  });
+  const musicSource = isRecord(source.backgroundMusic)
+    ? source.backgroundMusic
+    : isRecord(source.background_music)
+      ? source.background_music
+      : undefined;
+  const musicSourceMode = musicSource?.source;
+  const backgroundMusic: VideoAudioPlan["backgroundMusic"] = musicSource && (
+    musicSourceMode === "native"
+    || musicSourceMode === "post"
+    || musicSourceMode === "none"
+  ) ? {
+      source: musicSourceMode,
+      style: stringOr(musicSource.style, ""),
+      mood: stringOr(musicSource.mood, ""),
+      intensity: stringOr(musicSource.intensity, ""),
+    } : fallback?.backgroundMusic;
   return {
     mode,
+    strategy,
     needsVoiceover: typeof source.needsVoiceover === "boolean"
       ? source.needsVoiceover
       : typeof source.needs_voiceover === "boolean"
@@ -7462,6 +7533,18 @@ function normalizeAudioPlan(value: unknown, fallback: VideoAudioPlan | undefined
     lines: normalizeStringArray(source.lines) ?? fallback?.lines,
     linesZh: normalizeStringArray(source.linesZh ?? source.lines_zh) ?? fallback?.linesZh,
     linesEn: normalizeStringArray(source.linesEn ?? source.lines_en) ?? fallback?.linesEn,
+    exactTextRequired: typeof source.exactTextRequired === "boolean"
+      ? source.exactTextRequired
+      : typeof source.exact_text_required === "boolean"
+        ? source.exact_text_required
+        : fallback?.exactTextRequired,
+    preserveNativeAudio: typeof source.preserveNativeAudio === "boolean"
+      ? source.preserveNativeAudio
+      : typeof source.preserve_native_audio === "boolean"
+        ? source.preserve_native_audio
+        : fallback?.preserveNativeAudio ?? strategy !== "post_only",
+    soundEffects: soundEffects.length ? soundEffects : fallback?.soundEffects,
+    backgroundMusic,
     rationale: stringOr(source.rationale ?? source.reason, fallback?.rationale ?? ""),
   };
 }

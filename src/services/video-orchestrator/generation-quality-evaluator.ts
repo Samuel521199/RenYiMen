@@ -378,6 +378,9 @@ export interface VideoTechnicalInspection {
   width: number;
   height: number;
   frameRate: number;
+  audioStreamPresent: boolean;
+  audioCodec?: string;
+  audioSampleRate?: number;
   errorMessage?: string;
 }
 
@@ -430,7 +433,7 @@ export async function inspectGeneratedVideoTechnicalQuality(mediaUrl: string): P
       executionMethod: "deterministic_program",
       durationMs: Date.now() - inspectionStartedAtMs,
       passed: true,
-      resultZh: `${metadata.width}×${metadata.height}，${metadata.durationSeconds.toFixed(2)} 秒，可正常解码`,
+      resultZh: `${metadata.width}×${metadata.height}，${metadata.durationSeconds.toFixed(2)} 秒，可正常解码，${metadata.audioStreamPresent ? `音轨 ${metadata.audioCodec || "unknown"}/${metadata.audioSampleRate || 0}Hz` : "无音轨"}`,
     });
     return { valid: true, ...metadata };
   } catch (error) {
@@ -449,6 +452,7 @@ export async function inspectGeneratedVideoTechnicalQuality(mediaUrl: string): P
       width: 0,
       height: 0,
       frameRate: 0,
+      audioStreamPresent: false,
       errorMessage: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -1198,7 +1202,42 @@ function sampleTimesForDuration(duration: number, frameRate = 24): number[] {
   const safeTail = Math.max(0, Math.min(safe * 0.9, safe - tailMargin));
   return [0, safe * 0.25, safe * 0.5, safe * 0.75, safeTail];
 }
-async function probeVideo(inputPath: string): Promise<{ durationSeconds: number; width: number; height: number; frameRate: number }> { const output = await runCapture(process.env.FFPROBE_PATH?.trim() || "ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate:format=duration", "-of", "json", inputPath]); const data = JSON.parse(output) as Record<string, unknown>; const stream = Array.isArray(data.streams) ? record(data.streams[0]) : {}; const format = record(data.format); return { durationSeconds: Number(format.duration) || 0, width: Number(stream.width) || 0, height: Number(stream.height) || 0, frameRate: frameRate(stream.r_frame_rate) }; }
+async function probeVideo(inputPath: string): Promise<{
+  durationSeconds: number;
+  width: number;
+  height: number;
+  frameRate: number;
+  audioStreamPresent: boolean;
+  audioCodec?: string;
+  audioSampleRate?: number;
+}> {
+  const output = await runCapture(
+    process.env.FFPROBE_PATH?.trim() || "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate:format=duration",
+      "-of",
+      "json",
+      inputPath,
+    ],
+  );
+  const data = JSON.parse(output) as Record<string, unknown>;
+  const streams = Array.isArray(data.streams) ? data.streams.map(record) : [];
+  const videoStream = streams.find((stream) => stream.codec_type === "video") ?? {};
+  const audioStream = streams.find((stream) => stream.codec_type === "audio");
+  const format = record(data.format);
+  return {
+    durationSeconds: Number(format.duration) || 0,
+    width: Number(videoStream.width) || 0,
+    height: Number(videoStream.height) || 0,
+    frameRate: frameRate(videoStream.r_frame_rate),
+    audioStreamPresent: Boolean(audioStream),
+    audioCodec: typeof audioStream?.codec_name === "string" ? audioStream.codec_name : undefined,
+    audioSampleRate: Number(audioStream?.sample_rate) || undefined,
+  };
+}
 async function extractFrameDataUrlWithFallback(
   inputPath: string,
   outputPath: string,
