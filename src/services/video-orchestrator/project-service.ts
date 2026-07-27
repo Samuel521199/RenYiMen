@@ -37,6 +37,7 @@ import { evaluateGeneratedImageQuality, evaluateGeneratedVideoQuality, extractVi
 import { createOnePromptRolloutSnapshot, legacyReferenceSelection, onePromptRolloutEnabled } from "./rollout-flags";
 import { hydratePlanArtifactsFromTables, mirrorPlanArtifactsToTables } from "./plan-artifact-store";
 import { buildAuthoritativeVisualContract, repairNegativePromptAgainstVisualContract, repairPromptAgainstVisualContract, type AuthoritativeVisualContract } from "./visual-quality-contract";
+import { isVideoProviderCapacityError, registerVideoProviderDemand } from "./video-provider-capacity";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import {
   assertEndFrameRequirementSupported,
@@ -54,8 +55,10 @@ import {
 } from "./planning-performance";
 import {
   resolveVideoImageInputs,
+  type ResolvedVideoImageInputs,
   type VideoImageInput,
 } from "@/services/providers/video-input-contract";
+import { compileOrderedSubjectActionPrompt } from "./video-prompt-presentation";
 import {
   bindBoundaryContractsToApprovedAssets,
   deriveCanonicalBoundaryContracts,
@@ -81,7 +84,7 @@ const PROJECT_INCLUDE = {
 };
 
 const DEFAULT_IMAGE_TASK_CONCURRENCY = 5;
-const DEFAULT_CLIP_TASK_CONCURRENCY = 2;
+const DEFAULT_CLIP_TASK_CONCURRENCY = 5;
 const MAX_UPSTREAM_TASK_CONCURRENCY = 5;
 type OnePromptPlannerArch = "v1" | "v2_shadow" | "v2";
 
@@ -198,6 +201,7 @@ type CompiledPrompt = {
   prompt: string;
   negativePrompt?: string;
   referenceImageUrls?: string[];
+  resolvedVideoImages?: ResolvedVideoImageInputs;
   debugArtifact: PromptDebugArtifact;
 };
 
@@ -246,7 +250,13 @@ export function serializeVideoProject(project: VideoProjectWithShots) {
       .map((candidate) => [candidate.artifactId, candidate]),
   );
   const compatShots = segments.length
-    ? segments.map((segment) => serializeSegmentAsShot(segment, keyframeMap, planShots, selectedMicroShotCandidates))
+    ? segments.map((segment) => serializeSegmentAsShot(
+        segment,
+        keyframeMap,
+        planShots,
+        selectedMicroShotCandidates,
+        project.planJson,
+      ))
     : project.shots.map((shot) => ({
         ...shot,
         purposeZh: readPlanShotString(planShots.get(shot.shotNo), ["purposeZh", "purpose_zh"]) || shot.purpose,
@@ -261,7 +271,7 @@ export function serializeVideoProject(project: VideoProjectWithShots) {
         outputMode: readPlanShotString(planShots.get(shot.shotNo), ["outputMode", "output_mode"]),
         constraints: readPlanStringArray(planShots.get(shot.shotNo), ["constraints"]),
         timedPrompts: readPlanTimedPrompts(planShots.get(shot.shotNo)),
-        microShots: readPlanMicroShots(planShots.get(shot.shotNo)),
+        microShots: readEffectivePlanMicroShots(project.planJson, shot.shotNo),
         audioPlan: readPlanAudioPlan(planShots.get(shot.shotNo)),
         createdAt: shot.createdAt.toISOString(),
         updatedAt: shot.updatedAt.toISOString(),
@@ -349,6 +359,7 @@ function serializeSegmentAsShot(
   keyframeMap: Map<number, VideoProjectWithShots["keyframes"][number]>,
   planShots: Map<number, Record<string, unknown>>,
   selectedMicroShotCandidates: Map<string, VideoProjectWithShots["generationCandidates"][number]>,
+  planJson: Prisma.JsonValue | null,
 ) {
   const start = keyframeMap.get(segment.startKeyframeNo);
   const end = keyframeMap.get(segment.endKeyframeNo);
@@ -373,9 +384,9 @@ function serializeSegmentAsShot(
     outputMode: readPlanShotString(planShot, ["outputMode", "output_mode"]),
     constraints: readPlanStringArray(planShot, ["constraints"]),
     timedPrompts: readPlanTimedPrompts(planShot),
-    microShots: readPlanMicroShots(planShot).map((microShot) => {
+    microShots: readEffectivePlanMicroShots(planJson, segment.segmentNo).map((microShot) => {
       const selected = selectedMicroShotCandidates.get(imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo));
-      return selected?.mediaUrl
+      return selected?.mediaUrl && selectedCandidateMatchesMicroShotRevision(selected, microShot)
         ? { ...microShot, imageUrl: selected.mediaUrl, imageTaskId: "", imageStatus: "ready" as const, errorMessage: "" }
         : microShot;
     }),
@@ -539,6 +550,25 @@ function imageCandidateCount(): number {
   // Images are progressive too; environment configuration must not silently
   // restore eager multi-candidate spending.
   return 1;
+}
+
+function selectedCandidateMatchesMicroShotRevision(
+  candidate: VideoProjectWithShots["generationCandidates"][number],
+  microShot: VideoMicroShot,
+): boolean {
+  const metadata = isRecord(candidate.metadata) ? candidate.metadata : {};
+  const targetContract = isRecord(metadata.targetContract)
+    ? metadata.targetContract
+    : isRecord(metadata.target_contract)
+      ? metadata.target_contract
+      : {};
+  const candidateRevision = readPlanShotString(targetContract, [
+    "resolvedRevisionId",
+    "resolved_revision_id",
+  ]);
+  return microShot.resolvedRevisionId
+    ? candidateRevision === microShot.resolvedRevisionId
+    : !candidateRevision;
 }
 
 function videoCandidateCount(): number {
@@ -940,6 +970,7 @@ async function createVideoCandidateBatch(params: {
   startFrameUrl: string;
   endFrameUrl: string;
   imageInputs: VideoImageInput[];
+  resolvedVideoImages?: ResolvedVideoImageInputs;
   metadata: Record<string, unknown>;
 }): Promise<string> {
   const artifactId = videoArtifactIdForSegmentNo(params.segment.segmentNo);
@@ -952,10 +983,10 @@ async function createVideoCandidateBatch(params: {
   assertEndFrameRequirementSupported(
     endFrameRequirementLevel,
     aliyunImageToVideoCapabilities(),
-    "happyhorse-1.1-i2v",
+    aliyunVideoImageInputCapabilities().modelId,
   );
   const providerImageCapabilities = aliyunVideoImageInputCapabilities();
-  const resolvedVideoImages = resolveVideoImageInputs({
+  const resolvedVideoImages = params.resolvedVideoImages ?? resolveVideoImageInputs({
     inputs: params.imageInputs,
     capabilities: providerImageCapabilities,
     endFrameRequirementLevel,
@@ -966,7 +997,7 @@ async function createVideoCandidateBatch(params: {
     negativePrompt: params.segment.negativePrompt,
     referenceImageUrls: resolvedVideoImages.transported.map((item) => item.url),
     parameters: {
-      model: "happyhorse-1.1-i2v",
+      model: providerImageCapabilities.modelId,
       durationSeconds: params.segment.durationSeconds,
       startFrameUrl: params.startFrameUrl,
       endFrameUrl: params.endFrameUrl,
@@ -1002,14 +1033,21 @@ async function createVideoCandidateBatch(params: {
           imageUrl: params.startFrameUrl,
           lastFrameUrl: params.endFrameUrl,
           imageInputs: params.imageInputs,
+          resolvedImageInputs: resolvedVideoImages,
           prompt: params.prompt,
           durationSeconds: params.segment.durationSeconds,
           endFrameRequirementLevel,
+          schedulingContext: {
+            userId: params.project.userId,
+            projectId: params.project.id,
+            targetId: params.segment.id,
+          },
         });
         if (!firstTaskId) firstTaskId = taskId;
         await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, taskId, status: "running", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, videoModel: aliyunVideoImageInputCapabilities().modelId, audioPlan, audioStrategy, preserveNativeAudio: audioPlan?.preserveNativeAudio ?? audioStrategy !== "post_only", endFrameRequirementLevel, endFrameConstraintMode: resolvedVideoImages.nativeLastFrame ? "native_last_frame" : "semantic_prompt_and_visual_check", endFramePromptEnforced: true, videoImageInputCapabilities: providerImageCapabilities, requestedVideoImageInputs: params.imageInputs, transportedVideoImageInputs: resolvedVideoImages.transported, evaluationOnlyVideoImageInputs: resolvedVideoImages.evaluationOnly, rejectedVideoImageInputs: resolvedVideoImages.rejected, generationInputFingerprint, generationInputFingerprintVersion: GENERATION_INPUT_FINGERPRINT_VERSION }) } });
         await logOnePromptVideo("generation_candidate.video.submit.success", { taskId });
       } catch (error) {
+        if (isVideoProviderCapacityError(error)) throw error;
         await prisma.videoGenerationCandidate.create({ data: { projectId: params.project.id, artifactId, targetId: params.segment.id, kind: "segment_video", batchId, candidateNo, status: "failed", prompt: params.prompt, negativePrompt: params.segment.negativePrompt, errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ ...params.metadata, attempt, retryCycleId, historicalCandidateCount, durationSeconds: params.segment.durationSeconds, startFrameUrl: params.startFrameUrl, endFrameUrl: params.endFrameUrl, generationInputFingerprint, generationInputFingerprintVersion: GENERATION_INPUT_FINGERPRINT_VERSION }) } });
         await logOnePromptVideo("generation_candidate.video.submit.error", errorForLog(error), "error");
       }
@@ -1287,6 +1325,13 @@ async function runMediaConditionedPlanningAfterImageApproval(
   plan.boundaryContracts = contracts;
   plan.observedBoundaryFacts = observedFacts;
   plan.mediaConditionedSegmentPlans = segmentPlans;
+  plan.segments = activateResolvedMicroShots(
+    Array.isArray(plan.segments) ? plan.segments : [],
+    mediaPlanBySegment,
+  );
+  if (Array.isArray(plan.shots)) {
+    plan.shots = activateResolvedMicroShots(plan.shots, mediaPlanBySegment);
+  }
   plan.segmentRenderDescriptions = typedPlan.segments.map((segment) => {
     const existing = existingRenderDescriptions.find((item) =>
       Number(item.segmentNo ?? item.segment_no) === segment.segmentNo
@@ -1300,6 +1345,8 @@ async function runMediaConditionedPlanningAfterImageApproval(
       motionContract: media.motionContract,
       singleTakeContract: media.singleTakeContract,
       motionCheckpoints: media.motionCheckpoints,
+      resolvedMicroShots: media.resolvedMicroShots,
+      microShotRevisionId: media.microShotRevisionId,
       videoPromptContract: media.videoPromptContract,
       warnings: uniqueStrings([
         ...readPlanStringArray(existing, ["warnings"]),
@@ -1335,6 +1382,41 @@ async function runMediaConditionedPlanningAfterImageApproval(
   return { observedFacts, segmentPlans };
 }
 
+function activateResolvedMicroShots(
+  items: unknown[],
+  mediaPlanBySegment: Map<number, VideoMediaConditionedSegmentPlan>,
+): unknown[] {
+  return items.map((item) => {
+    if (!isRecord(item)) return item;
+    const segmentNo = Number(
+      item.segmentNo
+      ?? item.segment_no
+      ?? item.shotNo
+      ?? item.shot_no,
+    );
+    const media = mediaPlanBySegment.get(segmentNo);
+    if (!media) return item;
+    const currentMicroShots = Array.isArray(item.microShots)
+      ? item.microShots
+      : Array.isArray(item.micro_shots)
+        ? item.micro_shots
+        : [];
+    const provisionalMicroShots = Array.isArray(item.provisionalMicroShots)
+      ? item.provisionalMicroShots
+      : Array.isArray(item.provisional_micro_shots)
+        ? item.provisional_micro_shots
+        : currentMicroShots;
+    return {
+      ...item,
+      provisionalMicroShots,
+      resolvedMicroShots: media.resolvedMicroShots,
+      microShots: media.resolvedMicroShots,
+      microShotRevisionId: media.microShotRevisionId,
+      microShotResolutionStatus: "resolved",
+    };
+  });
+}
+
 function requiredMapValue<K, V>(map: Map<K, V>, key: K, message: string): V {
   const value = map.get(key);
   if (value === undefined) throw new Error(message);
@@ -1362,6 +1444,27 @@ async function invalidateMediaPlanningForBoundary(
       .map((segment) => Number(segment.segmentNo ?? segment.segment_no))
       .filter((segmentNo) => Number.isInteger(segmentNo) && segmentNo > 0),
   );
+  const staleArtifactIds = [...adjacentSegmentNos].flatMap((segmentNo) => {
+    const segment = (Array.isArray(plan.segments) ? plan.segments : [])
+      .filter(isRecord)
+      .find((item) => Number(item.segmentNo ?? item.segment_no) === segmentNo);
+    const media = (Array.isArray(plan.mediaConditionedSegmentPlans)
+      ? plan.mediaConditionedSegmentPlans
+      : [])
+      .filter(isRecord)
+      .find((item) => Number(item.segmentNo ?? item.segment_no) === segmentNo);
+    const microShots = Array.isArray(media?.resolvedMicroShots)
+      ? readPlanMicroShots({ microShots: media.resolvedMicroShots })
+      : readPlanMicroShots(segment);
+    return [
+      ...microShots.map((item) =>
+        imageArtifactIdForMicroShot(segmentNo, item.microShotNo)
+      ),
+      videoArtifactIdForSegmentNo(segmentNo),
+      `segment:${segmentNo}:prompt`,
+      `segment:${segmentNo}:reference_selection`,
+    ];
+  });
   plan.observedBoundaryFacts = (Array.isArray(plan.observedBoundaryFacts)
     ? plan.observedBoundaryFacts
     : []).filter((item) => !isRecord(item) || Number(item.keyframeNo) !== keyframeNo);
@@ -1370,6 +1473,37 @@ async function invalidateMediaPlanningForBoundary(
     : []).filter((item) =>
       !isRecord(item) || !adjacentSegmentNos.has(Number(item.segmentNo))
     );
+  const restoreProvisionalMicroShots = (items: unknown[]): unknown[] => items.map((item) => {
+    if (!isRecord(item)) return item;
+    const segmentNo = Number(
+      item.segmentNo
+      ?? item.segment_no
+      ?? item.shotNo
+      ?? item.shot_no,
+    );
+    if (!adjacentSegmentNos.has(segmentNo)) return item;
+    const provisional = Array.isArray(item.provisionalMicroShots)
+      ? item.provisionalMicroShots
+      : Array.isArray(item.provisional_micro_shots)
+        ? item.provisional_micro_shots
+        : Array.isArray(item.microShots)
+          ? item.microShots
+          : [];
+    const next: Record<string, unknown> = {
+      ...item,
+      microShots: provisional,
+      microShotResolutionStatus: "stale",
+    };
+    delete next.resolvedMicroShots;
+    delete next.microShotRevisionId;
+    return next;
+  });
+  if (Array.isArray(plan.segments)) {
+    plan.segments = restoreProvisionalMicroShots(plan.segments);
+  }
+  if (Array.isArray(plan.shots)) {
+    plan.shots = restoreProvisionalMicroShots(plan.shots);
+  }
   plan.segmentRenderDescriptions = (Array.isArray(plan.segmentRenderDescriptions)
     ? plan.segmentRenderDescriptions
     : []).map((item) => {
@@ -1383,6 +1517,8 @@ async function invalidateMediaPlanningForBoundary(
         "motionContract",
         "singleTakeContract",
         "motionCheckpoints",
+        "resolvedMicroShots",
+        "microShotRevisionId",
         "videoPromptContract",
         "planningSource",
         "refinedAt",
@@ -1398,6 +1534,11 @@ async function invalidateMediaPlanningForBoundary(
     finalPromptCompilation: "deferred_to_generation",
     updatedAt: new Date().toISOString(),
   };
+  markPlanArtifactsDirty(
+    plan,
+    uniqueStrings(staleArtifactIds),
+    `Boundary KF${keyframeNo} changed; media-conditioned micro-shots and all downstream outputs are stale.`,
+  );
   await prisma.videoProject.update({
     where: { id: projectId },
     data: { planJson: cleanInputJson(plan) },
@@ -2498,11 +2639,10 @@ function deferredVideoQualityChecksForSegment(
   startKeyframe: Pick<VideoProjectWithShots["keyframes"][number], "keyframeNo" | "imageUrl">,
   endKeyframe: Pick<VideoProjectWithShots["keyframes"][number], "keyframeNo" | "imageUrl">,
 ): DeferredVideoQualityCheck[] {
-  const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
   const sources: Array<{ artifactId: string; mediaUrl?: string | null }> = [
     { artifactId: imageArtifactIdForKeyframeNo(startKeyframe.keyframeNo), mediaUrl: startKeyframe.imageUrl },
     { artifactId: imageArtifactIdForKeyframeNo(endKeyframe.keyframeNo), mediaUrl: endKeyframe.imageUrl },
-    ...readPlanMicroShots(planSegment).map((microShot) => ({
+    ...readEffectivePlanMicroShots(project.planJson, segment.segmentNo).map((microShot) => ({
       artifactId: imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo),
       mediaUrl: microShot.imageUrl,
     })),
@@ -2722,7 +2862,7 @@ function approvedMicroShotImageArtifactIds(project: VideoProjectWithShots): stri
       .map((candidate) => candidate.artifactId),
   );
   return project.segments.flatMap((segment) => {
-    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
     return microShots
       .filter((microShot) =>
         Boolean(microShot.imageUrl)
@@ -2761,6 +2901,8 @@ function buildSegmentVideoImageInputs(
     instruction: "This is the exact approved first frame. Start the video from this image.",
     allowedUse: ["initial composition", "initial pose", "initial camera", "initial scene and product state"],
     forbiddenUse: ["do not treat it as style-only evidence", "do not swap it with the last frame"],
+    entityName: "the approved opening composition",
+    actionRole: "boundary",
   }, {
     id: `segment:${segment.segmentNo}:last_frame`,
     role: "last_frame",
@@ -2770,6 +2912,8 @@ function buildSegmentVideoImageInputs(
     instruction: "This is the exact approved last frame. Reach it through one continuous physically plausible take.",
     allowedUse: ["terminal composition", "terminal pose", "terminal scene and product state"],
     forbiddenUse: ["do not reveal it at the start", "do not reach it by cut, dissolve, teleportation, or pasted freeze-frame"],
+    entityName: "the approved target ending state",
+    actionRole: "boundary",
   }];
 
   const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
@@ -2782,6 +2926,7 @@ function buildSegmentVideoImageInputs(
     if (requiredAnchors.size && anchorId && !requiredAnchors.has(anchorId)) continue;
     const category = readPlanShotString(reference, ["assetCategory", "asset_category"]);
     const kind = readPlanShotString(reference, ["kind"]);
+    const assetView = readPlanShotString(reference, ["assetView", "asset_view"]);
     const role = videoReferenceRole(category, kind);
     inputs.push({
       id: `segment:${segment.segmentNo}:asset:${keyframe.keyframeNo}`,
@@ -2792,10 +2937,17 @@ function buildSegmentVideoImageInputs(
       instruction: videoReferenceInstruction(role, anchorId),
       allowedUse: videoReferenceAllowedUse(role),
       forbiddenUse: ["do not copy pose, framing, background, or unrelated objects unless this image is explicitly a scene-layout reference"],
+      anchorId: anchorId || undefined,
+      entityName: videoReferenceEntityName(role, anchorId, reference),
+      actionRole: videoReferenceActionRole(role),
+      requiredForSegment: Boolean(anchorId && requiredAnchors.has(anchorId)),
+      relevanceScore:
+        (anchorId && requiredAnchors.has(anchorId) ? 500 : 0)
+        + videoReferenceViewScore(assetView),
     });
   }
 
-  for (const microShot of readPlanMicroShots(planSegment)) {
+  for (const microShot of readEffectivePlanMicroShots(project.planJson, segment.segmentNo)) {
     if (!microShot.imageUrl) continue;
     inputs.push({
       id: `segment:${segment.segmentNo}:checkpoint:${microShot.microShotNo}`,
@@ -2806,9 +2958,14 @@ function buildSegmentVideoImageInputs(
       instruction: `Use only as ordered motion checkpoint ${microShot.microShotNo} at approximately ${microShot.localTimeSeconds}s.`,
       allowedUse: ["intermediate pose", "intermediate object state", "motion order"],
       forbiddenUse: ["do not use as first or last frame", "do not insert it as a cutaway or frozen frame"],
+      entityName: `the intermediate action at approximately ${microShot.localTimeSeconds}s`,
+      actionRole: "checkpoint",
+      temporalPosition: segment.durationSeconds > 0
+        ? Math.max(0, Math.min(1, microShot.localTimeSeconds / segment.durationSeconds))
+        : undefined,
     });
   }
-  return uniqueVideoImageInputs(inputs).slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  return uniqueVideoImageInputs(inputs);
 }
 
 function videoReferenceRole(
@@ -2840,6 +2997,47 @@ function videoReferenceAllowedUse(role: VideoImageInput["role"]): string[] {
   if (role === "scene_layout") return ["spatial relationships", "camera axis", "stable background geometry"];
   if (role === "style_reference") return ["rendering style", "texture", "color treatment"];
   return ["attributes explicitly named in its instruction"];
+}
+
+function videoReferenceEntityName(
+  role: VideoImageInput["role"],
+  anchorId: string,
+  reference: Record<string, unknown> | undefined,
+): string {
+  const displayName = readPlanShotString(reference, [
+    "displayNameEn",
+    "display_name_en",
+    "purposeEn",
+    "purpose_en",
+    "displayName",
+    "display_name",
+  ]).replace(/\s+/g, " ").trim();
+  if (displayName) return /^(the|a|an)\s/i.test(displayName) ? displayName : `the ${displayName}`;
+  const normalizedAnchor = anchorId.trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (normalizedAnchor) return `the ${normalizedAnchor}`;
+  if (role === "character_identity") return "the main character";
+  if (role === "product_identity") return "the referenced product";
+  if (role === "scene_layout") return "the approved setting";
+  if (role === "style_reference") return "the approved visual style";
+  return "the referenced subject";
+}
+
+function videoReferenceActionRole(
+  role: VideoImageInput["role"],
+): NonNullable<VideoImageInput["actionRole"]> {
+  if (role === "character_identity") return "actor";
+  if (role === "product_identity") return "object";
+  if (role === "scene_layout") return "environment";
+  if (role === "style_reference") return "style";
+  return "object";
+}
+
+function videoReferenceViewScore(view: string): number {
+  if (view === "front" || view === "face_closeup" || view === "overview") return 100;
+  if (view === "three_quarter") return 80;
+  if (view === "side") return 50;
+  if (view === "back") return 20;
+  return 0;
 }
 
 function uniqueVideoImageInputs(inputs: VideoImageInput[]): VideoImageInput[] {
@@ -3115,6 +3313,15 @@ function readPlanMicroShots(shot: Record<string, unknown> | undefined): VideoMic
     const promptZh = readPlanShotString(item, ["promptZh", "prompt_zh"]);
     const promptEn = readPlanShotString(item, ["promptEn", "prompt_en"]);
     const prompt = readPlanShotString(item, ["prompt"]) || promptZh || promptEn || action || purpose;
+    const planningSourceValue = readPlanShotString(item, ["planningSource", "planning_source"]);
+    const planningSource = planningSourceValue === "provisional"
+      || planningSourceValue === "media_conditioned"
+      || planningSourceValue === "legacy_fallback"
+      ? planningSourceValue
+      : undefined;
+    const sourceIntentMicroShotNo = Number(
+      item.sourceIntentMicroShotNo ?? item.source_intent_micro_shot_no,
+    );
     if (!prompt && !purpose && !scene && !action && !imagePrompt && !imageUrl) return [];
     const referenceTypeValue = item.referenceType ?? item.reference_type;
     const referenceType = referenceTypeValue === "text" || referenceTypeValue === "image_prompt" || referenceTypeValue === "mixed"
@@ -3149,8 +3356,86 @@ function readPlanMicroShots(shot: Record<string, unknown> | undefined): VideoMic
       prompt,
       promptZh,
       promptEn,
+      planningSource,
+      sourceIntentMicroShotNo: Number.isInteger(sourceIntentMicroShotNo)
+        ? sourceIntentMicroShotNo
+        : undefined,
+      resolvedRevisionId: readPlanShotString(item, ["resolvedRevisionId", "resolved_revision_id"]),
+      resolvedAt: readPlanShotString(item, ["resolvedAt", "resolved_at"]),
+      startBoundaryImageUrl: readPlanShotString(item, ["startBoundaryImageUrl", "start_boundary_image_url"]),
+      endBoundaryImageUrl: readPlanShotString(item, ["endBoundaryImageUrl", "end_boundary_image_url"]),
     }];
   });
+}
+
+function readEffectivePlanMicroShots(
+  planJson: Prisma.JsonValue | null | undefined,
+  segmentNo: number,
+): VideoMicroShot[] {
+  const plan = isRecord(planJson) ? planJson : {};
+  const findSegmentRecord = (value: unknown): Record<string, unknown> | undefined =>
+    (Array.isArray(value) ? value : [])
+      .filter(isRecord)
+      .find((item) => Number(
+        item.segmentNo
+        ?? item.segment_no
+        ?? item.shotNo
+        ?? item.shot_no,
+      ) === segmentNo);
+  const media = findSegmentRecord(plan.mediaConditionedSegmentPlans);
+  const mediaResolved = media?.resolvedMicroShots ?? media?.resolved_micro_shots;
+  if (Array.isArray(mediaResolved)) {
+    return readPlanMicroShots({ microShots: mediaResolved });
+  }
+  // Historical media-conditioned projects only stored motionCheckpoints.
+  const legacyMediaCheckpoints = media?.motionCheckpoints ?? media?.motion_checkpoints;
+  if (Array.isArray(legacyMediaCheckpoints)) {
+    return readPlanMicroShots({ microShots: legacyMediaCheckpoints }).map((item) => ({
+      ...item,
+      planningSource: item.planningSource ?? "legacy_fallback",
+    }));
+  }
+  const renderDescription = findSegmentRecord(plan.segmentRenderDescriptions);
+  const renderResolved = renderDescription?.resolvedMicroShots
+    ?? renderDescription?.resolved_micro_shots;
+  if (Array.isArray(renderResolved)) {
+    return readPlanMicroShots({ microShots: renderResolved });
+  }
+  const segment = findSegmentRecord(plan.segments) ?? findSegmentRecord(plan.shots);
+  const segmentResolved = segment?.resolvedMicroShots ?? segment?.resolved_micro_shots;
+  if (Array.isArray(segmentResolved)) {
+    return readPlanMicroShots({ microShots: segmentResolved });
+  }
+  return readPlanMicroShots(segment).map((item) => ({
+    ...item,
+    planningSource: item.planningSource ?? "provisional",
+  }));
+}
+
+function hasResolvedMicroShotPlan(
+  planJson: Prisma.JsonValue | null | undefined,
+  segmentNo: number,
+): boolean {
+  const plan = isRecord(planJson) ? planJson : {};
+  const planningPhase = isRecord(plan.planningPhase) ? plan.planningPhase : undefined;
+  if (!planningPhase || planningPhase.boundaryPlanning !== "image_approved") {
+    return true;
+  }
+  const mediaItems: Record<string, unknown>[] = (Array.isArray(plan.mediaConditionedSegmentPlans)
+    ? plan.mediaConditionedSegmentPlans
+    : []).flatMap((item) => isRecord(item) ? [item] : []);
+  const media = mediaItems
+    .find((item) => Number(item.segmentNo ?? item.segment_no) === segmentNo);
+  return Boolean(
+    media
+    && (
+      Array.isArray(media.resolvedMicroShots)
+      || Array.isArray(media.resolved_micro_shots)
+      // Compatibility for projects approved before resolvedMicroShots existed.
+      || Array.isArray(media.motionCheckpoints)
+      || Array.isArray(media.motion_checkpoints)
+    )
+  );
 }
 
 export async function listVideoProjects(userId: string): Promise<VideoProjectWithShots[]> {
@@ -4058,7 +4343,7 @@ export async function resumeVideoProject(userId: string, projectId: string): Pro
     return regenerateShotImage(userId, projectId, dirtyKeyframe.id, { recovery: true });
   }
   for (const segment of project.segments) {
-    const microShots = readPlanMicroShots(readPlanSegmentMap(project.planJson).get(segment.segmentNo));
+    const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
     const dirtyMicroShot = microShots.find((item) => recoverable(imageArtifactIdForMicroShot(segment.segmentNo, item.microShotNo)) && item.imageStatus !== "running");
     if (dirtyMicroShot) {
       await logOnePromptVideo("project.resume.dirty_micro_shot", { userId, projectId, segmentNo: segment.segmentNo, microShotNo: dirtyMicroShot.microShotNo, retryFromStage: recoveryMetadata[imageArtifactIdForMicroShot(segment.segmentNo, dirtyMicroShot.microShotNo)]?.retryFromStage });
@@ -4896,7 +5181,7 @@ export async function updateVideoShot(
   const updatedFields: string[] = [];
   if (segment) {
     if (Array.isArray(input.microShots)) {
-      const previousMicroShots = readPlanMicroShots(readPlanSegmentMap(project.planJson).get(segment.segmentNo));
+      const previousMicroShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
       if (previousMicroShots.length !== input.microShots.length) {
         // Micro-shot numbers are normalized on save, so after an insertion or
         // deletion every historical candidate for this segment may point at a
@@ -5966,8 +6251,7 @@ export async function regenerateMicroShotImage(
   const project = await requireVideoProject(userId, projectId);
   const segment = project.segments.find((item) => item.id === shotId);
   if (!segment) throw new Error("Video segment not found");
-  const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
-  const microShots = readPlanMicroShots(planSegment);
+  const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
   const existing = microShots.find((item) => item.microShotNo === microShotNo);
   if (!existing && !input?.microShot) throw new Error("Micro-shot not found");
   const merged = normalizeMicroShotForSegment(
@@ -6101,12 +6385,14 @@ export async function regenerateShotClip(
     prompt: compiled.prompt,
     startFrameUrl: startKeyframe.imageUrl,
     endFrameUrl: endKeyframe.imageUrl,
-    imageInputs: buildSegmentVideoImageInputs(project, segment, startKeyframe, endKeyframe),
+    imageInputs: compiled.resolvedVideoImages?.transported
+      ?? buildSegmentVideoImageInputs(project, segment, startKeyframe, endKeyframe),
+    resolvedVideoImages: compiled.resolvedVideoImages,
     metadata: {
       isRegeneration: Boolean(segment.clipUrl),
       retryCycleId: randomUUID(),
       targetContract: renderDescription,
-      motionCheckpoints: readPlanMicroShots(readPlanSegmentMap(project.planJson).get(segment.segmentNo)),
+      motionCheckpoints: readEffectivePlanMicroShots(project.planJson, segment.segmentNo),
       selectedReferenceUrls: selectedReferenceUrlsForPromptTarget(project.planJson, `segment:${segment.segmentNo}`),
       referenceUsageNotes: [],
     },
@@ -6287,9 +6573,8 @@ async function submitRequiredMicroShotImageTasks(
   options: { retryFailed?: boolean } = {},
 ): Promise<void> {
   const project = await requireVideoProject(userId, projectId);
-  const planSegments = readPlanSegmentMap(project.planJson);
   for (const segment of project.segments) {
-    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
     for (const microShot of microShots) {
       if (!isMicroShotImageRequired(microShot)) continue;
       if (microShot.imageUrl || (microShot.imageStatus === "running" && microShot.imageTaskId)) continue;
@@ -6478,9 +6763,8 @@ function queueRequiredMicroShotImageTasks(
 }
 
 function hasSubmittableRequiredMicroShotImage(project: VideoProjectWithShots): boolean {
-  const planSegments = readPlanSegmentMap(project.planJson);
   return project.segments.some((segment) =>
-    readPlanMicroShots(planSegments.get(segment.segmentNo)).some((microShot) =>
+    readEffectivePlanMicroShots(project.planJson, segment.segmentNo).some((microShot) =>
       isMicroShotImageRequired(microShot)
       && Boolean(localizedMicroShotImagePromptForGeneration(microShot))
       && !microShot.imageUrl
@@ -6491,18 +6775,25 @@ function hasSubmittableRequiredMicroShotImage(project: VideoProjectWithShots): b
 }
 
 function requiredMicroShotImageIssues(project: VideoProjectWithShots): string[] {
-  const planSegments = readPlanSegmentMap(project.planJson);
-  const selectedArtifactIds = new Set(
+  const selectedCandidates = new Map(
     project.generationCandidates
       .filter((candidate) => candidate.kind === "micro_shot_image" && candidate.selected && Boolean(candidate.mediaUrl))
-      .map((candidate) => candidate.artifactId),
+      .map((candidate) => [candidate.artifactId, candidate]),
   );
   return project.segments.flatMap((segment) => {
-    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    if (!hasResolvedMicroShotPlan(project.planJson, segment.segmentNo)) {
+      return [`S${segment.segmentNo} media-conditioned micro-shot plan missing`];
+    }
+    const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
     return microShots.flatMap((microShot) => {
       if (!isMicroShotImageRequired(microShot)) return [];
       const label = `S${segment.segmentNo}.${microShot.microShotNo}`;
-      const hasSelectedCandidate = selectedArtifactIds.has(imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo));
+      const selected = selectedCandidates.get(
+        imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo),
+      );
+      const hasSelectedCandidate = Boolean(
+        selected && selectedCandidateMatchesMicroShotRevision(selected, microShot),
+      );
       if (!localizedMicroShotImagePromptForGeneration(microShot)) return [`${label} prompt missing`];
       if (microShot.imageStatus === "failed" && !hasSelectedCandidate) return [`${label} failed`];
       if (!microShot.imageUrl && !hasSelectedCandidate) return [`${label} image missing`];
@@ -6530,6 +6821,7 @@ export async function approveShotImages(userId: string, projectId: string): Prom
       + ". Regenerate an adjacent boundary image or return to timeline planning.",
     );
   }
+  const resolvedProject = await requireVideoProject(userId, projectId);
   await logOnePromptVideo("micro_shot.review.start", {
     userId,
     projectId,
@@ -6545,9 +6837,11 @@ export async function approveShotImages(userId: string, projectId: string): Prom
     stage: "micro_shots",
     event: "Micro-shot review started",
     summary: "Reviewing micro-shot image requirements before clip generation.",
-    lines: project.segments.flatMap((segment) => {
-      const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
-      const microShots = readPlanMicroShots(planSegment);
+    lines: resolvedProject.segments.flatMap((segment) => {
+      const microShots = readEffectivePlanMicroShots(
+        resolvedProject.planJson,
+        segment.segmentNo,
+      );
       return microShots.length
         ? microShots.map((microShot) => `Segment ${segment.segmentNo} / Micro ${microShot.microShotNo}: ${microShot.purposeZh || microShot.purpose}, reference=${microShot.referenceType || "text"}, prompt=${(localizedMicroShotImagePromptForGeneration(microShot) || "").slice(0, 240)}`)
         : [`Segment ${segment.segmentNo}: no micro-shot image references required`];
@@ -6556,7 +6850,7 @@ export async function approveShotImages(userId: string, projectId: string): Prom
       userId,
       keyframeCount: project.keyframes.length,
       segmentCount: project.segments.length,
-      requiredMicroShotIssues: requiredMicroShotImageIssues(project),
+      requiredMicroShotIssues: requiredMicroShotImageIssues(resolvedProject),
     },
   });
 
@@ -7261,6 +7555,76 @@ export async function syncVideoProject(userId: string, projectId: string): Promi
   return synced;
 }
 
+export async function pumpGlobalVideoProviderQueue(): Promise<{
+  projectCount: number;
+  syncedCount: number;
+  failedCount: number;
+}> {
+  const projects = await prisma.videoProject.findMany({
+    where: {
+      status: VideoProjectStatus.CLIP_GENERATING,
+      segments: {
+        some: {
+          clipUrl: null,
+          status: { in: [VideoShotStatus.CLIP_PENDING, VideoShotStatus.CLIP_RUNNING] },
+        },
+      },
+    },
+    include: {
+      segments: {
+        where: {
+          clipUrl: null,
+          status: { in: [VideoShotStatus.CLIP_PENDING, VideoShotStatus.CLIP_RUNNING] },
+        },
+        orderBy: { segmentNo: "asc" },
+      },
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 100,
+  });
+  const modelId = aliyunVideoImageInputCapabilities().modelId;
+  await Promise.all(
+    projects.flatMap((project) =>
+      project.segments
+        .filter((segment) => segment.status === VideoShotStatus.CLIP_PENDING)
+        .map((segment) => registerVideoProviderDemand(modelId, {
+          userId: project.userId,
+          projectId: project.id,
+          targetId: segment.id,
+        }))
+    ),
+  );
+
+  const projectsByUser = new Map<string, typeof projects>();
+  for (const project of projects) {
+    projectsByUser.set(project.userId, [...(projectsByUser.get(project.userId) ?? []), project]);
+  }
+  const fairOrder: typeof projects = [];
+  while ([...projectsByUser.values()].some((items) => items.length)) {
+    for (const items of projectsByUser.values()) {
+      const next = items.shift();
+      if (next) fairOrder.push(next);
+    }
+  }
+
+  let syncedCount = 0;
+  let failedCount = 0;
+  for (const project of fairOrder) {
+    try {
+      await syncVideoProject(project.userId, project.id);
+      syncedCount += 1;
+    } catch (error) {
+      failedCount += 1;
+      await logOnePromptVideo("video_provider_queue.project_sync.error", {
+        projectId: project.id,
+        userId: project.userId,
+        ...errorForLog(error),
+      }, "warn");
+    }
+  }
+  return { projectCount: projects.length, syncedCount, failedCount };
+}
+
 async function persistGeneratedImageUrl(params: {
   projectId: string;
   sourceUrl: string;
@@ -7356,9 +7720,8 @@ async function persistExistingTemporaryImageUrls(projectId: string): Promise<voi
     }
   }
 
-  const planSegments = readPlanSegmentMap(project.planJson);
   for (const segment of project.segments) {
-    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
     for (const microShot of microShots) {
       if (!isTemporaryDashScopeUrl(microShot.imageUrl)) continue;
       const persisted = await refreshAndPersistTemporaryImage({
@@ -7592,7 +7955,13 @@ export async function generateTransitionReference(userId: string, projectId: str
     "Preserve only scene layout, composition, lighting, fixed objects and subject positions. Do not invent or copy identity, logos, product text, captions, UI, watermarks, or accidental typography. Hard anchor images remain authoritative later.",
     "One continuous reachable camera move, no cut, dissolve, montage, teleportation, scene replacement, or identity morphing.",
   ].filter(Boolean).join("\n");
-  const taskId = await submitAliyunImageToVideoTask({ imageUrl: parentKeyframe.imageUrl, lastFrameUrl: parentKeyframe.imageUrl, prompt, durationSeconds: 3 });
+  const taskId = await submitAliyunImageToVideoTask({
+    imageUrl: parentKeyframe.imageUrl,
+    lastFrameUrl: parentKeyframe.imageUrl,
+    prompt,
+    durationSeconds: 3,
+    schedulingContext: { userId, projectId, targetId: artifact.id },
+  });
   await patchTransitionReferenceArtifact(projectId, artifact.id, { status: "video_running", parentKeyframeUrl: parentKeyframe.imageUrl, videoTaskId: taskId, videoUrl: undefined, frameCandidates: undefined, errorMessage: undefined, locked: false });
   await updateProjectArtifactStatus(projectId, [artifact.id], "generating", { retryFromStage: "generation" });
   return requireVideoProject(userId, projectId);
@@ -7684,10 +8053,17 @@ export async function generateGeneratedBridge(userId: string, projectId: string,
   let submitted = 0;
   for (let candidateNo = 1; candidateNo <= videoCandidateCount(); candidateNo += 1) {
     try {
-      const taskId = await submitAliyunImageToVideoTask({ imageUrl: startFrame.imageUrl, lastFrameUrl: endFrame.imageUrl, prompt, durationSeconds: Math.max(3, artifact.durationSeconds) });
+      const taskId = await submitAliyunImageToVideoTask({
+        imageUrl: startFrame.imageUrl,
+        lastFrameUrl: endFrame.imageUrl,
+        prompt,
+        durationSeconds: Math.max(3, artifact.durationSeconds),
+        schedulingContext: { userId, projectId, targetId: artifact.id },
+      });
       await prisma.videoGenerationCandidate.create({ data: { projectId, artifactId: artifact.id, targetId: artifact.id, kind: "generated_bridge", batchId, candidateNo, taskId, status: "running", prompt, negativePrompt: "cut, dissolve, montage, duplicate person, duplicate product, identity drift, wrong logo, random text, teleportation, melting, scene replacement", metadata: cleanInputJson({ attempt, durationSeconds: Math.max(3, artifact.durationSeconds), startFrameUrl: startFrame.imageUrl, endFrameUrl: endFrame.imageUrl, fromSegmentNo: artifact.fromSegmentNo, toSegmentNo: artifact.toSegmentNo, targetContract: { artifactType: "generated_bridge", entersFinalComposition: true } }) } });
       submitted += 1;
     } catch (error) {
+      if (isVideoProviderCapacityError(error)) throw error;
       await prisma.videoGenerationCandidate.create({ data: { projectId, artifactId: artifact.id, targetId: artifact.id, kind: "generated_bridge", batchId, candidateNo, status: "failed", prompt, errorMessage: error instanceof Error ? error.message : String(error), metadata: cleanInputJson({ attempt, fromSegmentNo: artifact.fromSegmentNo, toSegmentNo: artifact.toSegmentNo }) } });
     }
   }
@@ -8605,10 +8981,15 @@ async function updateGenerationTargetForTechnicalQualityRetry(
     return;
   }
   if (candidate.kind === "micro_shot_image") {
+    const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
     await updatePlanMicroShot(project.id, Number(metadata.segmentNo), Number(metadata.microShotNo), {
       imageStatus: "running",
       imageTaskId: candidate.taskId ?? `quality:${candidate.id}`,
       errorMessage: exhausted ? errorMessage : "",
+      resolvedRevisionId: readPlanShotString(targetContract, [
+        "resolvedRevisionId",
+        "resolved_revision_id",
+      ]) || undefined,
     });
     return;
   }
@@ -8638,8 +9019,9 @@ function generationTargetNeedsTechnicalRetryReset(
   }
   if (candidate.kind === "micro_shot_image") {
     const metadata = candidateMetadata(candidate.metadata);
-    const microShot = readPlanMicroShots(
-      readPlanSegmentMap(project.planJson).get(Number(metadata.segmentNo)),
+    const microShot = readEffectivePlanMicroShots(
+      project.planJson,
+      Number(metadata.segmentNo),
     ).find((item) => item.microShotNo === Number(metadata.microShotNo));
     return Boolean(microShot && (microShot.imageStatus === "failed" || microShot.errorMessage));
   }
@@ -8665,6 +9047,15 @@ async function applySelectedGenerationCandidate(
   }
   const acceptedReport = report ? { ...report, userAccepted: candidate.passed !== true && userAccepted, originalPassed: report.originalPassed ?? report.passed } : undefined;
   const metadata = candidateMetadata(candidate.metadata);
+  if (candidate.kind === "micro_shot_image") {
+    const activeMicroShot = readEffectivePlanMicroShots(
+      project.planJson,
+      Number(metadata.segmentNo),
+    ).find((item) => item.microShotNo === Number(metadata.microShotNo));
+    if (!activeMicroShot || !selectedCandidateMatchesMicroShotRevision(candidate, activeMicroShot)) {
+      throw new Error("This micro-shot candidate belongs to an obsolete boundary-planning revision.");
+    }
+  }
   const dependencyRevisionIds = activeDependencyRevisionIds(project, candidate.kind, candidate.targetId, metadata);
   let applied = false;
   await prisma.$transaction(async (tx) => {
@@ -8710,7 +9101,17 @@ async function applySelectedGenerationCandidate(
     if (segment) await invalidateGeneratedBridgesForSegment(project.id, segment.segmentNo, "Adjacent segment candidate changed; generated bridge approval must be renewed.");
   }
   if (candidate.kind === "micro_shot_image") {
-    await updatePlanMicroShot(project.id, Number(metadata.segmentNo), Number(metadata.microShotNo), { imageUrl: candidate.mediaUrl, imageTaskId: "", imageStatus: "ready", errorMessage: "" });
+    const targetContract = isRecord(metadata.targetContract) ? metadata.targetContract : {};
+    await updatePlanMicroShot(project.id, Number(metadata.segmentNo), Number(metadata.microShotNo), {
+      imageUrl: candidate.mediaUrl,
+      imageTaskId: "",
+      imageStatus: "ready",
+      errorMessage: "",
+      resolvedRevisionId: readPlanShotString(targetContract, [
+        "resolvedRevisionId",
+        "resolved_revision_id",
+      ]) || undefined,
+    });
   }
   if (acceptedReport) await saveGenerationQualityReport(project.id, acceptedReport);
   await markProjectArtifactsDirty(
@@ -8785,7 +9186,10 @@ export async function selectGenerationCandidate(userId: string, projectId: strin
     }
   } else {
     const metadata = candidateMetadata(candidate.metadata);
-    const micro = readPlanMicroShots(readPlanSegmentMap(project.planJson).get(Number(metadata.segmentNo))).find((item) => item.microShotNo === Number(metadata.microShotNo));
+    const micro = readEffectivePlanMicroShots(
+      project.planJson,
+      Number(metadata.segmentNo),
+    ).find((item) => item.microShotNo === Number(metadata.microShotNo));
     const revisionId = await appendVideoMediaRevision(projectId, { kind: "micro_shot_image", targetId: candidate.targetId, segmentNo: Number(metadata.segmentNo), microShotNo: Number(metadata.microShotNo), url: micro?.imageUrl });
     if (revisionId) parentRevisionIds.push(revisionId);
   }
@@ -9134,10 +9538,9 @@ async function syncImageTasks(project: VideoProjectWithShots): Promise<void> {
 }
 
 async function syncMicroShotImageTasks(project: VideoProjectWithShots): Promise<void> {
-  const planSegments = readPlanSegmentMap(project.planJson);
   const candidateArtifacts = new Set(project.generationCandidates.map((candidate) => candidate.artifactId));
   const running = project.segments.flatMap((segment) => {
-    const microShots = readPlanMicroShots(planSegments.get(segment.segmentNo));
+    const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
     return microShots
       .filter((microShot) => microShot.imageStatus === "running" && Boolean(microShot.imageTaskId) && !candidateArtifacts.has(imageArtifactIdForMicroShot(segment.segmentNo, microShot.microShotNo)))
       .map((microShot) => ({ segment, microShot }));
@@ -9995,10 +10398,12 @@ async function submitNextClipTask(params: {
         prompt: compiled.prompt,
         startFrameUrl: startKeyframe.imageUrl,
         endFrameUrl: endKeyframe.imageUrl,
-        imageInputs: buildSegmentVideoImageInputs(project, nextSegment, startKeyframe, endKeyframe),
+        imageInputs: compiled.resolvedVideoImages?.transported
+          ?? buildSegmentVideoImageInputs(project, nextSegment, startKeyframe, endKeyframe),
+        resolvedVideoImages: compiled.resolvedVideoImages,
         metadata: {
           targetContract: renderDescription,
-          motionCheckpoints: readPlanMicroShots(readPlanSegmentMap(project.planJson).get(nextSegment.segmentNo)),
+          motionCheckpoints: readEffectivePlanMicroShots(project.planJson, nextSegment.segmentNo),
           deferredVideoQualityChecks,
           selectedReferenceUrls: selectedReferenceUrlsForPromptTarget(project.planJson, `segment:${nextSegment.segmentNo}`),
           referenceUsageNotes: [],
@@ -10115,7 +10520,8 @@ function readLooseArray(source: Record<string, unknown>, keys: string[]): unknow
 }
 
 function isAliyunRateLimitError(error: unknown): boolean {
-  return error instanceof Error && /Throttling|RateQuota|rate limit|Requests rate limit exceeded/i.test(error.message);
+  return isVideoProviderCapacityError(error)
+    || (error instanceof Error && /Throttling|RateQuota|rate limit|Requests rate limit exceeded/i.test(error.message));
 }
 
 async function syncComposeTask(projectId: string, jobId: string): Promise<void> {
@@ -10446,6 +10852,11 @@ function compileVideoPromptForSegment(
   startKeyframe: VideoProjectWithShots["keyframes"][number],
   endKeyframe: VideoProjectWithShots["keyframes"][number],
 ): CompiledPrompt {
+  if (!hasResolvedMicroShotPlan(project.planJson, segment.segmentNo)) {
+    throw new Error(
+      `Segment ${segment.segmentNo} has no authoritative media-conditioned micro-shot plan.`,
+    );
+  }
   const planSegment = readPlanSegmentMap(project.planJson).get(segment.segmentNo);
   const renderDescription = readPlanSegmentRenderDescriptionMap(project.planJson).get(segment.segmentNo);
   const motionContract = readLooseRecord(renderDescription ?? {}, ["motionContract", "motion_contract"]);
@@ -10474,7 +10885,7 @@ function compileVideoPromptForSegment(
   );
   const checkpointRecords = readLooseArray(renderDescription ?? {}, ["motionCheckpoints", "motion_checkpoints"])
     .filter(hasMeaningfulMotionCheckpoint);
-  const microShots = readPlanMicroShots(planSegment);
+  const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
   const visibleAnchorIds = readPlanStringArray(renderDescription, ["visibleAnchorIds", "visible_anchor_ids"]);
   const segmentAnchorIds = visibleAnchorIds.length
     ? visibleAnchorIds
@@ -10550,29 +10961,69 @@ function compileVideoPromptForSegment(
   const imageToVideoHandoffRequirements = deferredVideoQualityChecks.map((check) =>
     `IMAGE-TO-VIDEO HANDOFF [${check.sourceIssueId}]: ${check.requiredVideoCheck}`
   );
+  const providerImageCapabilities = aliyunVideoImageInputCapabilities();
+  const resolvedVideoImages = resolveVideoImageInputs({
+    inputs: requestedVideoImageInputs,
+    capabilities: providerImageCapabilities,
+    endFrameRequirementLevel,
+  });
+  const compiledStartState = auditedVideoText(
+    compactJsonLine("contract", startFrameContract)
+    || startVisualBlueprint
+    || (startKeyframe.purpose + ". " + startKeyframe.scene),
+  );
+  const videoPromptContract = modelPromptContract ?? compatibilityPromptContract;
   const compiledVideoPrompt = compileHappyHorseVideoPrompt({
     durationSeconds: segment.durationSeconds,
     requirementLevel: endFrameRequirementLevel,
-    modelId: aliyunVideoImageInputCapabilities().modelId,
+    modelId: providerImageCapabilities.modelId,
     audioPlan: readPlanAudioPlan(planSegment),
-    startState: auditedVideoText(
-      compactJsonLine("contract", startFrameContract)
-      || startVisualBlueprint
-      || (startKeyframe.purpose + ". " + startKeyframe.scene),
-    ),
-    contract: modelPromptContract ?? compatibilityPromptContract,
+    startState: compiledStartState,
+    contract: videoPromptContract,
     retryCorrections: uniqueStrings([...retryCorrections, ...imageToVideoHandoffRequirements]),
-    firstFrameIsNativeInput:
-      aliyunVideoImageInputCapabilities().roleBindings.first_frame?.nativeBoundaryControl === true,
-    lastFrameIsNativeInput:
-      aliyunVideoImageInputCapabilities().roleBindings.last_frame?.nativeBoundaryControl === true,
+    firstFrameIsNativeInput: resolvedVideoImages.nativeFirstFrame,
+    lastFrameIsNativeInput: resolvedVideoImages.nativeLastFrame,
   });
-  const finalPrompt = compiledVideoPrompt.prompt;
+  const naturalReferencePromptEnabled =
+    process.env.ONE_PROMPT_VIDEO_NATURAL_REFERENCE_PROMPT?.trim().toLowerCase() !== "false";
+  const naturalReferencePromptCandidate = naturalReferencePromptEnabled
+    && providerImageCapabilities.promptReferenceMode === "ordered_subject_action"
+    && providerImageCapabilities.promptCanAddressInputOrder
+    ? compileOrderedSubjectActionPrompt({
+        contract: videoPromptContract,
+        resolvedImages: resolvedVideoImages,
+        startState: compiledStartState,
+      })
+    : "";
+  const naturalReferencePromptFits = !providerImageCapabilities.maxPromptCharacters
+    || !naturalReferencePromptCandidate
+    || naturalReferencePromptCandidate.length + compiledVideoPrompt.prompt.length + 2
+      <= providerImageCapabilities.maxPromptCharacters;
+  // The natural presentation layer is an enhancement. If the complete,
+  // validated system contract leaves insufficient room, keep the contract
+  // intact and fall back instead of truncating either layer.
+  const naturalReferencePrompt = naturalReferencePromptFits
+    ? naturalReferencePromptCandidate
+    : "";
+  const finalPrompt = [naturalReferencePrompt, compiledVideoPrompt.prompt]
+    .filter(Boolean)
+    .join("\n\n");
+  if (
+    providerImageCapabilities.maxPromptCharacters
+    && finalPrompt.length > providerImageCapabilities.maxPromptCharacters
+  ) {
+    throw new Error(
+      `Compiled video prompt is ${finalPrompt.length} characters, exceeding `
+      + `${providerImageCapabilities.modelId}'s declared limit of `
+      + `${providerImageCapabilities.maxPromptCharacters}. Hard system constraints were not truncated.`,
+    );
+  }
   const negativePrompt = compileVideoNegativePrompt(generationNegativePromptForSegment(project, segment));
   return {
     prompt: finalPrompt,
     negativePrompt,
-    referenceImageUrls: requestedVideoImageInputs.map((input) => input.url),
+    referenceImageUrls: resolvedVideoImages.transported.map((input) => input.url),
+    resolvedVideoImages,
     debugArtifact: {
       targetArtifactId: "segment:" + segment.segmentNo,
       targetType: "segment",
@@ -10593,24 +11044,33 @@ function compileVideoPromptForSegment(
             ? "post_keyframe_media_conditioned_planner"
             : "pre_image_provisional_planner"
           : "legacy_compatibility",
-        videoPromptContract: modelPromptContract ?? compatibilityPromptContract,
+        videoPromptContract,
         observedBoundaryFacts,
         mediaConditionedPlan,
         requestedVideoImageInputs,
+        transportedVideoImageInputs: resolvedVideoImages.transported,
+        evaluationOnlyVideoImageInputs: resolvedVideoImages.evaluationOnly,
+        rejectedVideoImageInputs: resolvedVideoImages.rejected,
+        internalVideoReferenceMap: resolvedVideoImages.internalReferenceMap,
+        videoReferenceCoverage: resolvedVideoImages.coverage,
+        naturalReferencePrompt,
+        naturalReferencePromptSkippedForBudget:
+          Boolean(naturalReferencePromptCandidate) && !naturalReferencePromptFits,
         deferredVideoQualityChecks,
-        providerImageCapabilities: aliyunVideoImageInputCapabilities(),
+        providerImageCapabilities,
       },
-      selectedReferenceUrls: requestedVideoImageInputs.map((input) => input.url),
-      referenceUsageNotes: requestedVideoImageInputs.map((input) =>
-        `${input.role}: ${input.instruction} Authority=${input.authority}.`
+      selectedReferenceUrls: resolvedVideoImages.transported.map((input) => input.url),
+      referenceUsageNotes: resolvedVideoImages.transported.map((input, index) =>
+        `[Image ${index + 1}] ${input.role}: ${input.instruction} Selection=${input.selectionReason ?? "selected"}.`
       ),
       beforePrompt,
       finalPrompt,
       finalNegativePrompt: negativePrompt,
       rules: [
-        aliyunVideoImageInputCapabilities().modelId.toLowerCase().includes("r2v")
-          ? "happyhorse_multi_reference_inputs"
-          : "happyhorse_first_frame_hard_input",
+        providerImageCapabilities.promptReferenceMode === "ordered_subject_action"
+          ? "ordered_subject_action_prompt"
+          : "plain_action_prompt",
+        "internal_reference_map_not_sent_by_default",
         "end_frame_mandatory_prompt_contract",
         "end_frame_visual_continuity_check",
         "no_segment_boundary_mode_terms",
@@ -11573,7 +12033,7 @@ function generationPromptForSegment(
   const outputMode = readPlanShotString(planSegment, ["outputMode", "output_mode"]);
   const constraints = readPlanStringArray(planSegment, ["constraints"]);
   const timedPrompts = readPlanTimedPrompts(planSegment);
-  const microShots = readPlanMicroShots(planSegment);
+  const microShots = readEffectivePlanMicroShots(project.planJson, segment.segmentNo);
   const audioPlan = readPlanAudioPlan(planSegment);
   const identityLock = characterIdentityLockForPrompt(project.planJson);
   const toneLock = colorToneLockForPrompt(project.planJson);
@@ -11894,6 +12354,20 @@ async function updatePlanMicroShot(
   const plan = cloneJsonRecord(project.planJson);
   updatePlanMicroShotCollection(plan, "segments", segmentNo, microShotNo, patch);
   updatePlanMicroShotCollection(plan, "shots", segmentNo, microShotNo, patch);
+  updateResolvedMicroShotCollection(
+    plan,
+    "mediaConditionedSegmentPlans",
+    segmentNo,
+    microShotNo,
+    patch,
+  );
+  updateResolvedMicroShotCollection(
+    plan,
+    "segmentRenderDescriptions",
+    segmentNo,
+    microShotNo,
+    patch,
+  );
   await prisma.videoProject.update({
     where: { id: projectId },
     data: { planJson: plan as Prisma.InputJsonValue },
@@ -11917,22 +12391,128 @@ function updatePlanMicroShotCollection(
     if (!isRecord(item)) continue;
     const n = Number(item.segmentNo ?? item.segment_no ?? item.shotNo ?? item.shot_no ?? item.sequence);
     if (n !== segmentNo) continue;
+    const updateItems = (value: unknown): unknown[] => {
+      const microShots = Array.isArray(value) ? value : [];
+      return microShots.map((microShot, index) => {
+        if (!isRecord(microShot)) return microShot;
+        const currentNo = Number(microShot.microShotNo ?? microShot.micro_shot_no ?? index + 1);
+        if (currentNo !== microShotNo) return microShot;
+        const patchRevision = patch.resolvedRevisionId;
+        const currentRevision = readPlanShotString(microShot, [
+          "resolvedRevisionId",
+          "resolved_revision_id",
+        ]);
+        if (patchRevision && patchRevision !== currentRevision) return microShot;
+        return {
+          ...microShot,
+          ...patch,
+          microShotNo,
+        };
+      });
+    };
     const rawMicroShots = item.microShots ?? item.micro_shots ?? item.internalStoryboard ?? item.internal_storyboard ?? item.subShots ?? item.sub_shots;
-    const microShots = Array.isArray(rawMicroShots) ? rawMicroShots : [];
-    const nextMicroShots = microShots.map((microShot, index) => {
-      if (!isRecord(microShot)) return microShot;
-      const currentNo = Number(microShot.microShotNo ?? microShot.micro_shot_no ?? index + 1);
-      if (currentNo !== microShotNo) return microShot;
-      return {
-        ...microShot,
-        ...patch,
-        microShotNo,
-      };
-    });
     // Candidate polling and quality evaluation may finish after the user has
     // deleted this micro-shot. Those asynchronous updates may enrich an
     // existing item, but must never recreate an item that the user removed.
-    item.microShots = nextMicroShots;
+    item.microShots = updateItems(rawMicroShots);
+    if (Array.isArray(item.resolvedMicroShots)) {
+      item.resolvedMicroShots = updateItems(item.resolvedMicroShots);
+    }
+  }
+}
+
+function updateResolvedMicroShotCollection(
+  plan: Record<string, unknown>,
+  collectionKey: "mediaConditionedSegmentPlans" | "segmentRenderDescriptions",
+  segmentNo: number,
+  microShotNo: number,
+  patch: Partial<VideoMicroShot>,
+): void {
+  const collection = plan[collectionKey];
+  if (!Array.isArray(collection)) return;
+  for (const item of collection) {
+    if (!isRecord(item) || Number(item.segmentNo ?? item.segment_no) !== segmentNo) continue;
+    const updateItems = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
+      .map((microShot, index) => {
+        if (!isRecord(microShot)) return microShot;
+        const currentNo = Number(microShot.microShotNo ?? microShot.micro_shot_no ?? index + 1);
+        const patchRevision = patch.resolvedRevisionId;
+        const currentRevision = readPlanShotString(microShot, [
+          "resolvedRevisionId",
+          "resolved_revision_id",
+        ]);
+        if (patchRevision && patchRevision !== currentRevision) return microShot;
+        return currentNo === microShotNo
+          ? { ...microShot, ...patch, microShotNo }
+          : microShot;
+      });
+    if (Array.isArray(item.resolvedMicroShots)) {
+      item.resolvedMicroShots = updateItems(item.resolvedMicroShots);
+    }
+    if (Array.isArray(item.motionCheckpoints)) {
+      item.motionCheckpoints = updateItems(item.motionCheckpoints);
+    }
+  }
+}
+
+function synchronizeUserEditedResolvedMicroShots(
+  plan: Record<string, unknown>,
+  segmentNo: number,
+): void {
+  const mediaPlans = Array.isArray(plan.mediaConditionedSegmentPlans)
+    ? plan.mediaConditionedSegmentPlans
+    : [];
+  const media = mediaPlans.find((item) =>
+    isRecord(item) && Number(item.segmentNo ?? item.segment_no) === segmentNo
+  );
+  if (!isRecord(media)) return;
+  const segment = (Array.isArray(plan.segments) ? plan.segments : [])
+    .find((item) => isRecord(item) && Number(item.segmentNo ?? item.segment_no) === segmentNo);
+  if (!isRecord(segment) || !Array.isArray(segment.microShots)) return;
+  const revisionId = `resolved-micro-shots-user:${randomUUID()}`;
+  const resolvedAt = new Date().toISOString();
+  const resolved = segment.microShots.map((item, index) => {
+    if (!isRecord(item)) return item;
+    return {
+      ...item,
+      microShotNo: index + 1,
+      planningSource: "media_conditioned",
+      resolvedRevisionId: revisionId,
+      resolvedAt,
+      imageUrl: "",
+      imageTaskId: "",
+      imageStatus: "idle",
+      errorMessage: "",
+    };
+  });
+  segment.microShots = resolved;
+  segment.resolvedMicroShots = resolved;
+  segment.microShotRevisionId = revisionId;
+  segment.microShotResolutionStatus = "resolved";
+  media.resolvedMicroShots = resolved;
+  media.motionCheckpoints = resolved;
+  media.microShotRevisionId = revisionId;
+  for (const collectionKey of ["shots", "segmentRenderDescriptions"] as const) {
+    const collection = Array.isArray(plan[collectionKey]) ? plan[collectionKey] : [];
+    for (const item of collection) {
+      if (!isRecord(item)) continue;
+      const n = Number(item.segmentNo ?? item.segment_no ?? item.shotNo ?? item.shot_no);
+      if (n !== segmentNo) continue;
+      item.resolvedMicroShots = resolved;
+      item.microShotRevisionId = revisionId;
+      if (collectionKey === "shots") {
+        if (
+          !Array.isArray(item.provisionalMicroShots)
+          && Array.isArray(segment.provisionalMicroShots)
+        ) {
+          item.provisionalMicroShots = segment.provisionalMicroShots;
+        }
+        item.microShots = resolved;
+        item.microShotResolutionStatus = "resolved";
+      } else {
+        item.motionCheckpoints = resolved;
+      }
+    }
   }
 }
 
@@ -12158,6 +12738,12 @@ async function syncPlanJsonFromShots(
       segments: nextSegments,
       shots: nextShots,
     };
+    if (updatedSegment && Array.isArray(localizedUpdate?.microShots)) {
+      synchronizeUserEditedResolvedMicroShots(
+        nextPlan as unknown as Record<string, unknown>,
+        updatedSegment.segmentNo,
+      );
+    }
     markPlanArtifactsDirtyForShotUpdate(nextPlan as unknown as Record<string, unknown>, project, localizedUpdate);
     await prisma.videoProject.update({
       where: { id: projectId },

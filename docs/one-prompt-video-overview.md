@@ -330,7 +330,7 @@ DONE           完成
 
 每个 Segment 使用**首帧图 + 尾帧图**调用图生视频模型（当前默认 `happyhorse-1.1-i2v` 类首尾帧接口），模型只负责两帧之间的运动，**不会**自动补写新剧情。
 
-**并发**：默认最多 2 路并行（`ONE_PROMPT_VIDEO_CLIP_CONCURRENCY`）。
+**并发**：单项目最多准备 5 路任务（`ONE_PROMPT_VIDEO_CLIP_CONCURRENCY`），实际提交还必须取得全局 HappyHorse 租约（`ONE_PROMPT_HAPPYHORSE_GLOBAL_CONCURRENCY=5`）。资源池按 Provider、Endpoint、模型和 API Key 指纹隔离，并通过 PostgreSQL 事务级 advisory lock 原子分配；先平衡用户占用数，再平衡同一用户的项目占用数，空闲容量可被有需求的用户立即借用。分镜重生成、全量转场参考和生成式桥接也走同一个入口，不能绕过共享额度。任务查询到终态时释放租约，定时清理任务会跨项目对运行租约进行兜底对账并推动等待队列。
 
 **同步**：前端或后台定期调用 `sync` 接口轮询上游任务状态；完成的片段 URL 写回数据库。
 

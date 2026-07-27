@@ -71,6 +71,7 @@ model User {
   apiLogs             ApiLog[]
   generationHistories GenerationHistory[]
   videoProjects       VideoProject[]
+  providerVideoLeases VideoProviderTaskLease[]
   videoPlanningRuns   VideoPlanningRunMetric[]
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -99,6 +100,7 @@ model VideoProject {
   keyframes                 VideoKeyframe[]
   segments                  VideoSegment[]
   generationCandidates      VideoGenerationCandidate[]
+  providerVideoLeases       VideoProviderTaskLease[]
   consistencyAnchorImages   VideoConsistencyAnchorImage[]
   anchorReferenceViews      VideoAnchorReferenceView[]
   referenceSelectionOutputs VideoReferenceSelectionOutput[]
@@ -114,6 +116,34 @@ model VideoProject {
 
   @@index([userId, createdAt])
   @@map("video_projects")
+}
+
+model VideoProviderTaskLease {
+  id                String   @id @default(cuid())
+  resourceKey       String   @map("resource_key")
+  userId            String   @map("user_id")
+  projectId         String   @map("project_id")
+  targetId          String   @map("target_id")
+  status            String   @default("waiting")
+  leaseToken        String?  @unique @map("lease_token")
+  upstreamTaskId    String?  @unique @map("upstream_task_id")
+  queuedAt          DateTime @default(now()) @map("queued_at")
+  lastRequestedAt   DateTime @default(now()) @map("last_requested_at")
+  leaseExpiresAt    DateTime? @map("lease_expires_at")
+  attempt           Int      @default(0)
+  lastError         String?  @map("last_error") @db.Text
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([resourceKey, targetId])
+  @@index([resourceKey, status, queuedAt])
+  @@index([resourceKey, userId, status])
+  @@index([projectId, status])
+  @@map("video_provider_task_leases")
 }
 
 model VideoPlanningRunMetric {

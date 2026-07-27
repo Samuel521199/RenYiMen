@@ -13,9 +13,19 @@ import {
 import {
   mapResolvedVideoImagesToTransport,
   resolveVideoImageInputs,
+  type ResolvedVideoImageInputs,
   type VideoImageInput,
   type VideoProviderInputCapabilities,
 } from "@/services/providers/video-input-contract";
+import {
+  attachUpstreamTaskToVideoProviderLease,
+  heartbeatVideoProviderLease,
+  releaseVideoProviderLeaseByTaskId,
+  requestVideoProviderLease,
+  returnVideoProviderLeaseToQueue,
+  VideoProviderCapacityError,
+  type VideoProviderSchedulingContext,
+} from "./video-provider-capacity";
 
 const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
@@ -839,6 +849,14 @@ export function aliyunVideoImageInputCapabilities(): VideoProviderInputCapabilit
     maxPromptCharacters: 5000,
     supportsSemanticEndFramePrompt: true,
     promptCanAddressInputOrder: true,
+    promptReferenceMode: mode === "multi_reference"
+      ? "ordered_subject_action"
+      : "plain_action",
+    preservesTransportOrder: true,
+    referenceSelectionMode:
+      process.env.ONE_PROMPT_VIDEO_SMART_REFERENCE_SELECTION?.trim().toLowerCase() === "false"
+        ? "legacy_priority"
+        : "smart_coverage",
     roleBindings: mode === "multi_reference" ? {
       first_frame: referenceBinding,
       last_frame: referenceBinding,
@@ -877,9 +895,11 @@ export async function submitAliyunImageToVideoTask(params: {
   imageUrl: string;
   lastFrameUrl: string;
   imageInputs?: VideoImageInput[];
+  resolvedImageInputs?: ResolvedVideoImageInputs;
   prompt: string;
   durationSeconds: number;
   endFrameRequirementLevel?: EndFrameRequirementLevel;
+  schedulingContext?: VideoProviderSchedulingContext;
 }): Promise<string> {
   const i2vModel = onePromptI2vModel();
   if (!params.lastFrameUrl?.trim()) {
@@ -889,14 +909,14 @@ export async function submitAliyunImageToVideoTask(params: {
   const imageInputCapabilities = aliyunVideoImageInputCapabilities();
   const endFrameRequirementLevel = params.endFrameRequirementLevel ?? "hard_semantic";
   assertEndFrameRequirementSupported(endFrameRequirementLevel, capabilities, i2vModel);
-  const resolvedImages = resolveVideoImageInputs({
+  const resolvedImages = params.resolvedImageInputs ?? resolveVideoImageInputs({
     inputs: params.imageInputs?.length
       ? params.imageInputs
       : defaultBoundaryVideoImageInputs(params.imageUrl, params.lastFrameUrl),
     capabilities: imageInputCapabilities,
     endFrameRequirementLevel,
   });
-  const prompt = [resolvedImages.promptRoleMap, params.prompt].filter(Boolean).join("\n\n");
+  const prompt = assembleVideoSubmissionPrompt(resolvedImages, params.prompt);
   if (
     imageInputCapabilities.maxPromptCharacters
     && prompt.length > imageInputCapabilities.maxPromptCharacters
@@ -964,7 +984,34 @@ export async function submitAliyunImageToVideoTask(params: {
     sendAudioParameter,
     audioControlMode: sendAudioParameter ? "request_parameter_and_prompt" : "prompt_only",
   });
-  return submitDashScopeAsync(VIDEO_PATH, body, "阿里云万相图生视频");
+  const grant = params.schedulingContext
+    ? await requestVideoProviderLease(i2vModel, params.schedulingContext)
+    : null;
+  if (params.schedulingContext && !grant) throw new VideoProviderCapacityError();
+  let submittedTaskId = "";
+  try {
+    submittedTaskId = await submitDashScopeAsync(VIDEO_PATH, body, "阿里云万相图生视频");
+    if (grant) await attachUpstreamTaskToVideoProviderLease(grant.leaseToken, submittedTaskId);
+    return submittedTaskId;
+  } catch (error) {
+    // Once DashScope returned a task ID, never reopen the slot merely because
+    // the follow-up DB attachment failed: that would permit a duplicate paid
+    // render while the first task is still running upstream.
+    if (grant && !submittedTaskId) await returnVideoProviderLeaseToQueue(grant.leaseToken, error);
+    throw error;
+  }
+}
+
+export function assembleVideoSubmissionPrompt(
+  resolvedImages: ResolvedVideoImageInputs,
+  modelFacingPrompt: string,
+  sendInternalReferenceMap =
+    process.env.ONE_PROMPT_VIDEO_SEND_REFERENCE_MAP?.trim().toLowerCase() === "true",
+): string {
+  return [
+    sendInternalReferenceMap ? resolvedImages.promptRoleMap : "",
+    modelFacingPrompt,
+  ].filter(Boolean).join("\n\n");
 }
 
 function defaultBoundaryVideoImageInputs(
@@ -1023,6 +1070,15 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
         resultUrl: result.status === "succeeded" ? result.resultUrl : undefined,
         errorMessage: result.status === "failed" ? result.errorMessage : undefined,
       }, result.status === "failed" ? "error" : "info");
+      await releaseVideoProviderLeaseByTaskId(
+        taskId,
+        result.status === "succeeded" ? "completed" : "failed",
+        result.status === "failed" ? result.errorMessage : undefined,
+      ).catch((error) => logOnePromptVideo(
+        "video_provider_capacity.release.error",
+        { taskId, ...errorForLog(error) },
+        "warn",
+      ));
       return result;
     }
     if (status === "FAILED" || status === "CANCELED" || status === "UNKNOWN") {
@@ -1035,6 +1091,9 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
         errorMessage: result.errorMessage,
         rawSummary: summarizeRaw(raw),
       }, "error");
+      await releaseVideoProviderLeaseByTaskId(taskId, "failed", result.errorMessage).catch((error) =>
+        logOnePromptVideo("video_provider_capacity.release.error", { taskId, ...errorForLog(error) }, "warn")
+      );
       return result;
     }
     const result = { status: status === "RUNNING" ? "running" as const : "pending" as const, raw };
@@ -1044,6 +1103,9 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
       upstreamStatus: status,
       status: result.status,
     });
+    await heartbeatVideoProviderLease(taskId).catch((error) =>
+      logOnePromptVideo("video_provider_capacity.heartbeat.error", { taskId, ...errorForLog(error) }, "warn")
+    );
     return result;
   } catch (error) {
     await logOnePromptVideo("dashscope.task.query.error", { taskId, ...errorForLog(error) }, "error");

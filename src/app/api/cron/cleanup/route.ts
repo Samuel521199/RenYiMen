@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { expireAllStalePending } from "@/lib/stale-pending-cleanup";
+import { queryDashScopeTask } from "@/services/video-orchestrator/aliyun-workflow";
+import { pumpGlobalVideoProviderQueue } from "@/services/video-orchestrator/project-service";
+import { runningVideoProviderLeaseTaskIds } from "@/services/video-orchestrator/video-provider-capacity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,8 +48,24 @@ export async function GET(req: NextRequest) {
   }
 
   const cleaned = await expireAllStalePending();
+  const activeVideoTaskIds = await runningVideoProviderLeaseTaskIds();
+  const reconciledVideoTasks = await Promise.allSettled(
+    activeVideoTaskIds.map((taskId) => queryDashScopeTask(taskId)),
+  );
+  const videoQueue = await pumpGlobalVideoProviderQueue();
 
-  console.info("[cron/cleanup] 定时清理完成", { cleaned, ts: new Date().toISOString() });
+  console.info("[cron/cleanup] 定时清理完成", {
+    cleaned,
+    reconciledVideoTaskCount: reconciledVideoTasks.length,
+    videoQueue,
+    ts: new Date().toISOString(),
+  });
 
-  return NextResponse.json({ ok: true, cleaned, ts: new Date().toISOString() });
+  return NextResponse.json({
+    ok: true,
+    cleaned,
+    reconciledVideoTaskCount: reconciledVideoTasks.length,
+    videoQueue,
+    ts: new Date().toISOString(),
+  });
 }

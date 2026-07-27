@@ -28,6 +28,20 @@ export interface VideoImageInput {
   allowedUse: string[];
   forbiddenUse: string[];
   sourceArtifactId?: string;
+  /** Model-facing, human-readable subject name such as "the heroine". */
+  entityName?: string;
+  /** Stable consistency entity identifier used by the deterministic selector. */
+  anchorId?: string;
+  /** The part this reference plays in the current segment action. */
+  actionRole?: "actor" | "object" | "environment" | "checkpoint" | "style" | "boundary";
+  /** Relative checkpoint position within the segment, from 0 to 1. */
+  temporalPosition?: number;
+  /** True when the current segment contract requires this reference entity. */
+  requiredForSegment?: boolean;
+  relevanceScore?: number;
+  qualityScore?: number;
+  /** Populated only after selection; retained for audit/debug metadata. */
+  selectionReason?: string;
 }
 
 export interface VideoImageRoleBinding {
@@ -50,6 +64,15 @@ export interface VideoProviderInputCapabilities {
   maxPromptCharacters?: number;
   supportsSemanticEndFramePrompt: boolean;
   promptCanAddressInputOrder: boolean;
+  /**
+   * Controls only the model-facing presentation. The internal role map remains
+   * available for validation and debugging regardless of this value.
+   */
+  promptReferenceMode?: "none" | "plain_action" | "ordered_subject_action";
+  /** Whether the adapter promises to preserve the selected image order. */
+  preservesTransportOrder?: boolean;
+  /** Allows a provider rollout to return to the former role-priority slice. */
+  referenceSelectionMode?: "smart_coverage" | "legacy_priority";
   roleBindings: Partial<Record<VideoImageRole, VideoImageRoleBinding>>;
 }
 
@@ -57,6 +80,21 @@ export interface ResolvedVideoImageInputs {
   transported: VideoImageInput[];
   evaluationOnly: VideoImageInput[];
   rejected: Array<VideoImageInput & { reason: string }>;
+  internalReferenceMap: Array<{
+    imageNumber: number;
+    role: VideoImageRole;
+    entityName?: string;
+    anchorId?: string;
+    actionRole?: VideoImageInput["actionRole"];
+    allowedUse: string[];
+    forbiddenUse: string[];
+    selectionReason: string;
+  }>;
+  coverage: {
+    requiredAnchorIds: string[];
+    coveredAnchorIds: string[];
+    uncoveredHardAnchorIds: string[];
+  };
   promptRoleMap: string;
   nativeFirstFrame: boolean;
   nativeLastFrame: boolean;
@@ -114,9 +152,18 @@ export function resolveVideoImageInputs(params: {
     });
   }
 
-  const transported = candidates.slice(0, params.capabilities.maxImages);
-  for (const overflow of candidates.slice(params.capabilities.maxImages)) {
-    rejected.push({ ...overflow, reason: `Provider accepts at most ${params.capabilities.maxImages} image(s).` });
+  const transported = params.capabilities.referenceSelectionMode === "legacy_priority"
+    ? candidates.slice(0, params.capabilities.maxImages).map((input) => ({
+        ...input,
+        selectionReason: "legacy role-priority selection",
+      }))
+    : selectTransportedVideoInputs(candidates, params.capabilities.maxImages);
+  const transportedIds = new Set(transported.map((input) => input.id));
+  for (const overflow of candidates.filter((input) => !transportedIds.has(input.id))) {
+    rejected.push({
+      ...overflow,
+      reason: `Not selected by the ${params.capabilities.maxImages}-image coverage and diversity policy.`,
+    });
   }
   const firstBinding = params.capabilities.roleBindings.first_frame;
   const lastBinding = params.capabilities.roleBindings.last_frame;
@@ -145,6 +192,22 @@ export function resolveVideoImageInputs(params: {
       `${params.capabilities.modelId} supports neither native last-frame input nor a reviewed semantic end-frame target.`,
     );
   }
+  const requiredAnchorIds = uniqueStrings(
+    normalized
+      .filter((input) => input.requiredForSegment && input.anchorId)
+      .map((input) => input.anchorId as string),
+  );
+  const coveredAnchorIds = uniqueStrings(
+    transported.flatMap((input) => input.anchorId ? [input.anchorId] : []),
+  );
+  const coveredAnchorSet = new Set(coveredAnchorIds);
+  const uncoveredHardAnchorIds = requiredAnchorIds.filter((anchorId) => !coveredAnchorSet.has(anchorId));
+  if (uncoveredHardAnchorIds.length) {
+    throw new Error(
+      `${params.capabilities.modelId} cannot cover required video reference anchor(s) within its `
+      + `${params.capabilities.maxImages}-image limit: ${uncoveredHardAnchorIds.join(", ")}.`,
+    );
+  }
   return {
     transported,
     evaluationOnly: uniqueInputs([
@@ -155,10 +218,135 @@ export function resolveVideoImageInputs(params: {
       ).map((input) => ({ ...input, authority: "evaluation_only" as const })),
     ]),
     rejected,
+    internalReferenceMap: transported.map((input, index) => ({
+      imageNumber: index + 1,
+      role: input.role,
+      entityName: input.entityName,
+      anchorId: input.anchorId,
+      actionRole: input.actionRole,
+      allowedUse: input.allowedUse,
+      forbiddenUse: input.forbiddenUse,
+      selectionReason: input.selectionReason ?? defaultSelectionReason(input),
+    })),
+    coverage: {
+      requiredAnchorIds,
+      coveredAnchorIds,
+      uncoveredHardAnchorIds,
+    },
     promptRoleMap: buildVideoImageInputMapPrompt(transported, params.capabilities),
     nativeFirstFrame,
     nativeLastFrame,
   };
+}
+
+/**
+ * Deterministic, metadata-only selection. It never calls an LLM/VLM, downloads
+ * images, or performs network I/O. Boundaries and required active entities are
+ * selected first, then temporally diverse motion checkpoints, then the highest
+ * marginal-value remaining references.
+ */
+function selectTransportedVideoInputs(
+  candidates: VideoImageInput[],
+  maxImages: number,
+): VideoImageInput[] {
+  const selected = new Map<string, VideoImageInput>();
+  const selectedAnchorIds = new Set<string>();
+  const add = (input: VideoImageInput | undefined, reason: string): void => {
+    if (!input || selected.size >= maxImages || selected.has(input.id)) return;
+    selected.set(input.id, { ...input, selectionReason: reason });
+    if (input.anchorId) selectedAnchorIds.add(input.anchorId);
+  };
+
+  add(bestCandidate(candidates.filter((input) => input.role === "first_frame")), "approved opening boundary");
+  add(bestCandidate(candidates.filter((input) => input.role === "last_frame")), "approved target ending state");
+
+  const requiredByAnchor = new Map<string, VideoImageInput[]>();
+  for (const input of candidates) {
+    if (!input.requiredForSegment || !input.anchorId) continue;
+    const existing = requiredByAnchor.get(input.anchorId) ?? [];
+    existing.push(input);
+    requiredByAnchor.set(input.anchorId, existing);
+  }
+  for (const anchorCandidates of requiredByAnchor.values()) {
+    add(bestCandidate(anchorCandidates), "required active segment entity");
+  }
+
+  const checkpoints = candidates
+    .filter((input) => input.role === "motion_checkpoint" && !selected.has(input.id))
+    .sort((a, b) => normalizedTemporalPosition(a) - normalizedTemporalPosition(b));
+  const checkpointTarget = Math.min(2, checkpoints.length, Math.max(0, maxImages - selected.size));
+  if (checkpointTarget === 1) {
+    add(
+      [...checkpoints].sort((a, b) =>
+        Math.abs(normalizedTemporalPosition(a) - 0.5)
+        - Math.abs(normalizedTemporalPosition(b) - 0.5)
+      )[0],
+      "representative motion checkpoint",
+    );
+  } else if (checkpointTarget === 2) {
+    add(checkpoints[0], "early motion checkpoint");
+    add(checkpoints.at(-1), "late motion checkpoint");
+  }
+
+  const remaining = candidates
+    .filter((input) =>
+      !selected.has(input.id)
+      && input.role !== "motion_checkpoint"
+    )
+    .sort((a, b) => candidateScore(b) - candidateScore(a) || originalRolePriority(a) - originalRolePriority(b));
+  for (const input of remaining) {
+    // One strong identity/layout reference per consistency anchor is the safe
+    // default. Boundary frames and motion checkpoints already carry pose/state
+    // information, so extra views of the same anchor often add ambiguity.
+    if (input.anchorId && selectedAnchorIds.has(input.anchorId)) continue;
+    add(input, "highest remaining relevance and coverage");
+  }
+
+  return orderSelectedInputs([...selected.values()]);
+}
+
+function orderSelectedInputs(inputs: VideoImageInput[]): VideoImageInput[] {
+  return [...inputs].sort((a, b) =>
+    originalRolePriority(a) - originalRolePriority(b)
+    || normalizedTemporalPosition(a) - normalizedTemporalPosition(b)
+    || a.id.localeCompare(b.id)
+  );
+}
+
+function bestCandidate(inputs: VideoImageInput[]): VideoImageInput | undefined {
+  return [...inputs].sort((a, b) =>
+    candidateScore(b) - candidateScore(a)
+    || a.id.localeCompare(b.id)
+  )[0];
+}
+
+function candidateScore(input: VideoImageInput): number {
+  const boundary = input.role === "first_frame" || input.role === "last_frame" ? 10_000 : 0;
+  const required = input.requiredForSegment ? 2_000 : 0;
+  const active = input.actionRole === "actor" || input.actionRole === "object" ? 1_000 : 0;
+  const environment = input.actionRole === "environment" ? 300 : 0;
+  return boundary + required + active + environment
+    + (input.relevanceScore ?? 0)
+    + (input.qualityScore ?? 0);
+}
+
+function originalRolePriority(input: VideoImageInput): number {
+  return ROLE_PRIORITY[input.role];
+}
+
+function normalizedTemporalPosition(input: VideoImageInput): number {
+  const value = input.temporalPosition;
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : 0.5;
+}
+
+function defaultSelectionReason(input: VideoImageInput): string {
+  if (input.role === "first_frame") return "approved opening boundary";
+  if (input.role === "last_frame") return "approved target ending state";
+  if (input.requiredForSegment) return "required active segment entity";
+  if (input.role === "motion_checkpoint") return "ordered motion checkpoint";
+  return "within provider image budget";
 }
 
 export function buildVideoImageInputMapPrompt(
@@ -221,6 +409,10 @@ function uniqueInputs(inputs: VideoImageInput[]): VideoImageInput[] {
     seen.add(fingerprint);
     return true;
   });
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 function validateCapabilities(capabilities: VideoProviderInputCapabilities): void {

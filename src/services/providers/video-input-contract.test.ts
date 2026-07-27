@@ -6,7 +6,10 @@ import {
   type VideoImageInput,
   type VideoProviderInputCapabilities,
 } from "./video-input-contract.ts";
-import { aliyunVideoImageInputCapabilities } from "../video-orchestrator/aliyun-workflow.ts";
+import {
+  aliyunVideoImageInputCapabilities,
+  assembleVideoSubmissionPrompt,
+} from "../video-orchestrator/aliyun-workflow.ts";
 
 const inputs: VideoImageInput[] = [{
   id: "start",
@@ -200,6 +203,123 @@ test("built-in HappyHorse R2V transports start, end, and identity images as orde
     restoreEnv("ALIYUN_I2V_MODEL", previous.model);
     restoreEnv("ALIYUN_I2V_INPUT_MODE", previous.mode);
   }
+});
+
+test("smart selection preserves required active entities and a motion checkpoint before optional references", () => {
+  const referenceBinding = {
+    transportRole: "reference_image",
+    nativeBoundaryControl: false,
+  };
+  const capabilities: VideoProviderInputCapabilities = {
+    providerId: "test",
+    modelId: "ordered-r2v",
+    transportSchema: "dashscope_media",
+    maxImages: 5,
+    supportsSemanticEndFramePrompt: true,
+    promptCanAddressInputOrder: true,
+    promptReferenceMode: "ordered_subject_action",
+    preservesTransportOrder: true,
+    roleBindings: {
+      first_frame: referenceBinding,
+      last_frame: referenceBinding,
+      character_identity: referenceBinding,
+      product_identity: referenceBinding,
+      motion_checkpoint: referenceBinding,
+      custom_reference: referenceBinding,
+    },
+  };
+  const candidates: VideoImageInput[] = [
+    inputs[0],
+    inputs[1],
+    {
+      ...inputs[2],
+      anchorId: "heroine",
+      actionRole: "actor",
+      requiredForSegment: true,
+    },
+    {
+      id: "phone",
+      role: "product_identity",
+      url: "https://example.com/phone.png",
+      authority: "reference_only",
+      instruction: "Preserve the phone.",
+      allowedUse: ["black frame"],
+      forbiddenUse: [],
+      anchorId: "phone",
+      actionRole: "object",
+      requiredForSegment: true,
+    },
+    ...[0.2, 0.5, 0.8].map((temporalPosition, index) => ({
+      id: `checkpoint-${index + 1}`,
+      role: "motion_checkpoint" as const,
+      url: `https://example.com/checkpoint-${index + 1}.png`,
+      authority: "reference_only" as const,
+      instruction: "Ordered checkpoint.",
+      allowedUse: ["intermediate pose"],
+      forbiddenUse: [],
+      actionRole: "checkpoint" as const,
+      temporalPosition,
+    })),
+    ...Array.from({ length: 4 }, (_, index) => ({
+      id: `optional-${index + 1}`,
+      role: "custom_reference" as const,
+      url: `https://example.com/optional-${index + 1}.png`,
+      authority: "reference_only" as const,
+      instruction: "Optional reference.",
+      allowedUse: ["optional detail"],
+      forbiddenUse: [],
+    })),
+  ];
+
+  const resolved = resolveVideoImageInputs({
+    inputs: candidates,
+    capabilities,
+    endFrameRequirementLevel: "hard_semantic",
+  });
+
+  assert.deepEqual(
+    resolved.transported.map((input) => input.role),
+    ["first_frame", "last_frame", "character_identity", "product_identity", "motion_checkpoint"],
+  );
+  assert.deepEqual(resolved.coverage.uncoveredHardAnchorIds, []);
+  assert.deepEqual(
+    resolved.internalReferenceMap.map((item) => item.imageNumber),
+    [1, 2, 3, 4, 5],
+  );
+  assert.ok(resolved.rejected.some((input) => input.role === "custom_reference"));
+});
+
+test("internal reference maps stay out of the model-facing prompt unless an experiment enables them", () => {
+  const capabilities: VideoProviderInputCapabilities = {
+    providerId: "test",
+    modelId: "ordered-r2v",
+    transportSchema: "dashscope_media",
+    maxImages: 3,
+    supportsSemanticEndFramePrompt: true,
+    promptCanAddressInputOrder: true,
+    promptReferenceMode: "ordered_subject_action",
+    preservesTransportOrder: true,
+    roleBindings: {
+      first_frame: { transportRole: "reference_image", nativeBoundaryControl: false },
+      last_frame: { transportRole: "reference_image", nativeBoundaryControl: false },
+      character_identity: { transportRole: "reference_image", nativeBoundaryControl: false },
+    },
+  };
+  const resolved = resolveVideoImageInputs({
+    inputs,
+    capabilities,
+    endFrameRequirementLevel: "hard_semantic",
+  });
+  const modelFacingPrompt = "MAIN ACTION\n\nThe character from [Image 3] moves continuously.";
+
+  assert.equal(
+    assembleVideoSubmissionPrompt(resolved, modelFacingPrompt, false),
+    modelFacingPrompt,
+  );
+  assert.match(
+    assembleVideoSubmissionPrompt(resolved, modelFacingPrompt, true),
+    /VIDEO IMAGE INPUT MAP/,
+  );
 });
 
 function restoreEnv(name: string, value: string | undefined): void {

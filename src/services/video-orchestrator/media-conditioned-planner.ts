@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   callStructuredVisionModel,
   structuredVisionAvailable,
@@ -31,6 +32,8 @@ const MOTION_PLANNER_SYSTEM_PROMPT = [
   "Never add a cut, dissolve, teleport, scene replacement, hidden montage, new story event, or new asset.",
   "If the transition cannot be reached in the fixed duration as one continuous take, set physically_reachable=false and explain in warnings; do not disguise it.",
   "Return strict JSON only. The response must include start_frame_contract, end_frame_contract, motion_contract, single_take_contract with physically_reachable boolean, motion_checkpoints, and video_prompt_contract version video-prompt-contract-v1.",
+  "Each motion_checkpoints item must describe a real intermediate state using local_time_seconds, purpose, scene, action, camera, visible_anchor_ids, reference_type (text, image_prompt, or mixed), and image_prompt when a reference image is required.",
+  "Treat the provisional micro shots as story intent only. Reconcile every checkpoint with the pixels in both approved boundary images and keep each state physically reachable from its neighbors.",
   "video_prompt_contract must contain 1-3 terminal_requirements with at least one hard item, 1-3 motion_steps, at most 5 preserve_requirements, at most 5 forbidden_outcomes, narrative_boundary, and shot_intent.",
 ].join("\n");
 
@@ -148,6 +151,21 @@ function normalizeMediaPlan(
   if (!physicallyReachable && !warnings.length) {
     warnings.push("The approved boundary images are not physically reachable as one continuous take.");
   }
+  const resolvedMicroShots = materializeResolvedMicroShots({
+    checkpoints: normalizeCheckpoints(
+      source.motion_checkpoints ?? source.motionCheckpoints,
+      params.segment,
+    ),
+    segment: params.segment,
+    startFacts: params.startFacts,
+    endFacts: params.endFacts,
+    startImageUrl: params.startImageUrl,
+    endImageUrl: params.endImageUrl,
+    refinedAt,
+    planningSource: "media_conditioned",
+  });
+  const microShotRevisionId = resolvedMicroShots[0]?.resolvedRevisionId
+    ?? buildResolvedRevisionId(params, resolvedMicroShots);
   return {
     version: "media-conditioned-segment-v1",
     segmentNo: params.segment.segmentNo,
@@ -159,10 +177,9 @@ function normalizeMediaPlan(
     endFrameContract: record(source.end_frame_contract ?? source.endFrameContract),
     motionContract: record(source.motion_contract ?? source.motionContract),
     singleTakeContract: { ...singleTake, physicallyReachable },
-    motionCheckpoints: normalizeCheckpoints(
-      source.motion_checkpoints ?? source.motionCheckpoints,
-      params.segment,
-    ),
+    motionCheckpoints: resolvedMicroShots,
+    resolvedMicroShots,
+    microShotRevisionId,
     videoPromptContract: promptContract,
     planningStatus: "media_conditioned",
     warnings,
@@ -212,6 +229,21 @@ function fallbackPlan(
     shotIntent: params.segment.purpose,
   };
   const provisionalSingleTake = provisional.singleTakeContract ?? {};
+  const fallbackCheckpoints = params.provisional?.motionCheckpoints?.length
+    ? params.provisional.motionCheckpoints
+    : params.segment.microShots ?? [];
+  const resolvedMicroShots = materializeResolvedMicroShots({
+    checkpoints: fallbackCheckpoints,
+    segment: params.segment,
+    startFacts: params.startFacts,
+    endFacts: params.endFacts,
+    startImageUrl: params.startImageUrl,
+    endImageUrl: params.endImageUrl,
+    refinedAt,
+    planningSource: "legacy_fallback",
+  });
+  const microShotRevisionId = resolvedMicroShots[0]?.resolvedRevisionId
+    ?? buildResolvedRevisionId(params, resolvedMicroShots);
   return {
     version: "media-conditioned-segment-v1",
     segmentNo: params.segment.segmentNo,
@@ -239,7 +271,9 @@ function fallbackPlan(
         true,
       ),
     },
-    motionCheckpoints: params.provisional?.motionCheckpoints ?? [],
+    motionCheckpoints: resolvedMicroShots,
+    resolvedMicroShots,
+    microShotRevisionId,
     videoPromptContract,
     planningStatus: "fallback",
     warnings: [warning],
@@ -272,7 +306,7 @@ function fallbackObservation(
 
 function normalizeCheckpoints(value: unknown, segment: VideoPlanSegment): VideoMicroShot[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((item, index) => {
+  const checkpoints = value.flatMap((item, index) => {
     const source = record(item);
     const localTimeSeconds = numberValue(
       source.localTimeSeconds ?? source.local_time_seconds ?? source.timeSeconds ?? source.time_seconds,
@@ -286,9 +320,210 @@ function normalizeCheckpoints(value: unknown, segment: VideoPlanSegment): VideoM
       purpose,
       scene: stringValue(source.scene, ""),
       action: stringValue(source.action ?? source.motion, purpose),
+      camera: stringValue(source.camera, ""),
+      referenceType: referenceTypeValue(source.reference_type ?? source.referenceType),
+      imagePrompt: stringValue(source.image_prompt ?? source.imagePrompt, ""),
+      usesConsistencyAnchors: stringArray(
+        source.visible_anchor_ids
+          ?? source.visibleAnchorIds
+          ?? source.uses_consistency_anchors
+          ?? source.usesConsistencyAnchors,
+      ),
       prompt: stringValue(source.prompt, purpose),
     }];
+  }).sort((left, right) => left.localTimeSeconds - right.localTimeSeconds);
+  for (let index = 0; index < checkpoints.length; index += 1) {
+    const checkpoint = checkpoints[index];
+    if (
+      checkpoint.localTimeSeconds <= 0
+      || checkpoint.localTimeSeconds >= segment.durationSeconds
+      || (index > 0 && checkpoint.localTimeSeconds <= checkpoints[index - 1].localTimeSeconds)
+    ) {
+      throw new Error(
+        `Invalid motion checkpoint timing at segment ${segment.segmentNo}, checkpoint ${index + 1}.`,
+      );
+    }
+  }
+  return checkpoints;
+}
+
+export function materializeResolvedMicroShots(params: {
+  checkpoints: VideoMicroShot[];
+  segment: VideoPlanSegment;
+  startFacts: VideoObservedBoundaryFacts;
+  endFacts: VideoObservedBoundaryFacts;
+  startImageUrl: string;
+  endImageUrl: string;
+  refinedAt: string;
+  planningSource: "media_conditioned" | "legacy_fallback";
+}): VideoMicroShot[] {
+  const intents = params.segment.microShots ?? [];
+  const checkpoints = params.checkpoints.length ? params.checkpoints : intents;
+  const usedIntentIndexes = new Set<number>();
+  const usedMicroShotNos = new Set<number>();
+  const ordered = checkpoints
+    .map((checkpoint) => ({ ...checkpoint }))
+    .sort((left, right) => left.localTimeSeconds - right.localTimeSeconds);
+  const orderedTimesAreValid = ordered.every((checkpoint, index) =>
+    checkpoint.localTimeSeconds > 0
+    && checkpoint.localTimeSeconds < params.segment.durationSeconds
+    && (index === 0 || checkpoint.localTimeSeconds > ordered[index - 1].localTimeSeconds)
+  );
+  const draft = ordered.map((checkpoint, index) => {
+    const intentIndex = nearestUnusedIntentIndex(
+      checkpoint.localTimeSeconds,
+      intents,
+      usedIntentIndexes,
+    );
+    if (intentIndex >= 0) usedIntentIndexes.add(intentIndex);
+    const intent = intentIndex >= 0 ? intents[intentIndex] : undefined;
+    const fallbackTime = ((index + 1) * params.segment.durationSeconds) / (ordered.length + 1);
+    const localTimeSeconds = clampIntermediateTime(
+      orderedTimesAreValid ? checkpoint.localTimeSeconds : fallbackTime,
+      params.segment.durationSeconds,
+      fallbackTime,
+    );
+    const preferredMicroShotNo = intent?.microShotNo;
+    let microShotNo = Number.isInteger(preferredMicroShotNo) && Number(preferredMicroShotNo) > 0
+      ? Number(preferredMicroShotNo)
+      : index + 1;
+    while (usedMicroShotNos.has(microShotNo)) microShotNo += 1;
+    usedMicroShotNos.add(microShotNo);
+    const referenceType = checkpoint.referenceType ?? intent?.referenceType ?? "text";
+    const anchors = checkpoint.usesConsistencyAnchors?.length
+      ? checkpoint.usesConsistencyAnchors
+      : intent?.usesConsistencyAnchors
+        ?? params.segment.effectiveRequiredAnchorIds
+        ?? params.segment.usesConsistencyAnchors
+        ?? [];
+    const scene = checkpoint.scene || intent?.scene || params.startFacts.scene;
+    const action = checkpoint.action || intent?.action || checkpoint.purpose;
+    const camera = checkpoint.camera || intent?.camera || params.startFacts.cameraView;
+    const imagePrompt = referenceType === "text"
+      ? undefined
+      : checkpoint.imagePrompt?.trim()
+        || buildResolvedImagePrompt({
+          segment: params.segment,
+          localTimeSeconds,
+          scene,
+          action,
+          camera,
+          anchors,
+          startFacts: params.startFacts,
+          endFacts: params.endFacts,
+        });
+    return {
+      ...checkpoint,
+      microShotNo,
+      localTimeSeconds,
+      absoluteTimeSeconds: params.segment.startTimeSeconds + localTimeSeconds,
+      purpose: checkpoint.purpose || intent?.purpose || `Motion checkpoint ${index + 1}`,
+      scene,
+      action,
+      camera: camera || undefined,
+      referenceType,
+      imagePrompt,
+      usesConsistencyAnchors: anchors,
+      prompt: checkpoint.prompt || intent?.prompt || action,
+      imageUrl: undefined,
+      imageTaskId: undefined,
+      imageStatus: "idle" as const,
+      errorMessage: undefined,
+      planningSource: params.planningSource,
+      sourceIntentMicroShotNo: intent?.microShotNo,
+      resolvedAt: params.refinedAt,
+      startBoundaryImageUrl: params.startImageUrl,
+      endBoundaryImageUrl: params.endImageUrl,
+    };
   });
+  const revisionId = buildResolvedRevisionId({
+    segment: params.segment,
+    startImageUrl: params.startImageUrl,
+    endImageUrl: params.endImageUrl,
+  }, draft);
+  return draft.map((microShot) => ({
+    ...microShot,
+    resolvedRevisionId: revisionId,
+  }));
+}
+
+function nearestUnusedIntentIndex(
+  timeSeconds: number,
+  intents: VideoMicroShot[],
+  used: Set<number>,
+): number {
+  let selected = -1;
+  let selectedDistance = Number.POSITIVE_INFINITY;
+  intents.forEach((intent, index) => {
+    if (used.has(index)) return;
+    const distance = Math.abs(intent.localTimeSeconds - timeSeconds);
+    if (distance < selectedDistance) {
+      selected = index;
+      selectedDistance = distance;
+    }
+  });
+  return selected;
+}
+
+function clampIntermediateTime(value: number, durationSeconds: number, fallback: number): number {
+  const safeDuration = Math.max(0.2, durationSeconds);
+  const candidate = Number.isFinite(value) ? value : fallback;
+  return Math.min(safeDuration - 0.1, Math.max(0.1, candidate));
+}
+
+function buildResolvedImagePrompt(params: {
+  segment: VideoPlanSegment;
+  localTimeSeconds: number;
+  scene: string;
+  action: string;
+  camera: string;
+  anchors: string[];
+  startFacts: VideoObservedBoundaryFacts;
+  endFacts: VideoObservedBoundaryFacts;
+}): string {
+  return [
+    `Create the physically reachable intermediate frame at +${params.localTimeSeconds.toFixed(2)}s of one continuous take.`,
+    `Scene: ${params.scene || params.startFacts.scene}.`,
+    `Action state: ${params.action}.`,
+    params.camera ? `Camera: ${params.camera}.` : "",
+    params.anchors.length ? `Preserve these approved consistency anchors: ${params.anchors.join(", ")}.` : "",
+    `It must continue naturally from the approved opening composition (${params.startFacts.composition})`,
+    `and remain physically reachable to the approved ending composition (${params.endFacts.composition}).`,
+    "Do not introduce a cut, scene replacement, new subject, or later story event.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildResolvedRevisionId(
+  params: Pick<Parameters<typeof planMediaConditionedSegment>[0], "segment" | "startImageUrl" | "endImageUrl">,
+  microShots: VideoMicroShot[],
+): string {
+  const payload = {
+    version: "resolved-micro-shots-v1",
+    segmentNo: params.segment.segmentNo,
+    startImageUrl: params.startImageUrl,
+    endImageUrl: params.endImageUrl,
+    microShots: microShots.map((item) => ({
+      no: item.microShotNo,
+      time: item.localTimeSeconds,
+      purpose: item.purpose,
+      scene: item.scene,
+      action: item.action,
+      camera: item.camera,
+      referenceType: item.referenceType,
+      imagePrompt: item.imagePrompt,
+      anchors: item.usesConsistencyAnchors,
+    })),
+  };
+  return `resolved-micro-shots-v1:${createHash("sha256")
+    .update(JSON.stringify(payload))
+    .digest("hex")
+    .slice(0, 20)}`;
+}
+
+function referenceTypeValue(value: unknown): VideoMicroShot["referenceType"] {
+  return value === "text" || value === "image_prompt" || value === "mixed"
+    ? value
+    : undefined;
 }
 
 function record(value: unknown): Record<string, unknown> {

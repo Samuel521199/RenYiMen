@@ -418,6 +418,12 @@ export interface VideoMicroShot extends VideoAssetDependencyFields {
   prompt: string;
   promptZh?: string;
   promptEn?: string;
+  planningSource?: "provisional" | "media_conditioned" | "legacy_fallback";
+  sourceIntentMicroShotNo?: number;
+  resolvedRevisionId?: string;
+  resolvedAt?: string;
+  startBoundaryImageUrl?: string;
+  endBoundaryImageUrl?: string;
 }
 
 export interface VideoAudioPlan {
@@ -872,6 +878,8 @@ export interface SegmentRenderDescription {
   motionContract?: Record<string, unknown>;
   singleTakeContract?: Record<string, unknown>;
   motionCheckpoints?: VideoMicroShot[];
+  resolvedMicroShots?: VideoMicroShot[];
+  microShotRevisionId?: string;
   visibleAnchorIds: string[];
   requiresCut?: boolean;
   riskLevel?: "low" | "medium" | "high";
@@ -945,6 +953,8 @@ export interface VideoMediaConditionedSegmentPlan {
     physicallyReachable: boolean;
   };
   motionCheckpoints: VideoMicroShot[];
+  resolvedMicroShots: VideoMicroShot[];
+  microShotRevisionId: string;
   videoPromptContract: VideoPromptContract;
   planningStatus: "media_conditioned" | "fallback";
   warnings: string[];
