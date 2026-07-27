@@ -56,6 +56,37 @@ test("planner JSON normalizes into a versioned video prompt contract without sel
   assert.deepEqual(contract?.motionSteps, ["Lift the product continuously.", "Settle beside the face."]);
 });
 
+test("terminal provenance aliases are normalized locally while unknown owners still fail", () => {
+  const base = {
+    version: "video-prompt-contract-v1",
+    terminal_requirements: [{
+      requirement_id: "terminal.result",
+      priority: "hard",
+      observable_fact: "The approved result is visible.",
+      acceptance_criteria: "The stable tail shows the approved result.",
+      source: "end_frame_contract",
+    }],
+    motion_steps: ["Move continuously into the result."],
+    preserve_requirements: [],
+    forbidden_outcomes: [],
+    narrative_boundary: "",
+    shot_intent: "Reach the approved result.",
+  };
+  const normalized = videoPromptContractFromUnknown(base);
+  assert.equal(normalized?.terminalRequirements[0]?.source, "approved_end_frame");
+
+  assert.throws(
+    () => videoPromptContractFromUnknown({
+      ...base,
+      terminal_requirements: [{
+        ...base.terminal_requirements[0],
+        source: "some_unverifiable_owner",
+      }],
+    }),
+    /some_unverifiable_owner.*invalid/,
+  );
+});
+
 test("ordinary segment data is not mistaken for a prompt contract and malformed contracts fail loudly", () => {
   assert.equal(videoPromptContractFromUnknown({ segmentNo: 1, durationSeconds: 5 }), undefined);
   assert.throws(

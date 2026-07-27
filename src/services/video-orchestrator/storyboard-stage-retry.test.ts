@@ -124,7 +124,7 @@ test("legacy planner checkpoints are invalidated when the prompt contract versio
     },
   }, input);
 
-  assert.equal(legacy.version, 8);
+  assert.equal(legacy.version, 10);
   assert.equal(legacy.planningRaw, undefined);
   assert.deepEqual(legacy.shotDecomposerSegmentPlans, {});
 });
@@ -149,11 +149,16 @@ test("targeted split repair merges partial fields without deleting the approved 
     }],
   };
   const repair = {
+    title: "unauthorized rewrite",
     segments: [{
       segment_no: 5,
       subject_motion: "实体品牌牌从桌后连续滑入画面",
       motion: "镜头连续推进，实体品牌牌从桌后滑入并保持静止",
+    }, {
+      segment_no: 6,
+      motion: "unauthorized neighboring segment rewrite",
     }],
+    keyframes: [{ keyframe_no: 99, state: "unauthorized keyframe" }],
     segment_render_descriptions: [{
       segment_no: 5,
     }],
@@ -163,6 +168,7 @@ test("targeted split repair merges partial fields without deleting the approved 
   const description = (merged.segment_render_descriptions as Array<Record<string, unknown>>)[0];
   assert.equal((merged.segments as unknown[]).length, 1);
   assert.equal((merged.keyframes as unknown[]).length, 2);
+  assert.equal(merged.title, undefined);
   assert.deepEqual(description.start_frame_contract, { state: "牌桌空镜" });
   assert.deepEqual(description.motion_contract, { path: "镜头连续推进", subject_motion: "镜头连续推进，实体品牌牌从桌后滑入并保持静止" });
   assert.deepEqual(description.single_take_contract, { requires_cut: false, subject_path: "镜头连续推进，实体品牌牌从桌后滑入并保持静止" });

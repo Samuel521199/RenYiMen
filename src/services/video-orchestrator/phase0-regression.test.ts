@@ -374,6 +374,7 @@ test("provider dispatch uses independent global pools with fair cross-project ca
   assert.match(capacity, /ONE_PROMPT_TEXT_GLOBAL_CONCURRENCY/);
   assert.match(capacity, /ONE_PROMPT_VISUAL_QUALITY_GLOBAL_CONCURRENCY/);
   assert.match(capacity, /pg_advisory_xact_lock/);
+  assert.match(capacity, /pg_advisory_xact_lock\(hashtext\(\$\{resourceKey\}\)\)::text/);
   assert.match(capacity, /activeByUser/);
   assert.match(capacity, /activeByProject/);
   assert.match(workflow, /requestVideoProviderLease/);

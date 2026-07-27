@@ -1646,6 +1646,9 @@ async function removeWorkDir(workDir: string): Promise<void> {
 function qualityVisionEnabled(): boolean { if (process.env.ONE_PROMPT_GENERATION_QUALITY_VISION_EVAL?.trim().toLowerCase() === "false") return false; return Boolean(process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY); }
 function qualityVisionModel(): string { return process.env.ALIYUN_GENERATION_QUALITY_VISION_MODEL?.trim() || "qwen3.6-flash"; }
 function qualityAdjudicationModel(): string { return process.env.ALIYUN_GENERATION_QUALITY_ADJUDICATION_MODEL?.trim() || qualityVisionModel(); }
+export function generationQualityModelIdentity(): string {
+  return `dashscope:vision=${qualityVisionModel()};adjudication=${qualityAdjudicationModel()}`;
+}
 function qualityTimeoutMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_TIMEOUT_MS); return Number.isFinite(value) && value >= 5000 ? Math.max(60000, Math.round(value)) : 90000; }
 function qualityReferenceLimit(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_REFERENCE_LIMIT); return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 3; }
 function qualityVisionConcurrency(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_CONCURRENCY); return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 4; }

@@ -91,7 +91,7 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.match(picker, /setPreviewCandidate\(candidate\)/);
   assert.match(picker, /const issueLedger = report\?\.issueLedger \?\? \[\]/);
   assert.match(picker, /issueLedger\.filter/);
-  assert.match(picker, /转视频检查/);
+  assert.match(picker, /待确认/);
   assert.match(picker, /待新版质检/);
   assert.match(picker, /质检通过 · 有建议/);
   assert.match(picker, /cursor-zoom-in/);
@@ -244,8 +244,12 @@ test("candidate issue summary stays compact and loads localized copy without blo
   assert.match(picker, /issue\.status === "invalid_for_stage"/);
   assert.match(picker, /requestQualitySummary/);
   assert.match(picker, /\/quality-summary/);
-  assert.match(picker, /storedSummary\?\.version === "quality-summary-v2"/);
-  assert.match(picker, /storedQualitySummary\?\.version === "quality-summary-v2"/);
+  assert.match(picker, /storedSummary\?\.version === "quality-summary-v3"/);
+  assert.match(picker, /storedQualitySummary\?\.version === "quality-summary-v3"/);
+  assert.match(picker, /必须修复/);
+  assert.match(picker, /建议改进/);
+  assert.match(picker, /已满足/);
+  assert.match(picker, /待确认/);
   assert.match(picker, /qualitySummaryLoading/);
   assert.match(picker, /qualitySummary\.items\.map/);
   assert.match(picker, /正在整理质检结论/);

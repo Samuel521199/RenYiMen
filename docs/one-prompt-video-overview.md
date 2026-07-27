@@ -479,8 +479,18 @@ DONE           完成
 - 后台任务把 `planning_architect`、`storyboard_artist`、`shot_decomposer` 分段完成数、`single_take_audit`、`split_repair`、`json_repair`、`prompt_detailer` 和 `story_quality_gate` 写入 `planJson.plannerProgress`。
 - 前端通过现有 `sync` 轮询读取 `plannerProgress`，展示「已完成 N/M 步、剩余 M-N 步」和真实 segment 完成数量，不再用 `estimatePlanningProgress` 猜测 `PLANNING` 状态进度。
 - JSON 修复次数/耗时、一镜到底修复次数/耗时会同时写入进度数据和 `project.plan.progress` 日志。
+
+整个项目的进度现在进一步统一为后端派生的 `project-task-graph-v1` 加权 DAG。百分比严格使用「已完成的必要任务权重 / 当前计划中全部有效必要任务权重」；运行时长只参与剩余时间估算，不会让尚未完成的任务虚增进度。资产、边界关键帧、子分镜图、视频片段、合成及各个人工审核门都作为显式节点，并保存最小依赖关系；并行分支的剩余时间按最长关键路径计算。
+
+`sync` 返回的任务图同时包含当前阻塞对象、是否已被上游接单、排队或运行时长、尝试次数、最近失败原因、下一步纠正策略和关键路径节点。已从当前计划取消的按需任务会保留为非活动审计节点，但立即退出进度分母和 ETA。ETA 使用项目内已完成生成任务的观测时长修正静态基线，并按样本数标记低、中、高置信区间；遇到人工审核门时不伪造倒计时，而是明确显示等待人工操作。
+
+阶段文案仍由真实业务状态决定。例如视频阶段会显示「正在生成片段，已完成 3/5」；只有全部必要片段都得到可用结果，后端状态才会进入片段审核。
+
 - 规划任务使用持久化 `taskId`、租约和 30 秒心跳防止多实例重复提交；进程退出后租约过期，`sync` / `resume` 会重新接管。
 - Planning Architect、Storyboard Artist 和各 Shot Decomposer segment 的成功结果继续使用输入指纹检查点保存；失败恢复只补未完成阶段，不重复消耗已成功阶段。
+- Planning Architect 的大 JSON 已先拆出资产视觉规格职责：轻量规划调用只输出分类、因果事件、时间轴和稳定资产锚点；每个需要参考图的锚点再由独立 worker 生成结构化 `asset_image_contract`，应用代码确定性编译中英文资产 Prompt，并组装回兼容的原 `planning_manifest`。
+- 资产规格 worker 默认并发 5、单资产最多尝试 2 次，并按「锚点 + 全局风格 + 用户输入」指纹单独保存检查点；一个资产失败不会让其他已完成资产重做。
+- `ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION` 支持 `split`（默认新流程）、`split_shadow`（旧流程对外生效并旁路比较新流程）和 `legacy`（完整旧调用）。`split` 失败时默认自动退回旧 Planning Architect，可用 `ONE_PROMPT_VIDEO_SPLIT_PLANNING_FALLBACK_LEGACY=false` 关闭兜底。
 - Shot Decomposer 之后已改成 segment 级依赖流水线：某段拆解完成后立即进入该段 Single-Take Audit；通过或完成定向修复后立即进入该段 Prompt Detailer，不再等待其他 segment 全部拆完。
 - Prompt Detailer 已拆为 segment 级小输出。每个请求只生成当前 segment 的视频提示词、微镜头提示词，以及由该 segment 负责的边界关键帧提示词；共享边界帧采用唯一归属规则，避免相邻 worker 生成互相冲突的版本。
 - 检查点新增「原始 segment 拆解」「审计通过/修复后的 segment」「segment 提示词」三层结果。恢复任务会从最靠后的可用检查点继续，而不是重新执行整个 segment。

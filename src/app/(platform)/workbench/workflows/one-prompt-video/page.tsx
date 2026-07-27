@@ -82,7 +82,7 @@ interface WorkflowProgressView {
 interface PlannerProgress {
   taskId: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
-  stage: "queued" | "reference_fact_extractor" | "planning_architect" | "asset_prompt_contract_gate" | "asset_prompt_contract_repair" | "storyboard_artist" | "story_contract_gate" | "story_contract_repair" | "shot_decomposer" | "single_take_audit" | "split_repair" | "json_repair" | "prompt_detailer" | "story_quality_gate" | "complete" | "failed";
+  stage: "queued" | "reference_fact_extractor" | "planning_architect" | "asset_prompt_contract_gate" | "asset_prompt_contract_repair" | "asset_visual_spec" | "storyboard_artist" | "story_contract_gate" | "story_contract_repair" | "shot_decomposer" | "single_take_audit" | "split_repair" | "json_repair" | "prompt_detailer" | "story_quality_gate" | "complete" | "failed";
   completedSteps: number;
   totalSteps: number;
   currentSegmentNo?: number;
@@ -254,7 +254,60 @@ interface VideoProject {
   shots: VideoShot[];
   generationCandidates?: GenerationCandidate[];
   plannerProgress?: PlannerProgress;
+  taskGraph?: ProjectTaskGraphSnapshot;
   planDebug?: PlanDebugData;
+}
+
+type ProjectTaskStatus =
+  | "blocked"
+  | "waiting_capacity"
+  | "reserved"
+  | "upstream_accepted"
+  | "running"
+  | "quality_checking"
+  | "retrying"
+  | "awaiting_review"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+interface ProjectTaskGraphSnapshot {
+  version: "project-task-graph-v1";
+  generatedAt: string;
+  percent: number;
+  completedWeight: number;
+  totalWeight: number;
+  requiredTaskCount: number;
+  completedTaskCount: number;
+  cancelledTaskCount: number;
+  nodes: Array<{
+    id: string;
+    labelZh: string;
+    labelEn: string;
+    status: ProjectTaskStatus;
+    active: boolean;
+    required: boolean;
+  }>;
+  criticalPathNodeIds: string[];
+  currentBlockers: Array<{
+    id: string;
+    labelZh: string;
+    labelEn: string;
+    status: ProjectTaskStatus;
+    upstreamAccepted: boolean;
+    upstreamTaskId?: string;
+    elapsedMs?: number;
+    attempt: number;
+    retryReason?: string;
+    correctionStrategy?: string;
+  }>;
+  estimatedRemainingMs?: {
+    low: number;
+    high: number;
+    confidence: "low" | "medium" | "high";
+  };
+  etaUnavailableReasonZh?: string;
+  etaUnavailableReasonEn?: string;
 }
 
 interface GenerationCandidate {
@@ -478,8 +531,8 @@ interface ArtifactMetadata {
 }
 
 interface GenerationQualityReport {
-  policyVersion?: "quality-policy-v2" | "quality-policy-v3";
-  evaluationStatus?: "completed" | "partial" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
+  policyVersion?: "quality-policy-v2" | "quality-policy-v3" | "quality-policy-v4";
+  evaluationStatus?: "completed" | "partial" | "adjudication_required" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
   technicalError?: string;
   technicalRetryable?: boolean;
   evaluationConfidence?: number;
@@ -514,7 +567,7 @@ interface GenerationQualityReport {
     preserve?: string[];
   }>;
   contractConflicts?: string[];
-  qualityDecision?: "pass" | "recommended" | "retry" | "blocked";
+  qualityDecision?: "pass" | "recommended" | "retry" | "blocked" | "review";
   resolvedIssueIds?: string[];
   openHardIssueIds?: string[];
   softSuggestions?: string[];
@@ -534,14 +587,19 @@ interface GenerationQualityReport {
 }
 
 interface QualityDisplaySummary {
-  version: "quality-summary-v1" | "quality-summary-v2";
+  version: "quality-summary-v1" | "quality-summary-v2" | "quality-summary-v3";
   lang: PageLang;
   model: string;
   sourceHash: string;
   items: Array<{
-    status: "open" | "resolved" | "deferred";
+    status: "must_fix" | "improvement" | "satisfied" | "pending_review" | "blocked_input" | "technical_retry" | "open" | "resolved" | "deferred";
     text: string;
+    requirementId?: string;
+    confidence?: number;
   }>;
+  gateStatus?: "hard_fail" | "pass_with_advice" | "pass" | "pending_review" | "blocked_input" | "technical_retry";
+  blocksQualityPass?: boolean;
+  counts?: Partial<Record<"must_fix" | "improvement" | "satisfied" | "pending_review" | "blocked_input" | "technical_retry", number>>;
 }
 
 type DebugTab = "events" | "anchors" | "states" | "references" | "prompts" | "audit";
@@ -1438,16 +1496,15 @@ export default function OnePromptVideoPage() {
   const canCreateAndPlan = !creatingPlan && prompt.trim().length >= 4 && effectiveStylePreset.length > 0 && (!project || canPlanSelectedDraft);
   const workflowProgress = useMemo(() => {
     if (optimisticProgress) {
-      const next = estimatePlanningProgress(progressNow - optimisticProgress.startedAt);
       return optimisticWorkflowProgressView({
         ...optimisticProgress,
-        phase: next.phase,
-        percent: Math.max(optimisticProgress.percent, next.percent),
+        phase: "creating",
+        percent: 1,
       }, pageLang);
     }
     if (!project || !effectiveProjectStatus) return null;
     if (effectiveProjectStatus === "PLANNING") {
-      return plannerWorkflowProgressView(project.plannerProgress, pageLang);
+      return plannerWorkflowProgressView(project.plannerProgress, pageLang, project.taskGraph, progressNow);
     }
     return projectWorkflowProgressView(
       project,
@@ -1462,6 +1519,7 @@ export default function OnePromptVideoPage() {
         boundaryTotal,
         generatedBoundaryImages: completeBoundaryImages,
       },
+      progressNow,
     );
   }, [
     assetTotal,
@@ -1586,21 +1644,21 @@ export default function OnePromptVideoPage() {
   }, [selectedProjectId]);
 
   useEffect(() => {
-    if (!optimisticProgress?.active && effectiveProjectStatus !== "PLANNING") return;
+    if (
+      !optimisticProgress?.active
+      && effectiveProjectStatus !== "PLANNING"
+      && !project?.taskGraph?.currentBlockers.some((blocker) =>
+        blocker.status === "running"
+        || blocker.status === "upstream_accepted"
+        || blocker.status === "quality_checking"
+        || blocker.status === "retrying"
+      )
+    ) return;
     const timer = window.setInterval(() => {
       setProgressNow(Date.now());
-      setOptimisticProgress((current) => {
-        if (!current?.active) return current;
-        const next = estimatePlanningProgress(Date.now() - current.startedAt);
-        return {
-          ...current,
-          phase: next.phase,
-          percent: Math.max(current.percent, next.percent),
-        };
-      });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [effectiveProjectStatus, optimisticProgress?.active]);
+  }, [effectiveProjectStatus, optimisticProgress?.active, project?.taskGraph]);
 
   useEffect(() => {
     if (!project?.shots.length) return;
@@ -4348,7 +4406,7 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
   const requestQualitySummary = useCallback(async (candidate: GenerationCandidate) => {
     const cacheKey = `${candidate.id}:${lang}`;
     const storedSummary = candidate.qualityReport?.displaySummaries?.[lang];
-    if (qualitySummaryOverrides[cacheKey] || storedSummary?.version === "quality-summary-v2" || qualitySummaryRequestsRef.current.has(cacheKey)) return;
+    if (qualitySummaryOverrides[cacheKey] || storedSummary?.version === "quality-summary-v3" || qualitySummaryRequestsRef.current.has(cacheKey)) return;
     qualitySummaryRequestsRef.current.add(cacheKey);
     setQualitySummaryLoadingIds((current) => new Set(current).add(cacheKey));
     try {
@@ -4400,7 +4458,7 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           const referenceMissing = report?.evaluationStatus === "reference_missing" || report?.referenceComparable === false;
           const isVideo = candidate.kind === "segment_video";
           const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
-          const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v3";
+          const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v4";
           const statusText = referenceMissing
             ? (lang === "zh" ? "缺少可比参考" : "Reference required")
             : technicalQualityFailure
@@ -4416,6 +4474,10 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
               : (lang === "zh" ? "等待重新质检" : "Awaiting re-review")
             : needsPolicyRecheck
             ? (lang === "zh" ? "待新版质检" : "Awaiting updated review")
+            : report?.qualityDecision === "blocked" && report.contractConflicts?.length
+            ? (lang === "zh" ? "输入约束冲突" : "Input constraints conflict")
+            : report?.qualityDecision === "review"
+            ? (lang === "zh" ? "待确认 · 不自动返工" : "Review needed · no auto-redraw")
             : candidate.userAccepted && candidate.passed === false
             ? (lang === "zh" ? "系统未通过 · 人工保留" : "System failed · kept manually")
             : candidate.passed === true
@@ -4438,6 +4500,10 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
             ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
             : needsPolicyRecheck
             ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
+            : report?.qualityDecision === "blocked" && report.contractConflicts?.length
+            ? "border-violet-300/20 bg-violet-300/10 text-violet-100"
+            : report?.qualityDecision === "review"
+            ? "border-amber-300/20 bg-amber-300/10 text-amber-100"
             : candidate.userAccepted && candidate.passed === false
             ? "border-violet-300/15 bg-violet-300/10 text-violet-100"
             : candidate.passed === true
@@ -4459,8 +4525,14 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           const qualitySummaryKey = `${candidate.id}:${lang}`;
           const storedQualitySummary = report?.displaySummaries?.[lang];
           const qualitySummary = qualitySummaryOverrides[qualitySummaryKey]
-            ?? (storedQualitySummary?.version === "quality-summary-v2" ? storedQualitySummary : undefined);
+            ?? (storedQualitySummary?.version === "quality-summary-v3" ? storedQualitySummary : undefined);
           const qualitySummaryLoading = qualitySummaryLoadingIds.has(qualitySummaryKey);
+          const gateCounts = qualitySummary?.counts ?? {
+            must_fix: openIssues.filter((issue) => issue.severity === "hard").length,
+            improvement: openIssues.filter((issue) => issue.severity !== "hard").length,
+            satisfied: resolvedIssues.length,
+            pending_review: deferredIssues.length,
+          };
           const manualVideoChecks = isVideo && Array.isArray(candidate.metadata?.deferredVideoQualityChecks)
             ? candidate.metadata.deferredVideoQualityChecks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
             : [];
@@ -4521,7 +4593,7 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                     : candidate.status === "quality_failed"
                     ? (lang === "zh" ? "视觉质检服务连续失败，原图已保留，请稍后重新质检。" : "Visual review failed repeatedly. The original media is preserved; retry the review later.")
                     : (lang === "zh" ? "视觉质检超时，系统将使用原图自动重试，不会重新生成。" : "Visual review timed out. The original media will be rechecked automatically without regeneration.")}
-                </p> : issueLedger.length ? <button
+                </p> : report ? <button
                   type="button"
                   aria-expanded={issueDetailsExpanded}
                   title={lang === "zh" ? "点击查看具体问题" : "Click to view issue details"}
@@ -4537,23 +4609,31 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                   }}
                   className="w-full rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-1.5 text-left text-[10px] leading-4 text-slate-400 transition hover:border-white/15 hover:bg-white/[0.045]"
                 >
-                  <span className="text-emerald-200/80">{lang === "zh" ? "已解决" : "Resolved"} {resolvedIssues.length}</span>
+                  <span className="text-rose-200/80">{lang === "zh" ? "必须修复" : "Must fix"} {gateCounts.must_fix ?? 0}</span>
                   <span className="mx-1.5 text-slate-700">·</span>
-                  <span className="text-amber-100/80">{lang === "zh" ? "待改进" : "Open"} {openIssues.length}</span>
+                  <span className="text-amber-100/80">{lang === "zh" ? "建议改进" : "Improve"} {gateCounts.improvement ?? 0}</span>
                   <span className="mx-1.5 text-slate-700">·</span>
-                  <span>{lang === "zh" ? "转视频检查" : "Deferred to video"} {deferredIssues.length}</span>
+                  <span className="text-emerald-200/80">{lang === "zh" ? "已满足" : "Satisfied"} {gateCounts.satisfied ?? 0}</span>
+                  <span className="mx-1.5 text-slate-700">·</span>
+                  <span>{lang === "zh" ? "待确认" : "Pending"} {gateCounts.pending_review ?? 0}</span>
                 </button> : null}
-                {issueDetailsExpanded && issueLedger.length ? <div className="rounded-md border border-white/[0.07] bg-black/20 p-2.5 text-[10px] leading-4">
+                {issueDetailsExpanded && report ? <div className="rounded-md border border-white/[0.07] bg-black/20 p-2.5 text-[10px] leading-4">
                   {qualitySummaryLoading && !qualitySummary ? <div className="flex items-center gap-2 text-slate-500">
                     <RefreshCw className="h-3 w-3 animate-spin" />
                     {lang === "zh" ? "正在整理质检结论…" : "Summarizing quality findings…"}
                   </div> : qualitySummary?.items.length ? <ul className="space-y-2">
                     {qualitySummary.items.map((item, index) => {
-                      const tone = item.status === "resolved"
-                        ? { dot: "bg-emerald-300", label: lang === "zh" ? "已解决" : "Resolved", labelClass: "text-emerald-200/80" }
-                        : item.status === "deferred"
-                          ? { dot: "bg-slate-400", label: lang === "zh" ? "视频检查" : "Video check", labelClass: "text-slate-400" }
-                          : { dot: "bg-rose-300", label: lang === "zh" ? "待改进" : "Improve", labelClass: "text-rose-200/80" };
+                      const tone = item.status === "must_fix"
+                        ? { dot: "bg-rose-300", label: lang === "zh" ? "必须修复" : "Must fix", labelClass: "text-rose-200/90" }
+                        : item.status === "improvement" || item.status === "open"
+                          ? { dot: "bg-amber-300", label: lang === "zh" ? "建议改进" : "Improve", labelClass: "text-amber-100/85" }
+                          : item.status === "satisfied" || item.status === "resolved"
+                            ? { dot: "bg-emerald-300", label: lang === "zh" ? "已满足" : "Satisfied", labelClass: "text-emerald-200/80" }
+                            : item.status === "blocked_input"
+                              ? { dot: "bg-violet-300", label: lang === "zh" ? "输入缺失" : "Input required", labelClass: "text-violet-200/90" }
+                              : item.status === "technical_retry"
+                                ? { dot: "bg-cyan-300", label: lang === "zh" ? "技术重试" : "Retry review", labelClass: "text-cyan-100/85" }
+                                : { dot: "bg-slate-400", label: lang === "zh" ? "待确认" : "Pending", labelClass: "text-slate-400" };
                       return <li key={`${item.status}:${index}`} className="flex gap-2">
                         <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${tone.dot}`} />
                         <span className="min-w-0 text-slate-300">
@@ -6261,27 +6341,38 @@ function safeBoundaryRangeLabel(
   return `${safeBoundaryFrameShortLabel(start, totalSeconds, lang)} -> ${safeBoundaryFrameShortLabel(end, totalSeconds, lang)}`;
 }
 
-function plannerWorkflowProgressView(progress: PlannerProgress | undefined, lang: PageLang): WorkflowProgressView {
+function plannerWorkflowProgressView(
+  progress: PlannerProgress | undefined,
+  lang: PageLang,
+  taskGraph?: ProjectTaskGraphSnapshot,
+  nowMs = Date.now(),
+): WorkflowProgressView {
   if (!progress) {
     return {
-      percent: 2,
+      percent: taskGraph?.percent ?? 0,
       title: lang === "en" ? "Planning job queued" : "剧本规划任务已入队",
-      detail: lang === "en" ? "Waiting for the background planner to report its first real stage." : "正在等待后台规划器上报第一个真实阶段。",
+      detail: [
+        lang === "en" ? "Waiting for the background planner to report its first real task state." : "正在等待后台规划器上报第一个真实任务状态。",
+        taskGraphOperationalDetail(taskGraph, lang, nowMs),
+      ].filter(Boolean).join(" "),
       tone: "running",
     };
   }
   const total = Math.max(1, progress.totalSteps);
   const completed = Math.max(0, Math.min(total, progress.completedSteps));
   const remaining = Math.max(0, total - completed);
-  const percent = progress.status === "completed" || progress.stage === "complete"
-    ? 100
-    : Math.min(98, 5 + (completed / total) * 90);
+  const percent = taskGraph?.percent ?? (
+    progress.status === "completed" || progress.stage === "complete"
+      ? 100
+      : Math.min(99, (completed / total) * 100)
+  );
   const titles: Record<PlannerProgress["stage"], { zh: string; en: string }> = {
     queued: { zh: "剧本规划任务已入队", en: "Planning job queued" },
     reference_fact_extractor: { zh: "正在提取参考图客观事实", en: "Extracting objective reference facts" },
     planning_architect: { zh: "正在理解创意与规划时间轴", en: "Understanding the brief and timeline" },
     asset_prompt_contract_gate: { zh: "正在检查资产图片合同", en: "Validating asset image contracts" },
     asset_prompt_contract_repair: { zh: "正在返修空泛的资产描述", en: "Repairing vague asset specifications" },
+    asset_visual_spec: { zh: "正在并行细化资产视觉规格", en: "Detailing asset visual specifications in parallel" },
     storyboard_artist: { zh: "正在设计剧情节拍与广告因果", en: "Designing story beats and ad causality" },
     story_contract_gate: { zh: "正在校验剧情合同", en: "Validating the story contract" },
     story_contract_repair: { zh: "正在定向修复剧情合同", en: "Repairing the story contract" },
@@ -6312,21 +6403,14 @@ function plannerWorkflowProgressView(progress: PlannerProgress | undefined, lang
   return {
     percent,
     title: titles[progress.stage]?.[lang] ?? titles.queued[lang],
-    detail: [baseDetail, stepDetail, repairParts.join(lang === "en" ? "; " : "；")].filter(Boolean).join(" "),
+    detail: [
+      baseDetail,
+      stepDetail,
+      repairParts.join(lang === "en" ? "; " : "；"),
+      taskGraphOperationalDetail(taskGraph, lang, nowMs),
+    ].filter(Boolean).join(" "),
     tone: progress.status === "failed" || progress.stage === "failed" ? "failed" : progress.status === "completed" ? "success" : "running",
   };
-}
-
-function estimatePlanningProgress(elapsedMs: number): Pick<OptimisticProgress, "phase" | "percent"> {
-  const seconds = Math.max(0, elapsedMs / 1000);
-  if (seconds < 3) return { phase: "creating", percent: 3 + seconds * 4 };
-  if (seconds < 18) return { phase: "understanding", percent: 15 + (seconds - 3) * 2.2 };
-  if (seconds < 55) return { phase: "storyboard", percent: 48 + (seconds - 18) * 0.75 };
-  if (seconds < 110) return { phase: "prompts", percent: 75 + (seconds - 55) * 0.22 };
-
-  const waitingSeconds = seconds - 110;
-  const slowCurve = 87 + waitingSeconds * 0.012 + Math.log1p(waitingSeconds) * 0.55;
-  return { phase: "waiting", percent: Math.min(99.2, slowCurve) };
 }
 
 function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: PageLang): WorkflowProgressView {
@@ -6390,7 +6474,9 @@ function projectWorkflowProgressView(
     boundaryTotal: number;
     generatedBoundaryImages: number;
   },
+  nowMs = Date.now(),
 ): WorkflowProgressView {
+  const operationalDetail = taskGraphOperationalDetail(project.taskGraph, lang, nowMs);
   if (isManualStopProject(project)) {
     return lang === "en"
       ? { percent: progress.percent, title: "Generation stopped", detail: "You stopped this generation. Adjust the brief and generate again when ready.", tone: "idle" }
@@ -6410,13 +6496,13 @@ function projectWorkflowProgressView(
       ? {
           percent,
           title: waitingForApproval ? "Asset library awaiting review" : "Generating asset library",
-          detail: `${phase.generatedAssets}/${phase.assetTotal} asset references generated; ${phase.approvedAssets}/${phase.assetTotal} approved. ${phase.generatedBoundaryImages}/${phase.boundaryTotal} dependency-ready boundary keyframes have already generated in parallel.`,
+          detail: [`${phase.generatedAssets}/${phase.assetTotal} asset references generated; ${phase.approvedAssets}/${phase.assetTotal} approved. ${phase.generatedBoundaryImages}/${phase.boundaryTotal} dependency-ready boundary keyframes have already generated in parallel.`, operationalDetail].filter(Boolean).join(" "),
           tone: waitingForApproval ? "idle" : "running",
         }
       : {
           percent,
           title: waitingForApproval ? "资产库待审核" : "正在生成资产库",
-          detail: `${phase.generatedAssets}/${phase.assetTotal} 张资产参考图已生成，${phase.approvedAssets}/${phase.assetTotal} 张已确认；已有 ${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张依赖满足的边界关键帧并行完成。人物侧面和背面图仍需先确认对应正面图。`,
+          detail: [`${phase.generatedAssets}/${phase.assetTotal} 张资产参考图已生成，${phase.approvedAssets}/${phase.assetTotal} 张已确认；已有 ${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张依赖满足的边界关键帧并行完成。人物侧面和背面图仍需先确认对应正面图。`, operationalDetail].filter(Boolean).join(" "),
           tone: waitingForApproval ? "idle" : "running",
         };
   }
@@ -6433,17 +6519,17 @@ function projectWorkflowProgressView(
       ? {
           percent,
           title: allBoundaryImagesReady ? "Boundary keyframes awaiting review" : "Generating boundary keyframes",
-          detail: allBoundaryImagesReady
+          detail: [allBoundaryImagesReady
             ? `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes are ready. Approve them before internal micro-shot review.`
-            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes generated. Internal micro-shot review is not available yet.`,
+            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes generated. Internal micro-shot review is not available yet.`, operationalDetail].filter(Boolean).join(" "),
           tone: allBoundaryImagesReady ? "idle" : "running",
         }
       : {
           percent,
           title: allBoundaryImagesReady ? "边界关键帧待审核" : "正在生成边界关键帧",
-          detail: allBoundaryImagesReady
+          detail: [allBoundaryImagesReady
             ? `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已就绪，全部确认后才能进入内部子分镜审核。`
-            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已生成，当前尚不能进入内部子分镜审核。`,
+            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已生成，当前尚不能进入内部子分镜审核。`, operationalDetail].filter(Boolean).join(" "),
           tone: allBoundaryImagesReady ? "idle" : "running",
         };
   }
@@ -6476,7 +6562,7 @@ function projectWorkflowProgressView(
     FAILED: ["Task failed", "Check the error message, then retry the relevant step.", "failed"],
   };
   const [title, detail, tone] = lang === "en" ? en[status] : zh[status];
-  return { percent: progress.percent, title, detail, tone };
+  return { percent: progress.percent, title, detail: [detail, operationalDetail].filter(Boolean).join(" "), tone };
 }
 
 function projectProgress(project: VideoProject, status: ProjectStatus = project.status): { images: number; clips: number; imageTotal: number; clipTotal: number; percent: number } {
@@ -6505,21 +6591,98 @@ function projectProgress(project: VideoProject, status: ProjectStatus = project.
         || reviewableVideoTargetIds.has(segment.id)
       ).length
     : project.shots.filter((shot) => Boolean(shot.clipUrl) || shot.status === "CLIP_READY" || shot.status === "CLIP_APPROVED").length;
-  const stageWeight: Record<ProjectStatus, number> = {
-    DRAFT: 0,
-    PLANNING: 5,
-    PLAN_REVIEW: 15,
-    IMAGE_GENERATING: 20 + (images / safeImageTotal) * 25,
-    IMAGE_REVIEW: 50,
-    MICRO_SHOT_REVIEW: 54,
-    CLIP_GENERATING: 55 + (clips / safeClipTotal) * 30,
-    CLIP_REVIEW: 86,
-    COMPOSING: 92,
-    FINAL_REVIEW: 97,
-    DONE: 100,
-    FAILED: Math.max(10, Math.round(((images / safeImageTotal + clips / safeClipTotal) / 2) * 85)),
-  };
-  return { images, clips, imageTotal, clipTotal, percent: Math.round(stageWeight[status] ?? 0) };
+  const fallbackTotal = imageTotal + clipTotal;
+  const fallbackCompleted = images + clips;
+  const percent = project.taskGraph?.percent
+    ?? (status === "DONE" ? 100 : fallbackTotal > 0 ? Math.round((fallbackCompleted / fallbackTotal) * 100) : 0);
+  return { images, clips, imageTotal, clipTotal, percent };
+}
+
+function taskGraphOperationalDetail(
+  graph: ProjectTaskGraphSnapshot | undefined,
+  lang: PageLang,
+  nowMs: number,
+): string {
+  if (!graph) return "";
+  const generatedAtMs = Date.parse(graph.generatedAt);
+  const liveDeltaMs = Number.isFinite(generatedAtMs) ? Math.max(0, nowMs - generatedAtMs) : 0;
+  const blocker = graph.currentBlockers[0];
+  const parts: string[] = [];
+  if (blocker) {
+    const label = lang === "en" ? blocker.labelEn : blocker.labelZh;
+    parts.push(lang === "en" ? `Current task: ${label}.` : `当前对象：${label}。`);
+    const upstream = blocker.upstreamAccepted
+      ? (blocker.upstreamTaskId
+          ? `${lang === "en" ? "upstream accepted" : "上游已接单"} (${shortTaskId(blocker.upstreamTaskId)})`
+          : lang === "en" ? "upstream accepted" : "上游已接单")
+      : blocker.status === "waiting_capacity"
+        ? (lang === "en" ? "waiting for provider capacity" : "等待模型并发容量")
+        : blocker.status === "reserved"
+          ? (lang === "en" ? "provider slot reserved; submitting" : "已取得模型名额，正在提交")
+          : blocker.status === "awaiting_review"
+            ? (lang === "en" ? "waiting for manual approval" : "等待人工确认")
+            : (lang === "en" ? "not accepted upstream yet" : "上游尚未接单");
+    parts.push(`${lang === "en" ? "Upstream" : "上游"}：${upstream}。`);
+    const elapsedMs = blocker.elapsedMs == null ? undefined : blocker.elapsedMs + liveDeltaMs;
+    if (elapsedMs != null) {
+      const waiting = blocker.status === "waiting_capacity" || blocker.status === "reserved" || blocker.status === "blocked";
+      const elapsedLabel = lang === "en" ? (waiting ? "Waiting" : "Elapsed") : (waiting ? "已等待" : "已运行");
+      parts.push(`${elapsedLabel}：${formatTaskDuration(elapsedMs, lang)}。`);
+    }
+    if (blocker.attempt > 1 || blocker.retryReason) {
+      const reason = blocker.retryReason
+        ? `，${lang === "en" ? "reason" : "原因"}：${blocker.retryReason}`
+        : "";
+      parts.push(`${lang === "en" ? "Attempt" : "尝试次数"}：${Math.max(1, blocker.attempt)}${reason}。`);
+    }
+    if (blocker.correctionStrategy) {
+      parts.push(`${lang === "en" ? "Next correction" : "下一步纠正"}：${blocker.correctionStrategy}`);
+    }
+  }
+  if (graph.estimatedRemainingMs) {
+    const confidence = graph.estimatedRemainingMs.confidence === "high"
+      ? (lang === "en" ? "high" : "高")
+      : graph.estimatedRemainingMs.confidence === "medium"
+        ? (lang === "en" ? "medium" : "中")
+        : (lang === "en" ? "low" : "低");
+    const pathLabels = graph.criticalPathNodeIds
+      .map((id) => graph.nodes.find((node) => node.id === id))
+      .filter((node): node is ProjectTaskGraphSnapshot["nodes"][number] => Boolean(node))
+      .filter((node) => node.status !== "completed")
+      .slice(0, 3)
+      .map((node) => lang === "en" ? node.labelEn : node.labelZh);
+    parts.push(
+      lang === "en"
+        ? `Estimated critical path remaining: ${formatTaskDuration(graph.estimatedRemainingMs.low, lang)}–${formatTaskDuration(graph.estimatedRemainingMs.high, lang)} (confidence: ${confidence})${pathLabels.length ? `; path: ${pathLabels.join(" → ")}` : ""}.`
+        : `预计剩余关键路径：${formatTaskDuration(graph.estimatedRemainingMs.low, lang)}–${formatTaskDuration(graph.estimatedRemainingMs.high, lang)}（可信度：${confidence}）${pathLabels.length ? `；路径：${pathLabels.join(" → ")}` : ""}。`,
+    );
+  } else {
+    const unavailable = lang === "en" ? graph.etaUnavailableReasonEn : graph.etaUnavailableReasonZh;
+    if (unavailable) parts.push(`${lang === "en" ? "ETA unavailable" : "暂不提供 ETA"}：${unavailable}。`);
+  }
+  if (graph.cancelledTaskCount > 0) {
+    parts.push(
+      lang === "en"
+        ? `${graph.cancelledTaskCount} cancelled task(s) retained for audit and excluded from the denominator.`
+        : `${graph.cancelledTaskCount} 个已取消任务保留审计记录，并已从分母移除。`,
+    );
+  }
+  return parts.join(" ");
+}
+
+function formatTaskDuration(ms: number, lang: PageLang): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return lang === "en" ? `${seconds}s` : `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return lang === "en" ? `${minutes}m ${rest}s` : `${minutes} 分 ${rest} 秒`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return lang === "en" ? `${hours}h ${remainderMinutes}m` : `${hours} 小时 ${remainderMinutes} 分`;
+}
+
+function shortTaskId(taskId: string): string {
+  return taskId.length <= 14 ? taskId : `${taskId.slice(0, 6)}…${taskId.slice(-6)}`;
 }
 
 function effectiveReviewStatus(status: ProjectStatus, keyframesApproved: boolean): ProjectStatus {

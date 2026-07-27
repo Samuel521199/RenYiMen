@@ -100,6 +100,7 @@ model VideoProject {
   keyframes                 VideoKeyframe[]
   segments                  VideoSegment[]
   generationCandidates      VideoGenerationCandidate[]
+  qualityEvaluationCaches   VideoQualityEvaluationCache[]
   providerVideoLeases       VideoProviderTaskLease[]
   consistencyAnchorImages   VideoConsistencyAnchorImage[]
   anchorReferenceViews      VideoAnchorReferenceView[]
@@ -405,6 +406,32 @@ model VideoGenerationCandidate {
   @@index([projectId, artifactId, createdAt])
   @@index([projectId, status])
   @@map("video_generation_candidates")
+}
+
+model VideoQualityEvaluationCache {
+  id                   String       @id @default(cuid())
+  projectId            String       @map("project_id")
+  cacheKey             String       @map("cache_key")
+  status               String       @default("evaluating")
+  candidateContentHash String       @map("candidate_content_hash")
+  referenceSetHash     String       @map("reference_set_hash")
+  policyVersion        String       @map("policy_version")
+  promptVersion        String       @map("prompt_version")
+  modelId              String       @map("model_id")
+  reportJson           Json?        @map("report_json")
+  sourceCandidateId    String?      @map("source_candidate_id")
+  leaseToken           String?      @unique @map("lease_token")
+  leaseExpiresAt       DateTime?    @map("lease_expires_at")
+  lastError            String?      @map("last_error") @db.Text
+
+  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([projectId, cacheKey])
+  @@index([projectId, status, updatedAt])
+  @@map("video_quality_evaluation_caches")
 }
 
 model VideoShot {

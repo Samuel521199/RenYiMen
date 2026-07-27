@@ -24,7 +24,7 @@ test("one Single-take Audit accepts a reachable continuous plan and ignores expl
   const result = auditSingleTakePlan(plan());
   assert.equal(result.passed, true);
   assert.equal(result.action, "allow");
-  assert.equal(result.auditVersion, "single-take-audit-v1");
+  assert.equal(result.auditVersion, "single-take-audit-v2");
 });
 
 test("Chinese no-cut safety directives are not mistaken for edit instructions", () => {
@@ -59,25 +59,52 @@ test("fallback micro-shot safety wording is not mistaken for a scene transition"
   assert.equal(auditSingleTakePlan(value).passed, true);
 });
 
-test("requiresCut is a non-retryable Stage 2B block", () => {
+test("requiresCut requests a real timeline boundary", () => {
   const value = plan();
   const descriptions = value.segmentRenderDescriptions as Array<Record<string, unknown>>;
   descriptions[0].requiresCut = true;
   const result = auditSingleTakePlan(value);
   assert.equal(result.passed, false);
-  assert.equal(result.action, "block_stage_2b");
-  assert.ok(result.issues.some((item) => item.code === "SINGLE_TAKE_REQUIRES_CUT" && item.repairable === false));
+  assert.equal(result.action, "replan_timeline");
+  assert.ok(result.issues.some((item) =>
+    item.code === "SINGLE_TAKE_REQUIRES_CUT"
+    && item.repairable === false
+    && item.structural
+    && item.repairScope === "timeline"));
   assert.throws(() => assertSingleTakeAuditPassed(value), SingleTakeAuditError);
 });
 
-test("high risk and unreachable motion request Split Repair", () => {
+test("high risk and unreachable motion request a scoped segment repair", () => {
   const value = plan();
   const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
   description.singleTakeContract = { requiresCut: false, riskLevel: "high", physicallyReachable: false };
   const result = auditSingleTakePlan(value);
-  assert.equal(result.action, "split_repair");
+  assert.equal(result.action, "repair_segment");
   assert.ok(result.issues.some((item) => item.code === "SINGLE_TAKE_HIGH_RISK"));
   assert.ok(result.issues.some((item) => item.code === "SINGLE_TAKE_PHYSICALLY_UNREACHABLE"));
+});
+
+test("high risk without structural evidence is warning-only", () => {
+  const value = plan();
+  const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  description.singleTakeContract = { requiresCut: false, riskLevel: "high", physicallyReachable: true };
+  const result = auditSingleTakePlan(value);
+  assert.equal(result.passed, true);
+  assert.equal(result.action, "allow_with_warning");
+  assert.ok(result.issues.some((item) =>
+    item.code === "SINGLE_TAKE_HIGH_RISK"
+    && item.severity === "warning"
+    && item.repairScope === "none"));
+});
+
+test("missing contracts request contract-only repair", () => {
+  const value = plan({
+    segmentRenderDescriptions: [{ segmentNo: 1 }],
+  });
+  const result = auditSingleTakePlan(value);
+  assert.equal(result.passed, false);
+  assert.equal(result.action, "repair_contract");
+  assert.ok(result.issues.every((item) => item.repairScope === "contract"));
 });
 
 test("positive internal dissolve language is rejected instead of rewritten", () => {
@@ -86,6 +113,51 @@ test("positive internal dissolve language is rejected instead of rewritten", () 
   description.motionContract = { path: "人物走到中点，然后 dissolve to a new shot" };
   const result = auditSingleTakePlan(value);
   assert.ok(result.issues.some((item) => item.code === "INTERNAL_CUT_LANGUAGE"));
+  assert.equal(result.action, "replan_timeline");
+});
+
+test("small timing overflow repairs one segment while severe overflow replans timeline", () => {
+  const local = plan({
+    segments: [{ segmentNo: 1, durationSeconds: 5, videoPrompt: "One continuous take." }],
+  });
+  const localDescription = (local.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  localDescription.minimumExecutableSeconds = 6;
+  assert.equal(auditSingleTakePlan(local).action, "repair_segment");
+
+  const structural = plan({
+    segments: [{ segmentNo: 1, durationSeconds: 5, videoPrompt: "One continuous take." }],
+  });
+  const structuralDescription = (structural.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  structuralDescription.minimumExecutableSeconds = 8;
+  assert.equal(auditSingleTakePlan(structural).action, "replan_timeline");
+});
+
+test("incomplete alternate view requests camera-graph repair", () => {
+  const value = plan({
+    storyboardBrief: [{ segmentNo: 1, cameraId: "camera_b" }],
+    cameraGraph: {
+      cameras: [
+        {
+          cameraId: "camera_a",
+          segmentNos: [],
+          axisDescription: "table axis from left to right",
+          spatialLayoutLock: "hero stays left of product",
+        },
+        {
+          cameraId: "camera_b",
+          segmentNos: [1],
+          parentCameraId: "camera_a",
+          relationToParent: "alternate_view",
+        },
+      ],
+      relations: [],
+    },
+  });
+  const result = auditSingleTakePlan(value);
+  assert.equal(result.action, "repair_camera_graph");
+  assert.ok(result.issues.some((item) =>
+    item.code === "ALTERNATE_VIEW_AXIS_UNRESOLVED"
+    && item.repairScope === "camera_graph"));
 });
 
 test("forbidden outcome fields do not become false positive cut instructions", () => {

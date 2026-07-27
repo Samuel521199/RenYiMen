@@ -5,16 +5,22 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 import type {
+  AtomicVisualRequirement,
   GenerationIssueLedgerEntry,
   GenerationQualityReport,
+  QualityDisplayItemStatus,
   QualityDisplayLanguage,
   QualityDisplaySummary,
   QualityDisplaySummaryItem,
+  QualityGateStatus,
+  VisualEvidenceObservation,
 } from "./types";
 
-const SUMMARY_VERSION = "quality-summary-v2" as const;
-const DEFAULT_SUMMARY_MODEL = "qwen-flash";
-const MAX_SUMMARY_ITEMS = 3;
+const SUMMARY_VERSION = "quality-summary-v3" as const;
+const MAX_SUMMARY_ITEMS = 12;
+const HARD_EVIDENCE_CONFIDENCE = 0.8;
+
+type CurrentDisplayStatus = Exclude<QualityDisplayItemStatus, "open" | "resolved" | "deferred">;
 
 export async function getOrCreateCandidateQualityDisplaySummary(params: {
   userId: string;
@@ -40,15 +46,9 @@ export async function getOrCreateCandidateQualityDisplaySummary(params: {
   const cached = report.displaySummaries?.[params.lang];
   if (cached?.version === SUMMARY_VERSION && cached.sourceHash === sourceHash && cached.items.length) return cached;
 
-  let summary: QualityDisplaySummary;
-  try {
-    summary = await summarizeWithQwen(report, params.lang, sourceHash);
-  } catch {
-    // The summary is presentation-only. Never fail or slow the generation pipeline
-    // because this optional model is unavailable.
-    return fallbackQualityDisplaySummary(report, params.lang, sourceHash);
-  }
-
+  // Severity is policy, not copywriting. Build the summary deterministically so
+  // an optional language model can never promote advice into a blocking defect.
+  const summary = fallbackQualityDisplaySummary(report, params.lang, sourceHash);
   const nextReport: GenerationQualityReport = {
     ...report,
     displaySummaries: {
@@ -65,7 +65,14 @@ export async function getOrCreateCandidateQualityDisplaySummary(params: {
 
 export function qualitySummarySourceHash(report: GenerationQualityReport): string {
   return createHash("sha1").update(JSON.stringify({
+    evaluationStatus: report.evaluationStatus,
+    qualityDecision: report.qualityDecision,
+    passed: report.passed,
+    atomicRequirements: report.atomicRequirements ?? [],
+    evidenceObservations: report.evidenceObservations ?? [],
     issueLedger: report.issueLedger ?? [],
+    hardFailureReasons: report.hardFailureReasons ?? [],
+    softSuggestions: report.softSuggestions ?? [],
     correctionActions: report.correctionActions ?? [],
     artifactIssues: report.artifactIssues ?? [],
   })).digest("hex").slice(0, 16);
@@ -76,137 +83,266 @@ export function fallbackQualityDisplaySummary(
   lang: QualityDisplayLanguage,
   sourceHash = qualitySummarySourceHash(report),
 ): QualityDisplaySummary {
-  const prioritized = [...(report.issueLedger ?? [])].sort((a, b) => issuePriority(a) - issuePriority(b));
-  const items = prioritized.slice(0, MAX_SUMMARY_ITEMS).map((issue) => ({
-    status: displayStatus(issue),
-    text: fallbackIssueText(issue, lang),
-  }));
-  if (!items.length && report.artifactIssues.length) {
-    items.push(...report.artifactIssues.slice(0, MAX_SUMMARY_ITEMS).map((issue) => ({
-      status: "open" as const,
-      text: compactText(issue, lang === "zh" ? 32 : 100),
-    })));
+  const special = specialEvaluationItem(report, lang);
+  let items = special ? [special] : evidenceItems(report, lang);
+
+  if (!special) {
+    items.push(...unrepresentedHardFailureItems(report, items, lang));
+    items.push(...unrepresentedSoftSuggestionItems(report, items, lang));
+    if (!items.length) items = legacyLedgerItems(report.issueLedger ?? [], lang);
+    if (!items.length && report.artifactIssues.length) {
+      const status: CurrentDisplayStatus = report.passed ? "improvement" : "pending_review";
+      items = report.artifactIssues.map((text) => ({ status, text: compactText(text, lang === "zh" ? 42 : 140) }));
+    }
   }
+
   if (!items.length) {
     items.push({
-      status: report.passed ? "resolved" : "open",
-      text: lang === "zh" ? (report.passed ? "当前画面已通过质检" : "当前画面仍需调整") : (report.passed ? "The image passed quality review." : "The image still needs adjustment."),
+      status: report.passed ? "satisfied" : "pending_review",
+      text: lang === "zh"
+        ? (report.passed ? "当前画面已满足质检要求" : "当前结论需要人工确认")
+        : (report.passed ? "The current image meets the quality requirements." : "The current result needs review."),
     });
   }
-  return { version: SUMMARY_VERSION, lang, model: "local-fallback", sourceHash, items };
-}
 
-async function summarizeWithQwen(
-  report: GenerationQualityReport,
-  lang: QualityDisplayLanguage,
-  sourceHash: string,
-): Promise<QualityDisplaySummary> {
-  const apiKey = process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY;
-  if (!apiKey) throw new Error("missing DashScope API key");
-  const model = process.env.ALIYUN_QUALITY_SUMMARY_MODEL?.trim() || DEFAULT_SUMMARY_MODEL;
-  const timeoutMs = boundedInteger(process.env.ONE_PROMPT_QUALITY_SUMMARY_TIMEOUT_MS, 8_000, 2_000, 20_000);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${compatibleBaseUrl()}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "You are a concise UI copy editor for an AI image quality review panel.",
-              `Write only in ${lang === "zh" ? "Simplified Chinese" : "English"}.`,
-              "Merge duplicates and return at most 3 conclusions total, prioritizing unresolved issues.",
-              "For status=resolved, describe only the positive state visibly achieved in the current candidate. Never repeat, negate, or append the historical defect recorded in observed.",
-              "A resolved sentence must read as a present-state fact, for example '当前已显示两个点赞图标' or 'Two like icons are now visible.' Do not write 'previously', 'used to', 'no longer', or 'the issue was resolved'.",
-              "For status=open, describe only the current remaining gap. For status=deferred, describe what must be checked in video.",
-              lang === "zh"
-                ? "每条使用自然、明确的界面短句，12至30个汉字；说明画面哪里不对或已经解决，不复述字段名，不展示模型原文，不写修改步骤。"
-                : "Each item must be a natural 6-18 word UI sentence stating what is wrong or resolved; do not repeat field names, raw output, or correction steps.",
-              'Return strict JSON only: {"items":[{"status":"open|resolved|deferred","text":"..."}]}.',
-            ].join("\n"),
-          },
-          {
-            role: "user",
-            content: JSON.stringify(summaryInput(report)),
-          },
-        ],
-        temperature: 0.1,
-        max_tokens: 240,
-        enable_thinking: false,
-        response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`quality summary HTTP ${response.status}`);
-    const payload = await response.json() as unknown;
-    const content = readMessageContent(payload);
-    const parsed = JSON.parse(stripJsonFence(content)) as unknown;
-    const items = normalizeSummaryItems(parsed, lang);
-    if (!items.length) throw new Error("empty quality summary");
-    return { version: SUMMARY_VERSION, lang, model, sourceHash, items };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function summaryInput(report: GenerationQualityReport): Record<string, unknown> {
+  const allItems = dedupeAndPrioritize(items);
+  const counts = countStatuses(allItems);
+  const gateStatus = determineGateStatus(report, counts);
   return {
-    passed: report.passed,
-    issues: (report.issueLedger ?? []).slice(0, 12).map((issue) => ({
-      status: displayStatus(issue),
-      category: issue.category,
-      region: issue.region,
-      ...(issue.status === "resolved"
-        ? { currentAchievedState: issue.target || resolvedCurrentStateText(issue, "en") }
-        : { currentObservation: issue.summary, target: issue.target }),
-    })),
-    corrections: (report.correctionActions ?? []).slice(0, 8).map((action) => ({
-      region: action.region,
-      element: action.element,
-      observed: action.observed,
-      target: action.target,
-    })),
+    version: SUMMARY_VERSION,
+    lang,
+    model: "deterministic-policy",
+    sourceHash,
+    items: allItems.slice(0, MAX_SUMMARY_ITEMS),
+    gateStatus,
+    blocksQualityPass: gateStatus === "hard_fail",
+    counts,
   };
 }
 
-function normalizeSummaryItems(value: unknown, lang: QualityDisplayLanguage): QualityDisplaySummaryItem[] {
-  if (!isRecord(value) || !Array.isArray(value.items)) return [];
-  const seen = new Set<string>();
-  const items: QualityDisplaySummaryItem[] = [];
-  for (const raw of value.items) {
-    if (!isRecord(raw) || typeof raw.text !== "string") continue;
-    const text = compactText(raw.text, lang === "zh" ? 42 : 150);
-    if (!text || seen.has(text.toLowerCase())) continue;
-    const status = raw.status === "resolved" ? "resolved" : raw.status === "deferred" ? "deferred" : "open";
-    seen.add(text.toLowerCase());
-    items.push({ status, text });
-    if (items.length >= MAX_SUMMARY_ITEMS) break;
+function specialEvaluationItem(
+  report: GenerationQualityReport,
+  lang: QualityDisplayLanguage,
+): QualityDisplaySummaryItem | undefined {
+  if (report.contractConflictsVerified && (report.contractConflicts?.length ?? 0) > 0) {
+    return {
+      status: "blocked_input",
+      text: lang === "zh" ? "已确认的目标约束互相冲突，请先修正合同再重新质检" : "Confirmed target constraints conflict; correct the contract before review.",
+    };
   }
-  return items;
+  if (report.evaluationStatus === "reference_missing" || report.referenceComparable === false) {
+    return {
+      status: "blocked_input",
+      text: lang === "zh" ? "缺少已批准且可比较的参考图，请补齐后重新质检" : "An approved comparable reference is required before review.",
+    };
+  }
+  if (["technical_failed", "unavailable", "not_run"].includes(report.evaluationStatus ?? "")) {
+    return {
+      status: "technical_retry",
+      text: lang === "zh" ? "质检服务暂不可用，请对当前图片重试质检" : "Quality review is unavailable; retry review on this image.",
+    };
+  }
+  if (
+    report.evaluationStatus === "partial"
+    || report.evaluationStatus === "adjudication_required"
+    || report.adjudicationRequired
+    || report.qualityDecision === "review"
+  ) {
+    return {
+      status: "pending_review",
+      text: lang === "zh" ? "证据不完整或结论冲突，需要复核当前图片" : "Evidence is incomplete or disputed; review this image.",
+    };
+  }
+  return undefined;
+}
+
+function evidenceItems(report: GenerationQualityReport, lang: QualityDisplayLanguage): QualityDisplaySummaryItem[] {
+  const requirements = new Map((report.atomicRequirements ?? []).map((item) => [item.requirementId, item]));
+  return (report.evidenceObservations ?? [])
+    .filter((observation) => observation.status !== "not_applicable")
+    .map((observation) => {
+      const requirement = requirements.get(observation.requirementId);
+      if (!requirement) {
+        return {
+          status: "pending_review" as const,
+          text: observation.description || (lang === "zh" ? "存在未关联到明确要求的视觉发现" : "A visual finding is not linked to a defined requirement."),
+          requirementId: observation.requirementId,
+          confidence: observation.confidence,
+        };
+      }
+      return evidenceItem(requirement, observation, lang);
+    });
+}
+
+function evidenceItem(
+  requirement: AtomicVisualRequirement,
+  observation: VisualEvidenceObservation,
+  lang: QualityDisplayLanguage,
+): QualityDisplaySummaryItem {
+  const base = {
+    requirementId: requirement.requirementId,
+    confidence: observation.confidence,
+  };
+  if (observation.status === "satisfied") {
+    return { ...base, status: "satisfied", text: satisfiedText(requirement, lang) };
+  }
+  if (observation.status === "unknown") {
+    return { ...base, status: "pending_review", text: pendingText(requirement, lang) };
+  }
+  const evidenceBacked = observation.evidenceSource === "current_output"
+    && observation.confidence >= HARD_EVIDENCE_CONFIDENCE;
+  if (!evidenceBacked) {
+    return { ...base, status: "pending_review", text: pendingText(requirement, lang) };
+  }
+  return {
+    ...base,
+    status: requirement.severity === "hard" ? "must_fix" : "improvement",
+    text: violatedText(requirement, observation, lang),
+  };
+}
+
+function unrepresentedHardFailureItems(
+  report: GenerationQualityReport,
+  existing: QualityDisplaySummaryItem[],
+  lang: QualityDisplayLanguage,
+): QualityDisplaySummaryItem[] {
+  const joined = existing.map((item) => `${item.requirementId ?? ""} ${item.text}`.toLowerCase()).join("\n");
+  return (report.hardFailureReasons ?? [])
+    .filter((reason) => {
+      const requirementId = reason.match(/^requirement\s+(\S+)\s+visibly violated:/i)?.[1];
+      if (requirementId && existing.some((item) => item.requirementId === requirementId)) return false;
+      return !joined.includes(reason.toLowerCase()) && !isUnresolvedEvidenceReason(reason);
+    })
+    .map((reason) => ({
+      status: "must_fix" as const,
+      text: localizeHardFailure(reason, lang),
+    }));
+}
+
+function unrepresentedSoftSuggestionItems(
+  report: GenerationQualityReport,
+  existing: QualityDisplaySummaryItem[],
+  lang: QualityDisplayLanguage,
+): QualityDisplaySummaryItem[] {
+  const joined = existing.map((item) => item.text.toLowerCase()).join("\n");
+  return (report.softSuggestions ?? [])
+    .filter((suggestion) => !joined.includes(suggestion.toLowerCase()))
+    .map((suggestion) => ({
+      status: "improvement" as const,
+      text: compactText(suggestion, lang === "zh" ? 42 : 140),
+    }));
+}
+
+function legacyLedgerItems(issues: GenerationIssueLedgerEntry[], lang: QualityDisplayLanguage): QualityDisplaySummaryItem[] {
+  return issues.map((issue) => ({
+    status: legacyStatus(issue),
+    text: issue.status === "resolved" ? resolvedCurrentStateText(issue, lang) : fallbackIssueText(issue, lang),
+  }));
+}
+
+function legacyStatus(issue: GenerationIssueLedgerEntry): CurrentDisplayStatus {
+  if (issue.status === "resolved") return "satisfied";
+  if (issue.status === "invalid_for_stage") return "pending_review";
+  return issue.severity === "hard" ? "must_fix" : "improvement";
+}
+
+function determineGateStatus(
+  report: GenerationQualityReport,
+  counts: Partial<Record<CurrentDisplayStatus, number>>,
+): QualityGateStatus {
+  if ((counts.blocked_input ?? 0) > 0) return "blocked_input";
+  if ((counts.technical_retry ?? 0) > 0) return "technical_retry";
+  if ((counts.pending_review ?? 0) > 0 && report.qualityDecision === "review") return "pending_review";
+  if ((counts.must_fix ?? 0) > 0) return "hard_fail";
+  if ((counts.pending_review ?? 0) > 0 && !report.passed) return "pending_review";
+  if ((counts.improvement ?? 0) > 0 || (counts.pending_review ?? 0) > 0) return "pass_with_advice";
+  return "pass";
+}
+
+function countStatuses(items: QualityDisplaySummaryItem[]): Partial<Record<CurrentDisplayStatus, number>> {
+  const counts: Partial<Record<CurrentDisplayStatus, number>> = {};
+  for (const item of items) {
+    if (item.status === "open" || item.status === "resolved" || item.status === "deferred") continue;
+    counts[item.status] = (counts[item.status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function dedupeAndPrioritize(items: QualityDisplaySummaryItem[]): QualityDisplaySummaryItem[] {
+  const priority: Record<CurrentDisplayStatus, number> = {
+    must_fix: 0,
+    blocked_input: 1,
+    technical_retry: 2,
+    pending_review: 3,
+    improvement: 4,
+    satisfied: 5,
+  };
+  const seen = new Set<string>();
+  return items
+    .filter((item) => {
+      const key = `${item.status}:${item.requirementId ?? item.text.toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => priority[a.status as CurrentDisplayStatus] - priority[b.status as CurrentDisplayStatus]);
+}
+
+function satisfiedText(requirement: AtomicVisualRequirement, lang: QualityDisplayLanguage): string {
+  return lang === "zh"
+    ? `${domainLabel(requirement, lang)}符合要求：${compactText(requirement.target, 32)}`
+    : `${domainLabel(requirement, lang)} meets the requirement: ${compactText(requirement.target, 100)}`;
+}
+
+function pendingText(requirement: AtomicVisualRequirement, lang: QualityDisplayLanguage): string {
+  return lang === "zh"
+    ? `${domainLabel(requirement, lang)}证据不足，需确认：${compactText(requirement.target, 30)}`
+    : `${domainLabel(requirement, lang)} needs confirmation: ${compactText(requirement.target, 100)}`;
+}
+
+function violatedText(
+  requirement: AtomicVisualRequirement,
+  observation: VisualEvidenceObservation,
+  lang: QualityDisplayLanguage,
+): string {
+  const detail = observation.description || requirement.target;
+  return lang === "zh"
+    ? `${domainLabel(requirement, lang)}不符合要求：${compactText(detail, 32)}`
+    : `${domainLabel(requirement, lang)} does not meet the requirement: ${compactText(detail, 100)}`;
+}
+
+function domainLabel(requirement: AtomicVisualRequirement, lang: QualityDisplayLanguage): string {
+  if (lang === "en") return requirement.domain.replace("_", " ");
+  return {
+    identity: "身份",
+    layout: "构图",
+    brand_text: "品牌文字",
+    game_ui: "界面",
+    narrative: "剧情逻辑",
+    anatomy: "人物结构",
+    continuity: "连续性",
+    artifact: "画面完整性",
+  }[requirement.domain];
 }
 
 function fallbackIssueText(issue: GenerationIssueLedgerEntry, lang: QualityDisplayLanguage): string {
-  const category = issue.category;
-  const resolved = issue.status === "resolved";
-  if (resolved) return resolvedCurrentStateText(issue, lang);
-  if (lang === "zh") {
-    if (category === "text_brand") return "品牌文字或标识与要求不一致";
-    if (category === "game_ui") return "游戏界面数值或状态不准确";
-    if (category === "anatomy") return "人物肢体或手指形态异常";
-    if (category === "identity") return "人物形象与参考设定不一致";
-    if (category === "layout") return "画面构图或元素位置有偏差";
-    return compactText(issue.summary, 32);
+  if (issue.status === "invalid_for_stage") {
+    return lang === "zh" ? "该项需在视频阶段确认" : "This item must be checked in video.";
   }
-  if (category === "text_brand") return "Brand text or logo does not match the requirement.";
-  if (category === "game_ui") return "Game UI values or state are inaccurate.";
-  if (category === "anatomy") return "The character has malformed limbs or fingers.";
-  if (category === "identity") return "The character does not match the identity reference.";
-  if (category === "layout") return "Composition or element placement is inaccurate.";
-  return compactText(issue.summary, 100);
+  if (lang === "zh") {
+    if (issue.category === "text_brand") return "品牌文字或标识与要求不一致";
+    if (issue.category === "game_ui") return "游戏界面数值或状态不准确";
+    if (issue.category === "anatomy") return "人物肢体或手指形态异常";
+    if (issue.category === "identity") return "人物形象与参考设定不一致";
+    if (issue.category === "layout") return "画面构图或元素位置有偏差";
+    return compactText(issue.summary, 42);
+  }
+  if (issue.category === "text_brand") return "Brand text or logo does not match the requirement.";
+  if (issue.category === "game_ui") return "Game UI values or state are inaccurate.";
+  if (issue.category === "anatomy") return "The character has malformed limbs or fingers.";
+  if (issue.category === "identity") return "The character does not match the identity reference.";
+  if (issue.category === "layout") return "Composition or element placement is inaccurate.";
+  return compactText(issue.summary, 140);
 }
 
 function resolvedCurrentStateText(issue: GenerationIssueLedgerEntry, lang: QualityDisplayLanguage): string {
@@ -228,44 +364,24 @@ function resolvedCurrentStateText(issue: GenerationIssueLedgerEntry, lang: Quali
   return "The current image now meets this requirement.";
 }
 
-function issuePriority(issue: GenerationIssueLedgerEntry): number {
-  if (issue.status === "regressed") return 0;
-  if (issue.status === "open") return 1;
-  if (issue.status === "resolved") return 2;
-  return 3;
+function localizeHardFailure(reason: string, lang: QualityDisplayLanguage): string {
+  if (lang === "en") return compactText(reason, 140);
+  const lower = reason.toLowerCase();
+  if (lower.includes("identity")) return "身份一致性低于硬性标准";
+  if (lower.includes("layout")) return "构图完整性低于硬性标准";
+  if (lower.includes("prompt")) return "画面与核心提示要求不一致";
+  if (lower.includes("continuity")) return "连续性低于硬性标准";
+  if (lower.includes("contract")) return "画面违反已确认的合同约束";
+  return compactText(reason, 42);
 }
 
-function displayStatus(issue: GenerationIssueLedgerEntry): QualityDisplaySummaryItem["status"] {
-  if (issue.status === "resolved") return "resolved";
-  if (issue.status === "invalid_for_stage") return "deferred";
-  return "open";
-}
-
-function readMessageContent(value: unknown): string {
-  if (!isRecord(value) || !Array.isArray(value.choices)) throw new Error("missing choices");
-  const first = value.choices[0];
-  if (!isRecord(first) || !isRecord(first.message) || typeof first.message.content !== "string") throw new Error("missing message content");
-  return first.message.content;
-}
-
-function stripJsonFence(value: string): string {
-  const trimmed = value.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced?.[1]?.trim() || trimmed;
+function isUnresolvedEvidenceReason(reason: string): boolean {
+  return /^unresolved evidence for /i.test(reason);
 }
 
 function compactText(value: string, maxLength: number): string {
-  const compact = value.replace(/\s+/g, " ").replace(/^[•\-–—\d.)\s]+/, "").trim();
+  const compact = value.replace(/\s+/g, " ").replace(/^[•·–—\d.)\s]+/, "").trim();
   return compact.length <= maxLength ? compact : `${compact.slice(0, Math.max(1, maxLength - 1)).trim()}…`;
-}
-
-function compatibleBaseUrl(): string {
-  return (process.env.DASHSCOPE_COMPATIBLE_BASE_URL || process.env.ALIYUN_COMPATIBLE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1").replace(/\/$/, "");
-}
-
-function boundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.round(parsed))) : fallback;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

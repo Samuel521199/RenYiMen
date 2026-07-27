@@ -130,6 +130,67 @@ test("planning narrative contract accepts chronological event bindings", () => {
   assert.equal(report.passed, true, JSON.stringify(report.issues, null, 2));
 });
 
+test("adjacent story functions may share one event but reversed order still fails", () => {
+  const narrativeEvents = Array.from({ length: 4 }, (_, index) => ({
+    eventId: `event_${index + 1}`,
+    dramaticGoal: `goal ${index + 1}`,
+    participants: ["main_character"],
+    locationId: "game_room",
+    initialState: `start ${index + 1}`,
+    action: `action ${index + 1}`,
+    resultingState: `result ${index + 1}`,
+    requiredAnchorIds: ["main_character"],
+    previousEventIds: index ? [`event_${index}`] : [],
+    mustBecomeSeparateSegment: true,
+  }));
+  const timelineSegments = narrativeEvents.map((event, index) => ({
+    segmentNo: index + 1,
+    startTimeSeconds: index * 5,
+    endTimeSeconds: (index + 1) * 5,
+    durationSeconds: 5,
+    beatRole: index === 0 ? "hook" as const : "custom" as const,
+    purposeZh: `purpose ${index + 1}`,
+    purposeEn: "",
+    splitReasonZh: "",
+    subtitleIntentZh: "",
+    audioIntentZh: "",
+    requiredAnchorIds: ["main_character"],
+    sourceEventIds: [event.eventId],
+    boundaryModeHint: "continuous" as const,
+  }));
+  const shared = validatePlanningNarrativeContract({
+    creativeStrategy: {
+      chronologyMode: "chronological",
+      hook: "Meet the challenger.",
+      conflict: "Play the decisive cards.",
+      turningPoint: "The same play reverses the match.",
+      payoff: "Win the reward.",
+      cta: "Download now.",
+      hookEventIds: ["event_1"],
+      conflictEventIds: ["event_2"],
+      turningPointEventIds: ["event_2"],
+      payoffEventIds: ["event_3"],
+      ctaEventIds: ["event_4"],
+    },
+    narrativeEvents,
+    timelineSegments,
+  });
+  assert.equal(shared.passed, true, JSON.stringify(shared.issues, null, 2));
+
+  const reversed = validatePlanningNarrativeContract({
+    creativeStrategy: {
+      chronologyMode: "chronological",
+      conflict: "Conflict happens too late.",
+      turningPoint: "Turning point happens first.",
+      conflictEventIds: ["event_3"],
+      turningPointEventIds: ["event_2"],
+    },
+    narrativeEvents,
+    timelineSegments,
+  });
+  assert.ok(reversed.issues.some((issue) => issue.code === "STRATEGY_FUNCTION_ORDER_INVALID"));
+});
+
 test("planning narrative contract rejects Color Blitz hook leaking the turning point", () => {
   const report = validatePlanningNarrativeContract({
     creativeStrategy: {

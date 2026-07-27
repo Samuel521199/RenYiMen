@@ -102,7 +102,12 @@ export async function registerProviderDemand(
   const resourceKey = dashScopeResourceKey(lane, modelId);
   const now = new Date();
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${resourceKey}))`;
+    // pg_advisory_xact_lock returns PostgreSQL's `void` pseudo-type. Prisma
+    // cannot deserialize a raw `void` column, so expose it as a supported
+    // scalar while still acquiring the transaction-scoped lock.
+    await tx.$queryRaw<Array<{ lockResult: string | null }>>`
+      SELECT pg_advisory_xact_lock(hashtext(${resourceKey}))::text AS "lockResult"
+    `;
     const existing = await tx.videoProviderTaskLease.findUnique({
       where: { resourceKey_targetId: { resourceKey, targetId: context.targetId } },
     });
@@ -156,7 +161,9 @@ export async function requestProviderLease(
   return prisma.$transaction(async (tx) => {
     // A transaction-scoped advisory lock makes capacity inspection and slot
     // reservation atomic across every Next.js process sharing this database.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${resourceKey}))`;
+    await tx.$queryRaw<Array<{ lockResult: string | null }>>`
+      SELECT pg_advisory_xact_lock(hashtext(${resourceKey}))::text AS "lockResult"
+    `;
 
     await tx.videoProviderTaskLease.updateMany({
       where: {

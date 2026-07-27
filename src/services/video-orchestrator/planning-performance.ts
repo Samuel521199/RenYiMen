@@ -43,6 +43,8 @@ export function normalizePlanningStage(rawStage: string): {
   if (stage.startsWith("json_repair_")) {
     normalized = "json_repair";
     kind = "repair";
+  } else if (stage.startsWith("asset_visual_spec_")) {
+    normalized = "asset_visual_spec";
   } else if (stage.startsWith("asset_prompt_contract_repair")) {
     normalized = "asset_prompt_contract_repair";
     kind = "repair";

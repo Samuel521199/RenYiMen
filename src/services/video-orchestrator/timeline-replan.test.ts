@@ -5,8 +5,11 @@ import {
   applyTimelineReplanToPlanningRaw,
   createTimelineChangeRequest,
   invalidateCheckpointAfterTimelineReplan,
+  repairAlternateViewCameraGraph,
+  repairMissingSingleTakeContracts,
   type AliyunStoryboardPlannerCheckpoint,
 } from "./three-stage-planner.ts";
+import { auditSingleTakePlan } from "./single-take-audit.ts";
 import type { VideoPlanningManifest } from "./types.ts";
 
 const input = {
@@ -70,18 +73,24 @@ const currentManifest: VideoPlanningManifest = {
 test("non-repairable single-take audit becomes a structured timeline change request", () => {
   const request = createTimelineChangeRequest({
     passed: false,
-    action: "block_stage_2b",
+    action: "replan_timeline",
     auditedSegmentNos: [2],
-    auditVersion: "single-take-audit-v1",
+    auditVersion: "single-take-audit-v2",
     issues: [{
       code: "SINGLE_TAKE_REQUIRES_CUT",
       severity: "error",
       segmentNo: 2,
       artifactId: "segment:2",
       reason: "requires_cut_true",
+      reasonCode: "requires_cut_true",
       messageZh: "需要切分",
       retryFromStage: "stage2b",
       repairable: false,
+      sourcePath: "segmentRenderDescriptions[2].singleTakeContract.requiresCut",
+      evidenceType: "deterministic_contract",
+      confidence: 1,
+      structural: true,
+      repairScope: "timeline",
     }],
   }, {
     segment_render_descriptions: [{
@@ -188,7 +197,7 @@ test("timeline replan preserves the locked prefix and adds a real segment", () =
 
 test("timeline replan invalidates only the affected segment and later caches", () => {
   const checkpoint = {
-    version: 8,
+    version: 10,
     inputFingerprint: "test",
     storyboardArtistPlan: { story_beats: [] },
     storyContractReport: { passed: true, issues: [] },
@@ -204,4 +213,68 @@ test("timeline replan invalidates only the affected segment and later caches", (
   assert.deepEqual(Object.keys(checkpoint.shotDecomposerSegmentPlans ?? {}), ["1"]);
   assert.deepEqual(Object.keys(checkpoint.approvedShotDecomposerSegmentPlans ?? {}), ["1"]);
   assert.deepEqual(Object.keys(checkpoint.promptDetailSegmentPlans ?? {}), ["1"]);
+});
+
+test("missing execution contracts are completed locally without changing segment timing", () => {
+  const source = {
+    segments: [{
+      segment_no: 1,
+      start_time_seconds: 0,
+      end_time_seconds: 5,
+      duration_seconds: 5,
+      purpose_zh: "人物走向产品",
+      motion: "人物沿桌边连续走向产品",
+    }],
+    segment_render_descriptions: [{ segment_no: 1 }],
+  };
+  const audit = auditSingleTakePlan(source, [1]);
+  const repaired = repairMissingSingleTakeContracts(source, audit, [1]);
+
+  assert.equal(repaired.changed, true);
+  assert.deepEqual(repaired.plan.segments, source.segments);
+  const nextAudit = auditSingleTakePlan(repaired.plan, [1]);
+  assert.equal(nextAudit.passed, true);
+});
+
+test("alternate-view repair inherits only parent axis and layout evidence", () => {
+  const storyboardPlan = {
+    storyboard_brief: [{ segment_no: 2, camera_id: "camera_b" }],
+    camera_graph: {
+      cameras: [
+        {
+          camera_id: "camera_a",
+          segment_nos: [1],
+          axis_description: "table axis left-to-right",
+          spatial_layout_lock: "hero left, product right",
+        },
+        {
+          camera_id: "camera_b",
+          segment_nos: [2],
+          parent_camera_id: "camera_a",
+          relation_to_parent: "alternate_view",
+        },
+      ],
+      relations: [],
+    },
+  };
+  const executablePlan = {
+    ...storyboardPlan,
+    segments: [{ segment_no: 2, duration_seconds: 5, motion: "continuous walk" }],
+    segment_render_descriptions: [{
+      segment_no: 2,
+      start_frame_contract: { state: "start" },
+      end_frame_contract: { state: "end" },
+      motion_contract: { subject_motion: "continuous walk" },
+      single_take_contract: { requires_cut: false, physically_reachable: true },
+    }],
+  };
+  const audit = auditSingleTakePlan(executablePlan, [2]);
+  assert.equal(audit.action, "repair_camera_graph");
+  assert.equal(repairAlternateViewCameraGraph(storyboardPlan, audit), true);
+
+  const nextAudit = auditSingleTakePlan({
+    ...executablePlan,
+    cameraGraph: storyboardPlan.camera_graph,
+  }, [2]);
+  assert.equal(nextAudit.passed, true);
 });

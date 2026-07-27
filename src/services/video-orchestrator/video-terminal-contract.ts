@@ -325,14 +325,10 @@ function normalizeTerminalRequirement(
     );
   }
   const rawSource = stringValue(source.source);
-  if (
-    rawSource !== "user"
-    && rawSource !== "story_contract"
-    && rawSource !== "approved_end_frame"
-    && rawSource !== "planner"
-  ) {
+  const normalizedSource = normalizeTerminalRequirementSource(rawSource);
+  if (!normalizedSource) {
     throw new Error(
-      `video_prompt_contract.terminal_requirements[${index}].source is invalid.`,
+      `video_prompt_contract.terminal_requirements[${index}].source "${rawSource || "(empty)"}" is invalid.`,
     );
   }
   return {
@@ -340,8 +336,29 @@ function normalizeTerminalRequirement(
     priority,
     observableFact,
     acceptanceCriteria,
-    source: rawSource,
+    source: normalizedSource,
   };
+}
+
+function normalizeTerminalRequirementSource(
+  value: string,
+): VideoPromptTerminalRequirement["source"] | undefined {
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalized === "user") return "user";
+  if (normalized === "story_contract") return "story_contract";
+  if (normalized === "approved_end_frame") return "approved_end_frame";
+  if (normalized === "planner") return "planner";
+
+  // Model-facing schemas occasionally return a more descriptive provenance
+  // label. Normalize only aliases whose ownership is unambiguous; provenance
+  // values without a recognizable owner remain hard errors.
+  if (/(?:approved_)?(?:end|last|terminal)_(?:frame|keyframe|boundary)|end_frame_contract/.test(normalized)) {
+    return "approved_end_frame";
+  }
+  if (/story|narrative|beat/.test(normalized)) return "story_contract";
+  if (/user|brief|request/.test(normalized)) return "user";
+  if (/planner|planning|timeline|segment|shot_decomposer/.test(normalized)) return "planner";
+  return undefined;
 }
 
 function assertNoDuplicateValues(values: string[], label: string): void {

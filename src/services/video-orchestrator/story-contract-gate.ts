@@ -425,13 +425,17 @@ function validateStrategyOrder(
   const earlierOrders = (earlierEventIds ?? []).map((eventId) => eventOrder.get(eventId)).filter((value): value is number => value != null);
   const laterOrders = (laterEventIds ?? []).map((eventId) => eventOrder.get(eventId)).filter((value): value is number => value != null);
   if (!earlierOrders.length || !laterOrders.length) return;
-  if (Math.min(...earlierOrders) >= Math.min(...laterOrders)) {
+  // Adjacent story functions may legitimately coexist inside one observable
+  // event (for example, the decisive card play is both conflict and turning
+  // point). Reject only an actual reversal. Hook/turning-point leakage remains
+  // governed by the dedicated overlap and reveal-level checks above.
+  if (Math.min(...earlierOrders) > Math.min(...laterOrders)) {
     planningIssue(
       issues,
       "STRATEGY_FUNCTION_ORDER_INVALID",
       `creative_strategy.${earlierName}_event_ids`,
-      `顺叙结构中 ${earlierName} 没有发生在 ${laterName} 之前。`,
-      `重新绑定事件，使 ${earlierName} 的事件顺序严格早于 ${laterName}。`,
+      `顺叙结构中 ${earlierName} 发生在 ${laterName} 之后。`,
+      `重新绑定事件，使 ${earlierName} 不晚于 ${laterName}；同一可观察事件可以承载相邻剧情功能。`,
     );
   }
 }

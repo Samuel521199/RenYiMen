@@ -1329,17 +1329,43 @@ export interface ImageRepairDecision {
 
 export type QualityDisplayLanguage = "zh" | "en";
 
+export type QualityDisplayItemStatus =
+  | "must_fix"
+  | "improvement"
+  | "satisfied"
+  | "pending_review"
+  | "blocked_input"
+  | "technical_retry"
+  // Kept for reading persisted v1/v2 reports.
+  | "open"
+  | "resolved"
+  | "deferred";
+
+export type QualityGateStatus =
+  | "hard_fail"
+  | "pass_with_advice"
+  | "pass"
+  | "pending_review"
+  | "blocked_input"
+  | "technical_retry";
+
 export interface QualityDisplaySummaryItem {
-  status: "open" | "resolved" | "deferred";
+  status: QualityDisplayItemStatus;
   text: string;
+  requirementId?: string;
+  confidence?: number;
 }
 
 export interface QualityDisplaySummary {
-  version: "quality-summary-v1" | "quality-summary-v2";
+  version: "quality-summary-v1" | "quality-summary-v2" | "quality-summary-v3";
   lang: QualityDisplayLanguage;
   model: string;
   sourceHash: string;
   items: QualityDisplaySummaryItem[];
+  gateStatus?: QualityGateStatus;
+  /** Only evidence-backed hard visual failures may set this flag. */
+  blocksQualityPass?: boolean;
+  counts?: Partial<Record<Exclude<QualityDisplayItemStatus, "open" | "resolved" | "deferred">, number>>;
 }
 
 export interface GenerationIssueLedgerEntry {

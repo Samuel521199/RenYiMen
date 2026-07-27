@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 
 export const GENERATION_INPUT_FINGERPRINT_VERSION = "generation-input-v1";
-export const QUALITY_EVALUATION_FINGERPRINT_VERSION = "quality-evaluation-v1";
+export const QUALITY_EVALUATION_FINGERPRINT_VERSION = "quality-evaluation-v2";
+export const QUALITY_POLICY_VERSION = "quality-policy-v4";
+export const QUALITY_PROMPT_VERSION = "image-quality-prompt-v5";
 
 type CanonicalValue = null | boolean | number | string | CanonicalValue[] | { [key: string]: CanonicalValue | undefined };
 
@@ -59,23 +61,44 @@ export function buildGenerationInputFingerprint(input: {
 
 export function buildQualityEvaluationFingerprint(input: {
   kind: string;
-  mediaUrl: string;
-  prompt: string;
-  negativePrompt?: string;
-  selectedReferenceUrls?: string[];
-  targetContract?: unknown;
-  visualContract?: unknown;
-  parameters?: unknown;
+  candidateContentHash: string;
+  referenceSetHash: string;
+  qualityPolicyVersion: string;
+  qualityPromptVersion: string;
+  qualityModelId: string;
+  evaluationContract?: unknown;
 }): string {
   return fingerprint({
     version: QUALITY_EVALUATION_FINGERPRINT_VERSION,
     kind: input.kind,
-    mediaUrl: input.mediaUrl,
-    prompt: normalizeGenerationPromptForFingerprint(input.prompt),
-    negativePrompt: input.negativePrompt?.trim() ?? "",
-    selectedReferenceUrls: input.selectedReferenceUrls ?? [],
-    targetContract: input.targetContract ?? {},
-    visualContract: input.visualContract ?? {},
-    parameters: input.parameters ?? {},
+    candidateContentHash: input.candidateContentHash,
+    referenceSetHash: input.referenceSetHash,
+    qualityPolicyVersion: input.qualityPolicyVersion,
+    qualityPromptVersion: input.qualityPromptVersion,
+    qualityModelId: input.qualityModelId,
+    evaluationContract: input.evaluationContract ?? {},
+  });
+}
+
+export function buildQualityReferenceSetHash(
+  references: Array<{ contentHash: string; usageNote?: string }>,
+): string {
+  const normalized = Array.from(new Map(
+    references
+      .filter((item) => Boolean(item.contentHash))
+      .map((item) => {
+        const value = {
+          contentHash: item.contentHash.trim(),
+          usageNote: item.usageNote?.trim() ?? "",
+        };
+        return [`${value.contentHash}\u0000${value.usageNote}`, value] as const;
+      }),
+  ).values()).sort((left, right) =>
+    left.contentHash.localeCompare(right.contentHash)
+    || left.usageNote.localeCompare(right.usageNote)
+  );
+  return fingerprint({
+    version: "quality-reference-set-v1",
+    references: normalized,
   });
 }
