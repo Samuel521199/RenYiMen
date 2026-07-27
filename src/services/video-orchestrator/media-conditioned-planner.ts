@@ -14,6 +14,7 @@ import type {
   VideoPlanSegment,
   VideoPromptContract,
 } from "./types";
+import type { ProviderSchedulingContext } from "./provider-capacity";
 
 const OBSERVATION_SYSTEM_PROMPT = [
   "You are a Boundary Frame Observer.",
@@ -40,6 +41,7 @@ const MOTION_PLANNER_SYSTEM_PROMPT = [
 export async function observeApprovedBoundaryFrame(params: {
   contract: VideoBoundaryContract;
   imageUrl: string;
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }): Promise<VideoObservedBoundaryFacts> {
   const observedAt = new Date().toISOString();
   if (!structuredVisionAvailable()) {
@@ -60,7 +62,7 @@ export async function observeApprovedBoundaryFrame(params: {
         text: "CURRENT APPROVED BOUNDARY IMAGE — the only source of observed visual facts.",
       },
       { type: "image_url", image_url: { url: params.imageUrl } },
-    ], OBSERVATION_SYSTEM_PROMPT);
+    ], OBSERVATION_SYSTEM_PROMPT, params.schedulingContext);
     const source = record(raw);
     return {
       version: "observed-boundary-facts-v1",
@@ -97,6 +99,7 @@ export async function planMediaConditionedSegment(params: {
   startImageUrl: string;
   endImageUrl: string;
   provisional?: SegmentRenderDescription;
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }): Promise<VideoMediaConditionedSegmentPlan> {
   const refinedAt = new Date().toISOString();
   if (!structuredVisionAvailable()) {
@@ -121,7 +124,7 @@ export async function planMediaConditionedSegment(params: {
       { type: "image_url", image_url: { url: params.startImageUrl } },
       { type: "text", text: "END IMAGE — approved terminal-state pixel authority." },
       { type: "image_url", image_url: { url: params.endImageUrl } },
-    ], MOTION_PLANNER_SYSTEM_PROMPT);
+    ], MOTION_PLANNER_SYSTEM_PROMPT, params.schedulingContext);
     return normalizeMediaPlan(raw, params, refinedAt);
   } catch (error) {
     return fallbackPlan(

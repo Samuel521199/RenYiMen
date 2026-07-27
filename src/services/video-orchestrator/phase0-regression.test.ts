@@ -360,22 +360,36 @@ test("boundary image generation unlocks per approved asset subset", () => {
   assert.match(source, /asset_library\.batch/);
 });
 
-test("segment video dispatch can fill the five-task HappyHorse capacity", () => {
+test("provider dispatch uses independent global pools with fair cross-project capacity", () => {
   const source = readSource("src/services/video-orchestrator/project-service.ts");
-  const capacity = readSource("src/services/video-orchestrator/video-provider-capacity.ts");
+  const capacity = readSource("src/services/video-orchestrator/provider-capacity.ts");
   const workflow = readSource("src/services/video-orchestrator/aliyun-workflow.ts");
   const cron = readSource("src/app/api/cron/cleanup/route.ts");
   const migration = readSource("prisma/migrations/20260727140000_add_video_provider_task_leases/migration.sql");
   assert.match(source, /const DEFAULT_CLIP_TASK_CONCURRENCY = 5/);
   assert.match(source, /Math\.min\(MAX_UPSTREAM_TASK_CONCURRENCY, envInt\("ONE_PROMPT_VIDEO_CLIP_CONCURRENCY"/);
   assert.match(capacity, /ONE_PROMPT_HAPPYHORSE_GLOBAL_CONCURRENCY/);
+  assert.match(capacity, /ONE_PROMPT_IMAGE_GLOBAL_CONCURRENCY/);
+  assert.match(capacity, /const MAX_IMAGE_CAPACITY = 5/);
+  assert.match(capacity, /ONE_PROMPT_TEXT_GLOBAL_CONCURRENCY/);
+  assert.match(capacity, /ONE_PROMPT_VISUAL_QUALITY_GLOBAL_CONCURRENCY/);
   assert.match(capacity, /pg_advisory_xact_lock/);
   assert.match(capacity, /activeByUser/);
   assert.match(capacity, /activeByProject/);
   assert.match(workflow, /requestVideoProviderLease/);
   assert.match(workflow, /releaseVideoProviderLeaseByTaskId/);
   assert.match(source, /schedulingContext: \{[\s\S]*?userId[\s\S]*?projectId[\s\S]*?targetId/);
-  assert.match(cron, /pumpGlobalVideoProviderQueue/);
+  assert.match(cron, /pumpGlobalProviderQueue/);
   assert.match(migration, /video_provider_task_leases/);
   assert.match(migration, /resource_key.*target_id/);
+});
+
+test("micro-shot image preparation is bounded while planJson writes remain ordered", () => {
+  const source = readSource("src/services/video-orchestrator/project-service.ts");
+  assert.match(source, /const DEFAULT_MICRO_SHOT_PREPARATION_CONCURRENCY = 5/);
+  assert.match(source, /ONE_PROMPT_VIDEO_MICRO_SHOT_PREP_CONCURRENCY/);
+  assert.match(source, /mapWithConcurrencyLimit\(\s*targets,\s*preparationConcurrency/);
+  assert.match(source, /persistPreparedMicroShotImageSubmission/);
+  assert.match(source, /mapWithConcurrencyLimit\(\s*persistedPrepared,\s*imageTaskConcurrency\(\)/);
+  assert.match(source, /params\.kind === "micro_shot_image"[\s\S]*?\$\{params\.project\.id\}:\$\{params\.artifactId\}/);
 });

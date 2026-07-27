@@ -121,6 +121,30 @@ export function recommendShotConcurrency(
   };
 }
 
+export function selectAdaptiveFinalists(
+  aggregates: ShotConcurrencyBenchmarkAggregate[],
+  count = 2,
+): number[] {
+  const completed = aggregates.filter((item) =>
+    item.completedCount > 0
+    && item.shotPipelineP50Ms != null
+  );
+  const stable = completed
+    .filter((item) => item.rateLimitCount === 0 && item.failedModelRequestCount === 0)
+    .sort(compareAdaptiveCandidates);
+  const selected = stable.slice(0, count);
+  if (selected.length < count) {
+    const selectedSet = new Set(selected.map((item) => item.concurrency));
+    selected.push(
+      ...completed
+        .filter((item) => !selectedSet.has(item.concurrency))
+        .sort(compareAdaptiveCandidates)
+        .slice(0, count - selected.length),
+    );
+  }
+  return selected.map((item) => item.concurrency);
+}
+
 export function renderShotConcurrencyCsv(runs: ShotConcurrencyBenchmarkRun[]): string {
   const columns: Array<keyof ShotConcurrencyBenchmarkRun> = [
     "fixtureId",
@@ -188,6 +212,18 @@ function percentile(values: number[], quantile: number): number | null {
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.max(0, Math.ceil(sorted.length * quantile) - 1);
   return Math.round(sorted[index]);
+}
+
+function compareAdaptiveCandidates(
+  left: ShotConcurrencyBenchmarkAggregate,
+  right: ShotConcurrencyBenchmarkAggregate,
+): number {
+  return right.successRate - left.successRate
+    || left.rateLimitRate - right.rateLimitRate
+    || left.modelFailureRate - right.modelFailureRate
+    || (left.shotPipelineP50Ms ?? Number.POSITIVE_INFINITY)
+      - (right.shotPipelineP50Ms ?? Number.POSITIVE_INFINITY)
+    || left.concurrency - right.concurrency;
 }
 
 function sum(values: number[]): number {

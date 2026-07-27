@@ -26,6 +26,14 @@ import {
   VideoProviderCapacityError,
   type VideoProviderSchedulingContext,
 } from "./video-provider-capacity";
+import {
+  attachUpstreamTaskToProviderLease,
+  ProviderCapacityError,
+  requestProviderLease,
+  returnProviderLeaseToQueue,
+  withProviderCapacity,
+  type ProviderSchedulingContext,
+} from "./provider-capacity";
 
 const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
@@ -75,6 +83,10 @@ function model(name: string, fallback: string): string {
   return process.env[name]?.trim() || fallback;
 }
 
+export function aliyunImageModelName(): string {
+  return model("ALIYUN_IMAGE_MODEL", "wan2.7-image-pro");
+}
+
 function onePromptI2vModel(): string {
   return customI2vModelEnabled()
     ? process.env.ALIYUN_I2V_MODEL?.trim() || ONE_PROMPT_VIDEO_MODEL
@@ -104,8 +116,9 @@ export async function submitAliyunImageTask(params: {
   aspectRatio: VideoAspectRatio;
   seed?: number;
   preparedPromptReport?: AliyunImagePromptPreparationReport;
+  schedulingContext?: ProviderSchedulingContext;
 }): Promise<string> {
-  const imageModel = model("ALIYUN_IMAGE_MODEL", "wan2.7-image-pro");
+  const imageModel = aliyunImageModelName();
   const supportsNegativePrompt = process.env.ALIYUN_IMAGE_SUPPORTS_NEGATIVE_PROMPT?.trim().toLowerCase() === "true";
   const referenceImageUrls = (params.referenceImageUrls ?? [])
     .filter(Boolean)
@@ -169,14 +182,25 @@ export async function submitAliyunImageTask(params: {
     supportsNegativePrompt,
     seed: params.seed,
   });
+  const lease = params.schedulingContext
+    ? await requestProviderLease("image_generation", imageModel, params.schedulingContext)
+    : null;
+  if (params.schedulingContext && !lease) {
+    throw new ProviderCapacityError("Image generation capacity is full; the image remains queued");
+  }
   try {
-    return await submitDashScopeAsync(
+    const taskId = await submitDashScopeAsync(
       IMAGE_PATH,
       buildBody(fittedPrompt, referenceImageUrls.length > 0),
       "阿里云万相图片生成",
     );
+    if (lease) await attachUpstreamTaskToProviderLease(lease.leaseToken, taskId);
+    return taskId;
   } catch (error) {
-    if (!referenceImageUrls.length) throw error;
+    if (!referenceImageUrls.length) {
+      if (lease) await returnProviderLeaseToQueue(lease.leaseToken, error).catch(() => undefined);
+      throw error;
+    }
     const fallbackPromptReport = await prepareAliyunImagePromptForSubmission(
       params.prompt,
       params.negativePrompt,
@@ -189,11 +213,18 @@ export async function submitAliyunImageTask(params: {
       modelCompactionSucceeded: fallbackPromptReport.modelCompactionSucceeded,
       ...errorForLog(error),
     }, "warn");
-    return submitDashScopeAsync(
+    try {
+      const taskId = await submitDashScopeAsync(
       IMAGE_PATH,
       buildBody(fallbackPromptReport.prompt, false),
       "阿里云万相图片生成",
-    );
+      );
+      if (lease) await attachUpstreamTaskToProviderLease(lease.leaseToken, taskId);
+      return taskId;
+    } catch (fallbackError) {
+      if (lease) await returnProviderLeaseToQueue(lease.leaseToken, fallbackError).catch(() => undefined);
+      throw fallbackError;
+    }
   }
 }
 
@@ -627,6 +658,7 @@ function imagePromptCompactionTimeoutMs(): number {
 async function compactImagePromptWithModel(
   originalPrompt: string,
   protectedFacts: ProtectedImagePromptFact[],
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">,
 ): Promise<{ prompt: string; model: string; durationMs: number }> {
   const modelName = imagePromptCompactionModel();
   const timeoutMs = imagePromptCompactionTimeoutMs();
@@ -643,7 +675,7 @@ async function compactImagePromptWithModel(
     timeoutMs,
   }, "warn");
   try {
-    const response = await fetch(`${compatibleBaseUrl()}/chat/completions`, {
+    const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -683,6 +715,18 @@ async function compactImagePromptWithModel(
       }),
       signal: controller.signal,
     });
+    const response = await (schedulingContext
+      ? withProviderCapacity({
+          lane: "text_planning",
+          modelId: modelName,
+          context: {
+            ...schedulingContext,
+            targetId: `image-prompt-compaction:${crypto.randomUUID()}`,
+          },
+          operation,
+          waitTimeoutMs: timeoutMs,
+        })
+      : operation());
     const raw = await safeJson(response);
     if (!response.ok) {
       throw new Error(extractError(raw) || `prompt compaction HTTP ${response.status}`);
@@ -710,6 +754,7 @@ export async function prepareAliyunImagePromptForSubmission(
   negativePrompt?: string,
   referenceImageUrls: string[] = [],
   referenceUsageNotes: string[] = [],
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">,
 ): Promise<AliyunImagePromptPreparationReport> {
   const finalPrompt = assembledAliyunImagePrompt(
     prompt,
@@ -734,7 +779,7 @@ export async function prepareAliyunImagePromptForSubmission(
   const facts = protectedImagePromptFacts(detail.protectedUnits);
   const startedAtMs = Date.now();
   try {
-    const modelResult = await compactImagePromptWithModel(finalPrompt, facts);
+    const modelResult = await compactImagePromptWithModel(finalPrompt, facts, schedulingContext);
     return {
       ...detail.report,
       prompt: modelResult.prompt,

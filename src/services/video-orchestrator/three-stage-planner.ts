@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS,
@@ -82,6 +82,13 @@ import {
   type StoryContractGateResult,
 } from "./story-contract-gate";
 import {
+  acquireProviderCapacity,
+  releaseProviderLeaseByToken,
+  withProviderCapacity,
+  type ProviderLeaseGrant,
+  type ProviderSchedulingContext,
+} from "./provider-capacity";
+import {
   effectiveAnchorIdsForChild,
   resolveAssetContract,
   targetForKeyframe,
@@ -92,6 +99,10 @@ import {
   STORY_SEMANTIC_CRITIC_SYSTEM_PROMPT,
   STORY_SEMANTIC_REPAIR_SYSTEM_PROMPT,
 } from "./story-semantic-critic";
+import {
+  advanceRepairConvergence,
+  type RepairConvergenceDecision,
+} from "./repair-convergence-controller";
 
 const MIN_SEGMENT_SECONDS = 3;
 const MAX_SEGMENT_SECONDS = 15;
@@ -1477,11 +1488,13 @@ interface AliyunStoryboardPlannerOptions {
   onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
   onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
   onStageMetric?: (metric: AliyunStoryboardStageMetric) => Promise<void> | void;
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }
 
 const plannerProgressStorage = new AsyncLocalStorage<{
   onProgress?: (progress: AliyunStoryboardProgressUpdate) => Promise<void> | void;
   onStageMetric?: (metric: AliyunStoryboardStageMetric) => Promise<void> | void;
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }>();
 
 const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 8 as const;
@@ -1492,7 +1505,11 @@ export async function createAliyunStoryboardPlan(
   options: AliyunStoryboardPlannerOptions = {},
 ): Promise<OnePromptVideoPlan> {
   return plannerProgressStorage.run(
-    { onProgress: options.onProgress, onStageMetric: options.onStageMetric },
+    {
+      onProgress: options.onProgress,
+      onStageMetric: options.onStageMetric,
+      schedulingContext: options.schedulingContext,
+    },
     () => createAliyunStoryboardPlanInternal(input, options),
   );
 }
@@ -2260,7 +2277,7 @@ async function fetchJsonStage(stage: string, body: Record<string, unknown>): Pro
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(`${compatibleBaseUrl()}/chat/completions`, {
+    const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2269,6 +2286,19 @@ async function fetchJsonStage(stage: string, body: Record<string, unknown>): Pro
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    const schedulingContext = plannerProgressStorage.getStore()?.schedulingContext;
+    return await (schedulingContext
+      ? withProviderCapacity({
+          lane: "text_planning",
+          modelId: typeof body.model === "string" ? body.model : "unknown",
+          context: {
+            ...schedulingContext,
+            targetId: `planning:${stage}:${randomUUID()}`,
+          },
+          operation,
+          waitTimeoutMs: jsonStageTimeoutMs(),
+        })
+      : operation());
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       await logOnePromptVideo(`aliyun.storyboard.${stage}.timeout`, {
@@ -2319,9 +2349,10 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
     idleTimeout = setTimeout(() => controller.abort(), ms);
   };
   armIdleTimeout(firstChunkTimeoutMs, "first_chunk_timeout");
+  let capacityLease: ProviderLeaseGrant | undefined;
 
   try {
-    const res = await fetch(`${compatibleBaseUrl()}/chat/completions`, {
+    const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2334,6 +2365,19 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
       }),
       signal: controller.signal,
     });
+    const schedulingContext = plannerProgressStorage.getStore()?.schedulingContext;
+    if (schedulingContext) {
+      capacityLease = await acquireProviderCapacity({
+          lane: "text_planning",
+          modelId: typeof body.model === "string" ? body.model : "unknown",
+          context: {
+            ...schedulingContext,
+            targetId: `planning-stream:${stage}:${randomUUID()}`,
+          },
+          waitTimeoutMs: maxStreamMs,
+      });
+    }
+    const res = await operation();
     if (!res.ok) {
       if (idleTimeout) clearTimeout(idleTimeout);
       clearTimeout(maxTimeout);
@@ -2477,6 +2521,10 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
       );
     }
     throw error;
+  } finally {
+    if (capacityLease) {
+      await releaseProviderLeaseByToken(capacityLease.leaseToken, "completed").catch(() => undefined);
+    }
   }
 }
 
@@ -3147,8 +3195,35 @@ async function ensureStoryboardSemanticQuality(params: {
     }, "warn");
     return { storyboardArtistPlan: attachSemanticReview(current, review), review, repairCount: 0 };
   }
+  const semanticContractRevision = createHash("sha256").update(JSON.stringify({
+    userPrompt: params.input.userPrompt,
+    planningManifest: params.planningManifest,
+    planningTemplateId: params.planningTemplateId,
+  })).digest("hex");
+  let convergence: RepairConvergenceDecision = advanceRepairConvergence({
+    stage: "story_semantic",
+    repairMode: "local_edit",
+    contractRevision: semanticContractRevision,
+    report: semanticReviewAsQualityReport(review),
+    candidateId: "storyboard:initial",
+    candidateNo: 1,
+    policy: {
+      maxRepairAttempts: semanticStoryRepairMax(),
+      // Initial review plus the configured number of repair reviews.
+      maxStageVisits: semanticStoryRepairMax() + 1,
+    },
+  });
   const maxRepairs = semanticStoryRepairMax();
   for (let repairCount = 0; !review.passed && repairCount < maxRepairs; repairCount += 1) {
+    if (!convergence.mayContinueAutomatically) {
+      await logOnePromptVideo("aliyun.storyboard.story_semantic_repair.convergence_stopped", {
+        attempt: repairCount + 1,
+        terminalState: convergence.terminalState,
+        reason: convergence.reason,
+        bestObjective: convergence.episode.bestObjective,
+      }, "warn");
+      break;
+    }
     await reportPlannerProgress({
       stage: "story_semantic_repair",
       attempt: repairCount + 1,
@@ -3184,6 +3259,19 @@ async function ensureStoryboardSemanticQuality(params: {
         storyboardArtistPlan: current,
         repairAttempts: repairCount + 1,
       });
+      convergence = advanceRepairConvergence({
+        previous: convergence.episode,
+        stage: "story_semantic",
+        repairMode: repairCount === 0 ? "local_edit" : "guided_regenerate",
+        contractRevision: semanticContractRevision,
+        report: semanticReviewAsQualityReport(review),
+        candidateId: `storyboard:repair:${repairCount + 1}`,
+        candidateNo: repairCount + 2,
+        policy: {
+          maxRepairAttempts: maxRepairs,
+          maxStageVisits: maxRepairs + 1,
+        },
+      });
     } catch (error) {
       if (mode === "strict") throw error;
       await logOnePromptVideo("aliyun.storyboard.story_semantic_repair.unavailable", {
@@ -3203,6 +3291,9 @@ async function ensureStoryboardSemanticQuality(params: {
     blockingIssueCodes: review.blockingIssueCodes,
     invalidEvidenceReferences: review.invalidEvidenceReferences,
     dimensionScores: review.dimensionScores,
+    convergenceTerminalState: convergence.terminalState,
+    convergenceReason: convergence.reason,
+    convergenceBestObjective: convergence.episode.bestObjective,
   }, review.passed ? "info" : "warn");
   if (!review.passed && mode === "strict") {
     throw new Error(`Semantic story review failed before shot decomposition: ${review.blockingIssueCodes.slice(0, 8).join(", ")}`);
@@ -3211,6 +3302,29 @@ async function ensureStoryboardSemanticQuality(params: {
     storyboardArtistPlan: current,
     review,
     repairCount: review.repairAttempts ?? 0,
+  };
+}
+
+function semanticReviewAsQualityReport(
+  review: VideoStorySemanticReview,
+): GenerationQualityReport {
+  const scores = Object.values(review.dimensionScores)
+    .filter((score): score is number => typeof score === "number")
+    .map((score) => score * 20);
+  const minimumScore = scores.length ? Math.min(...scores) : review.passed ? 100 : 0;
+  return {
+    assetId: "storyboard_semantic_contract",
+    identityScore: minimumScore,
+    layoutScore: minimumScore,
+    promptAlignmentScore: minimumScore,
+    continuityScore: minimumScore,
+    artifactIssues: review.issues.map((issue) => `${issue.code}: ${issue.claimZh}`),
+    hardFailureReasons: review.blockingIssueCodes,
+    missingReferenceAnchorIds: review.invalidEvidenceReferences,
+    passed: review.passed,
+    retryFromStage: review.issues.some((issue) => issue.rewriteFromStage === "creative_strategy")
+      ? "stage2b"
+      : "stage3",
   };
 }
 

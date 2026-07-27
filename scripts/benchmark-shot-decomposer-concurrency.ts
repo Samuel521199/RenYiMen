@@ -7,6 +7,7 @@ import {
   recommendShotConcurrency,
   renderShotConcurrencyCsv,
   renderShotConcurrencyMarkdown,
+  selectAdaptiveFinalists,
   type ShotConcurrencyBenchmarkRun,
 } from "../src/services/video-orchestrator/shot-concurrency-benchmark";
 import type {
@@ -22,6 +23,7 @@ interface BenchmarkFixture {
 
 interface CliOptions {
   live: boolean;
+  adaptive: boolean;
   concurrencies: number[];
   repeats: number;
   fixtureCount: number;
@@ -47,6 +49,8 @@ const fixtures: BenchmarkFixture[] = [
   },
 ];
 
+const SEED_CHECKPOINT_MAX_ATTEMPTS = 3;
+
 class SeedCheckpointReady extends Error {
   constructor() {
     super("Benchmark seed checkpoint is ready.");
@@ -58,12 +62,16 @@ async function main(): Promise<void> {
   loadEnvConfig(process.cwd());
   const options = parseCliOptions(process.argv.slice(2));
   const selectedFixtures = fixtures.slice(0, options.fixtureCount);
-  const estimatedPlannerRuns = selectedFixtures.length * options.repeats * options.concurrencies.length;
+  const adaptiveFirstPass = [1, 4, 8, 10];
+  const estimatedPlannerRuns = options.adaptive
+    ? selectedFixtures.length * (adaptiveFirstPass.length + 2 * 2)
+    : selectedFixtures.length * options.repeats * options.concurrencies.length;
   const estimate = {
     mode: options.live ? "live" : "dry-run",
+    strategy: options.adaptive ? "adaptive-two-phase" : "fixed-grid",
     model: process.env.ALIYUN_STORYBOARD_MODEL?.trim() || "qwen3.7-plus",
-    concurrencies: options.concurrencies,
-    repeats: options.repeats,
+    concurrencies: options.adaptive ? adaptiveFirstPass : options.concurrencies,
+    repeats: options.adaptive ? "第一轮各1次，最快的两个档位各补2次" : options.repeats,
     fixtures: selectedFixtures.map((item) => item.id),
     seedCheckpointRuns: selectedFixtures.length,
     measuredPlannerRuns: estimatedPlannerRuns,
@@ -72,11 +80,14 @@ async function main(): Promise<void> {
   };
   process.stdout.write(`${JSON.stringify(estimate, null, 2)}\n`);
   if (!options.live) {
-    process.stdout.write("\n这是 dry-run，未调用任何模型。添加 --live 并设置 ONE_PROMPT_VIDEO_CONCURRENCY_BENCHMARK=1 才会执行真实压测。\n");
+    process.stdout.write("\n这是 dry-run，未调用任何模型。运行 npm run benchmark:shot-concurrency:live 可直接执行首轮真实压测。\n");
     return;
   }
-  if (process.env.ONE_PROMPT_VIDEO_CONCURRENCY_BENCHMARK !== "1") {
-    throw new Error("真实压测保护未解除：请设置 ONE_PROMPT_VIDEO_CONCURRENCY_BENCHMARK=1。");
+  if (
+    !process.argv.includes("--confirm-billable")
+    && process.env.ONE_PROMPT_VIDEO_CONCURRENCY_BENCHMARK !== "1"
+  ) {
+    throw new Error("真实压测保护未解除：请使用 npm run benchmark:shot-concurrency:live。");
   }
   if (
     !process.env.DASHSCOPE_API_KEY?.trim()
@@ -91,9 +102,16 @@ async function main(): Promise<void> {
   const reportDir = resolveReportDirectory(options.outputDir, generatedAt);
   await mkdir(reportDir, { recursive: true });
   const seedCheckpoints = new Map<string, AliyunStoryboardPlannerCheckpoint>();
+  // Benchmark preflight should repair a stochastic story-contract defect
+  // instead of aborting before any concurrency level is measured.
+  process.env.ONE_PROMPT_VIDEO_STORY_CONTRACT_REPAIR_MAX = "3";
   for (const fixture of selectedFixtures) {
     process.stdout.write(`\n[seed] ${fixture.id}: 生成共享前置检查点…\n`);
-    const checkpoint = await createSeedCheckpoint(fixture, createAliyunStoryboardPlan);
+    const checkpoint = await createSeedCheckpoint(
+      fixture,
+      createAliyunStoryboardPlan,
+      path.join(reportDir, `seed-${fixture.id}-failures.json`),
+    );
     seedCheckpoints.set(fixture.id, checkpoint);
     await writeFile(
       path.join(reportDir, `seed-${fixture.id}.json`),
@@ -103,18 +121,67 @@ async function main(): Promise<void> {
   }
 
   const runs: ShotConcurrencyBenchmarkRun[] = [];
-  const executionOrder = interleavedExecutionOrder(options, selectedFixtures);
   // The seed checkpoint already contains the semantic story review. Disable
   // the unrelated critic during measured runs so the benchmark pays for and
   // measures the per-segment pipeline rather than a constant serial prelude.
   process.env.ONE_PROMPT_VIDEO_SEMANTIC_STORY_GATE = "off";
-  for (let index = 0; index < executionOrder.length; index += 1) {
-    const item = executionOrder[index];
+  const firstPassOrder = options.adaptive
+    ? selectedFixtures.flatMap((fixture, fixtureIndex) =>
+        rotate(adaptiveFirstPass, fixtureIndex).map((concurrency) => ({
+          fixture,
+          concurrency,
+          repeat: 1,
+        }))
+      )
+    : interleavedExecutionOrder(options, selectedFixtures);
+  let completedExecutionCount = 0;
+  const maximumExecutionCount = estimatedPlannerRuns;
+  let adaptiveFinalists: number[] | undefined;
+  for (const item of firstPassOrder) {
+    await executeBenchmarkItem(item);
+  }
+
+  if (options.adaptive) {
+    adaptiveFinalists = selectAdaptiveFinalists(aggregateShotConcurrencyRuns(runs), 2);
+    if (!adaptiveFinalists.length) {
+      throw new Error("第一轮没有成功样本，无法进入第二轮复测。请查看已生成的 report.md。");
+    }
+    process.stdout.write(`\n[adaptive] 第一轮完成，进入复测的并发：${adaptiveFinalists.join(", ")}\n`);
+    const finalistOrder = Array.from({ length: 2 }, (_, repeatIndex) =>
+      selectedFixtures.flatMap((fixture, fixtureIndex) =>
+        rotate(adaptiveFinalists as number[], repeatIndex + fixtureIndex).map((concurrency) => ({
+          fixture,
+          concurrency,
+          repeat: repeatIndex + 2,
+        }))
+      )
+    ).flat();
+    for (const item of finalistOrder) {
+      await executeBenchmarkItem(item);
+    }
+  }
+
+  const { recommendation } = await writeInterimReports(
+    reportDir,
+    generatedAt,
+    runs,
+    adaptiveFinalists,
+  );
+  process.stdout.write(`\n完成。推荐并发：${recommendation.concurrency ?? "无"}\n${recommendation.reason}\n`);
+  process.stdout.write(`报告目录：${reportDir}\n`);
+  if (!runs.some((item) => item.status === "completed")) process.exitCode = 1;
+
+  async function executeBenchmarkItem(item: {
+    fixture: BenchmarkFixture;
+    concurrency: number;
+    repeat: number;
+  }): Promise<void> {
     const checkpoint = requiredCheckpoint(seedCheckpoints, item.fixture.id);
     process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_MODE = "segment";
     process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_CONCURRENCY = String(item.concurrency);
+    completedExecutionCount += 1;
     process.stdout.write(
-      `\n[${index + 1}/${executionOrder.length}] fixture=${item.fixture.id} concurrency=${item.concurrency} repeat=${item.repeat}\n`,
+      `\n[${completedExecutionCount}/${maximumExecutionCount}] fixture=${item.fixture.id} concurrency=${item.concurrency} repeat=${item.repeat}\n`,
     );
     const run = await runBenchmarkCase({
       fixture: item.fixture,
@@ -127,42 +194,62 @@ async function main(): Promise<void> {
     process.stdout.write(
       `${run.status} total=${formatMs(run.totalDurationMs)} pipeline=${formatMs(run.shotPipelineDurationMs)} requests=${run.modelRequestCount} 429=${run.rateLimitCount}\n`,
     );
-    await writeInterimReports(reportDir, generatedAt, runs);
-    if (options.cooldownMs > 0 && index < executionOrder.length - 1) {
+    await writeInterimReports(reportDir, generatedAt, runs, adaptiveFinalists);
+    if (options.cooldownMs > 0 && completedExecutionCount < maximumExecutionCount) {
       await delay(options.cooldownMs);
     }
   }
-
-  const { recommendation } = await writeInterimReports(reportDir, generatedAt, runs);
-  process.stdout.write(`\n完成。推荐并发：${recommendation.concurrency ?? "无"}\n${recommendation.reason}\n`);
-  process.stdout.write(`报告目录：${reportDir}\n`);
-  if (!runs.some((item) => item.status === "completed")) process.exitCode = 1;
 }
 
 async function createSeedCheckpoint(
   fixture: BenchmarkFixture,
   createPlan: typeof import("../src/services/video-orchestrator/three-stage-planner").createAliyunStoryboardPlan,
+  failureLogPath: string,
 ): Promise<AliyunStoryboardPlannerCheckpoint> {
-  let seed: AliyunStoryboardPlannerCheckpoint | undefined;
-  try {
-    await createPlan(plannerInput(fixture), {
-      onCheckpoint(checkpoint) {
-        seed = structuredClone(checkpoint);
-        if (
-          checkpoint.storyboardArtistPlan
-          && !Object.keys(checkpoint.shotDecomposerSegmentPlans ?? {}).length
-        ) {
-          throw new SeedCheckpointReady();
-        }
-      },
-    });
-  } catch (error) {
-    if (!(error instanceof SeedCheckpointReady)) throw error;
+  let latestCheckpoint: AliyunStoryboardPlannerCheckpoint | undefined;
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= SEED_CHECKPOINT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await createPlan(plannerInput(fixture), {
+        checkpoint: latestCheckpoint ? resetSeedCheckpointForRetry(latestCheckpoint) : undefined,
+        onCheckpoint(checkpoint) {
+          latestCheckpoint = structuredClone(checkpoint);
+          if (
+            checkpoint.storyboardArtistPlan
+            && !Object.keys(checkpoint.shotDecomposerSegmentPlans ?? {}).length
+          ) {
+            throw new SeedCheckpointReady();
+          }
+        },
+      });
+    } catch (error) {
+      if (error instanceof SeedCheckpointReady) {
+        if (!latestCheckpoint?.storyboardArtistPlan || !latestCheckpoint.planningRaw) break;
+        return resetSegmentCheckpoint(latestCheckpoint);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`attempt ${attempt}: ${message}`);
+      await writeFile(failureLogPath, `${JSON.stringify({
+        fixtureId: fixture.id,
+        updatedAt: new Date().toISOString(),
+        maxAttempts: SEED_CHECKPOINT_MAX_ATTEMPTS,
+        failures,
+        concurrencyBenchmarkStarted: false,
+      }, null, 2)}\n`, "utf8");
+      process.stderr.write(
+        `[seed] ${fixture.id} 前置检查点第 ${attempt}/${SEED_CHECKPOINT_MAX_ATTEMPTS} 次失败：${message}\n`,
+      );
+      if (attempt < SEED_CHECKPOINT_MAX_ATTEMPTS) {
+        process.stderr.write("[seed] 保留已完成的 Planning Architect 检查点，重新生成并校验 Storyboard Artist。\n");
+        await delay(2000);
+        continue;
+      }
+    }
   }
-  if (!seed?.storyboardArtistPlan || !seed.planningRaw) {
-    throw new Error(`Fixture ${fixture.id} 未能生成可复用的 Stage 2B 前检查点。`);
-  }
-  return resetSegmentCheckpoint(seed);
+  throw new Error(
+    `Fixture ${fixture.id} 连续 ${SEED_CHECKPOINT_MAX_ATTEMPTS} 次未能生成合法的 Stage 2B 前检查点；并发测试尚未开始。\n`
+    + failures.join("\n"),
+  );
 }
 
 async function runBenchmarkCase(params: {
@@ -254,9 +341,14 @@ async function writeInterimReports(
   reportDir: string,
   generatedAt: string,
   runs: ShotConcurrencyBenchmarkRun[],
+  recommendationConcurrencies?: number[],
 ) {
   const aggregates = aggregateShotConcurrencyRuns(runs);
-  const recommendation = recommendShotConcurrency(aggregates);
+  const recommendation = recommendShotConcurrency(
+    recommendationConcurrencies?.length
+      ? aggregates.filter((item) => recommendationConcurrencies.includes(item.concurrency))
+      : aggregates,
+  );
   const payload = {
     generatedAt,
     updatedAt: new Date().toISOString(),
@@ -316,14 +408,26 @@ function resetSegmentCheckpoint(
   return copy;
 }
 
+function resetSeedCheckpointForRetry(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+): AliyunStoryboardPlannerCheckpoint {
+  const copy = resetSegmentCheckpoint(checkpoint);
+  delete copy.storyboardArtistPlan;
+  delete copy.storyContractReport;
+  delete copy.storySemanticReview;
+  return copy;
+}
+
 function parseCliOptions(args: string[]): CliOptions {
   const live = args.includes("--live");
+  const adaptive = args.includes("--adaptive");
   const concurrencies = parseIntegerList(option(args, "--concurrency") ?? "1,2,3,4,6,8,10", 1, 10);
   const repeats = parseInteger(option(args, "--repeats") ?? "2", 1, 20, "--repeats");
   const fixtureCount = parseInteger(option(args, "--fixtures") ?? "1", 1, fixtures.length, "--fixtures");
   const cooldownMs = parseInteger(option(args, "--cooldown-ms") ?? "3000", 0, 300_000, "--cooldown-ms");
   return {
     live,
+    adaptive,
     concurrencies,
     repeats,
     fixtureCount,
@@ -333,10 +437,12 @@ function parseCliOptions(args: string[]): CliOptions {
 }
 
 function option(args: string[], name: string): string | undefined {
-  const inline = args.find((arg) => arg.startsWith(`${name}=`));
-  if (inline) return inline.slice(name.length + 1);
-  const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const arg = args[index];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+    if (arg === name) return args[index + 1];
+  }
+  return undefined;
 }
 
 function parseIntegerList(value: string, minimum: number, maximum: number): number[] {

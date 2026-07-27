@@ -1163,8 +1163,8 @@ export interface RollbackVideoMediaInput {
 }
 
 export interface GenerationQualityReport {
-  policyVersion?: "quality-policy-v2" | "quality-policy-v3";
-  evaluationStatus?: "completed" | "partial" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
+  policyVersion?: "quality-policy-v2" | "quality-policy-v3" | "quality-policy-v4";
+  evaluationStatus?: "completed" | "partial" | "adjudication_required" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
   technicalError?: string;
   technicalRetryable?: boolean;
   /** Whether identity/product scores have an authoritative approved reference to compare against. */
@@ -1202,6 +1202,11 @@ export interface GenerationQualityReport {
   suspectedContractConflicts?: string[];
   contractConflictsVerified?: boolean;
   issueLedger?: GenerationIssueLedgerEntry[];
+  atomicRequirements?: AtomicVisualRequirement[];
+  evidenceObservations?: VisualEvidenceObservation[];
+  adjudicationRequired?: boolean;
+  adjudicationPerformed?: boolean;
+  adjudicationReason?: string;
   resolvedIssueIds?: string[];
   openHardIssueIds?: string[];
   deferredVideoIssueResults?: DeferredVideoIssueResult[];
@@ -1228,6 +1233,43 @@ export interface GenerationQualityReport {
   suggestedRepairReasonCodes?: string[];
   repairDecision?: ImageRepairDecision;
   displaySummaries?: Partial<Record<QualityDisplayLanguage, QualityDisplaySummary>>;
+}
+
+export type AtomicVisualRequirementDomain =
+  | "identity"
+  | "layout"
+  | "brand_text"
+  | "game_ui"
+  | "narrative"
+  | "anatomy"
+  | "continuity"
+  | "artifact";
+
+export interface AtomicVisualRequirement {
+  requirementId: string;
+  domain: AtomicVisualRequirementDomain;
+  target: string;
+  severity: "hard" | "soft";
+  authority: "approved_reference" | "structured_contract" | "frame_contract" | "planner_inference";
+  appliesTo: "static_image" | "video" | "both";
+  tolerance?: string;
+  referenceAnchorIds?: string[];
+}
+
+export interface VisualEvidenceObservation {
+  requirementId: string;
+  status: "satisfied" | "violated" | "unknown" | "not_applicable";
+  confidence: number;
+  evidenceSource: "current_output" | "reference_only" | "unavailable";
+  description?: string;
+  observedText?: string;
+  expectedText?: string;
+  normalizedRegion?: {
+    xMin: number;
+    yMin: number;
+    xMax: number;
+    yMax: number;
+  };
 }
 
 export interface DeferredVideoQualityCheck {
@@ -1303,6 +1345,8 @@ export interface QualityDisplaySummary {
 export interface GenerationIssueLedgerEntry {
   issueId: string;
   fingerprint: string;
+  requirementId?: string;
+  defectType?: string;
   category: "text_brand" | "game_ui" | "anatomy" | "identity" | "layout" | "continuity" | "artifact";
   region?: string;
   summary: string;

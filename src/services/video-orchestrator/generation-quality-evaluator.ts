@@ -2,9 +2,10 @@
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
+import { randomUUID } from "node:crypto";
 import { logOnePromptVideo } from "./logger";
 import type {
+  AtomicVisualRequirement,
   DeferredVideoIssueResult,
   DeferredVideoQualityCheck,
   GenerationCorrectionAction,
@@ -13,25 +14,40 @@ import type {
   ImageRepairContextSection,
   ImageRepairDecision,
   ImageRepairMode,
+  VisualEvidenceObservation,
 } from "./types";
 import { onePromptRolloutEnabled } from "./rollout-flags";
 import type { AuthoritativeVisualContract } from "./visual-quality-contract";
-import { isMotionOnlyStillIssue, reconcileGenerationIssueLedger } from "./visual-quality-contract";
+import {
+  compileAtomicVisualRequirements,
+  isMotionOnlyStillIssue,
+  reconcileGenerationIssueLedger,
+} from "./visual-quality-contract";
+import { withProviderCapacity, type ProviderSchedulingContext } from "./provider-capacity";
 
 const IMAGE_QUALITY_SYSTEM_PROMPT = [
-  "You are an evidence-based Visual Quality Assurance Engineer and a Generative Image Repair Specification Engineer for production advertising imagery.",
+  "You are an evidence-based visual evidence extractor for production advertising imagery. You are not the final quality judge and you do not plan repairs.",
   "The image labeled CURRENT OUTPUT is the only image being judged. REFERENCE IMAGE and PREVIOUS OUTPUT images are comparison evidence only. Never report an object, text, count, UI element, score, timer, person, product, or defect as present unless it is visibly present in CURRENT OUTPUT.",
   "Every input image label defines its role and allowed use. Do not transfer observations between images. A detail visible only in a reference may define the desired target, but it is not evidence that the current output contains that detail.",
-  "First judge only what is visibly supported by the current pixels. Then translate confirmed defects into minimal, measurable redraw instructions. Do not preserve an old diagnosis when the new image visibly changed.",
-  "Use confirmed only when the defect is clearly visible. If gaze, tiny text, occlusion, or intent cannot be determined reliably, use evidenceStatus=uncertain, confidence below 0.75, priority=recommended, and do not set passed=false solely because of that uncertain finding.",
-  "For spatial repairs use normalized image coordinates: top-left=(0,0), bottom-right=(1,1). Coordinates are approximate generation targets, not claims of pixel-perfect measurement.",
+  "Evaluate only the supplied atomic requirements. For every requirement return exactly one status: satisfied, violated, unknown, or not_applicable.",
+  "A violated result requires localized visible evidence from CURRENT OUTPUT and confidence of at least 0.80. Otherwise return unknown.",
+  "If gaze, tiny text, occlusion, anatomy, count, or intent cannot be determined reliably, return unknown. Unknown is not a failure.",
+  "Do not decide whether the whole image passes. Do not output passed, retryFromStage, repair mode, correction actions, or new requirements.",
+  "For localized evidence use normalized image coordinates: top-left=(0,0), bottom-right=(1,1). Coordinates are approximate evidence regions, not claims of pixel-perfect measurement.",
   "Describe every direction from the viewer/image perspective only: viewer-left, viewer-right, up, or down. Never write ambiguous phrases such as 'character right (viewer left)'.",
   "For head or eye direction, specify a viewer-relative direction, an approximate yaw/pitch range when useful, and a normalized gaze target point. A turned head is not automatically a failed gaze; cite visible pupil/head evidence.",
-  "For countable UI or product elements, specify an exact count, normalized placement, spacing or size tolerance, and the surrounding elements that must remain unchanged.",
-  "Return at most three highest-impact correction actions. Avoid false precision and never invent geometry unsupported by the contract or visible image.",
-  "Also suggest a repair mode: local_edit for a few spatially bounded defects on an otherwise strong image; guided_regenerate for broader but recoverable changes; full_regenerate when the baseline structure, identity, subject count, scene, or composition is fundamentally wrong. This suggestion is advisory; deterministic orchestration rules make the final decision.",
-  "For local_edit, every required correction must have a normalizedRegion, and you must list the content that should remain unchanged. Never suggest local_edit for wrong subject count, wrong scene, severe identity failure, global layout failure, or contradictory requirements.",
+  "For countable UI or product elements, report the visible count and location without inventing an expected value outside the atomic requirement.",
+  "Return evaluationConfidence, the four summary scores, visible counts, wrongTextDetected, and observations[]. Every observation must include requirementId, status, confidence, evidenceSource=current_output|reference_only|unavailable, description, and normalizedRegion when visible.",
   "Output strict JSON only.",
+].join("\n");
+
+const IMAGE_QUALITY_ADJUDICATION_SYSTEM_PROMPT = [
+  "You are a visual evidence adjudicator. Review only the disputed atomic requirements.",
+  "CURRENT OUTPUT is the sole evidence of what exists. References define target appearance only.",
+  "Do not add requirements, propose repairs, or decide the whole image's pass status.",
+  "For every disputed requirement return confirmed_violation, rejected_violation, or unresolved with confidence and localized CURRENT OUTPUT evidence.",
+  "A confirmed violation requires confidence >= 0.80 and must exceed the explicit contract tolerance.",
+  "Output strict JSON only as {adjudications:[{requirementId,status,confidence,evidenceSource,description,normalizedRegion}]}.",
 ].join("\n");
 
 const VIDEO_QUALITY_SYSTEM_PROMPT = [
@@ -76,6 +92,7 @@ interface BaseEvaluationParams {
   previousQualityReport?: GenerationQualityReport;
   previousCandidateUrl?: string;
   deferredVideoQualityChecks?: DeferredVideoQualityCheck[];
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }
 
 export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams): Promise<GenerationQualityReport> {
@@ -104,37 +121,34 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
   if (!onePromptRolloutEnabled("ONE_PROMPT_VISUAL_QUALITY_EVAL")) return legacyQualityFallback(params, false);
   if (!qualityVisionEnabled()) return evaluationFailure(params, "真实图片视觉质量评估未启用或缺少 DashScope API Key。", "manual");
   const qualityPromptStartedAtMs = Date.now();
+  const atomicRequirements = compileAtomicVisualRequirements({
+    targetContract: params.targetContract,
+    visualContract: params.visualContract,
+    purpose: params.purpose,
+  });
   const content: Array<Record<string, unknown>> = [{
     type: "text",
     text: [
-      "Evaluate the actual generated image. Scores must come from visible media content, never prompt length.",
+      "Extract visible evidence from the actual generated image. Scores must come from visible media content, never prompt length.",
       "IMAGE LOCALIZATION CONTRACT: CURRENT OUTPUT is the sole subject of observation. Before writing any issue, count, text reading, or resolved/still-open decision, locate its visible evidence in CURRENT OUTPUT itself. Never use pixels from a REFERENCE IMAGE or PREVIOUS OUTPUT as evidence about what the current output contains.",
       "REFERENCE IMAGES define only the target attributes stated in their individual role notes. Pixels outside a role note are non-authoritative. If a game board, score, timer, logo, person, product, or text appears only in a reference, do not claim it appears in CURRENT OUTPUT.",
-      "You are the final visual quality gate. If any required visual evidence, identity lock, authoritative brand content, narrative meaning, anatomy, or composition is materially wrong or missing, return passed=false. The orchestration layer will not override your veto.",
       `Purpose: ${params.purpose}`,
-      `Target contract: ${JSON.stringify(params.targetContract)}`,
-      `Generation prompt: ${params.prompt.slice(0, 2400)}`,
-      `Negative prompt: ${(params.negativePrompt ?? "").slice(0, 1200)}`,
+      `Atomic visual requirements: ${JSON.stringify(atomicRequirements)}`,
       `Reference usage notes: ${JSON.stringify(params.referenceUsageNotes)}`,
-      params.visualContract ? `Authoritative visual contract: ${JSON.stringify(params.visualContract)}` : "",
-      params.previousQualityReport ? `Previous issue ledger to compare and close: ${JSON.stringify(params.previousQualityReport.issueLedger ?? [])}` : "",
-      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, artifactIssues[], correctionActions[], contractConflicts[], issueDeltas[], passed, retryInstruction, retryFromStage stage2b|stage3|generation, suggestedRepairMode local_edit|guided_regenerate|full_regenerate, correctionScope local|regional|global, baselineUsable, and repairReasonCodes[].",
-      "For EVERY confirmed failed issue, correctionActions must contain one executable object: {region, element, observed, target, instruction, evidenceStatus, confidence, normalizedRegion, targetPoint, executionParameters, tolerance, priority, sourceConstraint, preserve[]}. evidenceStatus is confirmed|uncertain and confidence is 0..1. normalizedRegion is {xMin,yMin,xMax,yMax} in the top-left-origin 0..1 coordinate system; targetPoint is {x,y} in the same system. executionParameters contains only contract-supported measurable controls such as viewerRelativeDirection, yawDegrees, pitchDegrees, exactCount, spacingRatio, sizeRatio, color, or textValue. tolerance states the acceptable visible range.",
-      "region must identify a concrete visual location. observed states exactly what is visibly wrong and cites visible evidence rather than inferred intent. target states one concrete desired result, including exact value/count/format/color/pose/size when the contract supports it. instruction must be imperative and ready to paste into the next generation prompt; never merely repeat the diagnosis.",
-      "retryInstruction must consolidate correctionActions into a precise redraw specification: say WHAT to change, WHERE to change it, the exact TARGET state, and what nearby/strong-scoring content must remain unchanged. Prefer concrete renderable values over vague words such as improve, fix, proper, near, appropriate, or more accurate.",
-      "Direction rule: use viewer-left/viewer-right only. For gaze, distinguish head yaw from pupil direction and give a normalized target point. If the current head or eyes visibly moved toward the requested side, acknowledge that delta instead of repeating 'looks forward'.",
-      "Evidence rule: uncertain observations may be returned as recommended correctionActions, but they must not appear as definite artifactIssues and must not alone cause passed=false.",
-      "Before proposing corrections, check Target contract, Generation prompt, Negative prompt, and reference notes for possible contradictions. The target contract and explicit required-visible evidence outrank generic negative-prompt defaults. Never infer that unlisted logo text is forbidden when an approved visual anchor contains it. Put possible contradictions in contractConflicts[] as advisory evidence only; the compiler, not this visual evaluator, owns stage-3 routing.",
+      params.visualContract ? `Applicable visual policy: ${JSON.stringify({
+        mediaStage: params.visualContract.mediaStage,
+        exactTextAuthority: params.visualContract.exactTextAuthority,
+        allowGameUi: params.visualContract.allowGameUi,
+        allowBrandText: params.visualContract.allowBrandText,
+      })}` : "",
+      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, and observations[].",
+      "Each observations[] item must be {requirementId,status,confidence,evidenceSource,description,observedText,expectedText,normalizedRegion}. status is satisfied|violated|unknown|not_applicable. evidenceSource is current_output|reference_only|unavailable.",
+      "Do not output a whole-image passed boolean. Do not output correctionActions, artifactIssues, repair mode, retry stage, or requirements absent from Atomic visual requirements.",
       "Authority rule for exact appearance and text: an approved reference image outranks planner-written descriptions. Compare the generated logo, UI, product, and character directly with the corresponding approved reference. Do not invent forbidden or required wording that is absent from the authoritative source.",
-      "Game-ad rule: authorized logo text, game title, score, timer, multiplier, buttons, and contract-required UI are allowed and often required. Fail only for missing required content, wrong spelling/value/state, gibberish, unauthorized extra copy, subtitles, or watermarks—not merely because text or UI exists.",
-      "For anchors prioritize isolated identity accuracy. For boundary keyframes prioritize contract/layout/identity. For motion checkpoints prioritize same-path state and continuity.",
-      "Repair-mode guidance: local_edit means the current image is a safe visual baseline and only a few bounded regions need changes; guided_regenerate means the baseline may guide identity/composition but broader rerendering is needed; full_regenerate means the current image must not be reused as a visual baseline. The application independently verifies this classification.",
-      "For a still image, never fail because motion itself is not visible. A static score, timer, glow, or pose may represent one instant; motion, jumping digits, countdown change, and animation belong to later video evaluation.",
-      "Compare against the previous issue ledger when provided. For each prior issue, explicitly decide resolved, still_open, regressed, or invalid_for_stage. Do not silently repeat old feedback.",
-      "A prior issue is resolved only when the current pixels visibly fix it. If the shot's core purpose or requiredVisibleEvidence is absent (for example social feedback in a social-feedback shot), that is a blocking failure even when numeric scores are high.",
-      "For an anchor reference image, use retryFromStage=generation for visible output defects such as extra people, unwanted backgrounds/decorations, wrong centering, bad proportions, malformed text, or missing requested elements. Stage2b is only for an impossible/contradictory shot contract and does not repair an anchor image.",
+      "Game-ad rule: authorized logo text, game title, score, timer, multiplier, buttons, and contract-required UI are allowed and often required. Mark violated only for a supplied atomic requirement, not merely because text or UI exists.",
+      "For a still image, motion, countdown change, jumping digits, and animation are not directly observable. Return not_applicable for motion-only requirements.",
       params.requiresExactBrandText
-        ? "This is a brand/logo/UI lock asset. Required brand text in the prompt is intentional. Set wrongTextDetected=true ONLY when visible text is misspelled, missing required lock wording, or random gibberish — NOT merely because readable brand/UI text is present."
+        ? "This is a brand/logo/UI lock asset. Set wrongTextDetected=true only when an atomic exact-text requirement is visibly violated."
         : "",
       params.assetCategory ? `Asset category: ${params.assetCategory}` : "",
     ].join("\n"),
@@ -143,14 +157,13 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     text: "CURRENT OUTPUT — IMAGE UNDER EVALUATION. Only pixels in the next image may support observed defects, counts, text readings, UI presence, and issue-resolution decisions.",
   }, { type: "image_url", image_url: { url: params.mediaUrl } }];
   const seenReferenceUrls = new Set<string>([params.mediaUrl, params.previousCandidateUrl ?? ""]);
-  const localizedReferences = params.selectedReferenceUrls
+  const localizedReferences = selectRoleDiverseQualityReferences(params.selectedReferenceUrls
     .map((url, index) => ({ url, usageNote: params.referenceUsageNotes[index] }))
     .filter(({ url }) => {
       if (!url || seenReferenceUrls.has(url)) return false;
       seenReferenceUrls.add(url);
       return true;
-    })
-    .slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+    }), qualityReferenceLimit());
   for (const [index, reference] of localizedReferences.entries()) {
     content.push({
       type: "text",
@@ -162,20 +175,13 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     });
     content.push({ type: "image_url", image_url: { url: reference.url } });
   }
-  if (params.previousCandidateUrl) {
-    content.push({
-      type: "text",
-      text: "PREVIOUS OUTPUT — NOT CURRENT OUTPUT. Use only for before/after delta comparison. Re-check every prior issue against CURRENT OUTPUT pixels; never copy the previous diagnosis or describe previous pixels as current.",
-    });
-    content.push({ type: "image_url", image_url: { url: params.previousCandidateUrl } });
-  }
   await logOnePromptVideo("production.step.completed", {
     moduleNameZh,
     stepNameZh: "编写本张候选图的视觉质检提示词",
     executionMethod: "program",
     durationMs: Date.now() - qualityPromptStartedAtMs,
     model: qualityVisionModel(),
-    resultZh: "已写入目标合同、参考图、上一轮问题和当前候选图",
+    resultZh: "已写入原子视觉要求、按角色筛选的参考图和当前候选图；上一轮诊断不进入主检查",
   });
   const evaluationStartedAt = Date.now();
   try {
@@ -185,7 +191,7 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       executionMethod: "vision_model",
       model: qualityVisionModel(),
     });
-    const raw = await callVision(content, IMAGE_QUALITY_SYSTEM_PROMPT);
+    const raw = await callVision(content, IMAGE_QUALITY_SYSTEM_PROMPT, params.schedulingContext);
     const modelDurationMs = Date.now() - evaluationStartedAt;
     await logOnePromptVideo("production.step.completed", {
       moduleNameZh,
@@ -196,8 +202,46 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       resultZh: "视觉大模型已返回质检意见",
     });
     const decisionStartedAtMs = Date.now();
+    let normalized = normalizeImageQualityResponse(raw, params);
+    if (normalized.adjudicationRequired) {
+      await logOnePromptVideo("generation_quality.image_adjudication.start", {
+        assetId: params.assetId,
+        candidateId: params.candidateId,
+        reason: normalized.adjudicationReason,
+        model: qualityAdjudicationModel(),
+      });
+      const adjudicationRaw = await callVision(
+        buildImageAdjudicationContent({
+          mediaUrl: params.mediaUrl,
+          requirements: normalized.atomicRequirements ?? atomicRequirements,
+          references: localizedReferences,
+          primaryReport: normalized,
+        }),
+        IMAGE_QUALITY_ADJUDICATION_SYSTEM_PROMPT,
+        params.schedulingContext,
+        qualityAdjudicationModel(),
+      );
+      normalized = {
+        ...normalizeImageQualityResponse(
+          mergeImageAdjudication(raw, adjudicationRaw, normalized.atomicRequirements ?? atomicRequirements),
+          params,
+        ),
+        evaluationStatus: "completed",
+        technicalRetryable: undefined,
+        adjudicationRequired: false,
+        adjudicationPerformed: true,
+        adjudicationReason: normalized.adjudicationReason,
+      };
+      await logOnePromptVideo("generation_quality.image_adjudication.completed", {
+        assetId: params.assetId,
+        candidateId: params.candidateId,
+        model: qualityAdjudicationModel(),
+        passed: normalized.passed,
+        hardFailureReasons: normalized.hardFailureReasons,
+      });
+    }
     const report = {
-      ...normalizeImageQualityResponse(raw, params),
+      ...normalized,
       evaluationModel: qualityVisionModel(),
       evaluationDurationMs: Date.now() - evaluationStartedAt,
     };
@@ -242,6 +286,107 @@ function imageQualityModuleNameZh(purpose: BaseEvaluationParams["purpose"]): str
   if (purpose === "motion_checkpoint_image") return "子分镜参考图质检";
   if (purpose === "transition_reference_frame") return "转场参考帧质检";
   return "图片质量检查";
+}
+
+function selectRoleDiverseQualityReferences(
+  references: Array<{ url: string; usageNote?: string }>,
+  limit: number,
+): Array<{ url: string; usageNote?: string }> {
+  const roleOf = (note?: string): string => {
+    const value = note?.toLowerCase() ?? "";
+    if (/identity|character|person|face|人物|角色|身份|脸/.test(value)) return "identity";
+    if (/brand|logo|text|品牌|标志|文字/.test(value)) return "brand";
+    if (/product|package|产品|包装/.test(value)) return "product";
+    if (/layout|scene|camera|space|构图|场景|镜头|空间/.test(value)) return "layout";
+    if (/ui|score|timer|game|界面|分数|计时|游戏/.test(value)) return "ui";
+    return "other";
+  };
+  const selected: Array<{ url: string; usageNote?: string }> = [];
+  const selectedRoles = new Set<string>();
+  for (const reference of references) {
+    const role = roleOf(reference.usageNote);
+    if (selectedRoles.has(role)) continue;
+    selected.push(reference);
+    selectedRoles.add(role);
+    if (selected.length >= limit) return selected;
+  }
+  for (const reference of references) {
+    if (selected.some((item) => item.url === reference.url)) continue;
+    selected.push(reference);
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+
+function buildImageAdjudicationContent(input: {
+  mediaUrl: string;
+  requirements: AtomicVisualRequirement[];
+  references: Array<{ url: string; usageNote?: string }>;
+  primaryReport: GenerationQualityReport;
+}): Array<Record<string, unknown>> {
+  const disputedRequirementIds = new Set(
+    input.primaryReport.evidenceObservations
+      ?.filter((item) => item.status === "violated" || item.status === "unknown")
+      .map((item) => item.requirementId)
+      ?? [],
+  );
+  const disputedRequirements = input.requirements.filter((item) =>
+    disputedRequirementIds.size === 0 || disputedRequirementIds.has(item.requirementId)
+  ).slice(0, 6);
+  const content: Array<Record<string, unknown>> = [{
+    type: "text",
+    text: [
+      `Disputed atomic requirements: ${JSON.stringify(disputedRequirements)}`,
+      `Primary evidence observations: ${JSON.stringify(input.primaryReport.evidenceObservations ?? [])}`,
+      "Review only these requirements. Do not inspect or criticize unrelated details.",
+    ].join("\n"),
+  }, {
+    type: "text",
+    text: "CURRENT OUTPUT — sole source of visible evidence.",
+  }, {
+    type: "image_url",
+    image_url: { url: input.mediaUrl },
+  }];
+  for (const [index, reference] of input.references.slice(0, 2).entries()) {
+    content.push({
+      type: "text",
+      text: `REFERENCE ${index + 1} — target comparison only. Role: ${reference.usageNote || "approved target attributes only"}`,
+    });
+    content.push({ type: "image_url", image_url: { url: reference.url } });
+  }
+  return content;
+}
+
+function mergeImageAdjudication(
+  primary: unknown,
+  adjudication: unknown,
+  requirements: AtomicVisualRequirement[],
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...record(primary), passed: true };
+  const source = record(adjudication);
+  const items = Array.isArray(source.adjudications) ? source.adjudications : [];
+  const requirementIds = new Set(requirements.map((item) => item.requirementId));
+  merged.observations = items.flatMap((item) => {
+    const value = record(item);
+    const requirementId = text(value.requirementId ?? value.requirement_id);
+    if (!requirementIds.has(requirementId)) return [];
+    const status = text(value.status).toLowerCase();
+    return [{
+      requirementId,
+      status: status === "confirmed_violation"
+        ? "violated"
+        : status === "rejected_violation"
+          ? "satisfied"
+          : "unknown",
+      confidence: unitNumber(value.confidence) ?? 0,
+      evidenceSource: text(value.evidenceSource ?? value.evidence_source).toLowerCase() === "current_output"
+        ? "current_output"
+        : "unavailable",
+      description: text(value.description ?? value.evidence),
+      normalizedRegion: normalizedBox(value.normalizedRegion ?? value.normalized_region),
+    }];
+  });
+  return merged;
 }
 
 export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams & {
@@ -343,7 +488,7 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
       model: qualityVisionModel(),
     });
     const modelStartedAtMs = Date.now();
-    const raw = await callVision(content, VIDEO_QUALITY_SYSTEM_PROMPT);
+    const raw = await callVision(content, VIDEO_QUALITY_SYSTEM_PROMPT, params.schedulingContext);
     await logOnePromptVideo("production.step.completed", {
       moduleNameZh: "视频片段质检",
       stepNameZh: "视觉大模型检查候选视频",
@@ -771,7 +916,17 @@ export async function extractVideoFrameDataUrls(mediaUrl: string, fractions = [0
 
 function normalizeReport(value: unknown, params: BaseEvaluationParams): GenerationQualityReport {
   const source = record(value);
+  const modelDecisionProvided = typeof source.passed === "boolean";
   const originalPassed = source.passed === true;
+  const atomicRequirements = compileAtomicVisualRequirements({
+    targetContract: params.targetContract,
+    visualContract: params.visualContract,
+    purpose: params.purpose,
+  });
+  const evidenceObservations = normalizeEvidenceObservations(
+    source.observations ?? source.evidenceObservations ?? source.evidence_observations,
+    atomicRequirements,
+  );
   const suggestedRepairMode = imageRepairMode(source.suggestedRepairMode ?? source.suggested_repair_mode);
   const suggestedCorrectionScope = imageCorrectionScope(source.correctionScope ?? source.correction_scope);
   const suggestedBaselineUsable = typeof (source.baselineUsable ?? source.baseline_usable) === "boolean"
@@ -799,8 +954,14 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   // A visual model may misread an approved reference and invent a contract
   // (for example, treating an existing logo word as forbidden). Do not feed
   // correction actions derived from an unverified conflict back into redraws.
-  const rawCorrectionActions = normalizeCorrectionActions(source.correctionActions ?? source.correction_actions);
-  const rawArtifactIssues = strings(source.artifactIssues ?? source.artifact_issues);
+  const evidenceCorrectionActions = correctionActionsFromEvidence(evidenceObservations, atomicRequirements);
+  const evidenceArtifactIssues = evidenceIssues(evidenceObservations, atomicRequirements);
+  const rawCorrectionActions = evidenceObservations.length
+    ? evidenceCorrectionActions
+    : normalizeCorrectionActions(source.correctionActions ?? source.correction_actions);
+  const rawArtifactIssues = evidenceObservations.length
+    ? evidenceArtifactIssues
+    : strings(source.artifactIssues ?? source.artifact_issues);
   const invalidForStageIssues = params.visualContract?.mediaStage === "static_image"
     ? rawArtifactIssues.filter(isMotionOnlyStillIssue)
     : [];
@@ -824,10 +985,34 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     && !wrongTextDetected
     && personInstanceCount === 0;
   const exactTextHardGate = params.requiresExactBrandText
-    || !params.visualContract
-    || params.visualContract.exactTextAuthority !== "none";
+    || params.visualContract?.exactTextAuthority === "approved_reference"
+    || params.visualContract?.exactTextAuthority === "structured_contract";
+  const confirmedHardRequirementViolations = evidenceObservations.flatMap((observation) => {
+    const requirement = atomicRequirements.find((item) => item.requirementId === observation.requirementId);
+    if (
+      !requirement
+      || requirement.severity !== "hard"
+      || observation.status !== "violated"
+      || observation.confidence < 0.8
+      || observation.evidenceSource !== "current_output"
+    ) return [];
+    return [`requirement ${requirement.requirementId} visibly violated: ${observation.description || requirement.target}`];
+  });
+  const confirmedLegacyViolations = evidenceObservations.length
+    ? []
+    : correctionActions.flatMap((action) => {
+        if (
+          action.evidenceStatus === "uncertain"
+          || action.priority === "recommended"
+          || (action.confidence ?? 1) < 0.8
+          || !action.normalizedRegion
+        ) return [];
+        return [`legacy localized contract evidence: ${action.observed}`];
+      });
   const hardFailureReasons = uniqueStrings([
     ...contractConflicts,
+    ...confirmedHardRequirementViolations,
+    ...confirmedLegacyViolations,
     identityScore != null && identityScore < 65 ? `identity score ${identityScore} is below 65` : "",
     layoutScore != null && layoutScore < 60 ? `layout score ${layoutScore} is below 60` : "",
     promptAlignmentScore != null && promptAlignmentScore < 65 ? `prompt alignment score ${promptAlignmentScore} is below 65` : "",
@@ -835,28 +1020,57 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     wrongTextDetected && exactTextHardGate ? "authoritative locked text is visibly wrong" : "",
     params.requiresExactBrandText && !brandVisualGatePassed ? "isolated brand asset failed its deterministic identity/layout/text gate" : "",
   ]);
-  // The visual model is the final semantic quality gate. Deterministic checks
-  // may add failures, but a high score must never reverse passed=false.
   const lowConfidence = evaluationConfidence != null && evaluationConfidence < 0.7;
-  const passed = originalPassed && scoreSetComplete && !lowConfidence && scoreGatePassed && hardFailureReasons.length === 0;
+  const unsupportedModelVeto =
+    modelDecisionProvided
+    && !originalPassed
+    && scoreGatePassed
+    && !lowConfidence
+    && hardFailureReasons.length === 0;
+  const highScoreEvidenceConflict =
+    confirmedHardRequirementViolations.length > 0
+    && identityScore != null && identityScore >= 85
+    && layoutScore != null && layoutScore >= 80
+    && promptAlignmentScore != null && promptAlignmentScore >= 80
+    && continuityScore != null && continuityScore >= 80;
+  const adjudicationRequired = unsupportedModelVeto || highScoreEvidenceConflict;
+  // The model supplies evidence; the deterministic policy owns the decision.
+  // A legacy whole-image veto with no supported hard evidence is adjudicated
+  // once instead of immediately triggering paid media regeneration.
+  const passed =
+    !unsupportedModelVeto
+    && scoreSetComplete
+    && !lowConfidence
+    && scoreGatePassed
+    && hardFailureReasons.length === 0;
   const issueLedger = reconcileGenerationIssueLedger({
     previous: params.previousQualityReport,
     candidateNo: params.candidateNo,
     artifactIssues: [...artifactIssues, ...invalidForStageIssues],
     correctionActions,
+    evidenceObservations,
     invalidIssueTexts: invalidForStageIssues,
   });
   const openHardIssueIds = issueLedger.filter((item) => (item.status === "open" || item.status === "regressed") && item.severity === "hard" && item.applicableStage === params.visualContract?.mediaStage).map((item) => item.issueId);
   const resolvedIssueIds = issueLedger.filter((item) => item.status === "resolved").map((item) => item.issueId);
-  const softSuggestions = issueLedger.filter((item) => (item.status === "open" || item.status === "regressed") && item.severity !== "hard").map((item) => item.summary);
-  const qualityDecision = !scoreSetComplete || lowConfidence
+  const softSuggestions = uniqueStrings([
+    ...issueLedger
+      .filter((item) => (item.status === "open" || item.status === "regressed") && item.severity !== "hard")
+      .map((item) => item.summary),
+    ...evidenceObservations.flatMap((observation) => {
+      if (observation.status !== "unknown" && !(observation.status === "violated" && observation.confidence < 0.8)) return [];
+      const requirement = atomicRequirements.find((item) => item.requirementId === observation.requirementId);
+      return requirement ? [`Unresolved evidence for ${requirement.requirementId}: ${requirement.target}`] : [];
+    }),
+  ]);
+  const qualityDecision = !scoreSetComplete || lowConfidence || adjudicationRequired
     ? "review" as const
     : contractConflictsVerified
     ? "blocked" as const
     : passed
-      ? originalPassed && softSuggestions.length === 0 ? "pass" as const : "recommended" as const
+      ? softSuggestions.length === 0 ? "pass" as const : "recommended" as const
       : "retry" as const;
-  const retryFromStage = !scoreSetComplete || lowConfidence
+  const retryFromStage = !scoreSetComplete || lowConfidence || adjudicationRequired
     ? "manual" as const
     : contractConflictsVerified
     ? "stage3" as const
@@ -876,9 +1090,11 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     /product|logo|brand|ui|产品|品牌|界面/.test(referenceText) && selectedReferenceCount > 0 ? "product" : "",
   ]);
   return {
-    policyVersion: "quality-policy-v3",
-    evaluationStatus: scoreSetComplete && !lowConfidence ? "completed" : "partial",
-    technicalRetryable: scoreSetComplete && !lowConfidence ? undefined : true,
+    policyVersion: "quality-policy-v4",
+    evaluationStatus: adjudicationRequired
+      ? "adjudication_required"
+      : scoreSetComplete && !lowConfidence ? "completed" : "partial",
+    technicalRetryable: adjudicationRequired ? false : scoreSetComplete && !lowConfidence ? undefined : true,
     evaluationConfidence: evaluationConfidence ?? undefined,
     suggestedRepairMode,
     suggestedCorrectionScope,
@@ -904,6 +1120,14 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     wrongTextDetected,
     artifactIssues,
     correctionActions,
+    atomicRequirements,
+    evidenceObservations,
+    adjudicationRequired,
+    adjudicationReason: unsupportedModelVeto
+      ? "legacy_model_veto_without_supported_hard_evidence"
+      : highScoreEvidenceConflict
+        ? "high_scores_conflict_with_confirmed_hard_evidence"
+        : undefined,
     contractConflicts,
     suspectedContractConflicts,
     contractConflictsVerified,
@@ -914,8 +1138,10 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     hardFailureReasons,
     softSuggestions,
     passed,
-    originalPassed,
-    retryInstruction: !scoreSetComplete || lowConfidence
+    originalPassed: modelDecisionProvided ? originalPassed : undefined,
+    retryInstruction: adjudicationRequired
+      ? "Re-adjudicate the disputed visual evidence for this existing candidate. Do not regenerate the media."
+      : !scoreSetComplete || lowConfidence
       ? "Retry visual quality evaluation for this existing candidate because required evidence was incomplete or evaluator confidence was low. Do not regenerate the media."
       : !passed || correctionActions.length > 0
       ? concreteRetryInstruction({ correctionActions, contractConflicts, suppliedRetryInstruction, identityScore, layoutScore, promptAlignmentScore, continuityScore })
@@ -923,6 +1149,97 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     retryFromStage,
     contentBased: true,
   };
+}
+
+function normalizeEvidenceObservations(
+  value: unknown,
+  requirements: AtomicVisualRequirement[],
+): VisualEvidenceObservation[] {
+  if (!Array.isArray(value)) return [];
+  const requirementIds = new Set(requirements.map((item) => item.requirementId));
+  const observations = new Map<string, VisualEvidenceObservation>();
+  for (const item of value) {
+    const source = record(item);
+    const requirementId = text(source.requirementId ?? source.requirement_id);
+    if (!requirementId || !requirementIds.has(requirementId)) continue;
+    const statusValue = text(source.status).toLowerCase();
+    const status: VisualEvidenceObservation["status"] =
+      statusValue === "satisfied"
+      || statusValue === "violated"
+      || statusValue === "not_applicable"
+        ? statusValue
+        : "unknown";
+    const evidenceValue = text(source.evidenceSource ?? source.evidence_source).toLowerCase();
+    const evidenceSource: VisualEvidenceObservation["evidenceSource"] =
+      evidenceValue === "current_output" || evidenceValue === "reference_only"
+        ? evidenceValue
+        : "unavailable";
+    const confidence = unitNumber(source.confidence) ?? 0;
+    observations.set(requirementId, {
+      requirementId,
+      status,
+      confidence,
+      evidenceSource,
+      description: text(source.description ?? source.evidence ?? source.observed) || undefined,
+      observedText: text(source.observedText ?? source.observed_text) || undefined,
+      expectedText: text(source.expectedText ?? source.expected_text) || undefined,
+      normalizedRegion: normalizedBox(source.normalizedRegion ?? source.normalized_region ?? source.region),
+    });
+  }
+  // A missing observation is explicitly unknown, not silently satisfied.
+  return requirements.map((requirement) => observations.get(requirement.requirementId) ?? {
+    requirementId: requirement.requirementId,
+    status: "unknown",
+    confidence: 0,
+    evidenceSource: "unavailable",
+    description: "Evaluator did not return evidence for this atomic requirement.",
+  });
+}
+
+function evidenceIssues(
+  observations: VisualEvidenceObservation[],
+  requirements: AtomicVisualRequirement[],
+): string[] {
+  return observations.flatMap((observation) => {
+    if (
+      observation.status !== "violated"
+      || observation.confidence < 0.8
+      || observation.evidenceSource !== "current_output"
+    ) return [];
+    const requirement = requirements.find((item) => item.requirementId === observation.requirementId);
+    if (!requirement) return [];
+    return [`[${requirement.requirementId}] ${observation.description || `Current output does not satisfy: ${requirement.target}`}`];
+  });
+}
+
+function correctionActionsFromEvidence(
+  observations: VisualEvidenceObservation[],
+  requirements: AtomicVisualRequirement[],
+): GenerationCorrectionAction[] {
+  return observations.flatMap((observation) => {
+    if (
+      observation.status !== "violated"
+      || observation.confidence < 0.8
+      || observation.evidenceSource !== "current_output"
+    ) return [];
+    const requirement = requirements.find((item) => item.requirementId === observation.requirementId);
+    if (!requirement) return [];
+    const region = observation.normalizedRegion ? requirement.domain : "specified visual region";
+    return [{
+      region,
+      element: requirement.domain,
+      observed: observation.description || "Current output visibly violates the atomic requirement.",
+      target: requirement.target,
+      instruction: `Render the current output so that it satisfies requirement ${requirement.requirementId}: ${requirement.target}`,
+      evidenceStatus: "confirmed" as const,
+      confidence: observation.confidence,
+      normalizedRegion: observation.normalizedRegion,
+      tolerance: requirement.tolerance,
+      priority: requirement.severity === "hard" ? "required" as const : "recommended" as const,
+      sourceConstraint: `requirement:${requirement.requirementId}`,
+      preserve: [],
+    }];
+  }).slice(0, 3);
 }
 
 function normalizeCorrectionActions(value: unknown): GenerationCorrectionAction[] {
@@ -996,7 +1313,7 @@ function concreteRetryInstruction(params: {
 
 function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFromStage: GenerationQualityReport["retryFromStage"]): GenerationQualityReport {
   return {
-    policyVersion: "quality-policy-v3",
+    policyVersion: "quality-policy-v4",
     evaluationStatus: "technical_failed",
     technicalError: issue,
     technicalRetryable: true,
@@ -1047,7 +1364,7 @@ function missingReferenceQualityReport(params: BaseEvaluationParams): Generation
   if (expectedAnchorIds.length === 0 || params.selectedReferenceUrls.some((url) => Boolean(url?.trim()))) return undefined;
   const issue = `缺少资产合同要求的可比参考图：${expectedAnchorIds.join("、")}`;
   return {
-    policyVersion: "quality-policy-v3",
+    policyVersion: "quality-policy-v4",
     evaluationStatus: "reference_missing",
     technicalRetryable: false,
     referenceComparable: false,
@@ -1094,7 +1411,12 @@ export function isTechnicalQualityEvaluationFailure(report: GenerationQualityRep
   if (!report) return false;
   if (isReferenceMissingQualityEvaluation(report)) return false;
   if (report.evaluationStatus === "not_run") return false;
-  if (report.evaluationStatus === "technical_failed" || report.evaluationStatus === "unavailable" || report.evaluationStatus === "partial") return true;
+  if (
+    report.evaluationStatus === "technical_failed"
+    || report.evaluationStatus === "unavailable"
+    || report.evaluationStatus === "partial"
+    || report.evaluationStatus === "adjudication_required"
+  ) return true;
   if (report.contentBased === false && report.passed === false) return true;
   return report.artifactIssues.some((issue) =>
     /视觉质量评估失败|quality evaluation failed|this operation was aborted|aborterror|timed? out|timeout|rate limit|too many requests|fetch failed|network/i.test(issue),
@@ -1126,13 +1448,29 @@ function legacyQualityFallback(params: BaseEvaluationParams, video: boolean): Ge
   };
 }
 
-async function callVision(content: Array<Record<string, unknown>>, system: string): Promise<unknown> {
+async function callVision(
+  content: Array<Record<string, unknown>>,
+  system: string,
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">,
+  model = qualityVisionModel(),
+): Promise<unknown> {
   return withQualityVisionSlot(async () => {
     const attempts = qualityVisionRequestAttempts();
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        return await callVisionOnce(content, system);
+        return await (schedulingContext
+          ? withProviderCapacity({
+              lane: "visual_quality",
+              modelId: model,
+              context: {
+                ...schedulingContext,
+                targetId: `visual-quality:${randomUUID()}`,
+              },
+              operation: () => callVisionOnce(content, system, model),
+              waitTimeoutMs: qualityTimeoutMs(),
+            })
+          : callVisionOnce(content, system, model));
       } catch (error) {
         lastError = error;
         if (attempt >= attempts || !isRetryableQualityError(error)) throw error;
@@ -1151,8 +1489,9 @@ async function callVision(content: Array<Record<string, unknown>>, system: strin
 export async function callStructuredVisionModel(
   content: Array<Record<string, unknown>>,
   system: string,
+  schedulingContext?: Omit<ProviderSchedulingContext, "targetId">,
 ): Promise<unknown> {
-  return callVision(content, system);
+  return callVision(content, system, schedulingContext);
 }
 
 export function structuredVisionModelName(): string {
@@ -1163,11 +1502,11 @@ export function structuredVisionAvailable(): boolean {
   return qualityVisionEnabled();
 }
 
-async function callVisionOnce(content: Array<Record<string, unknown>>, system: string): Promise<unknown> {
+async function callVisionOnce(content: Array<Record<string, unknown>>, system: string, model = qualityVisionModel()): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), qualityTimeoutMs());
   try {
-    const response = await fetch(`${compatibleBaseUrl()}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey()}` }, body: JSON.stringify({ model: qualityVisionModel(), messages: [{ role: "system", content: system }, { role: "user", content }], temperature: 0, enable_thinking: false, response_format: { type: "json_object" } }), signal: controller.signal });
+    const response = await fetch(`${compatibleBaseUrl()}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey()}` }, body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content }], temperature: 0, enable_thinking: false, response_format: { type: "json_object" } }), signal: controller.signal });
     const raw = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new Error(extractError(raw) || `HTTP ${response.status}`);
     return parseContent(raw);
@@ -1306,8 +1645,10 @@ async function removeWorkDir(workDir: string): Promise<void> {
 }
 function qualityVisionEnabled(): boolean { if (process.env.ONE_PROMPT_GENERATION_QUALITY_VISION_EVAL?.trim().toLowerCase() === "false") return false; return Boolean(process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY); }
 function qualityVisionModel(): string { return process.env.ALIYUN_GENERATION_QUALITY_VISION_MODEL?.trim() || "qwen3.6-flash"; }
+function qualityAdjudicationModel(): string { return process.env.ALIYUN_GENERATION_QUALITY_ADJUDICATION_MODEL?.trim() || qualityVisionModel(); }
 function qualityTimeoutMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_TIMEOUT_MS); return Number.isFinite(value) && value >= 5000 ? Math.max(60000, Math.round(value)) : 90000; }
-function qualityVisionConcurrency(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_CONCURRENCY); return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 2; }
+function qualityReferenceLimit(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_REFERENCE_LIMIT); return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 3; }
+function qualityVisionConcurrency(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_CONCURRENCY); return Number.isFinite(value) && value >= 1 ? Math.min(4, Math.round(value)) : 4; }
 function qualityVisionRequestAttempts(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_REQUEST_ATTEMPTS); return Number.isFinite(value) && value >= 1 ? Math.min(3, Math.round(value)) : 2; }
 function qualityRetryDelayMs(): number { const value = Number(process.env.ONE_PROMPT_GENERATION_QUALITY_RETRY_DELAY_MS); return Number.isFinite(value) && value >= 0 ? Math.min(30000, Math.round(value)) : 1500; }
 function compatibleBaseUrl(): string { return (process.env.DASHSCOPE_COMPATIBLE_BASE_URL || process.env.ALIYUN_COMPATIBLE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1").replace(/\/$/, ""); }

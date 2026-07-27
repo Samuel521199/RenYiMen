@@ -3,10 +3,89 @@ import test from "node:test";
 
 import {
   buildAuthoritativeVisualContract,
+  compileAtomicVisualRequirements,
   reconcileGenerationIssueLedger,
   repairNegativePromptAgainstVisualContract,
   repairPromptAgainstVisualContract,
 } from "./visual-quality-contract.ts";
+
+test("atomic visual requirements are bounded, stable and preserve explicit hard authority", () => {
+  const input = {
+    targetContract: {
+      requiredVisibleEvidence: [
+        "One approved character visibly holds the locked product",
+        "The product remains on viewer-right",
+      ],
+      requiredAnchorIds: ["character_main", "product_main"],
+      decorativeLighting: "warm rim light",
+    },
+    visualContract: {
+      version: "visual-contract-v1" as const,
+      mediaStage: "static_image" as const,
+      sourcePriority: [],
+      requiredText: ["BRAND X"],
+      allowedText: ["BRAND X"],
+      forbiddenText: [],
+      exactTextAuthority: "approved_reference" as const,
+      allowGameUi: false,
+      allowBrandText: true,
+      staticRequirements: [],
+      deferredVideoChecks: [],
+      verifiedConflicts: [],
+      warnings: [],
+    },
+    purpose: "boundary_keyframe" as const,
+  };
+  const first = compileAtomicVisualRequirements(input);
+  const second = compileAtomicVisualRequirements(input);
+  assert.deepEqual(second, first);
+  assert.ok(first.length <= 12);
+  assert.ok(first.some((item) => item.domain === "brand_text" && item.severity === "hard"));
+  assert.ok(first.some((item) => item.referenceAnchorIds?.includes("character_main")));
+  assert.ok(first.some((item) => item.requirementId.includes("requiredvisibleevidence")));
+  assert.equal(first.some((item) => item.target.includes("warm rim light")), false);
+});
+
+test("requirement-backed issue identity survives evaluator wording changes", () => {
+  const first = reconcileGenerationIssueLedger({
+    candidateNo: 1,
+    artifactIssues: ["The locked product is absent"],
+    correctionActions: [{
+      region: "center",
+      element: "product",
+      observed: "The locked product is absent",
+      target: "The character visibly holds the product",
+      instruction: "Add the approved product to the character's hand",
+      sourceConstraint: "requirement:contract.requiredvisibleevidence.abc123",
+    }],
+  });
+  const second = reconcileGenerationIssueLedger({
+    previous: {
+      assetId: "keyframe:1:image",
+      identityScore: 80,
+      layoutScore: 80,
+      promptAlignmentScore: 80,
+      continuityScore: 80,
+      artifactIssues: [],
+      passed: false,
+      issueLedger: first,
+    },
+    candidateNo: 2,
+    artifactIssues: ["No approved product can be seen in the hand"],
+    correctionActions: [{
+      region: "center",
+      element: "product",
+      observed: "No approved product can be seen in the hand",
+      target: "The character visibly holds the product",
+      instruction: "Place the approved product in the visible hand",
+      sourceConstraint: "requirement:contract.requiredvisibleevidence.abc123",
+    }],
+  });
+  const current = second.find((item) => item.requirementId === "contract.requiredvisibleevidence.abc123");
+  assert.equal(current?.issueId, first[0]?.issueId);
+  assert.equal(current?.occurrenceCount, 2);
+  assert.equal(second.filter((item) => item.requirementId === "contract.requiredvisibleevidence.abc123").length, 1);
+});
 
 test("game-ad contract preserves authorized brand text and UI while narrowing generic bans", () => {
   const contract = buildAuthoritativeVisualContract({

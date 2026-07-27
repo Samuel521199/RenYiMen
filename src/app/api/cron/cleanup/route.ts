@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { expireAllStalePending } from "@/lib/stale-pending-cleanup";
 import { queryDashScopeTask } from "@/services/video-orchestrator/aliyun-workflow";
-import { pumpGlobalVideoProviderQueue } from "@/services/video-orchestrator/project-service";
-import { runningVideoProviderLeaseTaskIds } from "@/services/video-orchestrator/video-provider-capacity";
+import { pumpGlobalProviderQueue } from "@/services/video-orchestrator/project-service";
+import { runningProviderLeaseTaskIds } from "@/services/video-orchestrator/provider-capacity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,24 +48,24 @@ export async function GET(req: NextRequest) {
   }
 
   const cleaned = await expireAllStalePending();
-  const activeVideoTaskIds = await runningVideoProviderLeaseTaskIds();
-  const reconciledVideoTasks = await Promise.allSettled(
-    activeVideoTaskIds.map((taskId) => queryDashScopeTask(taskId)),
+  const activeProviderTaskIds = await runningProviderLeaseTaskIds();
+  const reconciledProviderTasks = await Promise.allSettled(
+    activeProviderTaskIds.map((taskId) => queryDashScopeTask(taskId)),
   );
-  const videoQueue = await pumpGlobalVideoProviderQueue();
+  const providerQueue = await pumpGlobalProviderQueue();
 
   console.info("[cron/cleanup] 定时清理完成", {
     cleaned,
-    reconciledVideoTaskCount: reconciledVideoTasks.length,
-    videoQueue,
+    reconciledProviderTaskCount: reconciledProviderTasks.length,
+    providerQueue,
     ts: new Date().toISOString(),
   });
 
   return NextResponse.json({
     ok: true,
     cleaned,
-    reconciledVideoTaskCount: reconciledVideoTasks.length,
-    videoQueue,
+    reconciledProviderTaskCount: reconciledProviderTasks.length,
+    providerQueue,
     ts: new Date().toISOString(),
   });
 }

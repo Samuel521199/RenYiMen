@@ -5,6 +5,7 @@ import {
   aggregateShotConcurrencyRuns,
   recommendShotConcurrency,
   renderShotConcurrencyCsv,
+  selectAdaptiveFinalists,
   type ShotConcurrencyBenchmarkRun,
 } from "./shot-concurrency-benchmark.ts";
 
@@ -29,6 +30,21 @@ test("recommendation rejects a faster concurrency level when it is unstable", ()
   const recommendation = recommendShotConcurrency(aggregateShotConcurrencyRuns(runs));
   assert.equal(recommendation.concurrency, 4);
   assert.deepEqual(recommendation.eligibleConcurrencies, [2, 4]);
+});
+
+test("adaptive first pass selects the two fastest stable levels", () => {
+  const firstPass = aggregateShotConcurrencyRuns([
+    completed(1, 1, 900_000),
+    completed(4, 1, 600_000),
+    completed(8, 1, 500_000),
+    {
+      ...completed(10, 1, 450_000),
+      modelRequestCount: 20,
+      failedModelRequestCount: 1,
+      rateLimitCount: 1,
+    },
+  ]);
+  assert.deepEqual(selectAdaptiveFinalists(firstPass), [8, 4]);
 });
 
 test("CSV output safely quotes model errors", () => {

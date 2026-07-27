@@ -6,25 +6,30 @@
 
 共享检查点已经包含语义剧情评审。正式计时阶段会关闭这项与并发无关的串行评审，只测量 `Shot Decomposer → Single-take Audit → Prompt Detailer` 分段流水线。
 
-## 先检查调用规模
+## 一行命令执行首轮真实压测
 
 ```powershell
-npm run benchmark:shot-concurrency -- --concurrency 1,2,3,4,6,8,10 --repeats 2 --fixtures 1
+npm run benchmark:shot-concurrency:live
 ```
 
-不带 `--live` 时只输出预计运行数量，不调用模型。
+这个命令会先让并发 `1、4、8、10` 各跑一次，排除失败、429 和明显拥塞档位，再自动选择最快的两个并发各补跑两次。它使用一个产品广告样本，调用真实文本模型并生成完整报告。
 
-## 执行真实压测
+共享检查点生成阶段会把故事合同修复上限提高到三次。如果仍因模型随机输出产生非法故事引用，工具会保留已经完成的 Planning Architect 结果，只重新生成 Storyboard Artist，最多尝试三轮。并发计时在共享检查点成功后才开始。
+
+## 只查看预计调用规模
 
 ```powershell
-$env:ONE_PROMPT_VIDEO_CONCURRENCY_BENCHMARK="1"
-npm run benchmark:shot-concurrency -- --live --concurrency 1,2,3,4,6,8,10 --repeats 2 --fixtures 1
+npm run benchmark:shot-concurrency
 ```
 
-建议第一次使用一个样本、每档两次。确认费用和运行时间后，再使用三个样本、每档三次：
+这个命令不会调用模型。
+
+## 可选：扩大样本
+
+如需扩大到三个样本，仍然使用同一个自适应流程：
 
 ```powershell
-npm run benchmark:shot-concurrency -- --live --concurrency 1,2,3,4,6,8,10 --repeats 3 --fixtures 3
+npm run benchmark:shot-concurrency:live -- --fixtures 3
 ```
 
 可选参数：
