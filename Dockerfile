@@ -32,7 +32,21 @@ ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 RUN npx prisma generate
 RUN npm run build
 
-# --- Stage 3: runner — standalone server + static assets ---
+# --- Stage 3: durable production worker ---
+FROM base AS worker
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json package-lock.json tsconfig.json ./
+COPY prisma ./prisma
+COPY scripts ./scripts
+COPY src ./src
+COPY config ./config
+COPY public ./public
+RUN npx prisma generate
+CMD ["npm", "run", "worker:video-production"]
+
+# --- Stage 4: runner — standalone server + static assets ---
 FROM base AS runner
 ENV NODE_ENV=production
 WORKDIR /app

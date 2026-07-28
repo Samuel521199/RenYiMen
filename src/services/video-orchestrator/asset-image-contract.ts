@@ -3,6 +3,7 @@ import type {
   VideoConsistencyAnchor,
   VideoConsistencyAnchorType,
 } from "./types";
+import { ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS } from "@/lib/one-prompt-video-limits";
 
 export interface AssetImageContractIssue {
   anchorId: string;
@@ -38,6 +39,8 @@ const EXECUTABLE_ASSET_TYPES = new Set<VideoConsistencyAnchorType>([
   "food",
   "space_layout",
 ]);
+
+export const ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS = 2400;
 
 function present(value: unknown): boolean {
   return typeof value === "string" ? value.trim().length >= 3 : value != null;
@@ -76,6 +79,14 @@ export function validateAssetImageContract(anchor: VideoConsistencyAnchor): Asse
   }
 
   const issues: AssetImageContractIssue[] = [];
+  const serializedContractLength = JSON.stringify(contract).length;
+  if (serializedContractLength > ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS) {
+    issues.push({
+      anchorId: anchor.id,
+      field: "assetImageContract",
+      message: `structured contract is ${serializedContractLength} characters; the first-pass budget is ${ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS}`,
+    });
+  }
   addMissing(issues, anchor, "subjectDescription", contract.subjectDescription);
   addMissing(issues, anchor, "composition.framing", contract.composition?.framing);
   addMissing(issues, anchor, "composition.cameraAngle", contract.composition?.cameraAngle);
@@ -84,6 +95,14 @@ export function validateAssetImageContract(anchor: VideoConsistencyAnchor): Asse
   addMissing(issues, anchor, "environment.background", contract.environment?.background);
   addMissing(issues, anchor, "lighting.direction", contract.lighting?.direction);
   addMissing(issues, anchor, "lighting.quality", contract.lighting?.quality);
+  if (anchor.type === "person") {
+    addMissing(issues, anchor, "renderingStyle.medium", contract.renderingStyle?.medium);
+    addMissing(issues, anchor, "renderingStyle.shading", contract.renderingStyle?.shading);
+    addMissing(issues, anchor, "renderingStyle.edgeTreatment", contract.renderingStyle?.edgeTreatment);
+    if (!contract.renderingStyle?.dimensionality) {
+      issues.push({ anchorId: anchor.id, field: "renderingStyle.dimensionality", message: "person assets require an explicit 2d, 2.5d, 3d, or mixed dimensionality lock" });
+    }
+  }
 
   if (!Number.isInteger(contract.subjectCount) || (contract.subjectCount ?? 0) < 0) {
     issues.push({ anchorId: anchor.id, field: "subjectCount", message: "subjectCount must be an explicit non-negative integer" });
@@ -119,7 +138,6 @@ export function validateAssetImageContract(anchor: VideoConsistencyAnchor): Asse
   if (listSize(contract.acceptanceCriteria) < 2) {
     issues.push({ anchorId: anchor.id, field: "acceptanceCriteria", message: "at least two visually verifiable acceptance criteria are required" });
   }
-
   return issues;
 }
 
@@ -127,11 +145,52 @@ export function validatePlanningAssetImageContracts(anchors: VideoConsistencyAnc
   return anchors.flatMap(validateAssetImageContract);
 }
 
+/**
+ * Production gate for reusable asset prompts.
+ *
+ * The structured contract and its compiled English prompt are the only
+ * generation inputs. Chinese copy is presentation-only and must never block
+ * planning, repair, retries, or provider submission.
+ */
+export function validatePlanningAssetExecutionPrompts(anchors: VideoConsistencyAnchor[]): AssetImageContractIssue[] {
+  return anchors
+    .filter((anchor) => anchor.needsReferenceImage)
+    .flatMap((anchor) => {
+      const issues: AssetImageContractIssue[] = [];
+      if (!isEnglishPromptDisplayCopy(anchor.imagePromptEn)) {
+        issues.push({ anchorId: anchor.id, field: "imagePromptEn", message: "English execution prompt must be complete and must not contain Chinese prose" });
+      } else if ((anchor.imagePromptEn?.length ?? 0) > ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS) {
+        issues.push({
+          anchorId: anchor.id,
+          field: "imagePromptEn",
+          message: `imagePromptEn exceeds the ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS}-character planning budget`,
+        });
+      }
+      return issues;
+    });
+}
+
 function join(values: Array<string | undefined>, separator = "；"): string {
   return values.map((value) => value?.trim()).filter(Boolean).join(separator);
 }
 
+export function isChinesePromptDisplayCopy(value: string | undefined): boolean {
+  const prompt = value?.trim() ?? "";
+  if (!/[\u3400-\u9fff]/.test(prompt)) return false;
+  // Proper nouns such as TONGITS KING and model identifiers are allowed, but
+  // a natural-language English clause indicates the execution contract leaked
+  // into the Chinese presentation field.
+  return !/(?:\b[A-Za-z][A-Za-z'-]*\b[\s,.:;]*){5,}/.test(prompt);
+}
+
+export function isEnglishPromptDisplayCopy(value: string | undefined): boolean {
+  const prompt = value?.trim() ?? "";
+  return /[A-Za-z]/.test(prompt) && !/[\u3400-\u9fff]/.test(prompt);
+}
+
 export function compileAssetImagePromptZh(anchor: VideoConsistencyAnchor): string {
+  // Presentation-only legacy helper. Production code must use
+  // compileAssetImagePromptEn and must not gate on this localized copy.
   const contract = anchor.assetImageContract;
   if (!contract) return anchor.imagePromptZh?.trim() || anchor.descriptionZh?.trim() || "";
   const sceneLike = anchor.type === "location" || anchor.type === "space_layout";
@@ -159,6 +218,16 @@ export function compileAssetImagePromptZh(anchor: VideoConsistencyAnchor): strin
       contract.lighting?.quality,
       contract.lighting?.colorTemperature,
     ], "，")}`,
+    contract.renderingStyle ? `渲染风格硬锁：${join([
+      contract.renderingStyle.medium,
+      contract.renderingStyle.dimensionality ? `维度=${contract.renderingStyle.dimensionality}` : "",
+      contract.renderingStyle.shading ? `明暗塑造=${contract.renderingStyle.shading}` : "",
+      contract.renderingStyle.edgeTreatment ? `边缘处理=${contract.renderingStyle.edgeTreatment}` : "",
+      contract.renderingStyle.surfaceTreatment ? `表面质感=${contract.renderingStyle.surfaceTreatment}` : "",
+      contract.renderingStyle.depthTreatment ? `空间深度=${contract.renderingStyle.depthTreatment}` : "",
+      contract.renderingStyle.authority ? `依据=${contract.renderingStyle.authority}` : "",
+      contract.renderingStyle.forbiddenDrift?.length ? `禁止漂移=${contract.renderingStyle.forbiddenDrift.join("、")}` : "",
+    ], "，")}` : "",
     contract.palette?.length ? `固定色板：${contract.palette.join("、")}` : "",
     contract.materialDetails?.length ? `材质与表面：${contract.materialDetails.join("、")}` : "",
     contract.intrinsicDetails?.length ? `不可漂移的固有细节：${contract.intrinsicDetails.join("、")}` : "",
@@ -191,6 +260,16 @@ export function compileAssetImagePromptEn(anchor: VideoConsistencyAnchor): strin
       contract.lighting?.quality,
       contract.lighting?.colorTemperature,
     ], ", ")}`,
+    contract.renderingStyle ? `Hard rendering-style lock: ${join([
+      contract.renderingStyle.medium,
+      contract.renderingStyle.dimensionality ? `dimensionality=${contract.renderingStyle.dimensionality}` : "",
+      contract.renderingStyle.shading ? `shading=${contract.renderingStyle.shading}` : "",
+      contract.renderingStyle.edgeTreatment ? `edge treatment=${contract.renderingStyle.edgeTreatment}` : "",
+      contract.renderingStyle.surfaceTreatment ? `surface treatment=${contract.renderingStyle.surfaceTreatment}` : "",
+      contract.renderingStyle.depthTreatment ? `depth treatment=${contract.renderingStyle.depthTreatment}` : "",
+      contract.renderingStyle.authority ? `authority=${contract.renderingStyle.authority}` : "",
+      contract.renderingStyle.forbiddenDrift?.length ? `forbidden drift=${contract.renderingStyle.forbiddenDrift.join(", ")}` : "",
+    ], ", ")}` : "",
     contract.palette?.length ? `Locked palette: ${contract.palette.join(", ")}` : "",
     contract.materialDetails?.length ? `Materials and surfaces: ${contract.materialDetails.join(", ")}` : "",
     contract.intrinsicDetails?.length ? `Identity-locked details: ${contract.intrinsicDetails.join(", ")}` : "",

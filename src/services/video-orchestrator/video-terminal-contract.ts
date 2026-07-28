@@ -1,5 +1,6 @@
 import type {
   VideoAudioPlan,
+  VideoPromptEvidenceRef,
   VideoPromptContract,
   VideoPromptTerminalRequirement,
 } from "./types";
@@ -33,6 +34,9 @@ export interface CompiledHappyHorsePrompt {
   compacted: false;
   warnings: string[];
 }
+
+export type Wan27PromptInput = HappyHorsePromptInput;
+export type CompiledWan27Prompt = CompiledHappyHorsePrompt;
 
 export interface LegacyVideoPromptContractInput {
   terminalState: string;
@@ -123,7 +127,12 @@ export function buildLegacyVideoPromptContract(input: LegacyVideoPromptContractI
       priority: "hard",
       observableFact: input.terminalState,
       acceptanceCriteria: "The final stable frames visibly satisfy the complete approved terminal state.",
+      evidenceRefs: [{
+        type: "approved_end_frame",
+        id: "legacy.approved_end_frame",
+      }],
       source: "approved_end_frame",
+      sources: ["approved_end_frame"],
     }],
     motionSteps: input.motionPath ? [input.motionPath] : [],
     preserveRequirements: input.preserveRequirements,
@@ -167,7 +176,7 @@ export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): Comp
         `REQUIREMENT ${item.requirementId} [${item.priority}]`,
         `Visible fact: ${item.observableFact}`,
         `Acceptance: ${item.acceptanceCriteria}`,
-        `Source: ${item.source}`,
+        `Evidence provenance: ${item.sources.join(", ")}`,
       ].join("\n")),
     ].join("\n"),
     [
@@ -203,6 +212,75 @@ export function compileHappyHorseVideoPrompt(input: HappyHorsePromptInput): Comp
     );
   }
   return { prompt, requirementLevel: input.requirementLevel, compacted: false, warnings: [] };
+}
+
+/**
+ * Wan 2.7 I2V receives real first_frame and last_frame media roles. Its prompt
+ * should describe the continuous motion between those fixed visual boundaries,
+ * rather than teaching an R2V model how to interpret an ordered image list.
+ */
+export function compileWan27VideoPrompt(input: Wan27PromptInput): CompiledWan27Prompt {
+  validateVideoPromptContract(input.contract, input.retryCorrections);
+  if (!input.firstFrameIsNativeInput || !input.lastFrameIsNativeInput) {
+    throw new Error("Wan 2.7 first-last-frame generation requires native FIRST_FRAME and LAST_FRAME inputs.");
+  }
+  const settleStart = Math.max(1, Number((input.durationSeconds * 0.85).toFixed(1)));
+  const blocks = [
+    "WAN 2.7 NATIVE FIRST-LAST FRAME I2V — VALIDATED MOTION CONTRACT",
+    [
+      `DURATION: ${input.durationSeconds}s.`,
+      "The supplied FIRST_FRAME is the exact opening image.",
+      "The supplied LAST_FRAME is the exact closing image.",
+      `Complete the visible action by ${settleStart}s, then decelerate and settle exactly into the supplied LAST_FRAME.`,
+    ].join("\n"),
+    [
+      "1. CONTINUOUS MOTION BETWEEN THE TWO NATIVE BOUNDARIES",
+      ...input.contract.motionSteps.map((item, index) => `STEP ${index + 1}: ${item}`),
+    ].join("\n"),
+    [
+      "2. REQUIRED TERMINAL OBSERVABLES",
+      ...input.contract.terminalRequirements.map((item) => [
+        `REQUIREMENT ${item.requirementId} [${item.priority}]`,
+        `Visible fact: ${item.observableFact}`,
+        `Acceptance: ${item.acceptanceCriteria}`,
+      ].join("\n")),
+    ].join("\n"),
+    input.contract.preserveRequirements.length
+      ? ["3. PRESERVE THROUGHOUT THE TRANSITION", ...input.contract.preserveRequirements.map((item) => `- ${item}`)].join("\n")
+      : "",
+    input.contract.forbiddenOutcomes.length
+      ? ["4. FORBIDDEN OUTCOMES", ...input.contract.forbiddenOutcomes.map((item) => `- ${item}`)].join("\n")
+      : "",
+    input.contract.narrativeBoundary
+      ? `5. NARRATIVE BOUNDARY\n${input.contract.narrativeBoundary}`
+      : "",
+    input.contract.shotIntent
+      ? `6. SHOT INTENT\n${input.contract.shotIntent}`
+      : "",
+    input.retryCorrections.length
+      ? ["7. RETRY CORRECTIONS", ...input.retryCorrections.map((item) => `- ${item}`)].join("\n")
+      : "",
+    compileWan27AudioContract(input.audioPlan, input.durationSeconds),
+    [
+      "9. OUTPUT RULE",
+      "Generate one physically plausible uninterrupted transition. Do not cut, reset the camera, swap the scene, paste either boundary as an inserted still, or finish in an alternate composition.",
+    ].join("\n"),
+  ].filter(Boolean);
+  const prompt = blocks.join("\n\n");
+  if (prompt.length > 5000) {
+    throw new Error(
+      `video_prompt_contract compiles to ${prompt.length} characters, exceeding the Wan 2.7 I2V limit of 5000. `
+      + "Return to the planning model to compress soft descriptions without dropping hard requirements.",
+    );
+  }
+  return { prompt, requirementLevel: input.requirementLevel, compacted: false, warnings: [] };
+}
+
+export function compileAliyunVideoPrompt(input: HappyHorsePromptInput): CompiledHappyHorsePrompt {
+  const modelId = input.modelId?.trim().toLowerCase() ?? "";
+  return modelId.startsWith("wan2.7-i2v")
+    ? compileWan27VideoPrompt(input)
+    : compileHappyHorseVideoPrompt(input);
 }
 
 export function resolveVideoAudioStrategy(
@@ -279,6 +357,14 @@ export function compileHappyHorseAudioContract(
   return block.filter(Boolean).join("\n");
 }
 
+export function compileWan27AudioContract(
+  audioPlan: VideoAudioPlan | undefined,
+  durationSeconds: number,
+): string {
+  return compileHappyHorseAudioContract(audioPlan, durationSeconds)
+    .replace("9. AUDIO CONTRACT", "8. WAN 2.7 AUDIO CONTRACT");
+}
+
 export function validateVideoPromptContract(contract: VideoPromptContract, retryCorrections: string[] = []): void {
   if (contract.version !== "video-prompt-contract-v1") throw new Error("Unsupported video prompt contract version.");
   if (contract.terminalRequirements.length < 1 || contract.terminalRequirements.length > 3) {
@@ -302,6 +388,9 @@ export function validateVideoPromptContract(contract: VideoPromptContract, retry
     if (!requirement.requirementId || !requirement.observableFact || !requirement.acceptanceCriteria) {
       throw new Error("Every terminal requirement must include requirementId, observableFact, and acceptanceCriteria.");
     }
+    if (!requirement.evidenceRefs.length) {
+      throw new Error("Every terminal requirement must include at least one verified evidenceRef.");
+    }
   }
 }
 
@@ -324,19 +413,20 @@ function normalizeTerminalRequirement(
       `video_prompt_contract.terminal_requirements[${index}].priority must be hard or soft.`,
     );
   }
-  const rawSource = stringValue(source.source);
-  const normalizedSource = normalizeTerminalRequirementSource(rawSource);
-  if (!normalizedSource) {
-    throw new Error(
-      `video_prompt_contract.terminal_requirements[${index}].source "${rawSource || "(empty)"}" is invalid.`,
-    );
-  }
+  const rawEvidenceRefs = source.evidenceRefs ?? source.evidence_refs;
+  const evidenceRefs = rawEvidenceRefs === undefined
+    ? legacyEvidenceRefsFromSource(source.source, index)
+    : normalizeTerminalEvidenceRefs(rawEvidenceRefs, index);
+  const sources = compileTerminalRequirementSources(evidenceRefs);
+  const normalizedSource = sources[0];
   return {
     requirementId,
     priority,
     observableFact,
     acceptanceCriteria,
+    evidenceRefs,
     source: normalizedSource,
+    sources,
   };
 }
 
@@ -355,10 +445,93 @@ function normalizeTerminalRequirementSource(
   if (/(?:approved_)?(?:end|last|terminal)_(?:frame|keyframe|boundary)|end_frame_contract/.test(normalized)) {
     return "approved_end_frame";
   }
+  // A camera-graph node is planning provenance, not a fifth provenance
+  // category. Models sometimes copy the concrete node ID (for example
+  // camera_graph_camera_01) into this enum field.
+  if (/^camera_graph(?:_|$)/.test(normalized)) return "planner";
   if (/story|narrative|beat/.test(normalized)) return "story_contract";
   if (/user|brief|request/.test(normalized)) return "user";
   if (/planner|planning|timeline|segment|shot_decomposer/.test(normalized)) return "planner";
   return undefined;
+}
+
+function normalizeTerminalEvidenceRefs(value: unknown, requirementIndex: number): VideoPromptEvidenceRef[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 5) {
+    throw new Error(
+      `video_prompt_contract.terminal_requirements[${requirementIndex}].evidence_refs must contain 1 to 5 typed references.`,
+    );
+  }
+  const refs = value.map((item, evidenceIndex) => {
+    const source = record(item);
+    const type = stringValue(source.type);
+    if (
+      type !== "user_input"
+      && type !== "story_contract"
+      && type !== "approved_end_frame"
+      && type !== "planner_artifact"
+    ) {
+      throw new Error(
+        `video_prompt_contract.terminal_requirements[${requirementIndex}].evidence_refs[${evidenceIndex}].type is invalid.`,
+      );
+    }
+    const id = stringValue(source.id);
+    if (!id) {
+      throw new Error(
+        `video_prompt_contract.terminal_requirements[${requirementIndex}].evidence_refs[${evidenceIndex}].id is required.`,
+      );
+    }
+    const quote = stringValue(source.quote);
+    return {
+      type,
+      id,
+      ...(quote ? { quote } : {}),
+    } satisfies VideoPromptEvidenceRef;
+  });
+  const unique = new Map(refs.map((ref) => [`${ref.type}:${ref.id}`, ref]));
+  if (unique.size !== refs.length) {
+    throw new Error(
+      `video_prompt_contract.terminal_requirements[${requirementIndex}].evidence_refs contains duplicates.`,
+    );
+  }
+  return Array.from(unique.values());
+}
+
+function legacyEvidenceRefsFromSource(value: unknown, requirementIndex: number): VideoPromptEvidenceRef[] {
+  const rawSource = stringValue(value);
+  const normalizedSource = normalizeTerminalRequirementSource(rawSource);
+  if (!normalizedSource) {
+    throw new Error(
+      `video_prompt_contract.terminal_requirements[${requirementIndex}] must include evidence_refs; legacy source "${rawSource || "(empty)"}" is invalid.`,
+    );
+  }
+  const type: VideoPromptEvidenceRef["type"] =
+    normalizedSource === "user"
+      ? "user_input"
+      : normalizedSource === "story_contract"
+        ? "story_contract"
+        : normalizedSource === "approved_end_frame"
+          ? "approved_end_frame"
+          : "planner_artifact";
+  return [{ type, id: `legacy.${rawSource || normalizedSource}` }];
+}
+
+function compileTerminalRequirementSources(
+  evidenceRefs: VideoPromptEvidenceRef[],
+): VideoPromptTerminalRequirement["sources"] {
+  const mapped = evidenceRefs.map((ref): VideoPromptTerminalRequirement["source"] => {
+    if (ref.type === "user_input") return "user";
+    if (ref.type === "story_contract") return "story_contract";
+    if (ref.type === "approved_end_frame") return "approved_end_frame";
+    return "planner";
+  });
+  const precedence: VideoPromptTerminalRequirement["source"][] = [
+    "user",
+    "approved_end_frame",
+    "story_contract",
+    "planner",
+  ];
+  const present = new Set(mapped);
+  return precedence.filter((source) => present.has(source));
 }
 
 function assertNoDuplicateValues(values: string[], label: string): void {

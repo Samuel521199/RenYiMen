@@ -131,6 +131,27 @@ test("required transition layout evidence cannot be vetoed by generic visual con
   assert.ok(decision.selected.some((candidate) => candidate.artifactId === transition.artifactId));
 });
 
+test("hard person user upload cannot be vetoed by generic conflict scoring", () => {
+  const userReference: SelectableReferenceCandidate = {
+    artifactId: "user-upload:hero-bull",
+    url: "fixture://uploaded-hero-bull.jpg",
+    sourceType: "user_upload",
+    quotaType: "style_brand",
+    purpose: "authoritative person identity and rendering style",
+    relevanceScore: 1,
+    conflictScore: 0.99,
+    conflictReasons: ["poster_background", "incidental_logo"],
+    recencyScore: 1,
+    viewMatchScore: 1,
+    anchorId: "hero",
+    hardRequired: true,
+    usageNote: "HARD IDENTITY + HARD RENDERING STYLE reference for person asset hero",
+  };
+  const decision = selectForOrientation("front", [userReference]);
+  assert.ok(decision.selected.some((candidate) => candidate.artifactId === userReference.artifactId));
+  assert.equal(decision.candidates[0]?.rejectionReason, undefined);
+});
+
 test("reference selector accepts up to nine images", () => {
   const candidates = Array.from({ length: 10 }, (_, index): SelectableReferenceCandidate => ({
     artifactId: `style:${index}`,
@@ -162,6 +183,18 @@ test("vision evaluation only enriches scores and deterministic selector remains 
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /do not select the final references/i);
   assert.match(source, /conflictScore: Math\.max\(candidate\.conflictScore, evaluation\.conflictScore\)/);
-  assert.match(source, /candidate\.sourceType === "transition_reference" && candidate\.hardRequired/);
+  assert.match(source, /candidate\.sourceType === "transition_reference" \|\| candidate\.sourceType === "user_upload"/);
   assert.match(service, /const decision = selectReferenceCandidates/);
+});
+
+test("reference vision is bounded, single-flight, and fails open with an observable fallback", () => {
+  const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/reference-vision-evaluator.ts"), "utf8");
+  const logger = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/logger.ts"), "utf8");
+  assert.match(evaluator, /Math\.min\(8000,\s*Math\.round\(value\)\)/);
+  assert.match(evaluator, /onePromptReferenceVisionInFlight/);
+  assert.match(evaluator, /ONE_PROMPT_REFERENCE_VISION_FAILURE_CACHE_TTL_MS/);
+  assert.match(evaluator, /selectionMode:\s*"heuristic_fallback"/);
+  assert.match(evaluator, /reference vision timed out after \$\{timeoutMs\}ms/);
+  assert.match(logger, /参考图视觉评估未生效，已使用程序规则降级/);
+  assert.match(logger, /appendDetail\(details,\s*"降级原因",\s*data\.fallbackReason\)/);
 });

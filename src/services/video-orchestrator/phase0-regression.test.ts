@@ -52,6 +52,18 @@ test("phase 0 records the current plan, planner, prompt, and compiler versions",
   assert.ok(asArray(storyBaseline.knownLegacyFailureExamples).length > 0);
 });
 
+test("production planning has one v2 architecture and no legacy or shadow runtime switch", () => {
+  const projectService = readSource("src/services/video-orchestrator/project-service.ts");
+  const envExample = readSource(".env.example");
+  const localEnvExample = readSource(".env.local.example");
+
+  assert.match(projectService, /const CURRENT_PLANNER_ARCH = "v2"/);
+  assert.doesNotMatch(projectService, /ONE_PROMPT_VIDEO_PLANNER_ARCH/);
+  assert.doesNotMatch(projectService, /mergeShadowPlannerPlan|OnePromptPlannerArch|plannerShadow|planner_shadow|v2_shadow/);
+  assert.doesNotMatch(envExample, /ONE_PROMPT_VIDEO_PLANNER_ARCH/);
+  assert.doesNotMatch(localEnvExample, /ONE_PROMPT_VIDEO_PLANNER_ARCH/);
+});
+
 test("phase 0 freezes the required pre-story-gate story categories", () => {
   const categories = new Set(fixtureNames.map((fixtureName) => String(asRecord(readJson(fixtureName).storyBaseline).videoCategory)));
 

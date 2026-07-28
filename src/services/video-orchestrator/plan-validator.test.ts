@@ -41,6 +41,17 @@ test("valid historical camera nodes remain compatible without new optional field
   assert.deepEqual(errorCodes(validPlan()), []);
 });
 
+test("planning sends oversized keyframe prompts back to shot decomposition", () => {
+  const plan = validPlan();
+  (plan.keyframes as Array<Record<string, unknown>>)[0]!.imagePromptZh =
+    `关键帧画面，${"具体可见状态".repeat(700)}`;
+  const issues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+  assert.ok(issues.some((issue) =>
+    issue.code === "IMAGE_PROMPT_PLANNING_BUDGET_EXCEEDED"
+    && issue.retryFromStage === "stage_2b_shot_decomposer"
+  ));
+});
+
 test("missing camera graph can be conservatively derived from storyboard briefs", () => {
   const cameraGraph = deriveCameraGraphFromStoryboardBrief([
     { segmentNo: 1, cameraId: "camera_01", locationId: "table", visualDescZh: "牌桌中景" },
@@ -65,6 +76,109 @@ test("normalized consistency anchors using id are accepted", () => {
   const plan = validPlan();
   plan.consistencyManifest = { anchors: [{ id: "person_1", type: "person", referenceStrength: "hard" }] };
   assert.ok(!errorCodes(plan).includes("MISSING_ANCHOR_REFERENCE"));
+});
+
+test("planning rejects abstract palette mood promoted to a scene-layout anchor", () => {
+  const plan = validPlan();
+  plan.consistencyManifest = {
+    anchors: [{
+      id: "festival_bg",
+      type: "location",
+      displayNameZh: "节日感彩色背景",
+      needsReferenceImage: true,
+      descriptionZh: "高饱和模糊光斑与渐变色块",
+      assetImageContract: {
+        subjectCount: 0,
+        subjectDescription: "抽象散景，没有具体物体",
+        environment: {
+          background: "模糊节日氛围",
+          foreground: "None",
+          midground: "渐变色块",
+          backgroundLayer: "虚化光斑",
+          spatialRelationships: ["色块重叠", "散景大小变化"],
+        },
+      },
+    }],
+  };
+  const issues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+  assert.ok(issues.some((issue) => issue.code === "PALETTE_MOOD_MISCLASSIFIED_AS_SCENE" && issue.severity === "error"));
+});
+
+test("palette and style anchors cannot become required visible evidence", () => {
+  const plan = validPlan();
+  plan.consistencyManifest = {
+    anchors: [{
+      id: "palette_1",
+      type: "palette_mood",
+      needsReferenceImage: false,
+      descriptionZh: "明亮高饱和主色调",
+    }],
+  };
+  plan.keyframes = [
+    { keyframeNo: 1, effectiveRequiredAnchorIds: ["palette_1"], usesConsistencyAnchors: ["palette_1"] },
+    { keyframeNo: 2, usesConsistencyAnchors: [] },
+  ];
+  const issues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+  assert.ok(issues.some((issue) => issue.code === "SOFT_STYLE_ANCHOR_MARKED_VISIBLE" && issue.severity === "error"));
+});
+
+test("planning requires a scene contract when cameras claim spatial continuity", () => {
+  const plan = validPlan();
+  plan.cameraGraph = {
+    cameras: [
+      { cameraId: "cam_1", segmentNos: [1], relationToParent: "new_camera_setup" },
+      { cameraId: "cam_2", segmentNos: [2], parentCameraId: "cam_1", relationToParent: "same_spatial_context" },
+    ],
+    relations: [{ fromCameraId: "cam_1", toCameraId: "cam_2", relation: "same_spatial_context" }],
+  };
+  const issues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+  assert.ok(issues.some((issue) => issue.code === "SCENE_CONTRACT_MISSING"));
+});
+
+test("scene continuity accepts one physical scene-layout authority shared by both cameras", () => {
+  const plan = validPlan();
+  plan.consistencyManifest = {
+    anchors: [
+      { id: "person_1", type: "person", referenceStrength: "hard" },
+      {
+        id: "table_stage",
+        type: "space_layout",
+        needsReferenceImage: true,
+        descriptionZh: "实体游戏桌舞台空间",
+        assetImageContract: {
+          subjectCount: 0,
+          subjectDescription: "无人空景游戏桌舞台",
+          environment: {
+            foreground: "前景弧形桌沿",
+            midground: "中景中央游戏桌与左右站位区",
+            backgroundLayer: "后景实体拱门与两根立柱",
+            background: "封闭摄影棚舞台",
+            spatialRelationships: ["游戏桌位于两根立柱正中间", "拱门在游戏桌后方两米"],
+          },
+        },
+      },
+    ],
+  };
+  plan.cameraGraph = {
+    cameras: [
+      { cameraId: "cam_1", sceneId: "scene_table", segmentNos: [1], relationToParent: "new_camera_setup" },
+      { cameraId: "cam_2", sceneId: "scene_table", segmentNos: [2], parentCameraId: "cam_1", relationToParent: "same_spatial_context" },
+    ],
+    relations: [{ fromCameraId: "cam_1", toCameraId: "cam_2", relation: "same_spatial_context" }],
+  };
+  plan.sceneContracts = [{
+    version: "scene-contract-v1",
+    sceneId: "scene_table",
+    layoutAnchorId: "table_stage",
+    cameraIds: ["cam_1", "cam_2"],
+    segmentNos: [1, 2],
+    continuityMode: "single_space",
+    spatialLayoutLock: "桌居中、立柱分列左右、拱门固定在桌后",
+    fixedLandmarks: ["游戏桌", "左立柱", "右立柱", "后方拱门"],
+    authority: { kind: "scene_layout_asset", anchorId: "table_stage" },
+  }];
+  const issues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+  assert.ok(!issues.some((issue) => issue.code.startsWith("SCENE_") || issue.code === "CAMERA_SCENE_BINDING_BROKEN"));
 });
 
 test("semantic asset coverage detects omitted derived anchors and unjustified exclusions", () => {
@@ -130,6 +244,19 @@ test("motionful boundary keyframe wording is staticized instead of failing valid
   assert.ok(!errorCodes(repaired).includes("END_FRAME_CONTAINS_MOTION"));
 });
 
+test("endpoint detector does not join unrelated fields into fake from-to motion", () => {
+  const contract = {
+    characterPosition: "Visible from the chest up behind the cards.",
+    cardPosition: "Spanning the lower-center to the bottom of the frame.",
+  };
+
+  assert.equal(frameContractContainsMotionProcess(contract), false);
+  assert.equal(frameContractContainsMotionProcess({
+    ...contract,
+    actionState: "The character is moving from the table to the logo.",
+  }), true);
+});
+
 test("duration, total, keyframe count and boundary continuity are hard errors", () => {
   const plan = validPlan();
   plan.durationSeconds = 20;
@@ -157,6 +284,48 @@ test("missing render contracts and invalid references are hard errors", () => {
   assert.ok(codes.includes("MISSING_EVENT_REFERENCE"));
   assert.ok(codes.includes("MISSING_CAMERA_REFERENCE"));
   assert.ok(codes.includes("MISSING_ANCHOR_REFERENCE"));
+});
+
+test("static keyframe generation is not blocked by unrelated video execution contracts", () => {
+  const plan = validPlan();
+  plan.segmentRenderDescriptions = [{ segmentNo: 1 }];
+  const codes = validateOnePromptVideoPlan(plan, { stage: "keyframe_generation", keyframeNo: 1 })
+    .filter((item) => item.severity === "error")
+    .map((item) => item.code);
+  assert.ok(!codes.includes("START_FRAME_CONTRACT_MISSING"));
+  assert.ok(!codes.includes("END_FRAME_CONTRACT_MISSING"));
+  assert.ok(!codes.includes("MOTION_CONTRACT_MISSING"));
+  assert.ok(!codes.includes("SINGLE_TAKE_CONTRACT_MISSING"));
+  assert.ok(errorCodes(plan).includes("SINGLE_TAKE_CONTRACT_MISSING"));
+});
+
+test("static micro-shot image generation is not blocked by motionful video contracts", () => {
+  const plan = validPlan();
+  plan.segmentRenderDescriptions = [{
+    segmentNo: 1,
+    startFrameContract: { state: "人物正在走向桌子" },
+    endFrameContract: { state: "人物从门口移动到桌边的过程" },
+    motionContract: { path: "连续路径" },
+    singleTakeContract: { requiresCut: true, riskLevel: "high", physicallyReachable: false },
+    motionCheckpoints: [
+      { state: "动作一" },
+      { state: "动作二" },
+      { state: "动作三" },
+      { state: "动作四" },
+    ],
+  }];
+  const codes = validateOnePromptVideoPlan(plan, {
+    stage: "micro_shot_generation",
+    segmentNo: 1,
+    targetArtifactId: "segment:1:micro_shot:1:image",
+  })
+    .filter((item) => item.severity === "error")
+    .map((item) => item.code);
+  assert.ok(!codes.includes("START_FRAME_CONTAINS_MOTION"));
+  assert.ok(!codes.includes("END_FRAME_CONTAINS_MOTION"));
+  assert.ok(!codes.includes("SINGLE_TAKE_REQUIRES_CUT"));
+  assert.ok(!codes.includes("SINGLE_TAKE_HIGH_RISK"));
+  assert.ok(errorCodes(plan).includes("END_FRAME_CONTAINS_MOTION"));
 });
 
 test("frame motion, checkpoint cuts and unsafe single-take flags are hard errors", () => {

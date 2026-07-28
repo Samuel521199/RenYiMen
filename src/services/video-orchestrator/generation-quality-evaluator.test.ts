@@ -13,10 +13,12 @@ import {
 } from "./project-service.ts";
 import { mediaKeyMatchingContentType } from "./oss-media.ts";
 import {
+  compileReferenceRoleProtocol,
   fitAliyunImagePrompt,
   fitAliyunImagePromptWithReport,
   fitAliyunNegativePrompt,
   prepareAliyunImagePrompt,
+  prepareAliyunImagePromptForSubmission,
   validateModelImagePromptCompaction,
 } from "./aliyun-workflow.ts";
 import {
@@ -208,14 +210,50 @@ test("atomic evidence, not a model-wide boolean, drives hard image rejection", (
       normalizedRegion: { xMin: 0.2, yMin: 0.15, xMax: 0.8, yMax: 0.9 },
     }],
   }, { ...base, targetContract });
-  assert.equal(report.policyVersion, "quality-policy-v4");
+  assert.equal(report.policyVersion, "quality-policy-v10");
   assert.equal(report.passed, false);
   assert.equal(report.adjudicationRequired, false);
   assert.match(report.hardFailureReasons?.join(" ") ?? "", new RegExp(requirement.requirementId));
   assert.equal(report.issueLedger?.[0]?.requirementId, requirement.requirementId);
 });
 
-test("high scores that conflict with hard visual evidence receive one focused adjudication", () => {
+test("person rendering-style drift fails independently from identity similarity", () => {
+  const targetContract = {
+    isolationMode: "single_asset",
+    targetAnchorId: "hero_bull",
+    identityReferenceRequired: true,
+    styleReferenceRequired: true,
+    renderingStyle: {
+      medium: "stylized 3D CGI character render",
+      dimensionality: "3d",
+      shading: "smooth volumetric shading",
+      edgeTreatment: "clean silhouette without newly invented thick outlines",
+      forbiddenDrift: ["flat 2D vector illustration", "cel-shaded redesign"],
+    },
+  };
+  const report = normalizeImageQualityResponse({
+    evaluationConfidence: 0.96,
+    identityScore: 96,
+    layoutScore: 92,
+    promptAlignmentScore: 90,
+    continuityScore: 94,
+    styleFidelityScore: 35,
+    wrongTextDetected: false,
+    observations: [],
+  }, {
+    ...base,
+    targetContract,
+    assetCategory: "person",
+    referenceUsageNotes: ["HARD IDENTITY + HARD RENDERING STYLE reference for person asset hero_bull"],
+  });
+  assert.equal(report.styleScoreApplicable, true);
+  assert.equal(report.styleFidelityScore, 35);
+  assert.equal(report.passed, false);
+  assert.match(report.hardFailureReasons?.join(" ") ?? "", /style fidelity score 35 is below 80/i);
+  assert.equal(report.retryFromStage, "generation");
+});
+
+test("clear hard visual violations fail directly without paying for a second vision call", () => {
   const targetContract = {
     requiredVisibleEvidence: ["One approved character is visibly holding the locked product"],
   };
@@ -240,13 +278,102 @@ test("high scores that conflict with hard visual evidence receive one focused ad
     }],
   }, { ...base, targetContract });
   assert.equal(report.passed, false);
+  assert.equal(report.evaluationStatus, "completed");
+  assert.equal(report.adjudicationRequired, false);
+  assert.equal(report.retryFromStage, "generation");
+});
+
+test("only moderately confident hard evidence conflicting with high scores receives one focused adjudication", () => {
+  const targetContract = {
+    requiredVisibleEvidence: ["One approved character is visibly holding the locked product"],
+  };
+  const requirement = compileAtomicVisualRequirements({
+    targetContract,
+    purpose: "boundary_keyframe",
+  }).find((item) => item.severity === "hard");
+  assert.ok(requirement);
+  const report = normalizeImageQualityResponse({
+    evaluationConfidence: 0.92,
+    identityScore: 95,
+    layoutScore: 90,
+    promptAlignmentScore: 88,
+    continuityScore: 92,
+    observations: [{
+      requirementId: requirement.requirementId,
+      status: "violated",
+      confidence: 0.84,
+      evidenceSource: "current_output",
+      description: "The locked product may be absent.",
+      normalizedRegion: { xMin: 0.2, yMin: 0.15, xMax: 0.8, yMax: 0.9 },
+    }],
+  }, { ...base, targetContract });
+  assert.equal(report.passed, false);
   assert.equal(report.evaluationStatus, "adjudication_required");
   assert.equal(report.adjudicationRequired, true);
   assert.equal(report.adjudicationReason, "high_scores_conflict_with_confirmed_hard_evidence");
   assert.equal(report.repairDecision?.mode, "manual_review");
 });
 
-test("legacy high-score veto without confirmed evidence is adjudicated instead of regenerated", () => {
+test("low 0..1-like scores are overridden by satisfied hard evidence without rewriting scores or adjudicating", () => {
+  const targetContract = {
+    requiredVisibleEvidence: [
+      "The approved logo is fully visible",
+      "The brand name is correctly spelled",
+      "The logo is centered",
+      "No unrelated character is present",
+      "The decorative border remains intact",
+    ],
+  };
+  const requirements = compileAtomicVisualRequirements({
+    targetContract,
+    purpose: "anchor_reference_image",
+  });
+  assert.ok(requirements.length > 0);
+  const lastHardRequirementId = requirements.filter((requirement) => requirement.severity === "hard").at(-1)?.requirementId;
+  const observations = requirements.map((requirement) => ({
+    requirementId: requirement.requirementId,
+    status: requirement.severity === "hard" && requirement.requirementId !== lastHardRequirementId ? "satisfied" as const : "unknown" as const,
+    confidence: requirement.severity === "hard" && requirement.requirementId !== lastHardRequirementId ? 0.98 : 0.5,
+    description: requirement.target,
+    evidenceSource: requirement.severity === "hard" && requirement.requirementId !== lastHardRequirementId ? "current_output" as const : "unavailable" as const,
+  }));
+  const primary = normalizeImageQualityResponse({
+    evaluationConfidence: 0.98,
+    identityScore: 1,
+    layoutScore: 1,
+    promptAlignmentScore: 1,
+    continuityScore: 95,
+    productInstanceCount: 1,
+    personInstanceCount: 0,
+    wrongTextDetected: false,
+    observations,
+    passed: false,
+  }, { ...base, targetContract });
+  assert.equal(primary.identityScore, 1);
+  assert.equal(primary.layoutScore, 1);
+  assert.equal(primary.passed, true);
+  assert.equal(primary.adjudicationRequired, false);
+
+  const adjudicated = normalizeImageQualityResponse({
+    evaluationConfidence: 0.98,
+    identityScore: 1,
+    layoutScore: 1,
+    promptAlignmentScore: 1,
+    continuityScore: 95,
+    productInstanceCount: 1,
+    personInstanceCount: 0,
+    wrongTextDetected: false,
+    observations,
+    passed: true,
+    evidenceAdjudicated: true,
+  }, { ...base, targetContract });
+  assert.equal(adjudicated.identityScore, 1);
+  assert.equal(adjudicated.layoutScore, 1);
+  assert.equal(adjudicated.passed, true);
+  assert.equal(adjudicated.adjudicationRequired, false);
+});
+
+test("legacy high-score veto without confirmed evidence goes to manual review without a second call", () => {
   const report = normalizeImageQualityResponse({
     evaluationConfidence: 0.95,
     identityScore: 95,
@@ -266,9 +393,11 @@ test("legacy high-score veto without confirmed evidence is adjudicated instead o
     }],
   }, base);
   assert.equal(report.passed, false);
-  assert.equal(report.evaluationStatus, "adjudication_required");
-  assert.equal(report.adjudicationRequired, true);
-  assert.equal(report.repairDecision?.mode, "manual_review");
+  assert.equal(report.evaluationStatus, "completed");
+  assert.equal(report.adjudicationRequired, false);
+  assert.equal(report.unsupportedModelVetoDetected, true);
+  assert.equal(report.qualityDecision, "review");
+  assert.equal(report.retryFromStage, "manual");
 });
 
 test("failed visual evaluations produce a spatially precise next-generation correction plan", () => {
@@ -509,7 +638,18 @@ test("visual evaluator prompt extracts atomic evidence without acting as judge o
   assert.match(source, /evidenceSource=current_output\|reference_only\|unavailable/);
 });
 
-test("unsupported visual-model contract suspicions require focused adjudication instead of regeneration", () => {
+test("secondary adjudication is timed as a vision-model step instead of program processing", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
+  const adjudicationStart = source.indexOf('stepNameZh: "视觉大模型二次裁决候选图"');
+  const decisionStart = source.indexOf("const decisionStartedAtMs = Date.now()", adjudicationStart);
+  assert.ok(adjudicationStart >= 0);
+  assert.ok(decisionStart > adjudicationStart);
+  assert.match(source.slice(adjudicationStart, decisionStart), /executionMethod:\s*"vision_model"/);
+  assert.match(source.slice(adjudicationStart, decisionStart), /durationMs:\s*adjudicationDurationMs/);
+  assert.match(source, /qualityReferenceCount:\s*localizedReferences\.length/);
+});
+
+test("unsupported visual-model contract suspicions route to manual review without a second model call", () => {
   const report = normalizeImageQualityResponse({
     identityScore: 95,
     layoutScore: 90,
@@ -525,8 +665,8 @@ test("unsupported visual-model contract suspicions require focused adjudication 
   assert.deepEqual(report.suspectedContractConflicts, ["logo is both required and forbidden"]);
   assert.equal(report.contractConflictsVerified, false);
   assert.equal(report.qualityDecision, "review");
-  assert.equal(report.evaluationStatus, "adjudication_required");
-  assert.equal(report.adjudicationRequired, true);
+  assert.equal(report.evaluationStatus, "completed");
+  assert.equal(report.adjudicationRequired, false);
 });
 
 test("motion-only criticism is deferred from still-image quality to video quality", () => {
@@ -555,7 +695,8 @@ test("motion-only criticism is deferred from still-image quality to video qualit
   } });
   assert.equal(report.passed, false);
   assert.equal(report.qualityDecision, "review");
-  assert.equal(report.evaluationStatus, "adjudication_required");
+  assert.equal(report.evaluationStatus, "completed");
+  assert.equal(report.adjudicationRequired, false);
   assert.deepEqual(report.artifactIssues, []);
   assert.equal(report.issueLedger?.[0]?.status, "invalid_for_stage");
 });
@@ -738,7 +879,7 @@ test("manual acceptance preserves rather than rewrites the visual model's veto",
   const accepted = { ...report, userAccepted: true, originalPassed: report.originalPassed ?? report.passed };
   assert.equal(accepted.passed, false);
   assert.equal(accepted.qualityDecision, "review");
-  assert.equal(accepted.evaluationStatus, "adjudication_required");
+  assert.equal(accepted.evaluationStatus, "completed");
   assert.equal(accepted.originalPassed, false);
   assert.equal(accepted.userAccepted, true);
 });
@@ -763,7 +904,7 @@ test("candidate orchestration evaluates all batches, waits for the complete pool
   const claimIndex = source.indexOf("const claim = await prisma.videoKeyframe.updateMany");
   const submitIndex = source.indexOf("const taskId = await createImageCandidateBatch", claimIndex);
   assert.ok(claimIndex >= 0 && submitIndex > claimIndex);
-  assert.match(source, /submit\.skip_claimed/);
+  assert.match(source, /prepare\.skip_claimed/);
   assert.match(source, /status: "evaluating"/);
   assert.match(source, /evaluationClaim\.count !== 1/);
   assert.match(source, /qualityReport: \{ equals: Prisma\.DbNull \}/);
@@ -925,7 +1066,40 @@ test("hybrid image prompt compaction calls a non-thinking model only for omitted
   assert.match(source, /enable_thinking: false/);
   assert.match(source, /preserved_fact_ids/);
   assert.match(source, /validateModelImagePromptCompaction/);
-  assert.match(source, /fallback: "deterministic_semantic_unit_compaction"/);
+  assert.match(source, /generation_blocked_contract_repair_required/);
+  assert.match(source, /ImagePromptContractBudgetError/);
+});
+
+test("production prompt preparation blocks instead of omitting protected facts", async () => {
+  const previous = process.env.ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION;
+  process.env.ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION = "false";
+  const prompt = Array.from(
+    { length: 80 },
+    (_, index) => `Required visible invariant ${index + 1}: preserve UNIQUE_${index + 1} and its exact spatial relationship. ${"identity_detail ".repeat(8)}`,
+  ).join("\n");
+  try {
+    await assert.rejects(
+      () => prepareAliyunImagePromptForSubmission(prompt),
+      (error: unknown) =>
+        error instanceof Error
+        && error.name === "ImagePromptContractBudgetError"
+        && /generation was not submitted/i.test(error.message),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION;
+    else process.env.ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION = previous;
+  }
+});
+
+test("reference notes compile to a bounded role protocol instead of copying prose", () => {
+  const protocol = compileReferenceRoleProtocol(
+    `HARD IDENTITY + HARD RENDERING STYLE reference for person asset hero_bull. ${"Verbose explanation. ".repeat(80)}`,
+  );
+  assert.match(protocol, /^role=hard_identity_style/);
+  assert.match(protocol, /target=hero_bull/);
+  assert.match(protocol, /dimensionality/);
+  assert.ok(protocol.length < 240);
+  assert.doesNotMatch(protocol, /Verbose explanation/);
 });
 
 test("negative prompt compaction keeps complete constraints instead of slicing a sentence", () => {
@@ -947,8 +1121,8 @@ test("image generation prompt maps every uploaded reference to a narrow role", (
     ["Character identity only; do not copy pose or background.", "Scene layout and lighting only; do not copy people, UI, or text."],
   );
   assert.match(prepared, /MULTI-IMAGE INPUT MAP/);
-  assert.match(prepared, /INPUT IMAGE 1[\s\S]*Character identity only/);
-  assert.match(prepared, /INPUT IMAGE 2[\s\S]*Scene layout and lighting only/);
+  assert.match(prepared, /INPUT IMAGE 1[\s\S]*role=identity_only/);
+  assert.match(prepared, /INPUT IMAGE 2[\s\S]*role=scene_layout/);
   assert.match(prepared, /never merge unrelated subjects, text, UI, products, or backgrounds/i);
   assert.ok(prepared.length <= 5000);
 });
@@ -1103,7 +1277,7 @@ test("baseline selection stops when the whole image lineage is unusable", () => 
 test("isolated asset compilation uses one target anchor and rejects global-anchor leakage", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /resolveImageTargetDependencyScope/);
-  assert.match(source, /requiredAnchorIds: targetAnchorId \? \[targetAnchorId\] : \[\]/);
+  assert.match(source, /requiredAnchorIds: targetIsVisible && targetAnchorId \? \[targetAnchorId\] : \[\]/);
   assert.match(source, /Project-level anchors are downstream consumers and must not appear in this asset/);
   assert.match(source, /生成前检测到全局锚点污染/);
   assert.match(source, /STYLE-ONLY reference for isolated asset/);
@@ -1244,6 +1418,24 @@ test("resume repairs failed artifacts before waiting for unrelated candidate rev
   assert.ok(failedBoundaryRecovery >= 0 && failedBoundaryRecovery < runningWorkCheck);
 });
 
+test("resume waits for explicit boundary approval before regenerating dirty downstream artifacts", () => {
+  const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  const resume = source.slice(
+    source.indexOf("export async function resumeVideoProject"),
+    source.indexOf("export async function queueVideoProjectPlanning"),
+  );
+  const boundaryReviewGate = resume.indexOf("const boundaryReviewPending =");
+  const paidMicroShotRetry = resume.indexOf("return regenerateMicroShotImage(userId, projectId, segment.id");
+  const paidSegmentRetry = resume.indexOf("return regenerateShotClip(userId, projectId, dirtySegment.id");
+  assert.ok(boundaryReviewGate >= 0);
+  assert.ok(paidMicroShotRetry > boundaryReviewGate);
+  assert.ok(paidSegmentRetry > boundaryReviewGate);
+  assert.match(
+    resume,
+    /boundaryReviewPending[\s\S]*?status: VideoProjectStatus\.IMAGE_REVIEW, errorMessage: null[\s\S]*?project\.resume\.wait_boundary_approval/,
+  );
+});
+
 test("sync immediately schedules recoverable candidate failures without a user click", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /anchorImageMisclassifiedAsStage2b/);
@@ -1257,7 +1449,7 @@ test("sync immediately schedules recoverable candidate failures without a user c
 test("legacy image quality reports upgrade in place before another paid generation", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /async function upgradeLegacyImageQualityReports/);
-  assert.match(source, /existing\.policyVersion === "quality-policy-v4"/);
+  assert.match(source, /existing\.policyVersion === QUALITY_POLICY_VERSION/);
   assert.match(source, /await upgradeLegacyImageQualityReports\(project\)/);
   assert.match(source, /buildAuthoritativeVisualContract/);
   assert.match(source, /previousQualityReport: previous\?\.report/);
@@ -1270,7 +1462,7 @@ test("deterministic evidence policy owns image decisions and stale recovery cann
   const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/generation-quality-evaluator.ts"), "utf8");
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(evaluator, /The model supplies evidence; the deterministic policy owns the decision/);
-  assert.match(evaluator, /legacy whole-image veto with no supported hard evidence is adjudicated/);
+  assert.match(evaluator, /whole-image model veto without localized hard evidence is preserved for/);
   assert.doesNotMatch(evaluator, /You are the final visual quality gate/);
   assert.match(service, /options: \{ recovery\?: boolean \} = \{\}/);
   assert.match(service, /image\.regenerate\.skip_stale_recovery/);
@@ -1293,7 +1485,7 @@ test("manual boundary candidate acceptance immediately continues the next frame"
   );
   assert.match(selection, /missingBoundaryFrames/);
   assert.match(selection, /status: VideoProjectStatus\.IMAGE_GENERATING/);
-  assert.match(selection, /submitNextImageTask\(\{/);
+  assert.match(selection, /queueNextImageTask\(userId, projectId, "image\.continue_after_manual_candidate_selection"\)/);
   assert.match(selection, /image\.continue_after_manual_candidate_selection/);
   assert.match(selection, /micro_shot\.manual_candidate\.auto_continue/);
   assert.match(selection, /requiredMicroShotImageIssues\(selectedProject\)\.length === 0/);

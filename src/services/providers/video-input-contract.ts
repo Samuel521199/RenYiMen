@@ -71,6 +71,12 @@ export interface VideoProviderInputCapabilities {
   promptReferenceMode?: "none" | "plain_action" | "ordered_subject_action";
   /** Whether the adapter promises to preserve the selected image order. */
   preservesTransportOrder?: boolean;
+  /**
+   * Native first/last images already contain the visible character, product,
+   * and scene identity. Providers that only accept those two boundary images
+   * can satisfy reference coverage without a separate reference_image asset.
+   */
+  nativeBoundariesCarryReferenceIdentity?: boolean;
   /** Allows a provider rollout to return to the former role-priority slice. */
   referenceSelectionMode?: "smart_coverage" | "legacy_priority";
   roleBindings: Partial<Record<VideoImageRole, VideoImageRoleBinding>>;
@@ -198,7 +204,14 @@ export function resolveVideoImageInputs(params: {
       .map((input) => input.anchorId as string),
   );
   const coveredAnchorIds = uniqueStrings(
-    transported.flatMap((input) => input.anchorId ? [input.anchorId] : []),
+    [
+      ...transported.flatMap((input) => input.anchorId ? [input.anchorId] : []),
+      ...(params.capabilities.nativeBoundariesCarryReferenceIdentity
+        && nativeFirstFrame
+        && nativeLastFrame
+        ? requiredAnchorIds
+        : []),
+    ],
   );
   const coveredAnchorSet = new Set(coveredAnchorIds);
   const uncoveredHardAnchorIds = requiredAnchorIds.filter((anchorId) => !coveredAnchorSet.has(anchorId));

@@ -11,6 +11,7 @@ export class StoryboardStageError extends Error {
   readonly code: StoryboardStageErrorCode;
   readonly retryable: boolean;
   readonly httpStatus?: number;
+  readonly validationErrors?: readonly string[];
 
   constructor(
     message: string,
@@ -18,6 +19,7 @@ export class StoryboardStageError extends Error {
       code: StoryboardStageErrorCode;
       retryable: boolean;
       httpStatus?: number;
+      validationErrors?: readonly string[];
       cause?: unknown;
     },
   ) {
@@ -26,7 +28,16 @@ export class StoryboardStageError extends Error {
     this.code = options.code;
     this.retryable = options.retryable;
     this.httpStatus = options.httpStatus;
+    this.validationErrors = options.validationErrors;
   }
+}
+
+export function storyboardContractValidationFeedback(error: unknown): string | undefined {
+  if (!(error instanceof StoryboardStageError) || error.code !== "contract_validation_error") {
+    return undefined;
+  }
+  if (error.validationErrors?.length) return error.validationErrors.join("; ");
+  return error.message || undefined;
 }
 
 export function isRetryableStoryboardStageError(error: unknown): boolean {

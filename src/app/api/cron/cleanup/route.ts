@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { expireAllStalePending } from "@/lib/stale-pending-cleanup";
-import { queryDashScopeTask } from "@/services/video-orchestrator/aliyun-workflow";
 import { pumpGlobalProviderQueue } from "@/services/video-orchestrator/project-service";
-import { runningProviderLeaseTaskIds } from "@/services/video-orchestrator/provider-capacity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,15 +46,10 @@ export async function GET(req: NextRequest) {
   }
 
   const cleaned = await expireAllStalePending();
-  const activeProviderTaskIds = await runningProviderLeaseTaskIds();
-  const reconciledProviderTasks = await Promise.allSettled(
-    activeProviderTaskIds.map((taskId) => queryDashScopeTask(taskId)),
-  );
   const providerQueue = await pumpGlobalProviderQueue();
 
   console.info("[cron/cleanup] 定时清理完成", {
     cleaned,
-    reconciledProviderTaskCount: reconciledProviderTasks.length,
     providerQueue,
     ts: new Date().toISOString(),
   });
@@ -64,7 +57,6 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     cleaned,
-    reconciledProviderTaskCount: reconciledProviderTasks.length,
     providerQueue,
     ts: new Date().toISOString(),
   });

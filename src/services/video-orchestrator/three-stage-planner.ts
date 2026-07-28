@@ -29,6 +29,7 @@ import type {
   VideoNarrativeMicroRules,
   VideoPlanKeyframe,
   VideoPlanningManifest,
+  VideoSceneContract,
   VideoPlanSegment,
   VideoPlanShot,
   VideoPromptDetailPlan,
@@ -49,10 +50,17 @@ import {
 } from "./boundary-contract";
 import {
   compileAssetImagePromptEn,
-  compileAssetImagePromptZh,
+  ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS,
+  isChinesePromptDisplayCopy,
   validatePlanningAssetImageContracts,
+  validatePlanningAssetExecutionPrompts,
   type AssetImageContractIssue,
 } from "./asset-image-contract";
+import {
+  isReferenceImageEligibleAnchor,
+  isVisibleEvidenceAnchor,
+  normalizeAnchorSemantics,
+} from "./anchor-semantics";
 import { errorForLog, logOnePromptVideo } from "./logger";
 import { assertPlanValidForGeneration } from "./plan-validator";
 import { repairMotionfulEndpointContracts } from "./frame-contract";
@@ -73,6 +81,7 @@ import {
 import {
   StoryboardStageError,
   runStoryboardStageWithRetry,
+  storyboardContractValidationFeedback,
 } from "./storyboard-stage-retry";
 import {
   requiredStoryFunctionsForTemplate,
@@ -298,6 +307,7 @@ type PlanStructureExtras = {
   storyboardBrief: StoryboardBrief[];
   segmentRenderDescriptions: SegmentRenderDescription[];
   cameraGraph?: CameraGraph;
+  sceneContracts: VideoSceneContract[];
   transitionReferencePlan: unknown[];
   finalTransitionPlan: FinalTransitionPlan[];
   referenceSelectionOutputs: ReferenceSelectionOutput[];
@@ -331,7 +341,7 @@ Your only job in stage 1:
 - Decide whether this video needs editorial overlay subtitles, and if needed define their role, language, timing, placement, readability, and editability requirements.
 - Derive candidate_timeline and planning_manifest.timeline_blueprint from narrative_events. Do not invent segment boundaries without event reasons.
 - Do not write detailed narrative keyframes, video prompts, or micro-shot prompts.
-- You MUST write an executable asset-sheet image contract and matching image_prompt_zh/image_prompt_en for every anchor with needs_reference_image=true. These are isolated reusable asset specifications, not narrative keyframes.
+- You MUST write one executable English asset-sheet image contract for every anchor with needs_reference_image=true. This is an isolated reusable generation specification, not a narrative keyframe. Do not output localized prompt copies.
 
 Hard rules:
 - Every segment duration must be 3-15 seconds.
@@ -346,15 +356,22 @@ Hard rules:
 - Every segment must be generatable as one continuous unbroken camera take. A segment is not a montage container.
 - If a beat requires a location change, environment replacement, large time jump, major camera setup change, major composition reset, subject teleport, product state discontinuity, or dissolve-like transformation, create a new segment boundary instead of putting that change inside one segment.
 - Start and end boundary frames of the same segment must be compatible as two moments from the same continuous shot: same location logic, same camera axis family, same subject/product identity, same lighting direction, and no impossible scene jump.
-- Identify consistency anchors dynamically. Do not assume every task has a product. Anchors may be person, product, prop, location, style, brand_visual, task_object, effect_state, vehicle, food, space_layout, or custom.
+- Identify consistency anchors dynamically. Do not assume every task has a product. Anchors may be person, product, prop, location, style, palette_mood, graphic_backdrop, brand_visual, task_object, effect_state, vehicle, food, space_layout, or custom.
+- Keep palette_mood in global_style whenever possible. A palette, saturation level, color temperature, lighting mood, bokeh, blur, gradient, abstract color field, or festive atmosphere is not a location and must not become a scene/space-layout reference image.
+- A reusable physical scene and a visual style guide are different contracts. Never make one anchor serve both roles. palette_mood/style/graphic_backdrop has needs_reference_image=false and is not an asset-review item.
+- Use graphic_backdrop only for an explicitly reusable brand motif, pattern, or texture. It is a soft graphic reference, never physical space-layout evidence.
+- Create location/space_layout only for a physical environment with stable reusable geometry: at least two concrete foreground/midground/background structures and measurable spatial relationships. If those facts are absent, do not invent a scene asset to make the schema look complete.
+- If two or more narrative events intentionally occur in one continuous physical space, create one dedicated location/space_layout anchor for that space. It must use semantic_role=physical_scene, reference_usage.role=scene_layout, needs_reference_image=true, and contain an empty-set overview contract with foreground, midground, background_layer, fixed landmarks, subject placement zones, and at least two directional or measurable spatial relationships. Color atmosphere belongs in global_style or a separate palette_mood anchor, never in this layout anchor.
+- palette_mood, style, and graphic_backdrop are never requiredVisibleEvidence and must not enter required_anchor_ids merely because their color or rendering treatment applies globally.
 - A consistency-anchor image prompt is an asset-sheet prompt, not a narrative keyframe. Keep identity/appearance facts, but remove story actions, screen positions, title interactions, scene decoration, and event-specific composition.
 - For every anchor with needs_reference_image=true, asset_image_contract is mandatory. Never use placeholders such as "fixed spatial layout", "lighting direction", "color atmosphere", "main background structure", "clear presentation", or "high quality" unless you replace them with actual visible values.
 - Every asset_image_contract must make the result mechanically checkable: exact subject count; concrete subject description; framing; camera angle; placement; frame occupancy; named background; lighting direction and quality; forbidden elements; and at least two acceptance criteria.
+- Every person asset_image_contract must also preserve the reference-derived rendering medium through rendering_style.medium, dimensionality, shading, edge_treatment, surface_treatment, depth_treatment, authority, and forbidden_drift. "Cartoon" alone is invalid because it does not distinguish 2D illustration from stylized 3D CGI.
 - Person/product/prop/task-object/vehicle/food contracts must list concrete identity, geometry, clothing, marking, or material details. Scene/location/space-layout contracts must separately specify foreground, midground, far background, and at least two explicit spatial relationships or distances.
-- image_prompt_zh/image_prompt_en must faithfully serialize asset_image_contract. Do not shorten it into a category template or style summary.
-- Keep each individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses and remove explanations, repetition, synonyms, and ornamental quality phrases without dropping any contract fact.
+- Every natural-language value in asset_image_contract must use English. The application compiles the English provider execution prompt from this single contract.
+- Keep each complete compiled English execution prompt at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses and remove explanations, repetition, synonyms, and ornamental quality phrases without dropping any contract fact.
 - A prop prompt must be operationally specific rather than generic: state the exact object count, named variants, face/orientation, arrangement, material, colors, intrinsic markings, and forbidden extra objects. If the prop is a playing card, explicitly name every required rank and suit and require matching corner indices; never combine "A/K must be visible" with a blanket "no text" instruction.
-- For a person anchor, image_prompt_zh/image_prompt_en must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
+- For a person anchor, asset_image_contract must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
 - Reference images may contain a finished poster or advertisement. Extract the anchor's stable identity only; never copy the reference image's background, typography, logo placement, framing, or full composition into a person asset prompt.
 - Scene/location anchors may describe the environment. Brand-visual anchors may describe approved logos or typography. Do not leak those elements into person, prop, or product asset prompts unless they are an intrinsic part of that asset.
 - Every narrative_event must include event_id, dramatic_goal, participants, location_id, initial_state, action, resulting_state, required_anchor_ids, previous_event_ids, and must_become_separate_segment.
@@ -366,7 +383,7 @@ Hard rules:
 - A product/prop cannot occupy two mutually exclusive places at the same time unless consistency_manifest explicitly defines multiple instances.
 - Holder changes must have a visible_transition_path or an event explanation.
 - The timeline_blueprint is a hard contract for later stages.
-- In chronological mode enforce hook < conflict < turning_point < payoff < CTA whenever those functions apply. Strategy event bindings, narrative_events, and timeline source_event_ids must describe one identical causal chain.
+- In chronological mode keep hook, conflict, turning_point, payoff, and CTA in nondecreasing event order whenever those functions apply. Adjacent functions may bind the same observable event when one action legitimately carries both roles (for example, one decisive card play can be both conflict and turning_point). Reject only actual reversal. Strategy event bindings, narrative_events, and timeline source_event_ids must describe one identical causal chain. The dedicated chronological hook rules still forbid hook/turning-point overlap and a full payoff reveal.
 - Emit the top-level sections in the dependency order shown below: classification, consistency_manifest, narrative_events, creative_strategy, narrative_micro_rules, anchor_state_timeline, audio_bible, candidate_timeline, planning_manifest.
 - classification is the single source of truth for video_type, video_category, template_id, template_reason_zh, chronology_mode, and fallback_reason_zh. Do not duplicate those fields inside creative_strategy.
 - Finish the anchor registry and causal narrative_events before emitting creative_strategy. Every creative_strategy event ID must reference an event already emitted above.
@@ -404,8 +421,6 @@ Return this JSON shape:
         },
         "applies_to": ["keyframes", "segments", "micro_shots"],
         "user_editable": true,
-        "image_prompt_zh": "",
-        "image_prompt_en": "",
         "asset_image_contract": {
           "subject_count": 1,
           "subject_description": "concrete visible identity or environment description",
@@ -426,6 +441,16 @@ Return this JSON shape:
             "direction": "named direction such as upper-left/front-right/backlight",
             "quality": "hard/soft and shadow behavior",
             "color_temperature": "warm/cool/neutral or Kelvin description"
+          },
+          "rendering_style": {
+            "medium": "concrete medium such as stylized 3D CGI",
+            "dimensionality": "2d | 2.5d | 3d | mixed",
+            "shading": "concrete shading and volume treatment",
+            "edge_treatment": "outline or edge treatment",
+            "surface_treatment": "concrete surface language",
+            "depth_treatment": "flat, layered, volumetric, or depth-of-field treatment",
+            "authority": "user_reference | global_style | planner",
+            "forbidden_drift": ["specific incompatible rendering style"]
           },
           "palette": ["named color 1", "named color 2"],
           "material_details": ["concrete material/surface detail"],
@@ -649,7 +674,7 @@ Rules:
 - Preserve narrative_events, planning_manifest.timeline_blueprint, candidate_timeline, anchors, durations, segment numbers, and source_event_ids exactly.
 - Return one complete creative_strategy object.
 - Creative prose must summarize only its bound event_ids.
-- Default chronological stories must keep hook before conflict before turning point before payoff before CTA.
+- Default chronological stories must keep hook, conflict, turning point, payoff, and CTA in nondecreasing event order. Adjacent functions may share one observable event; do not invent a second event merely to make their IDs different. Reject only actual reversal. Hook/turning-point overlap and a full chronological hook reveal remain forbidden.
 - In chronological mode, hook_event_ids and turning_point_event_ids must not overlap, and hook_reveal_level cannot be full.
 - A chronological hook may establish a pain point, curiosity gap, or partial tease, but must remove any complete reveal of the later reward, solution, victory, transformation, or payoff.
 - Use flashforward_hook only for an intentional climax preview, and then provide a valid return_to_event_id.
@@ -674,6 +699,7 @@ Your only job in stage 2A:
 - Declare required_anchor_ids for visible people, products, brands, locations, and task objects. If a derived anchor is intentionally not visible, use anchor_exclusions with anchor_id, visibility=not_visible|offscreen|occluded, and a concrete reason; an empty array never overrides upstream asset requirements.
 - Create shot_grouping_pass that maps story_beats to segment numbers, merges adjacent micro-beats only when they share narrative focus, physical space, continuous action chain, emotion direction, and compatible POV/objective camera relation, and explains why each beat group can be executed as one continuous i2v segment.
 - Draft camera_graph and final_transition_plan.
+- Draft scene_contracts before camera_graph. Every same_camera_setup, same_axis, derived_reframe, same_spatial_context, or alternate_view chain must bind all cameras to the same scene_id. Its authority must be scene_layout_asset and must point to one physical location/space_layout anchor from consistency_manifest.
 - Keep output short and structural.
 
 Hard rules:
@@ -694,6 +720,7 @@ Hard rules:
 - Each storyboard_brief item must include segment_no, source_event_ids, camera_id, visual_desc_zh, visual_desc_en, beat_role, required_anchor_ids, location_id, and separation_reason.
 - Every new_camera_setup must either create a transition_reference_plan item for its target camera/segment or put an explicit no-inheritance explanation in inheritance_reason_zh. Never leave missing_info unresolved.
 - Every alternate_view must include axis_description and spatial_layout_lock. If either is missing, the hard audit reason is alternate_view_axis_or_left_right_lock_missing.
+- Do not use palette_mood, style, graphic_backdrop, bokeh, gradients, or color fields as scene authority. A scene contract needs physical landmarks and spatial relationships that can be compared between frames.
 - Evaluate transition-reference need for every alternate_view, derived_reframe whose parent frame cannot directly supply the target framing, and new setup inheriting layout, light, or positions. Use mode=short when an approved parent frame is sufficient; use mode=full when a generated camera move and extracted target-view frame are required.
 - A transition reference is generation-only scene-layout evidence and never enters the final edit. A generated_bridge is an independent final-edit clip. Never reuse one artifact or approval state for both concepts.
 
@@ -805,6 +832,7 @@ Return this JSON shape:
         {
           "camera_id": "camera_01",
           "segment_nos": [1],
+          "scene_id": "scene_01",
           "location_id": "",
           "description": "",
           "parent_camera_id": "",
@@ -827,6 +855,25 @@ Return this JSON shape:
         }
       ]
     },
+    "scene_contracts": [
+      {
+        "version": "scene-contract-v1",
+        "scene_id": "scene_01",
+        "display_name_zh": "",
+        "display_name_en": "",
+        "layout_anchor_id": "physical_scene_anchor_id",
+        "camera_ids": ["camera_01"],
+        "segment_nos": [1],
+        "continuity_mode": "single_space",
+        "spatial_layout_lock": "fixed landmark geometry and subject placement zones",
+        "camera_axis": "explicit 180-degree axis",
+        "fixed_landmarks": ["physical landmark 1", "physical landmark 2"],
+        "authority": {
+          "kind": "scene_layout_asset",
+          "anchor_id": "physical_scene_anchor_id"
+        }
+      }
+    ],
     "transition_reference_plan": [
       {
         "source_camera_id": "camera_01",
@@ -858,10 +905,13 @@ Return every supplied anchor, preserving its id, type, identity, and story-indep
 
 For each anchor:
 - Fill asset_image_contract with exact subject_count, subject_description, composition.framing, composition.camera_angle, composition.placement, composition.occupancy, environment.background, lighting.direction, lighting.quality, lighting.color_temperature, palette, material_details, intrinsic_details, forbidden_elements, and acceptance_criteria.
+- Write every natural-language contract value in English.
+- Return only the structured asset_image_contract. Do not output image_prompt_zh or image_prompt_en; the application compiles one English provider execution prompt.
+- Keep each complete serialized asset_image_contract at or below ${ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS} characters. Store each visible fact once in its canonical field.
+- For every person, also fill rendering_style.medium, dimensionality, shading, edge_treatment, surface_treatment, depth_treatment, authority, and forbidden_drift from global_style and the user-reference facts. Never reduce a concrete "stylized 3D CGI" contract to generic "cartoon".
 - For location or space_layout, also fill environment.foreground, midground, background_layer, and at least two measurable or directional spatial_relationships.
 - For person, prop, product, task_object, vehicle, or food, isolate the asset and forbid unrelated story characters, scenery, props, typography, logos, UI, frames, collages, and duplicates unless intrinsically required.
-- Write complete image_prompt_zh and image_prompt_en that serialize all contract facts. Do not use placeholders such as "fixed layout", "lighting direction", "color atmosphere", "main background structure", "clear", "high quality", or "detailed" without concrete visible values.
-- Keep each individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Compress wording, not facts: preserve subject identity/count, geometry/markings, composition, lighting, spatial relationships, acceptance criteria, and forbidden elements.
+- Do not use placeholders such as "fixed layout", "lighting direction", "color atmosphere", "main background structure", "clear", "high quality", or "detailed" without concrete visible values.
 - Do not add narrative actions, scene events, ad typography, or assets from other anchors.
 - Preserve intrinsic markings such as playing-card ranks/suits; distinguish them from incidental text.
 `;
@@ -887,7 +937,7 @@ Hard rules:
 - Every timeline segment contains segment_no, start/end/duration, source_event_ids, required_anchor_ids, duration_reason_zh, minimum_executable_seconds, preferred_duration_seconds, maximum_useful_seconds, and timing_budget.
 - timing_budget setup/action/result sums exactly to the segment duration. All segment durations sum exactly to duration_seconds.
 - A segment is one continuous take. Space changes, time jumps, camera resets, teleports, or discontinuous object states require a real segment boundary.
-- In chronological mode enforce hook < conflict < turning point < payoff < CTA. Creative-strategy event bindings and timeline source_event_ids describe the same causal chain.
+- In chronological mode keep hook, conflict, turning point, payoff, and CTA in nondecreasing event order. Adjacent functions may share one observable event when the same action genuinely performs both roles; only actual reversal is invalid. Creative-strategy event bindings and timeline source_event_ids describe the same causal chain. Do not relax the separate hook anti-spoiler rules.
 
 Return:
 {
@@ -902,7 +952,7 @@ Return:
   "consistency_manifest": {
     "anchors": [{
       "id": "",
-      "type": "person | product | prop | location | style | brand_visual | task_object | effect_state | vehicle | food | space_layout | custom",
+      "type": "person | product | prop | location | style | palette_mood | graphic_backdrop | brand_visual | task_object | effect_state | vehicle | food | space_layout | custom",
       "display_name_zh": "",
       "display_name_en": "",
       "must_stay_consistent": true,
@@ -1088,12 +1138,17 @@ const ASSET_VISUAL_SPEC_DETAILER_SYSTEM_PROMPT = `You are an Asset Visual Spec D
 
 Return only valid JSON in the shape {"anchor": {...}}. Process exactly one supplied anchor.
 
-Your only job is to add one executable asset_image_contract to the supplied stable anchor identity. Do not change its id, type, descriptions, visual_lock, reference strength, or story-independent identity.
+Your only job is to add one compact executable asset_image_contract to the supplied stable anchor identity. Do not change its id, type, descriptions, visual_lock, reference strength, or story-independent identity.
 
 Rules:
-- Do not write image prompts; application code deterministically compiles bilingual prompts from the contract.
+- Write every natural-language asset_image_contract value in English.
+- Do not output image_prompt_zh, image_prompt_en, or any prose copy of the contract. The application deterministically compiles one English provider execution prompt from asset_image_contract. Localized UI copy is outside this generation contract.
+- Keep the complete serialized asset_image_contract at or below ${ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS} characters on this first response. Use short visible-fact clauses, not explanations, synonyms, quality adjectives, or repeated facts.
+- Each fact must have exactly one canonical field. Do not repeat subject identity in composition, lighting, forbidden_elements, or acceptance_criteria.
 - Do not add narrative actions, event-specific poses, ad layouts, subtitles, UI, or assets belonging to other anchors.
 - Define subject_count, subject_description, exact composition, named environment, lighting, palette, materials, intrinsic details, forbidden elements, and at least two visually checkable acceptance criteria.
+- Treat global_style as an authoritative inherited contract, not optional inspiration. For every person asset, write rendering_style.medium, dimensionality, shading, edge_treatment, surface_treatment, depth_treatment, authority, and forbidden_drift. Preserve the reference-derived 2D/3D medium exactly; never collapse "stylized 3D CGI" into generic "cartoon".
+- When global_style came from a user reference, set rendering_style.authority=user_reference. A person asset must preserve the reference character's rendering medium, line/edge treatment, shading, texture language, and depth treatment in addition to identity and clothing.
 - Person assets contain exactly one person, one requested neutral asset-sheet view, and no scenery, text, UI, collage, or duplicate person.
 - Product, prop, task-object, vehicle, and food assets define exact count, geometry, materials, colors, intrinsic markings, orientation, and isolation boundary.
 - Location and space-layout assets separately define foreground, midground, far background, and at least two directional or measurable spatial relationships.
@@ -1124,6 +1179,16 @@ Return:
         "direction": "",
         "quality": "",
         "color_temperature": ""
+      },
+      "rendering_style": {
+        "medium": "concrete medium such as stylized 3D CGI",
+        "dimensionality": "2d | 2.5d | 3d | mixed",
+        "shading": "concrete shading and volume treatment",
+        "edge_treatment": "outline or edge treatment",
+        "surface_treatment": "fur, skin, fabric, metal, or other surface language",
+        "depth_treatment": "flat, layered, volumetric, or depth-of-field treatment",
+        "authority": "user_reference | global_style | planner",
+        "forbidden_drift": ["specific incompatible rendering style"]
       },
       "palette": [],
       "material_details": [],
@@ -1190,7 +1255,10 @@ Hard rules:
 - Set end_frame_requirement_level for every segment: hard_exact only when near-exact terminal composition is indispensable for the next boundary; hard_semantic when the visible action result must occur but composition may vary; soft_directional when the end frame is aspirational; editorial when only a stable edit point is required. Prefer hard_semantic unless the story contract proves another level.
 - Produce video_prompt_contract as the semantic compression source of truth for the provider prompt. The compiler will not truncate, reorder, deduplicate, summarize, or repair it.
 - video_prompt_contract must contain 1-3 terminal_requirements, 1-3 motion_steps, at most 5 preserve_requirements, and at most 5 forbidden_outcomes. Every list item must be unique.
-- At least one terminal requirement must have priority=hard. Each terminal requirement needs a stable requirement_id, one visible observable_fact, a concrete acceptance_criteria, and source=user|story_contract|approved_end_frame|planner.
+- At least one terminal requirement must have priority=hard. Each terminal requirement needs a stable requirement_id, one visible observable_fact, a concrete acceptance_criteria, and 1-5 evidence_refs selected only from allowed_terminal_evidence supplied by the application.
+- Do not output source or sources. They are audit metadata compiled deterministically by the application from evidence_refs. Never invent an evidence ID and never use natural-language keywords to guess provenance.
+- motion_contract is the only executable in-clip movement contract. It contains structured subject_actions, one enumerated camera_motion, prop_paths, and continuous_time=true. It must never contain an edit, cut, fade, dissolve, montage, shot switch, or segment-to-segment transition.
+- final_transition_plan is owned exclusively by the final compositor. Do not copy, paraphrase, or execute it in motion_contract, motion_steps, camera, subject_motion, micro_shots, timed_prompts, or video prompts.
 - Keep the complete compiled provider prompt under 4200 characters. Compress explanatory soft prose here; never omit or weaken a hard user, story, identity, product, or approved-boundary requirement.
 - Every segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, key_evidence_ids, depends_on_beat_ids, evidence_from_beat_ids, and resolves_conflict_beat_id. Preserve the validated causal graph; never invent or replace IDs.
 - If a segment contains a complex action, state action_continuity with motivation_or_preparation, execution, and result_or_reaction.
@@ -1223,10 +1291,20 @@ Return this JSON shape:
               "priority": "hard",
               "observable_fact": "",
               "acceptance_criteria": "",
-              "source": "approved_end_frame"
+              "evidence_refs": [
+                {
+                  "type": "approved_end_frame",
+                  "id": "keyframe:2",
+                  "quote": ""
+                }
+              ]
             }
           ],
-          "motion_steps": [""],
+          "motion_steps": [
+            "The character raises the playing cards into view",
+            "The playing cards move from the character's right hand to the center of the table",
+            "The camera pushes in to hold on the visible win result"
+          ],
           "preserve_requirements": [],
           "forbidden_outcomes": [],
           "narrative_boundary": "",
@@ -1235,7 +1313,21 @@ Return this JSON shape:
         "visible_anchor_ids": [],
         "start_frame_contract": {},
         "end_frame_contract": {},
-        "motion_contract": {},
+        "motion_contract": {
+          "version": "continuous-motion-contract-v1",
+          "subject_actions": [
+            {"subject": "", "action": ""}
+          ],
+          "camera_motion": {
+            "type": "static | pan | tilt | dolly_in | dolly_out | truck_left | truck_right | pedestal_up | pedestal_down | orbit | zoom_in | zoom_out | handheld_follow | crane",
+            "start": "",
+            "end": ""
+          },
+          "prop_paths": [
+            "The playing cards move from the character's right hand to the center of the table"
+          ],
+          "continuous_time": true
+        },
         "single_take_contract": {
           "continuous_time": true,
           "requires_cut": false,
@@ -1348,6 +1440,9 @@ Your job:
 - Include concise bilingual fields for user-visible text.
 - Set end_frame_requirement_level using hard_exact, hard_semantic, soft_directional, or editorial. Use hard_exact only when near-exact terminal composition is indispensable; otherwise prefer hard_semantic.
 - Return a complete video_prompt_contract within the same limits as the global shot decomposer: 1-3 unique terminal requirements, 1-3 unique motion steps, at most 5 preserve requirements, at most 5 forbidden outcomes, and at least one hard terminal requirement. The downstream compiler validates and serializes this contract without rewriting it, so resolve duplication and compression here.
+- For every terminal requirement, choose 1-5 evidence_refs only from allowed_terminal_evidence. Each reference contains type, id, and quote; quote may be an empty string when no short verbatim evidence is available. Do not output source or sources because application code compiles provenance from the verified evidence type.
+- Treat yourself as a structured contract compiler, not a creative writer. Use only these camera_motion.type values: static, pan, tilt, dolly_in, dolly_out, truck_left, truck_right, pedestal_up, pedestal_down, orbit, zoom_in, zoom_out, handheld_follow, crane.
+- final_transition_plan is deliberately absent from your executable input. Never invent or describe segment-to-segment editing in motion_contract, motion_steps, camera, subject_motion, micro_shots, timed_prompts, or video prompts.
 - Subtitles are editorial overlay copy. Do not ask generated images/videos to render text.
 - Use target_story_beats and target_shot_group to preserve story causality.
 - The target segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, key_evidence_ids, depends_on_beat_ids, evidence_from_beat_ids, and resolves_conflict_beat_id. Preserve the validated causal graph; never invent or replace IDs.
@@ -1375,10 +1470,20 @@ Return this JSON shape, containing only the target segment, its render descripti
               "priority": "hard",
               "observable_fact": "",
               "acceptance_criteria": "",
-              "source": "approved_end_frame"
+              "evidence_refs": [
+                {
+                  "type": "approved_end_frame",
+                  "id": "keyframe:2",
+                  "quote": ""
+                }
+              ]
             }
           ],
-          "motion_steps": [""],
+          "motion_steps": [
+            "The character raises the playing cards into view",
+            "The playing cards move from the character's right hand to the center of the table",
+            "The camera pushes in to hold on the visible win result"
+          ],
           "preserve_requirements": [],
           "forbidden_outcomes": [],
           "narrative_boundary": "",
@@ -1387,7 +1492,21 @@ Return this JSON shape, containing only the target segment, its render descripti
         "visible_anchor_ids": [],
         "start_frame_contract": {},
         "end_frame_contract": {},
-        "motion_contract": {},
+        "motion_contract": {
+          "version": "continuous-motion-contract-v1",
+          "subject_actions": [
+            {"subject": "", "action": ""}
+          ],
+          "camera_motion": {
+            "type": "static | pan | tilt | dolly_in | dolly_out | truck_left | truck_right | pedestal_up | pedestal_down | orbit | zoom_in | zoom_out | handheld_follow | crane",
+            "start": "",
+            "end": ""
+          },
+          "prop_paths": [
+            "The playing cards move from the character's right hand to the center of the table"
+          ],
+          "continuous_time": true
+        },
         "single_take_contract": {
           "continuous_time": true,
           "requires_cut": false,
@@ -1485,6 +1604,187 @@ Return this JSON shape, containing only the target segment, its render descripti
   }
 }`;
 
+const SEGMENT_SHOT_DECOMPOSER_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["shot_decomposer_plan"],
+  properties: {
+    shot_decomposer_plan: {
+      type: "object",
+      additionalProperties: false,
+      required: ["segment_render_descriptions", "keyframes", "segments"],
+      properties: {
+        segment_render_descriptions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1,
+          items: {
+            type: "object",
+            additionalProperties: true,
+            required: [
+              "segment_no",
+              "end_frame_requirement_level",
+              "video_prompt_contract",
+              "start_frame_contract",
+              "end_frame_contract",
+              "motion_contract",
+              "single_take_contract",
+              "motion_checkpoints",
+              "requires_cut",
+              "risk_level",
+            ],
+            properties: {
+              segment_no: { type: "integer", minimum: 1 },
+              end_frame_requirement_level: {
+                type: "string",
+                enum: ["hard_exact", "hard_semantic", "soft_directional", "editorial"],
+              },
+              video_prompt_contract: {
+                type: "object",
+                additionalProperties: false,
+                required: [
+                  "version",
+                  "terminal_requirements",
+                  "motion_steps",
+                  "preserve_requirements",
+                  "forbidden_outcomes",
+                  "narrative_boundary",
+                  "shot_intent",
+                ],
+                properties: {
+                  version: { const: "video-prompt-contract-v1" },
+                  terminal_requirements: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 3,
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: [
+                        "requirement_id",
+                        "priority",
+                        "observable_fact",
+                        "acceptance_criteria",
+                        "evidence_refs",
+                      ],
+                      properties: {
+                        requirement_id: { type: "string", minLength: 1 },
+                        priority: { type: "string", enum: ["hard", "soft"] },
+                        observable_fact: { type: "string", minLength: 1 },
+                        acceptance_criteria: { type: "string", minLength: 1 },
+                        evidence_refs: {
+                          type: "array",
+                          minItems: 1,
+                          maxItems: 5,
+                          items: {
+                            type: "object",
+                            additionalProperties: false,
+                            required: ["type", "id", "quote"],
+                            properties: {
+                              type: {
+                                type: "string",
+                                enum: [
+                                  "user_input",
+                                  "story_contract",
+                                  "approved_end_frame",
+                                  "planner_artifact",
+                                ],
+                              },
+                              id: { type: "string", minLength: 1 },
+                              quote: { type: "string" },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                  motion_steps: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 3,
+                    items: { type: "string", minLength: 1 },
+                  },
+                  preserve_requirements: {
+                    type: "array",
+                    maxItems: 5,
+                    items: { type: "string", minLength: 1 },
+                  },
+                  forbidden_outcomes: {
+                    type: "array",
+                    maxItems: 5,
+                    items: { type: "string", minLength: 1 },
+                  },
+                  narrative_boundary: { type: "string" },
+                  shot_intent: { type: "string" },
+                },
+              },
+              start_frame_contract: { type: "object" },
+              end_frame_contract: { type: "object" },
+              motion_contract: {
+                type: "object",
+                additionalProperties: false,
+                required: ["version", "subject_actions", "camera_motion", "prop_paths", "continuous_time"],
+                properties: {
+                  version: { const: "continuous-motion-contract-v1" },
+                  subject_actions: {
+                    type: "array",
+                    minItems: 1,
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["subject", "action"],
+                      properties: {
+                        subject: { type: "string", minLength: 1 },
+                        action: { type: "string", minLength: 1 },
+                      },
+                    },
+                  },
+                  camera_motion: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["type", "start", "end"],
+                    properties: {
+                      type: {
+                        type: "string",
+                        enum: [
+                          "static",
+                          "pan",
+                          "tilt",
+                          "dolly_in",
+                          "dolly_out",
+                          "truck_left",
+                          "truck_right",
+                          "pedestal_up",
+                          "pedestal_down",
+                          "orbit",
+                          "zoom_in",
+                          "zoom_out",
+                          "handheld_follow",
+                          "crane",
+                        ],
+                      },
+                      start: { type: "string" },
+                      end: { type: "string" },
+                    },
+                  },
+                  prop_paths: { type: "array", items: { type: "string" } },
+                  continuous_time: { const: true },
+                },
+              },
+              single_take_contract: { type: "object" },
+              motion_checkpoints: { type: "array" },
+              requires_cut: { type: "boolean" },
+              risk_level: { type: "string", enum: ["low", "medium", "high"] },
+            },
+          },
+        },
+        keyframes: { type: "array", minItems: 2, maxItems: 2, items: { type: "object" } },
+        segments: { type: "array", minItems: 1, maxItems: 1, items: { type: "object" } },
+      },
+    },
+  },
+};
+
 const PROMPT_DETAILER_SEGMENT_SYSTEM_PROMPT = `You are Segment Prompt Detailer for a controllable AI video pipeline.
 
 Return only valid JSON. No markdown, explanations, or comments.
@@ -1497,6 +1797,7 @@ Your only job:
 - Preserve the exact camera-graph inheritance scope and every referenced consistency anchor.
 - Compile a keyframe prompt only for owned_keyframe_nos. This prevents adjacent segment workers from producing conflicting prompts for the same shared boundary frame.
 - Keyframe and micro-shot image prompts describe static images only, with no subtitles, watermark, or generated UI text.
+- Every *_zh prompt field must contain Simplified Chinese prose only. Every *_en prompt field must contain English prose only. Preserve proper names, approved lettering, and IDs verbatim, but never mix descriptive prose languages.
 - Keep every individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses; remove explanations, repeated facts, synonyms, and ornamental quality phrases.
 - Within that budget, preserve in this order: exact subject identity/count, required action or state, key props/markings, composition/camera, consistency inheritance, and forbidden outcomes. Never shorten by dropping a hard user, identity, product, or boundary requirement.
 - Return only the target segment, its owned keyframe prompts, and its own micro-shot prompts. Do not repeat other segments.
@@ -1544,6 +1845,8 @@ Your job:
 - When repair_scope is target_segments_only, repair and return only target_segment_nos. Never regenerate, alter, or repeat already approved segments.
 - Prefer simplifying action, reducing camera movement, clarifying product/prop paths, merging excessive checkpoints, and making start/end frame contracts physically reachable.
 - Preserve or regenerate a complete valid video_prompt_contract for every returned segment. It remains the semantic source of truth after repair and must satisfy the same limits as Shot Decomposer: 1-3 unique terminal requirements with at least one hard requirement, 1-3 unique motion steps, at most 5 preserve requirements, and at most 5 forbidden outcomes.
+- Preserve verified evidence_refs and do not output source or sources. If a requirement changes, select replacement evidence only from allowed_terminal_evidence.
+- Keep final_transition_plan outside all returned executable fields. A boundary edit belongs to the final compositor, never to a repaired segment motion contract.
 - Fade in, fade out, opacity reveal, dissolve, and crossfade remain prohibited even when described as a continuous overlay. Never repeat those operations in executable motion fields. For a CTA, either use a physically reachable reveal such as a real sign sliding or rising into view, or move logo/text to an editorial overlay outside the generated clip and return a clean stable background plate.
 - Do not hide cuts inside wording. If a segment still requires a cut, keep requires_cut=true, risk_level=high, and explain why with recommended_split.
 - Do not output final image or video prompts.
@@ -1626,6 +1929,7 @@ Your only job in stage 3:
 - Segment prompts describe one continuous unbroken camera take from start boundary frame to end boundary frame.
 - Segment prompts must explicitly forbid internal cuts, jump cuts, fades, dissolves, crossfades, montage edits, ghost overlays, scene swaps, teleportation, and hard visual transitions inside the clip.
 - Micro-shot image prompts describe one static internal reference image that belongs to the same continuous take and same scene, not a separate shot or scene.
+- Every *_zh prompt field must contain Simplified Chinese prose only. Every *_en prompt field must contain English prose only. Preserve proper names, approved lettering, and IDs verbatim, but never mix descriptive prose languages.
 - Keep every individual image_prompt_zh and image_prompt_en at or below ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} characters. Use compact visible attribute clauses; remove explanations, repeated facts, synonyms, and ornamental quality phrases.
 - Within that budget, preserve in this order: exact subject identity/count, required action or state, key props/markings, composition/camera, consistency inheritance, and forbidden outcomes. Never shorten by dropping a hard user, identity, product, or boundary requirement.
 
@@ -1677,7 +1981,7 @@ type JsonStageContentResult = {
 export type PlanningDecompositionMode = "legacy" | "split_shadow" | "split";
 
 export interface AliyunStoryboardPlannerCheckpoint {
-  version: 10;
+  version: 11;
   inputFingerprint: string;
   referenceFactsRaw?: unknown;
   referenceFactsFingerprint?: string;
@@ -1792,8 +2096,8 @@ const plannerProgressStorage = new AsyncLocalStorage<{
   schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }>();
 
-const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 10 as const;
-const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-27-single-take-audit-v2";
+const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 11 as const;
+const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-28-evidence-motion-contract-v1";
 
 export async function createAliyunStoryboardPlan(
   input: PlanVideoProjectInput,
@@ -1852,9 +2156,10 @@ async function buildSplitPlanningRaw(params: {
     onCheckpoint: params.onCheckpoint,
   });
   manifest = materializePlanningAssetImagePrompts(manifest);
-  const issues = validatePlanningAssetImageContracts(
-    manifest.consistencyManifest.anchors,
-  );
+  const issues = [
+    ...validatePlanningAssetImageContracts(manifest.consistencyManifest.anchors),
+    ...validatePlanningAssetExecutionPrompts(manifest.consistencyManifest.anchors),
+  ];
   if (issues.length) {
     throw new StoryboardStageError(
       `Split planning did not produce executable asset contracts: ${formatAssetContractIssues(issues)}`,
@@ -2020,14 +2325,19 @@ async function createAliyunStoryboardPlanInternal(
     });
     checkpoint.planningRaw = planningRaw;
     await savePlannerCheckpoint(checkpoint, onCheckpoint);
-    let planningManifest = normalizePlanningManifest(planningRaw, input, fallback);
+    let planningManifest = materializePlanningAssetImagePrompts(
+      normalizePlanningManifest(planningRaw, input, fallback),
+    );
     await reportPlannerProgress({
       stage: "asset_prompt_contract_gate",
       detailZh: "正在检查人物、场景和道具资产描述是否具体、可执行且可验收。",
       detailEn: "Checking whether character, scene, and prop asset specifications are concrete, executable, and testable.",
     });
     const assetContractCheckStartedAtMs = Date.now();
-    let assetContractIssues = validatePlanningAssetImageContracts(planningManifest.consistencyManifest.anchors);
+    let assetContractIssues = [
+      ...validatePlanningAssetImageContracts(planningManifest.consistencyManifest.anchors),
+      ...validatePlanningAssetExecutionPrompts(planningManifest.consistencyManifest.anchors),
+    ];
     await logOnePromptVideo("production.step.completed", {
       moduleNameZh: "一致性资产规划",
       stepNameZh: "程序质检资产描述是否具体、可生成、可验收",
@@ -2054,44 +2364,47 @@ async function createAliyunStoryboardPlanInternal(
         scope: { kind: "anchors", anchorIds: [...invalidAnchorIds] },
         preserveRules: [
           "Preserve anchor id, type, identity descriptions, visual_lock, reference strength, and every valid anchor.",
-          "Modify only asset_image_contract fields for invalid anchors.",
+          "Modify only asset_image_contract for invalid anchors. All natural-language contract values must be English.",
         ],
       });
-      let assetPromptRepairRaw = checkpoint.assetPromptRepairRaw;
-      if (assetPromptRepairRaw === undefined) {
-        const repairPromptStartedAtMs = Date.now();
-        const repairUserContent = JSON.stringify({
-          user_idea: input.userPrompt,
-          aspect_ratio: input.aspectRatio,
-          global_style: planningManifest.globalStyle,
-          invalid_anchors: invalidAnchors,
-          validation_issues: assetContractIssues,
-          repair_plan: assetRepairPlan,
-        });
-        await logOnePromptVideo("production.step.completed", {
-          moduleNameZh: "一致性资产规划",
-          stepNameZh: "根据程序质检问题编写资产规划返修提示词",
-          executionMethod: "program",
-          durationMs: Date.now() - repairPromptStartedAtMs,
-          model: textModel,
-          attempt: 1,
-          resultZh: `把 ${assetContractIssues.length} 个问题写入返修要求`,
-        });
-        assetPromptRepairRaw = await callJsonStage({
-          stage: "asset_prompt_contract_repair",
-          modelName: textModel,
-          systemPrompt: `${ASSET_IMAGE_CONTRACT_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
-          userContent: repairUserContent,
-          temperature: 0.15,
-        });
-      }
-      if (checkpoint.assetPromptRepairRaw === undefined) {
-        checkpoint.assetPromptRepairRaw = assetPromptRepairRaw;
-        await savePlannerCheckpoint(checkpoint, onCheckpoint);
-      }
-      planningManifest = mergeRepairedAssetAnchors(planningManifest, assetPromptRepairRaw);
+      // The cached repair is already known to fail this deterministic gate.
+      // Generate a fresh targeted repair instead of replaying invalid output.
+      const repairPromptStartedAtMs = Date.now();
+      const repairUserContent = JSON.stringify({
+        user_idea: input.userPrompt,
+        aspect_ratio: input.aspectRatio,
+        global_style: planningManifest.globalStyle,
+        invalid_anchors: invalidAnchors,
+        validation_issues: assetContractIssues,
+        repair_plan: assetRepairPlan,
+      });
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "一致性资产规划",
+        stepNameZh: "根据程序质检问题编写资产规划返修提示词",
+        executionMethod: "program",
+        durationMs: Date.now() - repairPromptStartedAtMs,
+        model: textModel,
+        attempt: 1,
+        resultZh: `把 ${assetContractIssues.length} 个问题写入返修要求`,
+      });
+      const assetPromptRepairRaw = await callJsonStage({
+        stage: "asset_prompt_contract_repair",
+        modelName: textModel,
+        systemPrompt: `${ASSET_IMAGE_CONTRACT_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
+        userContent: repairUserContent,
+        temperature: 0.15,
+        maxTokens: Math.min(6000, invalidAnchors.length * 1200 + 400),
+      });
+      checkpoint.assetPromptRepairRaw = assetPromptRepairRaw;
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      planningManifest = materializePlanningAssetImagePrompts(
+        mergeRepairedAssetAnchors(planningManifest, assetPromptRepairRaw),
+      );
       const repairedAssetCheckStartedAtMs = Date.now();
-      assetContractIssues = validatePlanningAssetImageContracts(planningManifest.consistencyManifest.anchors);
+      assetContractIssues = [
+        ...validatePlanningAssetImageContracts(planningManifest.consistencyManifest.anchors),
+        ...validatePlanningAssetExecutionPrompts(planningManifest.consistencyManifest.anchors),
+      ];
       await logOnePromptVideo("production.step.completed", {
         moduleNameZh: "一致性资产规划",
         stepNameZh: "程序复检大模型返修后的资产描述",
@@ -2253,6 +2566,7 @@ async function createAliyunStoryboardPlanInternal(
       storyboardArtistPlan,
     });
     storyboardArtistPlan = storyContractResult.storyboardArtistPlan;
+    const storyContractRepairDurationMs = Date.now() - storyContractStartedAt;
     const semanticStoryResult = await ensureStoryboardSemanticQuality({
       input,
       modelName: model("ALIYUN_STORY_CRITIC_MODEL", textModel),
@@ -2284,7 +2598,7 @@ async function createAliyunStoryboardPlanInternal(
       detailZh: "剧情合同已通过，因果引用、证据引用和模板必需节拍均有效。",
       detailEn: "The story contract passed: causal links, evidence references, and template-required beats are valid.",
       metricsDelta: storyContractResult.repairCount > 0 ? {
-        storyContractRepairDurationMs: Date.now() - storyContractStartedAt,
+        storyContractRepairDurationMs,
       } : undefined,
     });
     await reportPlannerProgress({
@@ -2635,6 +2949,11 @@ async function callJsonStage(params: {
   systemPrompt: string;
   userContent: ChatContent;
   temperature: number;
+  maxTokens?: number;
+  jsonSchema?: {
+    name: string;
+    schema: Record<string, unknown>;
+  };
 }): Promise<unknown> {
   const startedAt = new Date();
   const startedAtMs = startedAt.getTime();
@@ -2656,8 +2975,14 @@ async function callJsonStage(params: {
     ],
     temperature: params.temperature,
     enable_thinking: reasoningPolicy.enableThinking,
+    // DashScope's OpenAI-compatible endpoint currently supports json_object,
+    // not OpenAI's json_schema response type. Strict schema enforcement runs
+    // locally immediately after parsing, before a segment can be checkpointed.
     response_format: { type: "json_object" },
   };
+  if (params.maxTokens !== undefined) {
+    body.max_tokens = params.maxTokens;
+  }
   if (reasoningPolicy.thinkingBudget !== undefined) {
     body.thinking_budget = reasoningPolicy.thinkingBudget;
   }
@@ -2673,8 +2998,12 @@ async function callJsonStage(params: {
     model: params.modelName,
     baseUrl: compatibleBaseUrl(),
     enableThinking: reasoningPolicy.enableThinking,
-    thinkingBudget: reasoningPolicy.thinkingBudget,
-  });
+      thinkingBudget: reasoningPolicy.thinkingBudget,
+      maxTokens: params.maxTokens,
+      responseFormat: params.jsonSchema
+        ? "json_object_plus_local_strict_schema"
+        : "json_object",
+    });
   let observationRecorded = false;
   try {
     await logOnePromptVideo("production.step.start", {
@@ -2724,8 +3053,9 @@ async function callJsonStage(params: {
     const content = result.content;
     if (!content) throw new Error(`Aliyun storyboard ${params.stage} returned empty content`);
     const parseStartedAtMs = Date.now();
+    let parsed: unknown;
     try {
-      const parsed = parseJsonObject(content);
+      parsed = parseJsonObject(content);
       await logOnePromptVideo("production.step.completed", {
         moduleNameZh,
         stepNameZh: "程序解析并检查大模型返回的 JSON",
@@ -2733,7 +3063,6 @@ async function callJsonStage(params: {
         durationMs: Date.now() - parseStartedAtMs,
         resultZh: "JSON 结构可用",
       });
-      return parsed;
     } catch (parseError) {
       await logOnePromptVideo("production.step.completed", {
         moduleNameZh,
@@ -2748,13 +3077,37 @@ async function callJsonStage(params: {
         contentPreview: content.slice(0, 1200),
       }, "warn");
       if (params.stage.startsWith("json_repair")) throw parseError;
-      return repairJsonStageContent({
+      parsed = await repairJsonStageContent({
         stage: params.stage,
         modelName: model("ALIYUN_STORYBOARD_MODEL", params.modelName),
         content,
         parseError,
       });
     }
+    if (params.jsonSchema) {
+      const schemaStartedAtMs = Date.now();
+      const schemaErrors = validateLocalJsonSchema(parsed, params.jsonSchema.schema);
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh,
+        stepNameZh: "程序按严格 JSON Schema 校验字段、类型和枚举",
+        executionMethod: "deterministic_program",
+        durationMs: Date.now() - schemaStartedAtMs,
+        resultZh: schemaErrors.length
+          ? `Schema 不合格，发现 ${schemaErrors.length} 个问题`
+          : "Schema 校验通过",
+      }, schemaErrors.length ? "warn" : "info");
+      if (schemaErrors.length) {
+        throw new StoryboardStageError(
+          `Strict JSON Schema validation failed: ${schemaErrors.slice(0, 8).join("; ")}`,
+          {
+            code: "contract_validation_error",
+            retryable: true,
+            validationErrors: schemaErrors,
+          },
+        );
+      }
+    }
+    return parsed;
   } catch (error) {
     if (!observationRecorded) {
       const completedAt = new Date();
@@ -3041,6 +3394,75 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
       await releaseProviderLeaseByToken(capacityLease.leaseToken, "completed").catch(() => undefined);
     }
   }
+}
+
+export function validateLocalJsonSchema(
+  value: unknown,
+  schemaValue: unknown,
+  path = "$",
+): string[] {
+  if (!isRecord(schemaValue)) return [`${path}: schema node is not an object`];
+  const schema = schemaValue;
+  const errors: string[] = [];
+  const expectedType = typeof schema.type === "string" ? schema.type : "";
+  const actualType = Array.isArray(value)
+    ? "array"
+    : value === null
+      ? "null"
+      : Number.isInteger(value)
+        ? "integer"
+        : typeof value === "number"
+          ? "number"
+          : typeof value;
+
+  if (expectedType && actualType !== expectedType) {
+    return [`${path}: expected ${expectedType}, received ${actualType}`];
+  }
+  if ("const" in schema && value !== schema.const) {
+    errors.push(`${path}: expected constant ${JSON.stringify(schema.const)}`);
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    errors.push(`${path}: value is outside the allowed enum`);
+  }
+  if (typeof value === "string" && typeof schema.minLength === "number" && value.length < schema.minLength) {
+    errors.push(`${path}: string is shorter than ${schema.minLength}`);
+  }
+  if (typeof value === "number" && typeof schema.minimum === "number" && value < schema.minimum) {
+    errors.push(`${path}: number is below ${schema.minimum}`);
+  }
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) {
+      errors.push(`${path}: expected at least ${schema.minItems} items`);
+    }
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) {
+      errors.push(`${path}: expected at most ${schema.maxItems} items`);
+    }
+    if (schema.items !== undefined) {
+      value.forEach((item, index) => {
+        errors.push(...validateLocalJsonSchema(item, schema.items, `${path}[${index}]`));
+      });
+    }
+  }
+  if (isRecord(value)) {
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    const required = Array.isArray(schema.required)
+      ? schema.required.filter((item): item is string => typeof item === "string")
+      : [];
+    for (const key of required) {
+      if (!(key in value)) errors.push(`${path}.${key}: required field is missing`);
+    }
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) {
+        if (!(key in properties)) errors.push(`${path}.${key}: additional property is not allowed`);
+      }
+    }
+    for (const [key, childSchema] of Object.entries(properties)) {
+      if (key in value) {
+        errors.push(...validateLocalJsonSchema(value[key], childSchema, `${path}.${key}`));
+      }
+    }
+  }
+  return errors;
 }
 
 function extractAttachedRepairPlan(content: ChatContent): ModelRepairPlan | undefined {
@@ -4134,9 +4556,6 @@ async function createShotDecomposerPlan(params: {
   }
 
   const timelineSegments = params.planningManifest.timelineBlueprint.segments;
-  if (timelineSegments.length <= 1) {
-    return { shotDecomposerPlan: await callWholeShotDecomposerPlan(params) };
-  }
 
   const concurrency = shotDecomposerConcurrency();
   await logOnePromptVideo("aliyun.storyboard.shot_decomposer.segmented.start", {
@@ -4170,41 +4589,60 @@ async function createShotDecomposerPlan(params: {
             ? buildModelRepairPlan({
                 targetStage: "shot_decomposer_contract_repair",
                 issues: [{
-                  code: "VIDEO_PROMPT_CONTRACT_INVALID",
-                  path: `segment_render_descriptions[segment_no=${segment.segmentNo}].video_prompt_contract`,
+                  code: "SHOT_DECOMPOSER_SCHEMA_INVALID",
+                  path: `shot_decomposer_plan.segment_render_descriptions[segment_no=${segment.segmentNo}]`,
                   message: contractValidationFeedback,
-                  repairHint: "Return a complete valid video_prompt_contract that preserves every hard terminal, motion, identity, product, and boundary requirement.",
+                  repairHint: "Return the complete target-segment JSON, correcting every reported path and preserving every hard terminal, motion, identity, product, and boundary requirement.",
                   segmentNo: segment.segmentNo,
                 }],
                 scope: { kind: "segments", segmentNos: [segment.segmentNo] },
                 preserveRules: [
                   "Preserve story, timing, camera graph, anchor identity, subtitles, audio plan, and micro-shot structure.",
-                  "Modify only the target segment video_prompt_contract and directly dependent motion wording.",
+                  "Modify only fields named by the strict schema errors and directly dependent fields in the target segment.",
                 ],
               })
             : undefined;
-          const raw = await callJsonStage({
-            stage,
-            modelName: params.modelName,
-            systemPrompt: contractValidationFeedback
-              ? `${SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT}
+          let raw: unknown;
+          try {
+            raw = await callJsonStage({
+              stage,
+              modelName: params.modelName,
+              systemPrompt: contractValidationFeedback
+                ? `${SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT}
 
-The previous response violated video_prompt_contract. Return the complete target-segment JSON again.
-Resolve the reported issue through model reasoning. Do not omit hard requirements and do not ask application code to repair your output.
+The previous response violated the strict target-segment JSON contract. Return the complete target-segment JSON again.
+Correct every reported JSON path. motion_steps must contain 1-3 strings. motion_contract.prop_paths must be an array of strings, never objects.
+Resolve the reported issues through model reasoning. Do not omit hard requirements and do not ask application code to repair your output.
 ${STRUCTURED_REPAIR_EXECUTION_RULES}`
-              : SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT,
-            userContent: contractValidationFeedback
-              ? JSON.stringify({
-                original_request: JSON.parse(baseContent),
-                previous_contract_validation_error: contractValidationFeedback,
-                repair_plan: repairPlan,
-              })
-              : baseContent,
-            temperature: 0.28,
-          });
+                : SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT,
+              userContent: contractValidationFeedback
+                ? JSON.stringify({
+                  original_request: JSON.parse(baseContent),
+                  previous_contract_validation_error: contractValidationFeedback,
+                  repair_plan: repairPlan,
+                })
+                : baseContent,
+              temperature: 0.1,
+              jsonSchema: {
+                name: "segment_shot_decomposer_contract",
+                schema: SEGMENT_SHOT_DECOMPOSER_JSON_SCHEMA,
+              },
+            });
+          } catch (error) {
+            const schemaFeedback = storyboardContractValidationFeedback(error);
+            if (schemaFeedback) contractValidationFeedback = schemaFeedback;
+            throw error;
+          }
           const candidatePlan = unwrapPlanRoot(raw, "shot_decomposer_plan");
           try {
-            assertShotPlanVideoPromptContract(candidatePlan, segment.segmentNo);
+            assertShotPlanVideoPromptContract(
+              candidatePlan,
+              segment.segmentNo,
+              buildTerminalEvidenceCatalog({
+                ...params,
+                segment,
+              }),
+            );
           } catch (error) {
             contractValidationFeedback = error instanceof Error ? error.message : String(error);
             throw new StoryboardStageError(
@@ -4386,6 +4824,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
 function assertShotPlanVideoPromptContract(
   plan: Record<string, unknown>,
   segmentNo: number,
+  allowedEvidence?: TerminalEvidenceCatalogItem[],
 ): void {
   const descriptions = arrayOfRecords(
     plan.segment_render_descriptions ?? plan.segmentRenderDescriptions,
@@ -4399,6 +4838,35 @@ function assertShotPlanVideoPromptContract(
   const contract = videoPromptContractFromUnknown(description);
   if (!contract) {
     throw new Error(`segment ${segmentNo} is missing video_prompt_contract.`);
+  }
+  if (allowedEvidence) {
+    const allowed = new Set(
+      allowedEvidence.map((item) => `${item.type}:${item.id}`),
+    );
+    const rawContract = isRecord(description.videoPromptContract)
+      ? description.videoPromptContract
+      : isRecord(description.video_prompt_contract)
+        ? description.video_prompt_contract
+        : {};
+    const rawRequirements = arrayOfRecords(
+      rawContract.terminalRequirements ?? rawContract.terminal_requirements,
+    );
+    rawRequirements.forEach((requirement, requirementIndex) => {
+      const rawRefs = requirement.evidenceRefs ?? requirement.evidence_refs;
+      // Existing checkpoints created before evidence_refs remain readable. New
+      // strict-schema responses always enter this branch and are fully checked.
+      if (rawRefs === undefined && requirement.source !== undefined) return;
+      const refs = arrayOfRecords(rawRefs);
+      refs.forEach((ref, evidenceIndex) => {
+        const key = `${stringOr(ref.type, "")}:${stringOr(ref.id, "")}`;
+        if (!allowed.has(key)) {
+          throw new Error(
+            `segment ${segmentNo} terminal requirement ${requirementIndex + 1} evidence_refs[${evidenceIndex}] `
+            + `"${key}" does not exist in allowed_terminal_evidence.`,
+          );
+        }
+      });
+    });
   }
   validateVideoPromptContract(contract);
 }
@@ -4420,16 +4888,119 @@ async function callWholeShotDecomposerPlan(params: {
       duration_seconds: params.input.durationSeconds,
       planning_manifest: params.planningManifest,
       story_design_context: params.storyDesignContext,
-      storyboard_artist_plan: params.storyboardArtistPlan,
+      storyboard_artist_plan: storyboardWithoutFinalTransitions(params.storyboardArtistPlan),
+      allowed_terminal_evidence: params.planningManifest.timelineBlueprint.segments.flatMap((segment) =>
+        buildTerminalEvidenceCatalog({ ...params, segment })),
+      edit_boundary_policy: {
+        owner: "final_compositor",
+        executable_by_video_model: false,
+      },
       confirmed_anchor_images: [],
     }),
-    temperature: 0.32,
+    temperature: 0.1,
   });
   const plan = unwrapPlanRoot(shotDecomposerRaw, "shot_decomposer_plan");
   for (const segment of params.planningManifest.timelineBlueprint.segments) {
-    assertShotPlanVideoPromptContract(plan, segment.segmentNo);
+    assertShotPlanVideoPromptContract(
+      plan,
+      segment.segmentNo,
+      buildTerminalEvidenceCatalog({ ...params, segment }),
+    );
   }
   return plan;
+}
+
+type TerminalEvidenceCatalogItem = {
+  type: "user_input" | "story_contract" | "approved_end_frame" | "planner_artifact";
+  id: string;
+  label: string;
+};
+
+function buildTerminalEvidenceCatalog(params: {
+  input: PlanVideoProjectInput;
+  planningManifest: VideoPlanningManifest;
+  storyboardArtistPlan: Record<string, unknown>;
+  storyDesignContext: Record<string, unknown>;
+  segment: VideoTimelineBlueprintSegment;
+}): TerminalEvidenceCatalogItem[] {
+  const segmentNo = params.segment.segmentNo;
+  const storyboardBrief = arrayOfRecords(
+    readLoose(params.storyboardArtistPlan, "storyboardBrief", "storyboard_brief"),
+  );
+  const targetBrief = storyboardBrief.find(
+    (item) => numberFrom(item.segmentNo ?? item.segment_no) === segmentNo,
+  ) ?? {};
+  const cameraId = safeId(targetBrief.cameraId ?? targetBrief.camera_id, "");
+  const storyBeats = arrayOfRecords(
+    readLoose(params.storyboardArtistPlan, "storyBeats", "story_beats")
+    ?? params.storyDesignContext.story_beats,
+  );
+  const linkedBeatIds = new Set(
+    normalizeStringArray(targetBrief.linkedBeatIds ?? targetBrief.linked_beat_ids) ?? [],
+  );
+  const targetBeats = storyBeats.filter((beat) => {
+    const beatId = safeId(beat.beatId ?? beat.beat_id, "");
+    return linkedBeatIds.has(beatId)
+      || normalizeNumberArray(beat.targetSegmentNos ?? beat.target_segment_nos).includes(segmentNo);
+  });
+  const refs: TerminalEvidenceCatalogItem[] = [{
+    type: "user_input",
+    id: "user_prompt",
+    label: "The user's original request.",
+  }, {
+    type: "approved_end_frame",
+    id: `keyframe:${segmentNo + 1}`,
+    label: `The reviewed semantic end-boundary contract for segment ${segmentNo}.`,
+  }, {
+    type: "planner_artifact",
+    id: `segment:${segmentNo}`,
+    label: `The approved timeline contract for segment ${segmentNo}.`,
+  }];
+  if (cameraId) {
+    refs.push({
+      type: "planner_artifact",
+      id: `camera:${cameraId}`,
+      label: `The camera-graph node assigned to segment ${segmentNo}.`,
+    });
+  }
+  for (const beat of targetBeats) {
+    const beatId = safeId(beat.beatId ?? beat.beat_id, "");
+    if (beatId) {
+      refs.push({
+        type: "story_contract",
+        id: `beat:${beatId}`,
+        label: "A validated story beat assigned to this segment.",
+      });
+    }
+    for (const eventId of normalizeStringArray(beat.sourceEventIds ?? beat.source_event_ids) ?? []) {
+      refs.push({
+        type: "story_contract",
+        id: `event:${eventId}`,
+        label: "A validated narrative event supporting this segment.",
+      });
+    }
+  }
+  for (const anchorId of normalizeStringArray(
+    targetBrief.requiredAnchorIds ?? targetBrief.required_anchor_ids,
+  ) ?? []) {
+    refs.push({
+      type: "story_contract",
+      id: `anchor:${anchorId}`,
+      label: "A consistency anchor required by the approved story contract.",
+    });
+  }
+  return Array.from(
+    new Map(refs.map((item) => [`${item.type}:${item.id}`, item])).values(),
+  );
+}
+
+function storyboardWithoutFinalTransitions(
+  storyboardArtistPlan: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized = { ...storyboardArtistPlan };
+  delete sanitized.finalTransitionPlan;
+  delete sanitized.final_transition_plan;
+  return sanitized;
 }
 
 function buildShotDecomposerSegmentContent(params: {
@@ -4455,8 +5026,7 @@ function buildShotDecomposerSegmentContent(params: {
   const shotGroupingGroups = arrayOfRecords(readLoose(isRecord(params.storyDesignContext.shot_grouping_pass) ? params.storyDesignContext.shot_grouping_pass : {}, "groups", "groups"))
     .concat(arrayOfRecords(readLoose(isRecord(readLoose(params.storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass")) ? readLoose(params.storyboardArtistPlan, "shotGroupingPass", "shot_grouping_pass") as Record<string, unknown> : {}, "groups", "groups")));
   const targetShotGroup = shotGroupingGroups.find((group) => normalizeNumberArray(group.segmentNos ?? group.segment_nos).includes(segmentNo)) ?? {};
-  const finalTransitionPlan = arrayOfRecords(readLoose(params.storyboardArtistPlan, "finalTransitionPlan", "final_transition_plan"))
-    .filter((item) => numberFrom(item.fromSegmentNo ?? item.from_segment_no) === segmentNo || numberFrom(item.toSegmentNo ?? item.to_segment_no) === segmentNo);
+  const allowedTerminalEvidence = buildTerminalEvidenceCatalog(params);
 
   return JSON.stringify({
     user_idea: params.input.userPrompt,
@@ -4492,9 +5062,14 @@ function buildShotDecomposerSegmentContent(params: {
       target_storyboard_brief: targetStoryboardBrief,
       adjacent_storyboard_brief: adjacentStoryboardBrief,
       camera_graph: readLoose(params.storyboardArtistPlan, "cameraGraph", "camera_graph"),
-      relevant_final_transition_plan: finalTransitionPlan,
       target_story_beats: targetStoryBeats,
       target_shot_group: targetShotGroup,
+    },
+    allowed_terminal_evidence: allowedTerminalEvidence,
+    edit_boundary_policy: {
+      owner: "final_compositor",
+      executable_by_video_model: false,
+      instruction: "Do not invent, copy, or paraphrase inter-segment edit transitions.",
     },
     output_contract: {
       only_target_segment: true,
@@ -4525,9 +5100,6 @@ function buildPromptDetailerSegmentContent(params: {
     const beatId = safeId(item.beatId ?? item.beat_id, "");
     return targetSegmentNos.includes(segmentNo) || (beatId && linkedBeatIds.includes(beatId));
   });
-  const relevantTransitions = arrayOfRecords(readLoose(params.storyboardArtistPlan, "finalTransitionPlan", "final_transition_plan"))
-    .filter((item) => numberFrom(item.fromSegmentNo ?? item.from_segment_no) === segmentNo
-      || numberFrom(item.toSegmentNo ?? item.to_segment_no) === segmentNo);
   const ownedKeyframeNos = segmentNo === 1 ? [1, 2] : [segmentNo + 1];
 
   return JSON.stringify({
@@ -4544,7 +5116,10 @@ function buildPromptDetailerSegmentContent(params: {
       target_storyboard_brief: targetStoryboardBrief,
       target_story_beats: targetStoryBeats,
       camera_graph: readLoose(params.storyboardArtistPlan, "cameraGraph", "camera_graph"),
-      relevant_final_transition_plan: relevantTransitions,
+    },
+    edit_boundary_policy: {
+      owner: "final_compositor",
+      executable_by_video_model: false,
     },
     approved_segment_plan: params.approvedSegmentPlan,
     output_contract: {
@@ -4613,17 +5188,27 @@ function mergeRecordPreferExisting(existing: Record<string, unknown>, next: Reco
   return merged;
 }
 
-async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
   const results = new Array<R>(items.length);
   let cursor = 0;
+  let firstError: unknown;
   const workerCount = Math.max(1, Math.min(concurrency, items.length));
   await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (cursor < items.length) {
+    while (cursor < items.length && firstError === undefined) {
       const index = cursor;
       cursor += 1;
-      results[index] = await fn(items[index], index);
+      try {
+        results[index] = await fn(items[index], index);
+      } catch (error) {
+        if (firstError === undefined) firstError = error;
+      }
     }
   }));
+  if (firstError !== undefined) throw firstError;
   return results;
 }
 
@@ -4983,8 +5568,15 @@ function buildSplitRepairContent(params: {
       duration_seconds: params.input.durationSeconds,
       planning_manifest: params.planningManifest,
       story_design_context: params.storyDesignContext,
-      storyboard_artist_plan: params.storyboardArtistPlan,
+      storyboard_artist_plan: storyboardWithoutFinalTransitions(params.storyboardArtistPlan),
       shot_decomposer_plan: params.shotDecomposerPlan,
+      allowed_terminal_evidence: params.planningManifest.timelineBlueprint.segments
+        .filter((segment) => params.expectedSegmentNos.includes(segment.segmentNo))
+        .flatMap((segment) => buildTerminalEvidenceCatalog({ ...params, segment })),
+      edit_boundary_policy: {
+        owner: "final_compositor",
+        executable_by_video_model: false,
+      },
       repair_scope: "whole_plan",
       target_segment_nos: params.expectedSegmentNos,
       single_take_audit_issues: params.auditIssues,
@@ -4999,10 +5591,6 @@ function buildSplitRepairContent(params: {
     .filter((item) => targets.has(numberFrom(item.segmentNo ?? item.segment_no)));
   const storyBeats = arrayOfRecords(readLoose(params.storyboardArtistPlan, "storyBeats", "story_beats"))
     .filter((item) => normalizeNumberArray(item.targetSegmentNos ?? item.target_segment_nos).some((segmentNo) => targets.has(segmentNo)));
-  const finalTransitions = arrayOfRecords(readLoose(params.storyboardArtistPlan, "finalTransitionPlan", "final_transition_plan"))
-    .filter((item) => targets.has(numberFrom(item.fromSegmentNo ?? item.from_segment_no))
-      || targets.has(numberFrom(item.toSegmentNo ?? item.to_segment_no)));
-
   return JSON.stringify({
     user_idea: params.input.userPrompt,
     aspect_ratio: params.input.aspectRatio,
@@ -5026,9 +5614,15 @@ function buildSplitRepairContent(params: {
       storyboard_brief: storyboardBrief,
       story_beats: storyBeats,
       camera_graph: readLoose(params.storyboardArtistPlan, "cameraGraph", "camera_graph"),
-      final_transition_plan: finalTransitions,
     },
     shot_decomposer_plan: params.shotDecomposerPlan,
+    allowed_terminal_evidence: params.planningManifest.timelineBlueprint.segments
+      .filter((segment) => targets.has(segment.segmentNo))
+      .flatMap((segment) => buildTerminalEvidenceCatalog({ ...params, segment })),
+    edit_boundary_policy: {
+      owner: "final_compositor",
+      executable_by_video_model: false,
+    },
     repair_scope: "target_segments_only",
     target_segment_nos: params.expectedSegmentNos,
     single_take_audit_issues: params.auditIssues,
@@ -5189,7 +5783,7 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
         revision: revision + 1,
         maxRevisions,
       }),
-      temperature: 0.2,
+      temperature: 0.1,
     });
     await reportPlannerProgress({
       stage: "single_take_audit",
@@ -5756,6 +6350,7 @@ function buildThreeStagePlan(params: {
     storyboardBrief: extras.storyboardBrief,
     segmentRenderDescriptions: extras.segmentRenderDescriptions,
     cameraGraph: extras.cameraGraph,
+    sceneContracts: extras.sceneContracts,
     transitionReferencePlan: extras.transitionReferencePlan,
     finalTransitionPlan: extras.finalTransitionPlan,
     referenceSelectionOutputs: extras.referenceSelectionOutputs,
@@ -5951,6 +6546,12 @@ function normalizePlanStructureExtras(params: {
     storyboardBrief,
     segmentRenderDescriptions,
     cameraGraph,
+    sceneContracts: normalizeSceneContracts(
+      firstDefined(
+        readLoose(storyboardRoot, "sceneContracts", "scene_contracts"),
+        readLoose(promptRoot, "sceneContracts", "scene_contracts"),
+      ),
+    ),
     transitionReferencePlan: normalizeUnknownArray(firstDefined(
       readLoose(storyboardRoot, "transitionReferencePlan", "transition_reference_plan"),
       readLoose(promptRoot, "transitionReferencePlan", "transition_reference_plan"),
@@ -6980,6 +7581,7 @@ function normalizeCameraGraph(
     return [{
       cameraId,
       segmentNos: normalizeNumberArray(item.segmentNos ?? item.segment_nos ?? item.segments),
+      sceneId: safeId(item.sceneId ?? item.scene_id, "") || undefined,
       locationId: safeId(item.locationId ?? item.location_id, ""),
       description: stringOr(item.description, ""),
       parentCameraId: safeId(item.parentCameraId ?? item.parent_camera_id, "") || undefined,
@@ -7010,6 +7612,35 @@ function normalizeCameraGraph(
     }];
   });
   return cameras.length || relations.length ? { cameras, relations } : undefined;
+}
+
+function normalizeSceneContracts(value: unknown): VideoSceneContract[] {
+  return arrayOfRecords(value).flatMap((item) => {
+    const sceneId = safeId(item.sceneId ?? item.scene_id, "");
+    const authorityRaw = isRecord(item.authority) ? item.authority : {};
+    const kind = stringOr(authorityRaw.kind, "");
+    const layoutAnchorId = safeId(item.layoutAnchorId ?? item.layout_anchor_id, "");
+    if (!sceneId || (kind !== "scene_layout_asset" && kind !== "approved_root_boundary")) return [];
+    const authority: VideoSceneContract["authority"] = kind === "approved_root_boundary"
+      ? { kind, keyframeNo: numberFrom(authorityRaw.keyframeNo ?? authorityRaw.keyframe_no) }
+      : { kind: "scene_layout_asset", anchorId: safeId(authorityRaw.anchorId ?? authorityRaw.anchor_id, layoutAnchorId) };
+    return [{
+      version: "scene-contract-v1",
+      sceneId,
+      displayNameZh: stringOr(item.displayNameZh ?? item.display_name_zh, "") || undefined,
+      displayNameEn: stringOr(item.displayNameEn ?? item.display_name_en, "") || undefined,
+      layoutAnchorId: layoutAnchorId || undefined,
+      cameraIds: normalizeStringArray(item.cameraIds ?? item.camera_ids) ?? [],
+      segmentNos: normalizeNumberArray(item.segmentNos ?? item.segment_nos),
+      continuityMode: stringOr(item.continuityMode ?? item.continuity_mode, "") === "independent_setup"
+        ? "independent_setup"
+        : "single_space",
+      spatialLayoutLock: stringOr(item.spatialLayoutLock ?? item.spatial_layout_lock, ""),
+      cameraAxis: stringOr(item.cameraAxis ?? item.camera_axis, "") || undefined,
+      fixedLandmarks: normalizeStringArray(item.fixedLandmarks ?? item.fixed_landmarks) ?? [],
+      authority,
+    }];
+  });
 }
 
 function normalizeFinalTransitionPlan(
@@ -7262,12 +7893,19 @@ function mergeRepairedAssetAnchors(
         return {
           ...anchor,
           assetImageContract: replacement.assetImageContract,
-          imagePromptZh: replacement.imagePromptZh || anchor.imagePromptZh,
-          imagePromptEn: replacement.imagePromptEn || anchor.imagePromptEn,
         };
       }),
     },
   };
+}
+
+function assetPromptDisplayZh(anchor: VideoConsistencyAnchor): string {
+  const candidates = [
+    anchor.imagePromptZh,
+    anchor.descriptionZh,
+    anchor.displayNameZh,
+  ];
+  return candidates.find((value) => isChinesePromptDisplayCopy(value))?.trim() ?? "";
 }
 
 function materializePlanningAssetImagePrompts(manifest: VideoPlanningManifest): VideoPlanningManifest {
@@ -7278,7 +7916,9 @@ function materializePlanningAssetImagePrompts(manifest: VideoPlanningManifest): 
         if (!anchor.assetImageContract) return anchor;
         return {
           ...anchor,
-          imagePromptZh: compileAssetImagePromptZh(anchor),
+          // English is the sole executable generation contract. Chinese is a
+          // best-effort presentation field and is never validated as a gate.
+          imagePromptZh: assetPromptDisplayZh(anchor),
           imagePromptEn: compileAssetImagePromptEn(anchor),
         };
       }),
@@ -7328,7 +7968,7 @@ function assetVisualSpecFingerprint(
   input: PlanVideoProjectInput,
 ): string {
   return createHash("sha256").update(JSON.stringify({
-    version: "asset-visual-spec-v1",
+    version: "asset-visual-spec-v3",
     userPrompt: input.userPrompt,
     aspectRatio: input.aspectRatio,
     anchor: {
@@ -7430,7 +8070,10 @@ async function detailPlanningAssetVisualSpecs(params: {
         : undefined;
       if (cachedRaw) {
         const cached = normalizeDetailedAssetAnchor(anchor, cachedRaw);
-        const cachedIssues = validatePlanningAssetImageContracts([cached]);
+        const cachedIssues = [
+          ...validatePlanningAssetImageContracts([cached]),
+          ...validatePlanningAssetExecutionPrompts([cached]),
+        ];
         if (cached.assetImageContract && !cachedIssues.length) {
           completed += 1;
           await reportPlannerProgress({
@@ -7479,9 +8122,13 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
               repair_plan: repairPlan,
             }),
             temperature: 0.15,
+            maxTokens: 1400,
           });
           const candidate = normalizeDetailedAssetAnchor(anchor, result);
-          validationFeedback = validatePlanningAssetImageContracts([candidate]);
+          validationFeedback = [
+            ...validatePlanningAssetImageContracts([candidate]),
+            ...validatePlanningAssetExecutionPrompts([candidate]),
+          ];
           if (!candidate.assetImageContract) {
             validationFeedback = [{
               anchorId: anchor.id,
@@ -7638,7 +8285,7 @@ function normalizeAnchors(value: unknown): VideoConsistencyAnchor[] {
     const type = normalizeAnchorType(item.type);
     if (!type) return [];
     const id = stringOr(item.id, `${type}_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "_");
-    return [{
+    return [normalizeAnchorSemantics({
       id,
       type,
       displayNameZh: stringOr(item.displayNameZh ?? item.display_name_zh ?? item.display_name, ""),
@@ -7654,7 +8301,7 @@ function normalizeAnchors(value: unknown): VideoConsistencyAnchor[] {
       imagePromptZh: stringOr(item.imagePromptZh ?? item.image_prompt_zh, ""),
       imagePromptEn: stringOr(item.imagePromptEn ?? item.image_prompt_en, ""),
       assetImageContract: normalizeAssetImageContract(item.assetImageContract ?? item.asset_image_contract),
-    }];
+    })];
   }).slice(0, 12);
 }
 
@@ -7663,6 +8310,24 @@ function normalizeAssetImageContract(value: unknown): VideoConsistencyAnchor["as
   const composition = isRecord(value.composition) ? value.composition : {};
   const environment = isRecord(value.environment) ? value.environment : {};
   const lighting = isRecord(value.lighting) ? value.lighting : {};
+  const renderingStyle = isRecord(value.renderingStyle)
+    ? value.renderingStyle
+    : isRecord(value.rendering_style)
+      ? value.rendering_style
+      : {};
+  const dimensionalityValue = stringOr(renderingStyle.dimensionality, "").toLowerCase();
+  const dimensionality = dimensionalityValue === "2d"
+    || dimensionalityValue === "2.5d"
+    || dimensionalityValue === "3d"
+    || dimensionalityValue === "mixed"
+      ? dimensionalityValue
+      : undefined;
+  const authorityValue = stringOr(renderingStyle.authority, "").toLowerCase();
+  const authority = authorityValue === "user_reference"
+    || authorityValue === "global_style"
+    || authorityValue === "planner"
+      ? authorityValue
+      : undefined;
   const contract: NonNullable<VideoConsistencyAnchor["assetImageContract"]> = {
     subjectCount: Math.max(0, Math.round(numberFrom(value.subjectCount ?? value.subject_count))),
     subjectDescription: stringOr(value.subjectDescription ?? value.subject_description, ""),
@@ -7683,6 +8348,16 @@ function normalizeAssetImageContract(value: unknown): VideoConsistencyAnchor["as
       direction: stringOr(lighting.direction, ""),
       quality: stringOr(lighting.quality, ""),
       colorTemperature: stringOr(lighting.colorTemperature ?? lighting.color_temperature, ""),
+    },
+    renderingStyle: {
+      medium: stringOr(renderingStyle.medium, ""),
+      dimensionality,
+      shading: stringOr(renderingStyle.shading, ""),
+      edgeTreatment: stringOr(renderingStyle.edgeTreatment ?? renderingStyle.edge_treatment, ""),
+      surfaceTreatment: stringOr(renderingStyle.surfaceTreatment ?? renderingStyle.surface_treatment, ""),
+      depthTreatment: stringOr(renderingStyle.depthTreatment ?? renderingStyle.depth_treatment, ""),
+      authority,
+      forbiddenDrift: normalizeStringArray(renderingStyle.forbiddenDrift ?? renderingStyle.forbidden_drift),
     },
     palette: normalizeStringArray(value.palette),
     materialDetails: normalizeStringArray(value.materialDetails ?? value.material_details),
@@ -7865,9 +8540,7 @@ function anchorsToConsistencyReferences(manifest: VideoPlanningManifest, styleBi
       return value;
     })();
     const lock = anchorLockText(anchor);
-    const executablePromptZh = anchor.assetImageContract
-      ? compileAssetImagePromptZh(anchor)
-      : anchor.imagePromptZh || anchor.descriptionZh || lock;
+    const displayPromptZh = assetPromptDisplayZh(anchor);
     const executablePromptEn = anchor.assetImageContract
       ? compileAssetImagePromptEn(anchor)
       : anchor.imagePromptEn || anchor.descriptionEn || lock;
@@ -7883,10 +8556,10 @@ function anchorsToConsistencyReferences(manifest: VideoPlanningManifest, styleBi
       scene: anchor.descriptionZh || anchor.descriptionEn || lock,
       characterState: kind === "character" ? lock : "",
       productState: kind !== "character" ? lock : styleBible.productLock ?? "",
-      imagePrompt: executablePromptZh || executablePromptEn,
-      imagePromptZh: executablePromptZh,
+      imagePrompt: executablePromptEn,
+      imagePromptZh: displayPromptZh,
       imagePromptEn: executablePromptEn,
-      negativePrompt: styleBible.negativePrompt,
+      negativePrompt: styleBible.negativePromptEn || styleBible.negativePrompt,
       negativePromptZh: styleBible.negativePromptZh,
       negativePromptEn: styleBible.negativePromptEn,
     }];
@@ -7900,6 +8573,7 @@ function anchorsToConsistencyReferences(manifest: VideoPlanningManifest, styleBi
 }
 
 function isHardConsistencyAnchor(anchor: VideoConsistencyAnchor): boolean {
+  if (!isReferenceImageEligibleAnchor(anchor) || !isVisibleEvidenceAnchor(anchor)) return false;
   if (anchor.needsReferenceImage && anchor.referenceStrength === "hard") return true;
   return anchor.needsReferenceImage && [
     "person",
@@ -8542,6 +9216,8 @@ function normalizeAnchorType(value: unknown): VideoConsistencyAnchor["type"] | u
     normalized === "vehicle" ||
     normalized === "food" ||
     normalized === "space_layout" ||
+    normalized === "palette_mood" ||
+    normalized === "graphic_backdrop" ||
     normalized === "custom"
   ) return normalized;
   if (normalized === "character" || normalized === "human" || normalized === "mascot") return "person";

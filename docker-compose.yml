@@ -1,3 +1,21 @@
+x-video-production-worker: &video-production-worker
+  image: workflow-video-production-worker:latest
+  restart: always
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: worker
+  depends_on:
+    - db
+    - workbench-backend
+  env_file:
+    - .env
+  environment: &video-production-worker-environment
+    DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD_ENCODED:-${POSTGRES_PASSWORD:-postgres}}@db:5432/workflow?schema=public
+    WORKBENCH_BACKEND_URL: http://workbench-backend:8000
+    WORKBENCH_SSO_SECRET: ${WORKBENCH_SSO_SECRET:-change-me-workbench-sso-secret}
+    NODE_ENV: production
+
 services:
   db:
     image: postgres:15-alpine
@@ -129,6 +147,46 @@ services:
       WORKBENCH_STATIC_CACHE_MAX_AGE: ${WORKBENCH_STATIC_CACHE_MAX_AGE:-86400}
       WORKBENCH_SSO_SECRET: ${WORKBENCH_SSO_SECRET:-change-me-workbench-sso-secret}
       NODE_ENV: production
+
+  video-planning-worker:
+    <<: *video-production-worker
+    container_name: workflow-video-planning-worker
+    environment:
+      <<: *video-production-worker-environment
+      VIDEO_PRODUCTION_WORKER_ID: docker-planning
+      VIDEO_PRODUCTION_WORKER_KINDS: planning
+
+  video-image-worker:
+    <<: *video-production-worker
+    container_name: workflow-video-image-worker
+    environment:
+      <<: *video-production-worker-environment
+      VIDEO_PRODUCTION_WORKER_ID: docker-image
+      VIDEO_PRODUCTION_WORKER_KINDS: image_prepare_submit,micro_shot_prepare_submit
+
+  video-clip-worker:
+    <<: *video-production-worker
+    container_name: workflow-video-clip-worker
+    environment:
+      <<: *video-production-worker-environment
+      VIDEO_PRODUCTION_WORKER_ID: docker-clip
+      VIDEO_PRODUCTION_WORKER_KINDS: clip_prepare_submit
+
+  video-reconcile-worker:
+    <<: *video-production-worker
+    container_name: workflow-video-reconcile-worker
+    environment:
+      <<: *video-production-worker-environment
+      VIDEO_PRODUCTION_WORKER_ID: docker-reconcile
+      VIDEO_PRODUCTION_WORKER_KINDS: project_reconcile
+
+  video-quality-worker:
+    <<: *video-production-worker
+    container_name: workflow-video-quality-worker
+    environment:
+      <<: *video-production-worker-environment
+      VIDEO_PRODUCTION_WORKER_ID: docker-quality
+      VIDEO_PRODUCTION_WORKER_KINDS: image_quality
 
   nginx:
     container_name: workflow-nginx

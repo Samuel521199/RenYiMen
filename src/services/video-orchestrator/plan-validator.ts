@@ -2,6 +2,13 @@ import { readCameraGraph, resolveCameraInheritanceContext } from "./camera-graph
 import { frameContractContainsMotionProcess } from "./frame-contract";
 import type { PlanValidationIssue } from "./types";
 import { auditSingleTakePlan } from "./single-take-audit";
+import {
+  hasPhysicalSceneEvidence,
+  inferAnchorSemanticType,
+  isVisibleEvidenceAnchor,
+} from "./anchor-semantics";
+import type { VideoConsistencyAnchor } from "./types";
+import { ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS } from "@/lib/one-prompt-video-limits";
 
 export type PlanValidationStage = "planning" | "keyframe_generation" | "micro_shot_generation" | "video_generation";
 
@@ -34,6 +41,9 @@ export function assertPlanValidForGeneration(plan: unknown, context: PlanValidat
 export function validateOnePromptVideoPlan(planValue: unknown, context: PlanValidationContext = {}): PlanValidationIssue[] {
   const plan = record(planValue);
   const issues: PlanValidationIssue[] = [];
+  const staticImageStage =
+    context.stage === "keyframe_generation"
+    || context.stage === "micro_shot_generation";
   const keyframes = arrayRecords(plan.keyframes);
   const segments = arrayRecords(plan.segments);
   const descriptions = arrayRecords(plan.segmentRenderDescriptions ?? plan.segment_render_descriptions);
@@ -41,6 +51,8 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
   const events = arrayRecords(plan.narrativeEvents ?? plan.narrative_events);
   const graph = readCameraGraph(plan.cameraGraph ?? plan.camera_graph);
   const durationSeconds = number(plan.durationSeconds ?? plan.duration_seconds);
+  validateAnchorSemanticRoles(plan, context, issues);
+  validateSceneContracts(plan, graph, context, issues);
 
   for (const segment of segments) {
     const segmentNo = number(segment.segmentNo ?? segment.segment_no);
@@ -55,6 +67,43 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
   }
   if (keyframes.length !== segments.length + 1) {
     error(issues, "KEYFRAME_COUNT_MISMATCH", "timeline", `关键帧数量 ${keyframes.length} 必须等于片段数量 ${segments.length} 加一。`, "stage_2b_shot_decomposer");
+  }
+  if (context.stage === "planning") {
+    for (const keyframe of keyframes) {
+      const keyframeNo = number(keyframe.keyframeNo ?? keyframe.keyframe_no);
+      for (const [field, value] of [
+        ["imagePromptZh", text(keyframe.imagePromptZh ?? keyframe.image_prompt_zh)],
+        ["imagePromptEn", text(keyframe.imagePromptEn ?? keyframe.image_prompt_en)],
+      ] as const) {
+        if (value.length <= ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS) continue;
+        error(
+          issues,
+          "IMAGE_PROMPT_PLANNING_BUDGET_EXCEEDED",
+          `keyframe:${keyframeNo}`,
+          `KF${keyframeNo} 的 ${field} 长度为 ${value.length}，超过规划阶段 ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} 字符预算，必须在分镜阶段重写而不是留到生成前压缩。`,
+          "stage_2b_shot_decomposer",
+        );
+      }
+    }
+    for (const segment of segments) {
+      const segmentNo = number(segment.segmentNo ?? segment.segment_no);
+      for (const microShot of arrayRecords(segment.microShots ?? segment.micro_shots)) {
+        const microShotNo = number(microShot.microShotNo ?? microShot.micro_shot_no);
+        for (const [field, value] of [
+          ["imagePromptZh", text(microShot.imagePromptZh ?? microShot.image_prompt_zh)],
+          ["imagePromptEn", text(microShot.imagePromptEn ?? microShot.image_prompt_en)],
+        ] as const) {
+          if (value.length <= ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS) continue;
+          error(
+            issues,
+            "IMAGE_PROMPT_PLANNING_BUDGET_EXCEEDED",
+            `segment:${segmentNo}:micro_shot:${microShotNo}`,
+            `片段 ${segmentNo} 的微镜头 ${microShotNo} ${field} 长度为 ${value.length}，超过规划阶段 ${ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS} 字符预算。`,
+            "stage_2b_shot_decomposer",
+          );
+        }
+      }
+    }
   }
 
   const keyframeNos = new Set(keyframes.map((item) => number(item.keyframeNo ?? item.keyframe_no)));
@@ -75,26 +124,33 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
     }
   }
 
-  const descriptionsBySegment = new Map(descriptions.map((item) => [number(item.segmentNo ?? item.segment_no), item]));
-  for (const segment of segments) {
-    const segmentNo = number(segment.segmentNo ?? segment.segment_no);
-    const artifactId = `segment:${segmentNo}`;
-    const description = descriptionsBySegment.get(segmentNo);
-    if (!description) continue;
-    const startFrame = recordOrUndefined(description.startFrameContract ?? description.start_frame_contract);
-    const endFrame = recordOrUndefined(description.endFrameContract ?? description.end_frame_contract);
-    if (startFrame && frameContractContainsMotionProcess(startFrame)) error(issues, "START_FRAME_CONTAINS_MOTION", artifactId, `片段 ${segmentNo} 的首帧合同包含运动过程，必须只描述静态状态。`, "stage_2b_shot_decomposer");
-    if (endFrame && frameContractContainsMotionProcess(endFrame)) error(issues, "END_FRAME_CONTAINS_MOTION", artifactId, `片段 ${segmentNo} 的尾帧合同包含运动过程，必须只描述静态状态。`, "stage_2b_shot_decomposer");
+  if (!staticImageStage) {
+    const descriptionsBySegment = new Map(descriptions.map((item) => [number(item.segmentNo ?? item.segment_no), item]));
+    for (const segment of segments) {
+      const segmentNo = number(segment.segmentNo ?? segment.segment_no);
+      const artifactId = `segment:${segmentNo}`;
+      const description = descriptionsBySegment.get(segmentNo);
+      if (!description) continue;
+      const startFrame = recordOrUndefined(description.startFrameContract ?? description.start_frame_contract);
+      const endFrame = recordOrUndefined(description.endFrameContract ?? description.end_frame_contract);
+      if (startFrame && frameContractContainsMotionProcess(startFrame)) error(issues, "START_FRAME_CONTAINS_MOTION", artifactId, `片段 ${segmentNo} 的首帧合同包含运动过程，必须只描述静态状态。`, "stage_2b_shot_decomposer");
+      if (endFrame && frameContractContainsMotionProcess(endFrame)) error(issues, "END_FRAME_CONTAINS_MOTION", artifactId, `片段 ${segmentNo} 的尾帧合同包含运动过程，必须只描述静态状态。`, "stage_2b_shot_decomposer");
+    }
   }
 
-  const singleTakeAudit = auditSingleTakePlan(plan, context.segmentNo ? [context.segmentNo] : undefined);
-  issues.push(...singleTakeAudit.issues.map((issue) => ({
-    code: issue.code,
-    severity: issue.severity,
-    artifactId: issue.artifactId,
-    messageZh: issue.messageZh,
-    retryFromStage: issue.retryFromStage,
-  } satisfies PlanValidationIssue)));
+  // Static boundary and micro-shot images must not be blocked by motion/video
+  // execution contracts. Those remain mandatory during planning and video
+  // generation, where they can still trigger a storyboard repair.
+  if (!staticImageStage) {
+    const singleTakeAudit = auditSingleTakePlan(plan, context.segmentNo ? [context.segmentNo] : undefined);
+    issues.push(...singleTakeAudit.issues.map((issue) => ({
+      code: issue.code,
+      severity: issue.severity,
+      artifactId: issue.artifactId,
+      messageZh: issue.messageZh,
+      retryFromStage: issue.retryFromStage,
+    } satisfies PlanValidationIssue)));
+  }
 
   const eventIds = new Set(events.map((item) => text(item.eventId ?? item.event_id)).filter(Boolean));
   const anchorIds = new Set(readAnchorIds(plan));
@@ -127,6 +183,214 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
 
   if (!graph.cameras.length) warning(issues, "CAMERA_GRAPH_MISSING", "camera_graph", "计划缺少 Camera Graph；历史计划可以打开，但重新生成前应补齐机位继承关系。", "stage_2a_storyboard");
   return dedupe(issues);
+}
+
+const SPATIAL_CONTINUITY_RELATIONS = new Set([
+  "same_camera_setup",
+  "same_axis",
+  "derived_reframe",
+  "same_spatial_context",
+  "alternate_view",
+]);
+
+function validateSceneContracts(
+  plan: Record<string, unknown>,
+  graph: ReturnType<typeof readCameraGraph>,
+  context: PlanValidationContext,
+  issues: PlanValidationIssue[],
+): void {
+  // Historical plans remain readable. New planning output is held to the
+  // contract; later stages also enforce it when the plan declares contracts.
+  const sceneContracts = arrayRecords(plan.sceneContracts ?? plan.scene_contracts);
+  const continuityEdges = graph.relations.filter((edge) => SPATIAL_CONTINUITY_RELATIONS.has(edge.relation));
+  const continuityNodes = graph.cameras.filter((node) =>
+    node.parentCameraId && SPATIAL_CONTINUITY_RELATIONS.has(node.relationToParent ?? "")
+  );
+  if (!continuityEdges.length && !continuityNodes.length) return;
+  if (!sceneContracts.length) {
+    if (context.stage === "planning") {
+      error(
+        issues,
+        "SCENE_CONTRACT_MISSING",
+        "scene_contracts",
+        "Camera Graph 声明了同空间、继承构图或换视角关系，但没有输出可追溯的 Scene Contract。",
+        "stage_2a_storyboard",
+      );
+    }
+    return;
+  }
+
+  const anchors = readAnchors(plan);
+  const anchorMap = new Map(anchors.map((anchor) => [anchor.id, anchor]));
+  const contractsById = new Map(sceneContracts.map((contract) => [
+    text(contract.sceneId ?? contract.scene_id),
+    contract,
+  ]));
+  const camerasById = new Map(graph.cameras.map((camera) => [camera.cameraId, camera]));
+
+  for (const contract of sceneContracts) {
+    const sceneId = text(contract.sceneId ?? contract.scene_id);
+    const layoutAnchorId = text(contract.layoutAnchorId ?? contract.layout_anchor_id);
+    const authority = record(contract.authority);
+    const authorityKind = text(authority.kind);
+    const spatialLayoutLock = text(contract.spatialLayoutLock ?? contract.spatial_layout_lock);
+    if (!sceneId || !spatialLayoutLock) {
+      error(issues, "SCENE_CONTRACT_INCOMPLETE", sceneId || "scene_contract", "Scene Contract 必须包含 scene_id 和可执行的 spatial_layout_lock。", "stage_2a_storyboard");
+      continue;
+    }
+    if (authorityKind === "scene_layout_asset") {
+      const anchor = anchorMap.get(layoutAnchorId || text(authority.anchorId ?? authority.anchor_id));
+      const inferredType = anchor ? inferAnchorSemanticType(anchor) : "custom";
+      if (!anchor || (inferredType !== "location" && inferredType !== "space_layout") || !hasPhysicalSceneEvidence(anchor)) {
+        error(
+          issues,
+          "SCENE_LAYOUT_AUTHORITY_INVALID",
+          `scene:${sceneId}`,
+          "Scene Contract 的空间权威必须指向具有前景、中景、背景和空间关系的物理 location/space_layout 资产；色板、光斑和抽象氛围不能充当场景。",
+          "stage_1_timeline",
+        );
+      } else if (!anchor.needsReferenceImage) {
+        error(issues, "SCENE_LAYOUT_REFERENCE_NOT_REQUESTED", `anchor:${anchor.id}`, "物理场景布局锚点必须生成并审核参考图。", "stage_1_timeline");
+      }
+    } else if (authorityKind === "approved_root_boundary") {
+      const keyframeNo = number(authority.keyframeNo ?? authority.keyframe_no);
+      if (context.stage === "planning" || keyframeNo <= 0) {
+        error(
+          issues,
+          "SCENE_BOUNDARY_AUTHORITY_UNAVAILABLE",
+          `scene:${sceneId}`,
+          "新规划不能预先假定边界帧已审核；必须先输出 scene_layout 资产。approved_root_boundary 只用于迁移已有项目。",
+          "stage_1_timeline",
+        );
+      }
+    } else {
+      error(issues, "SCENE_AUTHORITY_MISSING", `scene:${sceneId}`, "Scene Contract 必须声明 scene_layout_asset 或已审核根边界帧作为空间权威。", "stage_2a_storyboard");
+    }
+  }
+
+  const validatePair = (fromCameraId: string, toCameraId: string) => {
+    const from = camerasById.get(fromCameraId);
+    const to = camerasById.get(toCameraId);
+    const fromSceneId = from?.sceneId ?? "";
+    const toSceneId = to?.sceneId ?? "";
+    if (!fromSceneId || !toSceneId || fromSceneId !== toSceneId || !contractsById.has(fromSceneId)) {
+      error(
+        issues,
+        "CAMERA_SCENE_BINDING_BROKEN",
+        `camera:${toCameraId}`,
+        `连续空间机位 ${fromCameraId} → ${toCameraId} 必须绑定同一个有效 scene_id，不能只靠自然语言声称“同一场景”。`,
+        "stage_2a_storyboard",
+      );
+    }
+  };
+  for (const edge of continuityEdges) validatePair(edge.fromCameraId, edge.toCameraId);
+  for (const node of continuityNodes) validatePair(node.parentCameraId!, node.cameraId);
+}
+
+function validateAnchorSemanticRoles(
+  plan: Record<string, unknown>,
+  context: PlanValidationContext,
+  issues: PlanValidationIssue[],
+): void {
+  const consistency = record(
+    plan.consistencyManifest
+    ?? plan.consistency_manifest
+    ?? record(plan.planningManifest ?? plan.planning_manifest).consistencyManifest
+    ?? record(plan.planningManifest ?? plan.planning_manifest).consistency_manifest,
+  );
+  const anchors = arrayRecords(consistency.anchors).map(anchorFromRecord);
+  const softAnchorIds = new Set(anchors.filter((anchor) => !isVisibleEvidenceAnchor(anchor)).map((anchor) => anchor.id));
+  for (const anchor of anchors) {
+    const inferredType = inferAnchorSemanticType(anchor);
+    if ((anchor.type === "location" || anchor.type === "space_layout") && inferredType !== anchor.type) {
+      const add = context.stage === "planning" ? error : warning;
+      add(
+        issues,
+        "PALETTE_MOOD_MISCLASSIFIED_AS_SCENE",
+        `anchor:${anchor.id}`,
+        `锚点 ${anchor.displayNameZh || anchor.displayNameEn || anchor.id} 只有配色、光斑或氛围信息，不能作为固定场景或空间布局参考。`,
+        "stage_1_timeline",
+      );
+      continue;
+    }
+    if ((anchor.type === "location" || anchor.type === "space_layout") && !hasPhysicalSceneEvidence(anchor)) {
+      const add = context.stage === "planning" ? error : warning;
+      add(
+        issues,
+        "SCENE_ANCHOR_GEOMETRY_MISSING",
+        `anchor:${anchor.id}`,
+        `场景锚点 ${anchor.displayNameZh || anchor.displayNameEn || anchor.id} 缺少可复用的实体结构和空间关系，不能升级为空间布局参考。`,
+        "stage_1_timeline",
+      );
+    }
+  }
+  for (const target of [
+    ...arrayRecords(plan.keyframes),
+    ...arrayRecords(plan.segments),
+    ...arrayRecords(plan.storyboardBrief ?? plan.storyboard_brief),
+  ]) {
+    const targetId = text(target.frameId ?? target.frame_id)
+      || (number(target.keyframeNo ?? target.keyframe_no) ? `keyframe:${number(target.keyframeNo ?? target.keyframe_no)}` : "")
+      || (number(target.segmentNo ?? target.segment_no) ? `segment:${number(target.segmentNo ?? target.segment_no)}` : "planning_target");
+    const referenced = strings(
+      target.effectiveRequiredAnchorIds
+      ?? target.effective_required_anchor_ids
+      ?? target.requiredAnchorIds
+      ?? target.required_anchor_ids
+      ?? target.usesConsistencyAnchors
+      ?? target.uses_consistency_anchors,
+    );
+    const invalid = referenced.filter((anchorId) => softAnchorIds.has(anchorId));
+    if (!invalid.length) continue;
+    const add = context.stage === "planning" ? error : warning;
+    add(
+      issues,
+      "SOFT_STYLE_ANCHOR_MARKED_VISIBLE",
+      targetId,
+      `色彩/风格软锚点 ${invalid.join("、")} 不得作为必须可见实体或空间布局证据。`,
+      "stage_1_timeline",
+    );
+  }
+}
+
+function anchorFromRecord(source: Record<string, unknown>): VideoConsistencyAnchor {
+  const contract = record(source.assetImageContract ?? source.asset_image_contract);
+  const environment = record(contract.environment);
+  return {
+    id: text(source.id ?? source.anchorId ?? source.anchor_id),
+    type: (text(source.type) || "custom") as VideoConsistencyAnchor["type"],
+    displayNameZh: text(source.displayNameZh ?? source.display_name_zh),
+    displayNameEn: text(source.displayNameEn ?? source.display_name_en),
+    mustStayConsistent: source.mustStayConsistent !== false && source.must_stay_consistent !== false,
+    needsReferenceImage: source.needsReferenceImage === true || source.needs_reference_image === true,
+    referenceStrength: text(source.referenceStrength ?? source.reference_strength) as VideoConsistencyAnchor["referenceStrength"],
+    descriptionZh: text(source.descriptionZh ?? source.description_zh),
+    descriptionEn: text(source.descriptionEn ?? source.description_en),
+    imagePromptZh: text(source.imagePromptZh ?? source.image_prompt_zh),
+    imagePromptEn: text(source.imagePromptEn ?? source.image_prompt_en),
+    assetImageContract: Object.keys(contract).length ? {
+      subjectCount: number(contract.subjectCount ?? contract.subject_count),
+      subjectDescription: text(contract.subjectDescription ?? contract.subject_description),
+      environment: {
+        background: text(environment.background),
+        foreground: text(environment.foreground),
+        midground: text(environment.midground),
+        backgroundLayer: text(environment.backgroundLayer ?? environment.background_layer),
+        spatialRelationships: strings(environment.spatialRelationships ?? environment.spatial_relationships),
+      },
+      palette: strings(contract.palette),
+    } : undefined,
+  };
+}
+
+function readAnchors(plan: Record<string, unknown>): VideoConsistencyAnchor[] {
+  const consistency = record(
+    plan.consistencyManifest
+    ?? plan.consistency_manifest
+    ?? record(plan.planningManifest ?? plan.planning_manifest).consistencyManifest
+    ?? record(plan.planningManifest ?? plan.planning_manifest).consistency_manifest,
+  );
+  return arrayRecords(consistency.anchors).map(anchorFromRecord);
 }
 
 function validateCameraSafety(plan: Record<string, unknown>, entries: Array<{ node: ReturnType<typeof readCameraGraph>["cameras"][number]; context: ReturnType<typeof resolveCameraInheritanceContext> }>, issues: PlanValidationIssue[]): void {

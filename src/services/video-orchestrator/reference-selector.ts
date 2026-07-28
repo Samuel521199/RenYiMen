@@ -163,7 +163,8 @@ export function selectReferenceCandidates(params: {
 }
 
 function isMandatoryTransitionCandidate(candidate: Pick<SelectableReferenceCandidate, "sourceType" | "hardRequired">): boolean {
-  return candidate.sourceType === "transition_reference" && candidate.hardRequired === true;
+  return candidate.hardRequired === true
+    && (candidate.sourceType === "transition_reference" || candidate.sourceType === "user_upload");
 }
 
 function roundScore(value: number): number {

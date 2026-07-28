@@ -11,6 +11,18 @@ const projectServiceSource = readFileSync(
   path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"),
   "utf8",
 );
+const referenceVisionSource = readFileSync(
+  path.join(process.cwd(), "src/services/video-orchestrator/reference-vision-evaluator.ts"),
+  "utf8",
+);
+const aliyunWorkflowSource = readFileSync(
+  path.join(process.cwd(), "src/services/video-orchestrator/aliyun-workflow.ts"),
+  "utf8",
+);
+const productionJobQueueSource = readFileSync(
+  path.join(process.cwd(), "src/services/video-orchestrator/production-job-queue.ts"),
+  "utf8",
+);
 
 test("recoverable image-review failures keep an explicit resume action", () => {
   assert.match(pageSource, /canResumeRecoverableImageReview/);
@@ -106,6 +118,13 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.match(picker, /快速质检中/);
 });
 
+test("video candidates show a poster while metadata preloads over a warmed connection", () => {
+  assert.match(pageSource, /poster=\{posterUrl \|\| undefined\}/);
+  assert.match(pageSource, /preload="metadata"/);
+  assert.match(pageSource, /link\.rel = "preconnect"/);
+  assert.match(pageSource, /candidate\.kind !== "segment_video"/);
+});
+
 test("selecting a boundary candidate explains that the next frame continues automatically", () => {
   assert.match(pageSource, /已采用该画面，正在自动生成下一帧/);
   assert.match(pageSource, /Image accepted; generating the next frame automatically/);
@@ -121,9 +140,101 @@ test("approving boundary frames opens micro-shot review without waiting for upst
   const approve = service.slice(approveStart, approveEnd);
   assert.doesNotMatch(approve, /await submitRequiredMicroShotImageTasks/);
   assert.ok(approve.indexOf("VideoProjectStatus.MICRO_SHOT_REVIEW") < approve.indexOf("queueRequiredMicroShotImageTasks"));
-  assert.match(service, /onePromptVideoMicroShotSubmissionRuns/);
+  assert.match(service, /kind: "micro_shot_prepare_submit"/);
   assert.match(service, /project\.status === VideoProjectStatus\.MICRO_SHOT_REVIEW && hasSubmittableRequiredMicroShotImage\(project\)/);
   assert.match(pageSource, /item\.imageStatus === "running" \|\| item\.imageStatus === "pending" \|\| !item\.imageStatus \|\| item\.imageStatus === "idle"/);
+});
+
+test("reference approval returns before image submission and does not animate the save button", () => {
+  const updateShot = projectServiceSource.slice(
+    projectServiceSource.indexOf("export async function updateVideoShot"),
+    projectServiceSource.indexOf("export async function approveVideoPlan"),
+  );
+  assert.match(updateShot, /queueNextImageTask\(/);
+  assert.doesNotMatch(updateShot, /await submitNextImageTask\(/);
+  assert.match(projectServiceSource, /kind: "image_prepare_submit"/);
+  assert.match(productionJobQueueSource, /idempotencyKey/);
+  assert.match(projectServiceSource, /submit\.background\.queued/);
+  assert.match(pageSource, /const \[savingKeyframeId, setSavingKeyframeId\] = useState\(""\)/);
+  assert.match(pageSource, /const \[lockingKeyframeIds, setLockingKeyframeIds\] = useState<string\[\]>\(\[\]\)/);
+  assert.match(pageSource, /savingKeyframeId === selectedKeyframe\.id \? <Loader2/);
+  assert.doesNotMatch(pageSource, /\{loading \? <Loader2 className="h-4 w-4 animate-spin" \/> : <Save/);
+});
+
+test("image sync queues submission once and clears terminal work behind a protected selection", () => {
+  const syncImages = projectServiceSource.slice(
+    projectServiceSource.indexOf("async function syncImageTasks"),
+    projectServiceSource.indexOf("async function syncMicroShotImageTasks"),
+  );
+  assert.match(syncImages, /queueNextImageTask\(project\.userId, project\.id, "image\.sync"\)/);
+  assert.doesNotMatch(syncImages, /await submitNextImageTask\(/);
+  assert.match(projectServiceSource, /kind: "image_prepare_submit"/);
+  assert.match(productionJobQueueSource, /where: \{ idempotencyKey: input\.idempotencyKey \}/);
+  assert.match(projectServiceSource, /image\.sync\.protected_selection_task_reconciled/);
+  assert.match(projectServiceSource, /status: targetKeyframe\.locked[\s\S]*VideoShotStatus\.IMAGE_APPROVED[\s\S]*VideoShotStatus\.IMAGE_READY/);
+});
+
+test("sync queues durable quality work instead of awaiting vision evaluation", () => {
+  const syncProject = projectServiceSource.slice(
+    projectServiceSource.indexOf("export async function syncVideoProject"),
+    projectServiceSource.indexOf("export async function pumpGlobalProviderQueue"),
+  );
+  assert.match(syncProject, /await syncGenerationCandidates\(project\)/);
+  assert.match(projectServiceSource, /kind: "image_quality"/);
+  assert.match(projectServiceSource, /enqueueVideoProductionJob/);
+  assert.match(projectServiceSource, /generation_quality\.worker\.queued/);
+  assert.match(projectServiceSource, /runImageQualityWorker/);
+  assert.match(projectServiceSource, /evaluateClaimedImageCandidateWithTimedRetries/);
+  assert.match(projectServiceSource, /generation_quality\.asset_retry_wait/);
+  assert.match(projectServiceSource, /runQualityEvaluations: true/);
+  assert.match(projectServiceSource, /pollUpstream: false/);
+  assert.match(projectServiceSource, /generation_quality\.worker\.retry_wait/);
+  assert.match(projectServiceSource, /qualityNextRetryAt/);
+});
+
+test("optional reference vision is gated, cached, short-lived, and circuit-broken", () => {
+  assert.match(referenceVisionSource, /referenceVisionNeeded/);
+  assert.match(referenceVisionSource, /vision_conflict_eval_not_needed/);
+  assert.match(referenceVisionSource, /vision_conflict_eval_cache_hit/);
+  assert.match(referenceVisionSource, /readProductionCircuit/);
+  assert.match(referenceVisionSource, /recordProductionCircuitFailure/);
+  assert.match(referenceVisionSource, /referenceVisionCircuitCooldownMs/);
+  assert.match(referenceVisionSource, /return Number\.isFinite\(value\) && value >= 3000 \? Math\.round\(value\) : 8000/);
+});
+
+test("prompt preparation keeps model compaction opt-in and blocks lossy fallbacks", () => {
+  assert.match(aliyunWorkflowSource, /\|\| "qwen-flash"/);
+  assert.match(aliyunWorkflowSource, /return 10_000/);
+  assert.match(aliyunWorkflowSource, /protected_facts_exceed_lossless_compaction_budget/);
+  assert.match(aliyunWorkflowSource, /aliyun\.image\.prompt_compaction\.model\.skipped/);
+  assert.match(aliyunWorkflowSource, /ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION[\s\S]*=== "true"/);
+  assert.match(aliyunWorkflowSource, /ImagePromptContractBudgetError/);
+  assert.match(aliyunWorkflowSource, /compileReferenceRoleProtocol/);
+  assert.doesNotMatch(aliyunWorkflowSource, /fallback: "deterministic_semantic_unit_compaction"/);
+});
+
+test("runtime image compiler serializes canonical facts once instead of duplicating full contracts", () => {
+  const compiler = projectServiceSource.slice(
+    projectServiceSource.indexOf("function compileImagePromptForKeyframe"),
+    projectServiceSource.indexOf("function compileImagePromptForMicroShot"),
+  );
+  assert.doesNotMatch(compiler, /"Authoritative visual contract:\\n" \+ JSON\.stringify\(visualContract\)/);
+  assert.doesNotMatch(compiler, /"Selected reference usage:"/);
+  assert.match(compiler, /Reference role notes are serialized exactly once/);
+  assert.match(compiler, /clipText\(sourceImagePrompt, 1000\)/);
+});
+
+test("asset planning uses one English execution contract and keeps Chinese copy presentation-only", () => {
+  assert.match(aliyunWorkflowSource, /qwen-flash/);
+  const plannerSource = readFileSync(
+    path.join(process.cwd(), "src/services/video-orchestrator/three-stage-planner.ts"),
+    "utf8",
+  );
+  assert.match(plannerSource, /Do not output image_prompt_zh, image_prompt_en/);
+  assert.match(plannerSource, /maxTokens: 1400/);
+  assert.match(plannerSource, /imagePromptZh: assetPromptDisplayZh\(anchor\)/);
+  assert.match(plannerSource, /imagePromptEn: compileAssetImagePromptEn\(anchor\)/);
+  assert.match(plannerSource, /imagePrompt: executablePromptEn/);
 });
 
 test("all enlarged image previews share wheel zoom, drag pan, and reset controls", () => {
@@ -272,6 +383,25 @@ test("candidate cards expose a concise asset-reference trust chain", () => {
   assert.match(picker, /不会消耗抽图重试次数/);
 });
 
+test("keyframe prompt editing uses one contract for localized form, JSON, and provider preview", () => {
+  assert.match(pageSource, /画面描述/);
+  assert.match(pageSource, /生成合同 JSON/);
+  assert.match(pageSource, /实际提交 Prompt/);
+  assert.match(pageSource, /updateKeyframePromptContract/);
+  assert.match(pageSource, /updateKeyframePromptJson/);
+  assert.match(pageSource, /compileImagePromptForProvider/);
+  assert.match(pageSource, /imagePromptEditContract/);
+  assert.match(pageSource, /JSON 格式不正确，修正后才能保存/);
+  assert.match(pageSource, /这里的修改会同步写入生成合同/);
+});
+
+test("palette mood is presented as a non-scene guide instead of a generated asset", () => {
+  assert.match(pageSource, /visualStyleGuides/);
+  assert.match(pageSource, /主色调与氛围/);
+  assert.match(pageSource, /不作为固定场景/);
+  assert.match(pageSource, /不复制背景构图和空间布局/);
+});
+
 test("asset progress counts approvals and keeps approval available after a recoverable failure", () => {
   assert.match(pageSource, /Boolean\(keyframe\.imageUrl\) && \(keyframe\.locked \|\| keyframe\.status === "IMAGE_APPROVED"\)/);
   assert.match(pageSource, /project\.status === "IMAGE_REVIEW" \|\| project\.status === "FAILED"/);
@@ -361,6 +491,9 @@ test("workflow errors follow the selected interface language instead of renderin
   assert.match(localizer, /isBudgetExhausted/);
   assert.match(localizer, /this revision chain has exhausted its automatic retry budget/);
   assert.match(localizer, /compiler-verified generation-contract conflict/);
+  assert.match(localizer, /CONTRACT_REPAIR_REQUIRED/);
+  assert.match(localizer, /RETRY_EXHAUSTED/);
+  assert.match(localizer, /TERMINAL_FAILED/);
   assert.match(localizer, /function localizeQualityIssue/);
   assert.match(pageSource, /const localizedActionError = error \? localizeWorkflowError\(error, pageLang\)/);
   assert.match(pageSource, /const projectWorkflowNotice = visibleProjectError \? workflowNoticeForMessage\(visibleProjectError, pageLang\)/);

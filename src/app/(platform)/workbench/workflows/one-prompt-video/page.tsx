@@ -3,8 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
+import { promptForInterfaceLanguage } from "@/lib/prompt-display-language";
 import { zoomViewAtPoint } from "@/lib/zoomable-image-math";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
+import {
+  compileImagePromptDisplay,
+  compileImagePromptForProvider,
+  createImagePromptEditContract,
+  normalizeImagePromptEditContract,
+  updateLocalizedImagePromptDescription,
+  validateImagePromptEditContract,
+} from "@/services/video-orchestrator/image-prompt-edit-contract";
+import type { ImagePromptEditContract } from "@/services/video-orchestrator/types";
 import {
   Check,
   ChevronDown,
@@ -204,6 +214,8 @@ interface VideoKeyframe {
   imagePrompt: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
+  providerImagePrompt?: string;
+  imagePromptEditContract?: ImagePromptEditContract;
   negativePrompt?: string;
   negativePromptZh?: string;
   negativePromptEn?: string;
@@ -255,6 +267,35 @@ interface VideoProject {
   generationCandidates?: GenerationCandidate[];
   plannerProgress?: PlannerProgress;
   taskGraph?: ProjectTaskGraphSnapshot;
+  productionJobs?: Array<{
+    id: string;
+    kind: string;
+    stage: string;
+    status: string;
+    attempt: number;
+    maxAttempts: number;
+    lastError?: string | null;
+    availableAt: string;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  productionState?: {
+    hasPendingJobs: boolean;
+    queuedCount: number;
+    runningCount: number;
+    retryingCount: number;
+    oldestQueuedAt: string | null;
+    oldestQueuedAgeMs: number;
+    workerUnavailable: boolean;
+  };
+  humanWorkflowState?: {
+    state: "none" | "waiting_candidate_selection" | "waiting_asset_confirmation" | "waiting_boundary_confirmation";
+    blocking: boolean;
+    titleZh?: string;
+    titleEn?: string;
+  };
   planDebug?: PlanDebugData;
 }
 
@@ -338,6 +379,7 @@ interface PlanDebugData {
   consistencyAnchors?: unknown[];
   anchorStateTimeline?: unknown[];
   segmentRenderDescriptions?: unknown[];
+  sceneContracts?: unknown[];
   finalTransitionPlan?: unknown[];
   transitionReferenceArtifacts?: TransitionReferenceArtifact[];
   generatedBridgeArtifacts?: GeneratedBridgeArtifact[];
@@ -349,8 +391,19 @@ interface PlanDebugData {
   generationQualityReports?: GenerationQualityReport[];
   storyQualityReport?: StoryQualityReport;
   storySemanticReview?: Record<string, unknown>;
-  plannerShadow?: Record<string, unknown>;
   plannerWarnings?: unknown[];
+}
+
+interface VisualStyleGuide {
+  id: string;
+  type: "palette_mood" | "style" | "graphic_backdrop";
+  displayNameZh?: string;
+  displayNameEn?: string;
+  descriptionZh?: string;
+  descriptionEn?: string;
+  assetImageContract?: {
+    palette?: string[];
+  };
 }
 
 interface CreativeStrategyData {
@@ -531,7 +584,7 @@ interface ArtifactMetadata {
 }
 
 interface GenerationQualityReport {
-  policyVersion?: "quality-policy-v2" | "quality-policy-v3" | "quality-policy-v4";
+  policyVersion?: "quality-policy-v2" | "quality-policy-v3" | "quality-policy-v4" | "quality-policy-v5" | "quality-policy-v6" | "quality-policy-v7" | "quality-policy-v8" | "quality-policy-v9";
   evaluationStatus?: "completed" | "partial" | "adjudication_required" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
   technicalError?: string;
   technicalRetryable?: boolean;
@@ -660,7 +713,6 @@ type Copy = {
   rollbackDone: string;
   shots: string;
   assetLibrary: string;
-  assetLibraryHint: string;
   frames: string;
   autoShotPlan: string;
   segmentDurationPolicy: string;
@@ -797,7 +849,6 @@ const TEXT: Record<PageLang, Copy> = {
     rollbackDone: "\u5df2\u56de\u9000\u5230\u9009\u4e2d\u9636\u6bb5",
     shots: "\u955c\u5934",
     assetLibrary: "资产库",
-    assetLibraryHint: "人物、场景、产品等固定资产先在这里确认；人物资产包含正面、侧面和背面视角。",
     frames: "\u8fb9\u754c\u53c2\u8003\u5e27",
     autoShotPlan: "AI \u81ea\u52a8\u62c6\u955c",
     segmentDurationPolicy: "\u6bcf\u6bb5 3-15s",
@@ -975,7 +1026,6 @@ const TEXT: Record<PageLang, Copy> = {
     rollbackDone: "Rolled back to the selected stage",
     shots: "Shots",
     assetLibrary: "Asset library",
-    assetLibraryHint: "Confirm fixed people, scenes, products, and props here first. Person assets include front, side, and back views.",
     frames: "boundary frames",
     autoShotPlan: "AI decides shots",
     segmentDurationPolicy: "3-15s per clip",
@@ -1158,6 +1208,29 @@ function localizeWorkflowError(message: string, lang: PageLang): string {
   const normalized = message.trim();
   if (!normalized) return "";
 
+  if (
+    normalized.startsWith("[CONTRACT_REPAIR_REQUIRED]")
+    || normalized.includes("计划硬校验未通过")
+  ) {
+    const detail = normalized
+      .replace(/^\[CONTRACT_REPAIR_REQUIRED\]\s*/, "")
+      .replace(/^计划硬校验未通过[:：]\s*/, "")
+      .replace(/\s*建议回退[:：]\s*[\w.-]+/gi, "")
+      .trim();
+    return lang === "zh"
+      ? `当前阶段的结构合同没有通过，系统已停止下游生成并保留已完成内容。${detail ? ` 原因：${detail}` : ""}`
+      : "The current stage contract did not pass. Downstream generation was stopped while completed work was preserved. Review the current segment contract and retry.";
+  }
+  if (normalized.startsWith("[TERMINAL_FAILED]")) {
+    return lang === "zh"
+      ? "生成服务返回了不可自动恢复的配置或鉴权错误。系统已停止重试，请检查上游服务配置后再继续。"
+      : "Generation stopped because of a non-retryable provider configuration or authentication error. Check the upstream service configuration before continuing.";
+  }
+  if (normalized.startsWith("[RETRY_EXHAUSTED]")) {
+    return lang === "zh"
+      ? normalized.replace(/^\[RETRY_EXHAUSTED\]\s*/, "")
+      : "Automatic retries were exhausted. Completed work was preserved; resume this stage after checking provider capacity and the latest task error.";
+  }
   if (/Approve and lock each person front view before generating its side and back views/i.test(normalized)) {
     return lang === "zh"
       ? "请先确认并锁定每个人物的正面参考图，侧面和背面图会在此后自动继续生成。"
@@ -1319,7 +1392,12 @@ export default function OnePromptVideoPage() {
   const [projectView, setProjectView] = useState<ProjectView>("clips");
   const [draft, setDraft] = useState<Partial<VideoShot>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
+  const [imagePromptEditorMode, setImagePromptEditorMode] = useState<"description" | "json" | "provider">("description");
+  const [imagePromptJsonDraft, setImagePromptJsonDraft] = useState("");
+  const [imagePromptJsonError, setImagePromptJsonError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [savingKeyframeId, setSavingKeyframeId] = useState("");
+  const [lockingKeyframeIds, setLockingKeyframeIds] = useState<string[]>([]);
   const [selectingCandidateId, setSelectingCandidateId] = useState("");
   const [rollingBackTarget, setRollingBackTarget] = useState<RollbackTarget | "">("");
   const candidateSelectionAbortControllerRef = useRef<AbortController | null>(null);
@@ -1405,6 +1483,23 @@ export default function OnePromptVideoPage() {
     () => project?.keyframes?.filter((keyframe) => keyframe.keyframeNo < 0) ?? [],
     [project?.keyframes],
   );
+  const visualStyleGuides = useMemo(
+    () => (project?.planDebug?.consistencyAnchors ?? []).flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const guide = value as Partial<VisualStyleGuide>;
+      if (guide.type !== "palette_mood" && guide.type !== "style" && guide.type !== "graphic_backdrop") return [];
+      return [{
+        id: String(guide.id ?? guide.type),
+        type: guide.type,
+        displayNameZh: guide.displayNameZh,
+        displayNameEn: guide.displayNameEn,
+        descriptionZh: guide.descriptionZh,
+        descriptionEn: guide.descriptionEn,
+        assetImageContract: guide.assetImageContract,
+      } satisfies VisualStyleGuide];
+    }),
+    [project?.planDebug?.consistencyAnchors],
+  );
   const boundaryKeyframes = useMemo(
     () => project?.keyframes?.filter((keyframe) => keyframe.keyframeNo > 0) ?? [],
     [project?.keyframes],
@@ -1447,7 +1542,12 @@ export default function OnePromptVideoPage() {
   const consistencyKeyframesReady = consistencyKeyframes.length > 0 && consistencyKeyframes.every((keyframe) => Boolean(keyframe.imageUrl));
   const hasUnsavedKeyframeChanges = Boolean(
     selectedKeyframe &&
-    (keyframeFieldChanged("purpose") || keyframeFieldChanged("imagePrompt") || keyframeFieldChanged("negativePrompt")),
+    (
+      keyframeFieldChanged("purpose")
+      || keyframeFieldChanged("imagePrompt")
+      || keyframeFieldChanged("negativePrompt")
+      || JSON.stringify(keyframeDraft.imagePromptEditContract ?? null) !== JSON.stringify(keyframeImagePromptContract(selectedKeyframe))
+    ),
   );
   const hasPendingBoundaryKeyframes = boundaryKeyframes.some((keyframe) => !keyframe.imageUrl);
   const keyframesApproved = Boolean(project?.keyframes?.length && project.keyframes.every((keyframe) => keyframe.status === "IMAGE_APPROVED" || keyframe.locked));
@@ -1462,6 +1562,7 @@ export default function OnePromptVideoPage() {
           RUNNING_PROJECT_STATUSES.includes(item.status)
           || hasRunningMicroShotImage(item)
           || hasRunningGenerationCandidate(item)
+          || hasPendingProductionWork(item)
         )
         .map((item) => item.id),
       ...planningProjectIds,
@@ -1740,11 +1841,15 @@ export default function OnePromptVideoPage() {
 
   useEffect(() => {
     if (!selectedKeyframe) return;
+    const imagePromptEditContract = keyframeImagePromptContract(selectedKeyframe);
     setKeyframeDraft({
       purpose: localizedKeyframePurpose(selectedKeyframe, pageLang),
-      imagePrompt: localizedKeyframeImagePrompt(selectedKeyframe, pageLang),
+      imagePrompt: compileImagePromptDisplay(imagePromptEditContract, pageLang),
+      imagePromptEditContract,
       negativePrompt: localizedKeyframeNegativePrompt(selectedKeyframe, pageLang),
     });
+    setImagePromptJsonDraft(JSON.stringify(imagePromptEditContract, null, 2));
+    setImagePromptJsonError("");
   }, [selectedKeyframe, pageLang]);
 
   const rememberProject = useCallback((nextProject: VideoProject) => {
@@ -1760,7 +1865,10 @@ export default function OnePromptVideoPage() {
     syncingProjectIdsRef.current.add(projectId);
     try {
       const res = await fetchJson(`/api/video-projects/${projectId}/sync`, copy, { method: "POST" });
-      if (res.project) rememberProject(res.project);
+      if (res.project) {
+        rememberProject(res.project);
+        if (selectedProjectIdRef.current === projectId) setError("");
+      }
     } catch (err) {
       if (!options?.silent) setError(err instanceof Error ? err.message : copy.actionFailed);
     } finally {
@@ -2187,12 +2295,71 @@ export default function OnePromptVideoPage() {
 
   function undoKeyframeField(field: "purpose" | "imagePrompt" | "negativePrompt") {
     if (!selectedKeyframe) return;
+    if (field === "imagePrompt") {
+      const imagePromptEditContract = keyframeImagePromptContract(selectedKeyframe);
+      setKeyframeDraft((current) => ({
+        ...current,
+        imagePrompt: compileImagePromptDisplay(imagePromptEditContract, pageLang),
+        imagePromptEditContract,
+      }));
+      setImagePromptJsonDraft(JSON.stringify(imagePromptEditContract, null, 2));
+      setImagePromptJsonError("");
+      return;
+    }
     const value = field === "purpose"
       ? localizedKeyframePurpose(selectedKeyframe, pageLang)
-      : field === "imagePrompt"
-        ? localizedKeyframeImagePrompt(selectedKeyframe, pageLang)
-        : localizedKeyframeNegativePrompt(selectedKeyframe, pageLang);
+      : localizedKeyframeNegativePrompt(selectedKeyframe, pageLang);
     setKeyframeDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateKeyframePromptDescription(value: string) {
+    if (!selectedKeyframe) return;
+    const current = normalizeImagePromptEditContract(
+      keyframeDraft.imagePromptEditContract,
+      keyframeContractFallback(selectedKeyframe),
+    );
+    const next = updateLocalizedImagePromptDescription(current, pageLang, value);
+    setKeyframeDraft((draftValue) => ({
+      ...draftValue,
+      imagePrompt: value,
+      imagePromptEditContract: next,
+    }));
+    setImagePromptJsonDraft(JSON.stringify(next, null, 2));
+    setImagePromptJsonError("");
+  }
+
+  function updateKeyframePromptContract(next: ImagePromptEditContract) {
+    const localized = { ...next, lastEditedLocale: pageLang };
+    setKeyframeDraft((current) => ({
+      ...current,
+      imagePrompt: compileImagePromptDisplay(localized, pageLang),
+      imagePromptEditContract: localized,
+    }));
+    setImagePromptJsonDraft(JSON.stringify(localized, null, 2));
+    setImagePromptJsonError("");
+  }
+
+  function updateKeyframePromptJson(value: string) {
+    setImagePromptJsonDraft(value);
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      const next = normalizeImagePromptEditContract(parsed);
+      const errors = validateImagePromptEditContract(next);
+      if (errors.length) {
+        setImagePromptJsonError(pageLang === "zh"
+          ? `合同缺少必要字段：${errors.join("、")}`
+          : `The contract is incomplete: ${errors.join(", ")}`);
+        return;
+      }
+      setImagePromptJsonError("");
+      setKeyframeDraft((current) => ({
+        ...current,
+        imagePrompt: compileImagePromptDisplay(next, pageLang),
+        imagePromptEditContract: next,
+      }));
+    } catch {
+      setImagePromptJsonError(pageLang === "zh" ? "JSON 格式不正确，修正后才能保存" : "Invalid JSON. Fix it before saving.");
+    }
   }
 
   function keyframeFieldChanged(field: "purpose" | "imagePrompt" | "negativePrompt"): boolean {
@@ -2354,9 +2521,17 @@ export default function OnePromptVideoPage() {
 
   async function saveKeyframe() {
     if (!project || !selectedKeyframe || !hasUnsavedKeyframeChanges) return;
+    if (imagePromptJsonError) {
+      setMessage(imagePromptJsonError);
+      return;
+    }
     const targetId = selectedKeyframe.keyframeNo < 0 ? `consistency_reference:${selectedKeyframe.keyframeNo}` : `keyframe:${selectedKeyframe.keyframeNo}`;
     if (!confirmArtifactImpact(project, [`${targetId}:prompt`, `${targetId}:image`], pageLang)) return;
-    await runAction(async () => {
+    const keyframeId = selectedKeyframe.id;
+    setSavingKeyframeId(keyframeId);
+    setError("");
+    setMessage("");
+    try {
       const res = await fetchJson(`/api/video-projects/${project.id}/shots/${selectedKeyframe.id}`, copy, {
         method: "PATCH",
         body: JSON.stringify({ ...keyframeDraft, locale: pageLang }),
@@ -2366,14 +2541,22 @@ export default function OnePromptVideoPage() {
       rememberProject(res.project);
       if (updatedKeyframe) {
         setSelectedKeyframeId(updatedKeyframe.id);
+        const imagePromptEditContract = keyframeImagePromptContract(updatedKeyframe);
         setKeyframeDraft({
           purpose: localizedKeyframePurpose(updatedKeyframe, pageLang),
-          imagePrompt: localizedKeyframeImagePrompt(updatedKeyframe, pageLang),
+          imagePrompt: compileImagePromptDisplay(imagePromptEditContract, pageLang),
+          imagePromptEditContract,
           negativePrompt: localizedKeyframeNegativePrompt(updatedKeyframe, pageLang),
         });
+        setImagePromptJsonDraft(JSON.stringify(imagePromptEditContract, null, 2));
+        setImagePromptJsonError("");
       }
       setMessage(copy.changesSaved);
-    });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.actionFailed);
+    } finally {
+      setSavingKeyframeId((current) => current === keyframeId ? "" : current);
+    }
   }
 
   async function saveDebugSection(section: EditableDebugSection) {
@@ -2455,6 +2638,10 @@ export default function OnePromptVideoPage() {
 
   async function regenerateImage(shotId: string) {
     if (!project) return;
+    if (selectedKeyframe?.id === shotId && imagePromptJsonError) {
+      setMessage(imagePromptJsonError);
+      return;
+    }
     if (selectedKeyframe?.id === shotId && hasUnsavedKeyframeChanges) {
       const targetId = selectedKeyframe.keyframeNo < 0 ? `consistency_reference:${selectedKeyframe.keyframeNo}` : `keyframe:${selectedKeyframe.keyframeNo}`;
       if (!confirmArtifactImpact(project, [`${targetId}:prompt`, `${targetId}:image`], pageLang)) return;
@@ -2607,7 +2794,10 @@ export default function OnePromptVideoPage() {
 
   async function toggleLock(shot: Pick<VideoShot | VideoKeyframe, "id" | "locked">) {
     if (!project) return;
-    await runAction(async () => {
+    setLockingKeyframeIds((current) => current.includes(shot.id) ? current : [...current, shot.id]);
+    setError("");
+    setMessage("");
+    try {
       const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shot.id}`, copy, {
         method: "PATCH",
         body: JSON.stringify({ locked: !shot.locked }),
@@ -2615,7 +2805,11 @@ export default function OnePromptVideoPage() {
       if (!res.project) throw new Error(copy.lockFailed);
       rememberProject(res.project);
       setMessage(shot.locked ? copy.updated : copy.referenceApproved);
-    });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.actionFailed);
+    } finally {
+      setLockingKeyframeIds((current) => current.filter((id) => id !== shot.id));
+    }
   }
 
   async function approveImages() {
@@ -3210,13 +3404,75 @@ export default function OnePromptVideoPage() {
                 </section>
               )}
 
-              {projectView === "assets" && orderedAssetKeyframes.length ? (
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <h3 className="text-sm font-semibold text-slate-200">{copy.assetLibrary} {completeAssets}/{assetTotal}</h3>
-                    <span className="text-xs text-slate-500">{copy.assetLibraryHint}</span>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {projectView === "assets" && (orderedAssetKeyframes.length || visualStyleGuides.length) ? (
+                <div className="space-y-6">
+                  {visualStyleGuides.length ? (
+                    <section className="space-y-3" aria-label={pageLang === "zh" ? "视觉风格指导" : "Visual style guide"}>
+                      <div>
+                        <h3 className="text-sm font-semibold text-violet-100">
+                          {pageLang === "zh" ? "视觉风格指导" : "Visual style guide"}
+                        </h3>
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          {pageLang === "zh"
+                            ? "这是生成时继承的色彩与渲染规则，不计入资产数量，也不需要单独审核。"
+                            : "Color and rendering rules inherited during generation; not counted or reviewed as assets."}
+                        </p>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                        {visualStyleGuides.map((guide) => {
+                        const title = pageLang === "zh"
+                          ? guide.displayNameZh || guide.displayNameEn || guide.id
+                          : guide.displayNameEn || guide.displayNameZh || guide.id;
+                        const description = pageLang === "zh"
+                          ? guide.descriptionZh || guide.descriptionEn || ""
+                          : guide.descriptionEn || guide.descriptionZh || "";
+                        const roleLabel = guide.type === "palette_mood"
+                          ? pageLang === "zh" ? "主色调与氛围" : "Palette & mood"
+                          : guide.type === "graphic_backdrop"
+                            ? pageLang === "zh" ? "软图形背景参考" : "Soft graphic backdrop"
+                            : pageLang === "zh" ? "渲染风格" : "Rendering style";
+                          return (
+                            <div key={guide.id} className="rounded-md border border-violet-300/20 bg-violet-300/[0.05] p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <p className="text-xs font-semibold text-violet-100">{title}</p>
+                                <p className="mt-1 text-[10px] text-violet-200/70">{roleLabel}</p>
+                              </div>
+                              <span className="rounded border border-violet-300/20 px-2 py-1 text-[9px] text-violet-200">
+                                {pageLang === "zh" ? "不作为固定场景" : "Not a fixed scene"}
+                              </span>
+                            </div>
+                            {description ? <p className="mt-2 text-xs leading-5 text-slate-400">{description}</p> : null}
+                            {guide.assetImageContract?.palette?.length ? (
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {guide.assetImageContract.palette.map((color) => (
+                                  <span key={color} className="rounded bg-black/25 px-1.5 py-1 text-[9px] text-slate-300">{color}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                            <p className="mt-2 text-[10px] leading-4 text-emerald-200/65">
+                              {pageLang === "zh"
+                                ? "只继承颜色、饱和度、色温或渲染语言，不复制背景构图和空间布局。"
+                                : "Only color, saturation, temperature, or rendering language is inherited; background composition and layout are not copied."}
+                            </p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ) : null}
+                  {orderedAssetKeyframes.length ? <section className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-200">{copy.assetLibrary} {completeAssets}/{assetTotal}</h3>
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          {pageLang === "zh"
+                            ? "仅包含需要生成、选择并审核的身份资产与物理场景布局资产。"
+                            : "Only identity assets and physical scene-layout assets that require generation and review."}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                     {orderedAssetKeyframes.map((keyframe) => (
                       <div key={keyframe.id} className={`overflow-hidden rounded-md border bg-white/[0.03] transition ${selectedKeyframe?.id === keyframe.id ? "border-cyan-400/60 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]" : "border-white/10 hover:border-white/20"}`}>
                         <button
@@ -3254,8 +3510,8 @@ export default function OnePromptVideoPage() {
                             <p className="line-clamp-2 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
                           </button>
                           {keyframe.imageUrl && !keyframe.locked && keyframe.status !== "IMAGE_APPROVED" && (
-                            <button type="button" onClick={() => toggleLock(keyframe)} disabled={loading} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-xs font-medium text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
-                              <Check className="h-3.5 w-3.5" /> {copy.approveReference}
+                            <button type="button" onClick={() => toggleLock(keyframe)} disabled={loading || lockingKeyframeIds.includes(keyframe.id)} aria-busy={lockingKeyframeIds.includes(keyframe.id)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-xs font-medium text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
+                              {lockingKeyframeIds.includes(keyframe.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} {copy.approveReference}
                             </button>
                           )}
                           <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || isRegeneratingImage(keyframe) || Boolean(personDerivedViewWaitReason(keyframe, orderedAssetKeyframes, pageLang))} aria-busy={isRegeneratingImage(keyframe)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
@@ -3269,8 +3525,9 @@ export default function OnePromptVideoPage() {
                         </div>
                       </div>
                     ))}
-                  </div>
-                </section>
+                    </div>
+                  </section> : null}
+                </div>
               ) : null}
 
               {projectView === "frames" && orderedBoundaryKeyframes.length ? (
@@ -3316,8 +3573,8 @@ export default function OnePromptVideoPage() {
                             <p className="line-clamp-2 text-xs leading-5 text-slate-400">{localizedKeyframeImagePrompt(keyframe, pageLang)}</p>
                           </button>
                           {keyframe.keyframeNo < 0 && keyframe.imageUrl && !keyframe.locked && keyframe.status !== "IMAGE_APPROVED" && (
-                            <button type="button" onClick={() => toggleLock(keyframe)} disabled={loading} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-xs font-medium text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
-                              <Check className="h-3.5 w-3.5" /> {copy.approveReference}
+                            <button type="button" onClick={() => toggleLock(keyframe)} disabled={loading || lockingKeyframeIds.includes(keyframe.id)} aria-busy={lockingKeyframeIds.includes(keyframe.id)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-xs font-medium text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
+                              {lockingKeyframeIds.includes(keyframe.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} {copy.approveReference}
                             </button>
                           )}
                           <button type="button" onClick={() => regenerateImage(keyframe.id)} disabled={loading || isRegeneratingImage(keyframe)} aria-busy={isRegeneratingImage(keyframe)} className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/10 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-50">
@@ -3514,7 +3771,6 @@ export default function OnePromptVideoPage() {
                         <div className="flex h-full items-center justify-center text-sm text-slate-600">{safeBoundaryFrameShortLabel(selectedKeyframe, project.durationSeconds, pageLang)}</div>
                       )}
                     </div>
-                    {selectedKeyframe.keyframeNo < 0 && <p className="text-xs text-slate-500">{copy.assetLibraryHint}</p>}
                   </div>
                   <GenerationCandidatePicker
                     projectId={project.id}
@@ -3528,16 +3784,128 @@ export default function OnePromptVideoPage() {
                     onRecheck={recheckGenerationCandidate}
                   />
                   <Field label={copy.purpose} onUndo={() => undoKeyframeField("purpose")} canUndo={keyframeFieldChanged("purpose")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={5} value={String(keyframeDraft.purpose ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, purpose: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <Field label={copy.imagePrompt} onUndo={() => undoKeyframeField("imagePrompt")} canUndo={keyframeFieldChanged("imagePrompt")} undoLabel={copy.undo}><AutoResizeTextarea minRows={3} maxRows={10} value={String(keyframeDraft.imagePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, imagePrompt: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
+                  <Field label={copy.imagePrompt} onUndo={() => undoKeyframeField("imagePrompt")} canUndo={keyframeFieldChanged("imagePrompt")} undoLabel={copy.undo}>
+                    <div className="space-y-2.5">
+                      <div className="grid grid-cols-3 gap-1 rounded-md border border-white/[0.08] bg-slate-950/60 p-1 text-[10px]">
+                        {([
+                          ["description", pageLang === "zh" ? "画面描述" : "Description"],
+                          ["json", pageLang === "zh" ? "生成合同 JSON" : "Contract JSON"],
+                          ["provider", pageLang === "zh" ? "实际提交 Prompt" : "Provider prompt"],
+                        ] as const).map(([mode, label]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => setImagePromptEditorMode(mode)}
+                            className={`rounded px-2 py-1.5 transition ${imagePromptEditorMode === mode ? "bg-cyan-300/10 text-cyan-100" : "text-slate-500 hover:text-slate-300"}`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      {imagePromptEditorMode === "description" ? (() => {
+                        const contract = normalizeImagePromptEditContract(
+                          keyframeDraft.imagePromptEditContract,
+                          keyframeContractFallback(selectedKeyframe),
+                        );
+                        const background = pageLang === "zh" ? contract.environment.backgroundZh : contract.environment.backgroundEn;
+                        return <div className="space-y-2.5">
+                          <AutoResizeTextarea
+                            minRows={3}
+                            maxRows={10}
+                            value={String(keyframeDraft.imagePrompt ?? "")}
+                            onChange={(event) => updateKeyframePromptDescription(event.target.value)}
+                            className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
+                          />
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="space-y-1 text-[10px] text-slate-500">
+                              <span>{pageLang === "zh" ? "主体数量" : "Subject count"}</span>
+                              <input
+                                type="number"
+                                min={0}
+                                value={contract.subject.count ?? ""}
+                                onChange={(event) => updateKeyframePromptContract({
+                                  ...contract,
+                                  subject: {
+                                    ...contract.subject,
+                                    count: event.target.value === "" ? undefined : Math.max(0, Math.round(Number(event.target.value))),
+                                  },
+                                })}
+                                className="h-8 w-full rounded border border-white/10 bg-slate-900 px-2 text-xs text-slate-200 outline-none focus:border-cyan-400"
+                              />
+                            </label>
+                            <label className="space-y-1 text-[10px] text-slate-500">
+                              <span>{pageLang === "zh" ? "构图/景别" : "Framing"}</span>
+                              <input
+                                value={contract.composition.framing}
+                                onChange={(event) => updateKeyframePromptContract({ ...contract, composition: { ...contract.composition, framing: event.target.value } })}
+                                className="h-8 w-full rounded border border-white/10 bg-slate-900 px-2 text-xs text-slate-200 outline-none focus:border-cyan-400"
+                              />
+                            </label>
+                            <label className="space-y-1 text-[10px] text-slate-500">
+                              <span>{pageLang === "zh" ? "机位角度" : "Camera angle"}</span>
+                              <input
+                                value={contract.composition.cameraAngle}
+                                onChange={(event) => updateKeyframePromptContract({ ...contract, composition: { ...contract.composition, cameraAngle: event.target.value } })}
+                                className="h-8 w-full rounded border border-white/10 bg-slate-900 px-2 text-xs text-slate-200 outline-none focus:border-cyan-400"
+                              />
+                            </label>
+                            <label className="space-y-1 text-[10px] text-slate-500">
+                              <span>{pageLang === "zh" ? "背景" : "Background"}</span>
+                              <input
+                                value={background}
+                                onChange={(event) => updateKeyframePromptContract({
+                                  ...contract,
+                                  environment: {
+                                    ...contract.environment,
+                                    ...(pageLang === "zh" ? { backgroundZh: event.target.value } : { backgroundEn: event.target.value }),
+                                  },
+                                })}
+                                className="h-8 w-full rounded border border-white/10 bg-slate-900 px-2 text-xs text-slate-200 outline-none focus:border-cyan-400"
+                              />
+                            </label>
+                          </div>
+                          <p className="text-[10px] leading-4 text-emerald-200/65">
+                            {pageLang === "zh" ? "这里的修改会同步写入生成合同，并重新编译实际提交 Prompt。" : "Edits here update the generation contract and recompile the provider prompt."}
+                          </p>
+                        </div>;
+                      })() : imagePromptEditorMode === "json" ? <div className="space-y-1.5">
+                        <AutoResizeTextarea
+                          minRows={12}
+                          maxRows={24}
+                          value={imagePromptJsonDraft}
+                          onChange={(event) => updateKeyframePromptJson(event.target.value)}
+                          spellCheck={false}
+                          className="w-full resize-none rounded-md border border-white/10 bg-slate-950 px-3 py-2 font-mono text-[11px] leading-5 text-slate-200 outline-none focus:border-cyan-400"
+                        />
+                        {imagePromptJsonError ? <p className="text-[10px] leading-4 text-rose-300">{imagePromptJsonError}</p> : <p className="text-[10px] leading-4 text-slate-500">{pageLang === "zh" ? "保存前会执行 Schema 校验；JSON 与上方画面描述编辑的是同一份合同。" : "Schema validation runs before save. JSON and the description edit the same contract."}</p>}
+                      </div> : <div className="space-y-1.5">
+                        <AutoResizeTextarea
+                          minRows={10}
+                          maxRows={22}
+                          readOnly
+                          value={compileImagePromptForProvider(normalizeImagePromptEditContract(
+                            keyframeDraft.imagePromptEditContract,
+                            keyframeContractFallback(selectedKeyframe),
+                          ))}
+                          className="w-full resize-none rounded-md border border-white/[0.06] bg-black/25 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400 outline-none"
+                        />
+                        <p className="text-[10px] leading-4 text-slate-500">
+                          {pageLang === "zh"
+                            ? "只读预览。它由生成合同自动编译；真正请求时仍会追加已批准参考图、返修和安全约束。"
+                            : "Read-only compiled preview. Approved-reference, repair, and safety constraints are appended when the request is dispatched."}
+                        </p>
+                      </div>}
+                    </div>
+                  </Field>
                   <Field label={copy.negativePrompt} onUndo={() => undoKeyframeField("negativePrompt")} canUndo={keyframeFieldChanged("negativePrompt")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={7} value={String(keyframeDraft.negativePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, negativePrompt: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   {selectedKeyframe.keyframeNo < 0 && selectedKeyframe.imageUrl && !selectedKeyframe.locked && selectedKeyframe.status !== "IMAGE_APPROVED" && (
-                    <button type="button" onClick={() => toggleLock(selectedKeyframe)} disabled={loading} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-sm font-semibold text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
-                      <Check className="h-4 w-4" /> {copy.approveReference}
+                    <button type="button" onClick={() => toggleLock(selectedKeyframe)} disabled={loading || lockingKeyframeIds.includes(selectedKeyframe.id)} aria-busy={lockingKeyframeIds.includes(selectedKeyframe.id)} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-sm font-semibold text-emerald-100 hover:bg-emerald-400/15 disabled:opacity-50">
+                      {lockingKeyframeIds.includes(selectedKeyframe.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} {copy.approveReference}
                     </button>
                   )}
                   {selectedKeyframe.keyframeNo >= 0 && selectedKeyframe.imageUrl && !selectedKeyframe.locked && selectedKeyframe.status !== "IMAGE_APPROVED" && (
-                    <button type="button" onClick={() => toggleLock(selectedKeyframe)} disabled={loading} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-violet-400/30 bg-violet-400/10 text-sm font-semibold text-violet-100 hover:bg-violet-400/15 disabled:opacity-50">
-                      <Check className="h-4 w-4" /> {pageLang === "zh" ? "锁定为父机位空间参考" : "Lock as parent-camera layout reference"}
+                    <button type="button" onClick={() => toggleLock(selectedKeyframe)} disabled={loading || lockingKeyframeIds.includes(selectedKeyframe.id)} aria-busy={lockingKeyframeIds.includes(selectedKeyframe.id)} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-violet-400/30 bg-violet-400/10 text-sm font-semibold text-violet-100 hover:bg-violet-400/15 disabled:opacity-50">
+                      {lockingKeyframeIds.includes(selectedKeyframe.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} {pageLang === "zh" ? "锁定为父机位空间参考" : "Lock as parent-camera layout reference"}
                     </button>
                   )}
                   {hasUnsavedKeyframeChanges && (
@@ -3554,21 +3922,19 @@ export default function OnePromptVideoPage() {
                     <button
                       type="button"
                       onClick={saveKeyframe}
-                      disabled={loading || !hasUnsavedKeyframeChanges}
+                      disabled={loading || savingKeyframeId === selectedKeyframe.id || lockingKeyframeIds.includes(selectedKeyframe.id) || !hasUnsavedKeyframeChanges || Boolean(imagePromptJsonError)}
+                      aria-busy={savingKeyframeId === selectedKeyframe.id}
                       className={`inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-md text-sm font-semibold transition disabled:cursor-not-allowed ${
                         hasUnsavedKeyframeChanges
                           ? "bg-cyan-500 text-slate-950 hover:bg-cyan-400 disabled:opacity-60"
                           : "border border-white/10 bg-slate-900/70 text-slate-500"
                       }`}
                     >
-                      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                      {savingKeyframeId === selectedKeyframe.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                       {copy.saveKeyframe}
                     </button>
-                    <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || isRegeneratingImage(selectedKeyframe) || Boolean(personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang))} aria-busy={isRegeneratingImage(selectedKeyframe)} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${isRegeneratingImage(selectedKeyframe) ? "animate-spin" : ""}`} /></button>
+                    <button type="button" onClick={() => regenerateImage(selectedKeyframe.id)} disabled={loading || Boolean(imagePromptJsonError) || isRegeneratingImage(selectedKeyframe) || Boolean(personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang))} aria-busy={isRegeneratingImage(selectedKeyframe)} className="inline-flex h-10 w-12 items-center justify-center rounded-md border border-white/10 text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${isRegeneratingImage(selectedKeyframe) ? "animate-spin" : ""}`} /></button>
                   </div>
-                  {personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang) && (
-                    <p className="rounded-md border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs leading-5 text-amber-100">{personDerivedViewWaitReason(selectedKeyframe, orderedAssetKeyframes, pageLang)}</p>
-                  )}
                   {hasMediaRevision(project, "keyframe_image", selectedKeyframe.id) && (
                     <button type="button" onClick={() => rollbackMedia("keyframe_image", selectedKeyframe.id)} disabled={loading} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-amber-300/25 bg-amber-300/5 text-sm text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
                       <Undo2 className="h-4 w-4" /> {copy.rollbackMedia}
@@ -3610,6 +3976,7 @@ export default function OnePromptVideoPage() {
                     lang={pageLang}
                     loading={loading}
                     selectingCandidateId={selectingCandidateId}
+                    posterUrl={selectedShot!.imageUrl}
                     onSelect={chooseGenerationCandidate}
                     onRetry={() => regenerateClip(selectedShot!.id)}
                     onRecheck={recheckGenerationCandidate}
@@ -4364,13 +4731,14 @@ function LegacyNarrativeSkeletonJsonReview({
   );
 }
 
-function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, selectingCandidateId = "", onSelect, onRetry, onRecheck, onAnalyzeVideo }: {
+function GenerationCandidatePicker({ projectId, candidates, lang, loading, retrying = false, selectingCandidateId = "", posterUrl, onSelect, onRetry, onRecheck, onAnalyzeVideo }: {
   projectId: string;
   candidates: GenerationCandidate[];
   lang: "zh" | "en";
   loading: boolean;
   retrying?: boolean;
   selectingCandidateId?: string;
+  posterUrl?: string | null;
   onSelect: (candidate: GenerationCandidate) => void;
   onRetry?: (retryInstruction: string) => void;
   onRecheck?: (candidate: GenerationCandidate) => void;
@@ -4402,6 +4770,29 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [previewCandidate]);
+
+  useEffect(() => {
+    const origins = new Set(candidates.flatMap((candidate) => {
+      if (candidate.kind !== "segment_video" || !candidate.mediaUrl) return [];
+      try {
+        return [new URL(candidate.mediaUrl).origin];
+      } catch {
+        return [];
+      }
+    }));
+    const existing = new Set(
+      Array.from(document.head.querySelectorAll<HTMLLinkElement>('link[rel="preconnect"]'))
+        .map((link) => link.href),
+    );
+    for (const origin of origins) {
+      if (existing.has(`${origin}/`) || existing.has(origin)) continue;
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    }
+  }, [candidates]);
 
   const requestQualitySummary = useCallback(async (candidate: GenerationCandidate) => {
     const cacheKey = `${candidate.id}:${lang}`;
@@ -4437,15 +4828,11 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
         <div>
           <p className="text-xs font-semibold tracking-wide text-slate-100">{lang === "zh" ? "候选版本" : "Candidate versions"}</p>
-          <p className="mt-1 text-[11px] text-slate-500">
-            {onlyVideoCandidates
-              ? (lang === "zh"
-                  ? "视频通过技术检查后即可预览和人工选择；多帧 AI 分析只在你主动触发时运行"
-                  : "Videos are ready after technical validation; multi-frame AI analysis runs only when requested")
-              : (lang === "zh"
-                  ? "已按画面质量排序，你可以随时改选"
-                  : "Ranked by visual quality; you can switch anytime")}
-          </p>
+          {onlyVideoCandidates ? <p className="mt-1 text-[11px] text-slate-500">
+            {lang === "zh"
+              ? "视频通过技术检查后即可预览和人工选择；多帧 AI 分析只在你主动触发时运行"
+              : "Videos are ready after technical validation; multi-frame AI analysis runs only when requested"}
+          </p> : null}
         </div>
         <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.07] px-2.5 py-1 text-[10px] font-medium text-cyan-100/80">
           {lang === "zh" ? `${candidates.length} 个版本` : `${candidates.length} versions`}
@@ -4458,7 +4845,7 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
           const referenceMissing = report?.evaluationStatus === "reference_missing" || report?.referenceComparable === false;
           const isVideo = candidate.kind === "segment_video";
           const displayCandidateNo = candidateOrdinals.get(candidate.id) ?? candidate.candidateNo;
-          const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v4";
+          const needsPolicyRecheck = candidate.passed === true && report?.originalPassed === false && report?.policyVersion !== "quality-policy-v9";
           const statusText = referenceMissing
             ? (lang === "zh" ? "缺少可比参考" : "Reference required")
             : technicalQualityFailure
@@ -4540,7 +4927,14 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
             <div key={candidate.id} className={`group/card overflow-hidden rounded-lg border bg-slate-950/75 transition duration-200 ${candidate.selected ? "border-cyan-300/50 shadow-[0_0_0_1px_rgba(103,232,249,0.08),0_12px_30px_rgba(8,145,178,0.08)]" : "border-white/[0.09] hover:border-white/20"}`}>
               <div className="relative aspect-[4/5] overflow-hidden bg-black/25">
                 {candidate.mediaUrl ? (isVideo
-                  ? <video src={candidate.mediaUrl} controls playsInline preload="metadata" className="h-full w-full object-contain" />
+                  ? <video
+                      src={candidate.mediaUrl}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      poster={posterUrl || undefined}
+                      className="h-full w-full object-contain"
+                    />
                   : <button
                       type="button"
                       onClick={() => setPreviewCandidate(candidate)}
@@ -5479,9 +5873,6 @@ function PlanDebugPanel({
             {project.planDebug?.audioBible && Object.keys(project.planDebug.audioBible).length > 0 && (
               <DebugPromptBlock title="Audio Bible" value={prettyDebugJson(project.planDebug.audioBible)} />
             )}
-            {project.planDebug?.plannerShadow && Object.keys(project.planDebug.plannerShadow).length > 0 && (
-              <DebugPromptBlock title={lang === "en" ? "Planner shadow output" : "Planner shadow 输出"} value={prettyDebugJson(project.planDebug.plannerShadow)} />
-            )}
           </div>
           <div className="space-y-3">
             {project.planDebug?.storyQualityReport && (
@@ -6102,13 +6493,17 @@ function shotClipDownloadUrl(projectId: string, shotId: string): string {
 
 function localizedShotPrompt(shot: VideoShot, kind: "image" | "video", lang: PageLang): string {
   if (kind === "image") {
-    return lang === "en"
-      ? shot.imagePromptEn || shot.imagePrompt
-      : shot.imagePromptZh || shot.imagePrompt;
+    return promptForInterfaceLanguage({
+      preferred: lang === "en" ? shot.imagePromptEn : shot.imagePromptZh,
+      fallback: shot.imagePrompt,
+      lang,
+    });
   }
-  return lang === "en"
-    ? shot.videoPromptEn || shot.videoPrompt
-    : shot.videoPromptZh || shot.videoPrompt;
+  return promptForInterfaceLanguage({
+    preferred: lang === "en" ? shot.videoPromptEn : shot.videoPromptZh,
+    fallback: shot.videoPrompt,
+    lang,
+  });
 }
 
 function localizedShotPurpose(shot: VideoShot, lang: PageLang): string {
@@ -6144,9 +6539,37 @@ function localizedShotNegativePrompt(shot: VideoShot, lang: PageLang): string {
 }
 
 function localizedKeyframeImagePrompt(keyframe: VideoKeyframe, lang: PageLang): string {
-  return lang === "en"
-    ? keyframe.imagePromptEn || keyframe.imagePrompt
-    : keyframe.imagePromptZh || keyframe.imagePrompt;
+  if (keyframe.imagePromptEditContract) {
+    return compileImagePromptDisplay(keyframeImagePromptContract(keyframe), lang);
+  }
+  return promptForInterfaceLanguage({
+    preferred: lang === "en" ? keyframe.imagePromptEn : keyframe.imagePromptZh,
+    fallback: keyframe.imagePrompt,
+    lang,
+  });
+}
+
+function keyframeContractFallback(keyframe: VideoKeyframe): Parameters<typeof createImagePromptEditContract>[0] {
+  return {
+    imagePromptZh: promptForInterfaceLanguage({
+      preferred: keyframe.imagePromptZh,
+      fallback: keyframe.imagePrompt,
+      lang: "zh",
+    }),
+    imagePromptEn: promptForInterfaceLanguage({
+      preferred: keyframe.imagePromptEn,
+      fallback: keyframe.imagePrompt,
+      lang: "en",
+    }),
+    providerPrompt: keyframe.providerImagePrompt || keyframe.imagePrompt,
+  };
+}
+
+function keyframeImagePromptContract(keyframe: VideoKeyframe): ImagePromptEditContract {
+  return normalizeImagePromptEditContract(
+    keyframe.imagePromptEditContract,
+    keyframeContractFallback(keyframe),
+  );
 }
 
 function localizedKeyframeNegativePrompt(keyframe: VideoKeyframe, lang: PageLang): string {
@@ -6159,8 +6582,11 @@ function localizedKeyframeNegativePrompt(keyframe: VideoKeyframe, lang: PageLang
 }
 
 function localizedNegativePrompt(base: string, lang: PageLang, zh?: string, en?: string): string {
-  if (lang === "en") return en || base;
-  return zh || translateNegativePromptToZh(base);
+  return promptForInterfaceLanguage({
+    preferred: lang === "en" ? en : zh || translateNegativePromptToZh(base),
+    fallback: base,
+    lang,
+  });
 }
 
 function translateNegativePromptToZh(prompt: string): string {
@@ -6193,7 +6619,11 @@ function translateNegativePromptToZh(prompt: string): string {
 }
 
 function localizedTimedPrompt(prompt: TimedPrompt, lang: PageLang): string {
-  return lang === "en" ? prompt.promptEn || prompt.prompt : prompt.promptZh || prompt.prompt;
+  return promptForInterfaceLanguage({
+    preferred: lang === "en" ? prompt.promptEn : prompt.promptZh,
+    fallback: prompt.prompt,
+    lang,
+  });
 }
 
 function timedPromptRangeLabel(prompt: TimedPrompt): string {
@@ -6204,9 +6634,11 @@ function timedPromptRangeLabel(prompt: TimedPrompt): string {
 }
 
 function localizedMicroShotPrompt(microShot: MicroShot, lang: PageLang): string {
-  return lang === "en"
-    ? microShot.promptEn || languageSafeText(microShot.prompt, "en") || localizedMicroShotAction(microShot, lang) || localizedMicroShotPurpose(microShot, lang)
-    : microShot.promptZh || languageSafeText(microShot.prompt, "zh") || localizedMicroShotAction(microShot, lang) || localizedMicroShotPurpose(microShot, lang);
+  return promptForInterfaceLanguage({
+    preferred: lang === "en" ? microShot.promptEn : microShot.promptZh,
+    fallback: languageSafeText(microShot.prompt, lang) || localizedMicroShotAction(microShot, lang) || localizedMicroShotPurpose(microShot, lang),
+    lang,
+  });
 }
 
 function localizedMicroShotScene(microShot: MicroShot, lang: PageLang): string {
@@ -6222,9 +6654,11 @@ function localizedMicroShotAction(microShot: MicroShot, lang: PageLang): string 
 }
 
 function localizedMicroShotImagePrompt(microShot: MicroShot, lang: PageLang): string {
-  return lang === "en"
-    ? microShot.imagePromptEn || languageSafeText(microShot.imagePrompt, "en") || ""
-    : microShot.imagePromptZh || languageSafeText(microShot.imagePrompt, "zh") || "";
+  return promptForInterfaceLanguage({
+    preferred: lang === "en" ? microShot.imagePromptEn : microShot.imagePromptZh,
+    fallback: languageSafeText(microShot.imagePrompt, lang),
+    lang,
+  });
 }
 
 function languageSafeText(text: string | undefined, lang: PageLang): string {
@@ -6482,6 +6916,44 @@ function projectWorkflowProgressView(
       ? { percent: progress.percent, title: "Generation stopped", detail: "You stopped this generation. Adjust the brief and generate again when ready.", tone: "idle" }
       : { percent: progress.percent, title: "\u751f\u6210\u5df2\u505c\u6b62", detail: "\u4f60\u5df2\u624b\u52a8\u505c\u6b62\u672c\u6b21\u751f\u6210\uff0c\u53ef\u4ee5\u8c03\u6574\u5185\u5bb9\u540e\u91cd\u65b0\u751f\u6210\u3002", tone: "idle" };
   }
+  if (project.productionState?.workerUnavailable) {
+    const queuedSeconds = Math.max(15, Math.round(project.productionState.oldestQueuedAgeMs / 1000));
+    return lang === "en"
+      ? {
+          percent: project.taskGraph?.percent ?? progress.percent,
+          title: "Task worker is unavailable",
+          detail: `${project.productionState.queuedCount} production task(s) have waited ${queuedSeconds}s without being claimed. Start or restore the video production worker; no model request has been sent yet.`,
+          tone: "failed",
+        }
+      : {
+          percent: project.taskGraph?.percent ?? progress.percent,
+          title: "任务处理器未运行",
+          detail: `${project.productionState.queuedCount} 个生产任务已等待 ${queuedSeconds} 秒但尚未被领取。请启动或恢复视频生产 Worker；当前还没有向模型提交请求。`,
+          tone: "failed",
+        };
+  }
+  if (project.humanWorkflowState?.blocking) {
+    const state = project.humanWorkflowState.state;
+    const detail = state === "waiting_candidate_selection"
+      ? (lang === "en"
+          ? "Choose one generated candidate for the current image. Selecting a candidate does not confirm the asset library."
+          : "请先为当前图片采纳一张候选图。采纳候选只确定这张图，不等于确认整个资产库。")
+      : state === "waiting_asset_confirmation"
+        ? (lang === "en"
+            ? "Candidate images have been selected. Confirm the asset library separately before dependent frames continue."
+            : "候选图已经采纳完成，请单独确认资产库后再继续生成依赖画面。")
+        : (lang === "en"
+            ? "Review and confirm the ready boundary keyframes before internal micro-shot review."
+            : "请审核并确认已就绪的边界关键帧，再进入内部子分镜审核。");
+    return {
+      percent: project.taskGraph?.percent ?? progress.percent,
+      title: lang === "en"
+        ? project.humanWorkflowState.titleEn || "Waiting for confirmation"
+        : project.humanWorkflowState.titleZh || "等待人工确认",
+      detail: [detail, operationalDetail].filter(Boolean).join(" "),
+      tone: "idle",
+    };
+  }
   if (
     phase
     && phase.assetTotal > 0
@@ -6611,8 +7083,12 @@ function taskGraphOperationalDetail(
   if (blocker) {
     const label = lang === "en" ? blocker.labelEn : blocker.labelZh;
     parts.push(lang === "en" ? `Current task: ${label}.` : `当前对象：${label}。`);
-    const upstream = blocker.upstreamAccepted
-      ? (blocker.upstreamTaskId
+    const upstream = blocker.status === "failed" && blocker.upstreamAccepted
+      ? (lang === "en"
+          ? "upstream returned; local validation or processing failed"
+          : "上游已返回，本地校验或处理失败")
+      : blocker.upstreamAccepted
+        ? (blocker.upstreamTaskId
           ? `${lang === "en" ? "upstream accepted" : "上游已接单"} (${shortTaskId(blocker.upstreamTaskId)})`
           : lang === "en" ? "upstream accepted" : "上游已接单")
       : blocker.status === "waiting_capacity"
@@ -6633,7 +7109,10 @@ function taskGraphOperationalDetail(
       const reason = blocker.retryReason
         ? `，${lang === "en" ? "reason" : "原因"}：${blocker.retryReason}`
         : "";
-      parts.push(`${lang === "en" ? "Attempt" : "尝试次数"}：${Math.max(1, blocker.attempt)}${reason}。`);
+      const attemptLabel = blocker.id === "planning"
+        ? (lang === "en" ? "Current stage attempt" : "当前阶段尝试次数")
+        : (lang === "en" ? "Attempt" : "尝试次数");
+      parts.push(`${attemptLabel}：${Math.max(1, blocker.attempt)}${reason}。`);
     }
     if (blocker.correctionStrategy) {
       parts.push(`${lang === "en" ? "Next correction" : "下一步纠正"}：${blocker.correctionStrategy}`);
@@ -6753,6 +7232,13 @@ function hasRunningGenerationCandidate(project: VideoProject): boolean {
   return (project.generationCandidates ?? []).some((candidate) =>
     activeStatuses.has(candidate.status)
     && (Boolean(candidate.mediaUrl) || candidate.status === "pending" || candidate.status === "running")
+  );
+}
+
+function hasPendingProductionWork(project: VideoProject): boolean {
+  if (project.productionState?.hasPendingJobs) return true;
+  return (project.productionJobs ?? []).some((job) =>
+    job.status === "queued" || job.status === "running"
   );
 }
 

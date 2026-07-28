@@ -1,7 +1,14 @@
 ﻿import type { OnePromptVideoPlan, VideoPlanKeyframe } from "./types";
 
 export function frameContractContainsMotionProcess(value: unknown): boolean {
-  return /\b(moving|walking|running|turning|transitioning|from .+ to|while|during)\b|正在|走向|跑向|转身过程|从.+到.+过程|运动过程|移动过程/i.test(flatText(value));
+  if (typeof value === "string") {
+    return /\b(moving|walking|running|turning|transitioning|from .+ to|while|during)\b|正在|走向|跑向|转身过程|从.+到.+过程|运动过程|移动过程/i.test(value);
+  }
+  if (Array.isArray(value)) return value.some(frameContractContainsMotionProcess);
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some(frameContractContainsMotionProcess);
+  }
+  return false;
 }
 
 /**
@@ -131,11 +138,4 @@ export function staticizeEndpointText(value: string): string {
     .replace(/\bduring\b/gi, "at")
     .trim(),
   );
-}
-
-function flatText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(flatText).join(" ");
-  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).map(flatText).join(" ");
-  return "";
 }

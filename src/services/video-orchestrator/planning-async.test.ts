@@ -8,13 +8,18 @@ const service = readFileSync(path.join(root, "src/services/video-orchestrator/pr
 const planner = readFileSync(path.join(root, "src/services/video-orchestrator/three-stage-planner.ts"), "utf8");
 const planRoute = readFileSync(path.join(root, "src/app/api/video-projects/[projectId]/plan/route.ts"), "utf8");
 const page = readFileSync(path.join(root, "src/app/(platform)/workbench/workflows/one-prompt-video/page.tsx"), "utf8");
+const productionJobQueue = readFileSync(
+  path.join(root, "src/services/video-orchestrator/production-job-queue.ts"),
+  "utf8",
+);
 
 test("plan endpoint accepts a background job without waiting for the planner", () => {
   assert.match(planRoute, /queueVideoProjectPlanning/);
   assert.match(planRoute, /status:\s*202/);
   assert.doesNotMatch(planRoute, /await planVideoProject/);
-  assert.match(service, /new Promise<void>\(\(resolve\) => setImmediate\(resolve\)\)/);
-  assert.match(service, /onePromptVideoPlanningRuns/);
+  assert.match(service, /kind: "planning"/);
+  assert.match(service, /enqueueVideoProductionJob/);
+  assert.match(productionJobQueue, /idempotencyKey/);
   assert.match(service, /PLANNING_HEARTBEAT_MS/);
   assert.match(service, /leaseExpiresAt/);
   assert.match(service, /plan_json" #>> '\{plannerProgress,taskId\}'/);
@@ -23,8 +28,10 @@ test("plan endpoint accepts a background job without waiting for the planner", (
 test("planning state persists real stages and survives refresh or process restart", () => {
   assert.match(service, /plannerProgress/);
   assert.match(service, /writePlanningEnvelope/);
-  assert.match(service, /project\.status === VideoProjectStatus\.PLANNING && !planningRuns\.has\(projectId\)/);
-  assert.match(service, /queueVideoProjectPlanning\(userId, projectId\)/);
+  assert.match(service, /claimNextVideoProductionJob/);
+  assert.match(service, /job\.kind === "planning"/);
+  assert.match(service, /planningTaskId: taskId/);
+  assert.match(service, /planningAttemptNumber: job\.attempt/);
   for (const stage of [
     "planning_architect",
     "storyboard_artist",
@@ -78,4 +85,12 @@ test("segment pipeline bounds slow calls and serializes concurrent checkpoint wr
   assert.match(planner, /return Math\.max\(jsonStageTimeoutMs\(\), 240000\)/);
   assert.match(planner, /serializePlannerCheckpointWriter/);
   assert.match(planner, /pending\.catch\(\(\) => undefined\)\.then\(\(\) => writer\(snapshot\)\)/);
+});
+
+test("planning contract failures report returned upstream work instead of claiming no provider accepted it", () => {
+  assert.match(service, /planningModelReturnedBeforeFailure/);
+  assert.match(service, /Strict JSON Schema validation failed/);
+  assert.match(service, /upstreamAccepted:\s*plannerProgress\?\.status === "running" \|\| planningModelReturnedBeforeFailure/);
+  assert.match(page, /上游已返回，本地校验或处理失败/);
+  assert.match(page, /当前阶段尝试次数/);
 });

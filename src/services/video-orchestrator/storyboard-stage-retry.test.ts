@@ -4,9 +4,14 @@ import {
   StoryboardStageError,
   isRetryableStoryboardStageError,
   runStoryboardStageWithRetry,
+  storyboardContractValidationFeedback,
   storyboardStageHttpStatus,
 } from "./storyboard-stage-retry";
-import { mergeTargetedShotDecomposerRepair, normalizeAliyunStoryboardPlannerCheckpoint } from "./three-stage-planner";
+import {
+  mapWithConcurrency,
+  mergeTargetedShotDecomposerRepair,
+  normalizeAliyunStoryboardPlannerCheckpoint,
+} from "./three-stage-planner";
 
 test("shot decomposer retry only reruns the failed stage", async () => {
   let attempts = 0;
@@ -58,6 +63,46 @@ test("network failures are retryable but ordinary validation errors are not", ()
     code: "contract_validation_error",
     retryable: true,
   })), true);
+});
+
+test("strict schema errors retain field-level feedback for the next model attempt", () => {
+  const error = new StoryboardStageError("Strict JSON Schema validation failed", {
+    code: "contract_validation_error",
+    retryable: true,
+    validationErrors: [
+      "$.video_prompt_contract.motion_steps: expected at most 3 items",
+      "$.motion_contract.prop_paths[0]: expected string, received object",
+    ],
+  });
+
+  assert.equal(
+    storyboardContractValidationFeedback(error),
+    "$.video_prompt_contract.motion_steps: expected at most 3 items; $.motion_contract.prop_paths[0]: expected string, received object",
+  );
+});
+
+test("concurrent mapping stops scheduling queued work and waits for in-flight work before rejecting", async () => {
+  const started: number[] = [];
+  const completed: number[] = [];
+  let releaseSecond!: () => void;
+  const secondInFlight = new Promise<void>((resolve) => { releaseSecond = resolve; });
+
+  const pending = mapWithConcurrency([1, 2, 3, 4], 2, async (item) => {
+    started.push(item);
+    if (item === 1) throw new Error("segment 1 failed");
+    if (item === 2) {
+      await secondInFlight;
+      completed.push(item);
+    }
+    return item;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [1, 2]);
+  releaseSecond();
+  await assert.rejects(pending, /segment 1 failed/);
+  assert.deepEqual(completed, [2]);
+  assert.deepEqual(started, [1, 2]);
 });
 
 test("timeouts and upstream failures use gateway status codes", () => {
@@ -124,7 +169,7 @@ test("legacy planner checkpoints are invalidated when the prompt contract versio
     },
   }, input);
 
-  assert.equal(legacy.version, 10);
+  assert.equal(legacy.version, 11);
   assert.equal(legacy.planningRaw, undefined);
   assert.deepEqual(legacy.shotDecomposerSegmentPlans, {});
 });

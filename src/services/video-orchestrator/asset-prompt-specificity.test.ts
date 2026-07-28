@@ -7,8 +7,13 @@ import {
 } from "./project-service.ts";
 import { buildAuthoritativeVisualContract } from "./visual-quality-contract.ts";
 import {
+  ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS,
+  compileAssetImagePromptEn,
   compileAssetImagePromptZh,
+  isChinesePromptDisplayCopy,
+  isEnglishPromptDisplayCopy,
   validateAssetImageContract,
+  validatePlanningAssetExecutionPrompts,
 } from "./asset-image-contract.ts";
 import type { VideoConsistencyAnchor } from "./types.ts";
 
@@ -20,6 +25,62 @@ const playingCards = {
   descriptionZh: "标准扑克牌，卡通风格，可见 A 与 K。",
   descriptionEn: "Standard cartoon playing cards with visible A and K.",
 } as VideoConsistencyAnchor;
+
+test("Chinese asset prompt copy is presentation-only and never blocks execution", () => {
+  const anchor = {
+    ...playingCards,
+    needsReferenceImage: true,
+    imagePromptZh: "资产参考图，严格只显示一个角色。A single cartoon bull standing in a neutral pose.",
+    imagePromptEn: "Asset reference sheet with one cartoon bull.",
+  };
+  assert.equal(isChinesePromptDisplayCopy(anchor.imagePromptZh), false);
+  assert.equal(isEnglishPromptDisplayCopy(anchor.imagePromptEn), true);
+  assert.deepEqual(
+    validatePlanningAssetExecutionPrompts([anchor]),
+    [],
+  );
+});
+
+test("planning budgets only the English execution prompt before image generation", () => {
+  const anchor = {
+    ...playingCards,
+    needsReferenceImage: true,
+    imagePromptZh: `资产参考图，${"具体可见细节".repeat(700)}`,
+    imagePromptEn: `Asset reference sheet, ${"concrete visible detail ".repeat(180)}`,
+  };
+  assert.deepEqual(
+    validatePlanningAssetExecutionPrompts([anchor])
+      .map((issue) => issue.message)
+      .filter((message) => message.includes("planning budget")),
+    ["imagePromptEn exceeds the 3000-character planning budget"],
+  );
+});
+
+test("first-pass structured asset contracts have a deterministic total size budget", () => {
+  const oversizedContract = {
+    ...playingCards,
+    needsReferenceImage: true,
+    assetImageContract: {
+      subjectCount: 1,
+      subjectDescription: "x".repeat(ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS),
+      composition: {
+        framing: "full object",
+        cameraAngle: "front",
+        placement: "center",
+        occupancy: "70%",
+      },
+      environment: { background: "plain white" },
+      lighting: { direction: "front", quality: "soft" },
+      intrinsicDetails: ["red heart A", "black spade K"],
+      forbiddenElements: ["people", "scene", "UI", "extra cards", "random text"],
+      acceptanceCriteria: ["two required cards visible", "indices match"],
+    },
+  } as VideoConsistencyAnchor;
+  assert.ok(validateAssetImageContract(oversizedContract).some(
+    (issue) => issue.field === "assetImageContract"
+      && issue.message.includes(String(ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS)),
+  ));
+});
 
 test("playing-card asset prompt fixes count, rank, suit, orientation, and layout", () => {
   const prompt = assetSubjectPromptInstruction(playingCards, "prop", "zh");
@@ -111,6 +172,8 @@ test("asset reference compiler does not inherit unrelated base-reference state",
   assert.equal(person.scene, "plain white or light neutral asset-library background");
   assert.equal(person.productState, "");
   assert.match(person.characterState, /opponent_bull:front/);
+  assert.equal(person.imagePrompt, person.imagePromptEn);
+  assert.doesNotMatch(person.imagePrompt, /[\u3400-\u9fff]/);
 
   const prop = buildAssetConsistencyReference({
     item: {
@@ -187,6 +250,50 @@ test("planning rejects a person sheet that permits multiple characters", () => {
     },
   } as VideoConsistencyAnchor;
   assert.ok(validateAssetImageContract(person).some((issue) => issue.message.includes("exactly one")));
+});
+
+test("person asset contract requires and serializes an explicit rendering-style lock", () => {
+  const person = {
+    id: "hero_bull",
+    type: "person",
+    mustStayConsistent: true,
+    needsReferenceImage: true,
+    assetImageContract: {
+      subjectCount: 1,
+      subjectDescription: "The same bull character visible in the approved user reference.",
+      composition: {
+        framing: "full body",
+        cameraAngle: "front eye-level",
+        placement: "centered",
+        occupancy: "75 percent of frame height",
+      },
+      environment: { background: "plain light neutral background" },
+      lighting: { direction: "soft frontal key light", quality: "soft but dimensional" },
+      renderingStyle: {
+        medium: "stylized 3D CGI character render",
+        dimensionality: "3d",
+        shading: "smooth volumetric shading",
+        edgeTreatment: "clean silhouette without thick outlines",
+        surfaceTreatment: "soft modeled fur and fabric",
+        depthTreatment: "clear rounded volume",
+        authority: "user_reference",
+        forbiddenDrift: ["flat 2D vector illustration", "generic cel shading"],
+      },
+      intrinsicDetails: [
+        "same rounded face and short horn geometry",
+        "same compact body proportions and clothing silhouette",
+        "same colors, medallion, scarf, and accessories",
+      ],
+      forbiddenElements: ["unrelated poster background", "typography", "logo", "game interface elements", "other characters"],
+      acceptanceCriteria: ["one complete character is visible", "identity and rendering style match the user reference"],
+    },
+  } as VideoConsistencyAnchor;
+  assert.deepEqual(validateAssetImageContract(person), []);
+  const prompt = compileAssetImagePromptEn(person);
+  assert.match(prompt, /Hard rendering-style lock/);
+  assert.match(prompt, /dimensionality=3d/);
+  assert.match(prompt, /authority=user_reference/);
+  assert.match(prompt, /forbidden drift=flat 2D vector illustration/);
 });
 
 test("planning scene contract compiles measurable foreground-midground-background instructions", () => {

@@ -6,6 +6,7 @@ import type {
   VideoConsistencyAnchor,
   VideoPlanningManifest,
 } from "./types";
+import { isVisibleEvidenceAnchor } from "./anchor-semantics";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -181,16 +182,22 @@ function target(params: {
   reasons: string[];
 }): VideoAssetContractTarget {
   const validExclusions = new Set(params.exclusions.filter((item) => item.valid).map((item) => item.anchorId));
-  const effectiveRequiredAnchorIds = unique([...params.derivedAnchorIds, ...params.declaredAnchorIds])
-    .filter((anchorId) => !validExclusions.has(anchorId));
   const anchorById = new Map(params.anchors.map((anchor) => [anchor.id, anchor]));
+  const visibleAnchorId = (anchorId: string) => {
+    const anchor = anchorById.get(anchorId);
+    return !anchor || isVisibleEvidenceAnchor(anchor);
+  };
+  const declaredAnchorIds = unique(params.declaredAnchorIds).filter(visibleAnchorId);
+  const derivedAnchorIds = unique(params.derivedAnchorIds).filter(visibleAnchorId);
+  const effectiveRequiredAnchorIds = unique([...derivedAnchorIds, ...declaredAnchorIds])
+    .filter((anchorId) => !validExclusions.has(anchorId));
   return {
     targetType: params.targetType,
     targetId: params.targetId,
     segmentNo: params.segmentNo,
     keyframeNo: params.keyframeNo,
-    declaredAnchorIds: unique(params.declaredAnchorIds),
-    derivedAnchorIds: unique(params.derivedAnchorIds),
+    declaredAnchorIds,
+    derivedAnchorIds,
     effectiveRequiredAnchorIds,
     excludedAnchors: params.exclusions,
     expectedVisibleEntities: effectiveRequiredAnchorIds.map((anchorId) => {

@@ -23,6 +23,16 @@ export interface PlanningProgressCounters {
   storyContractRepairDurationMs: number;
 }
 
+export interface PlanningPerformanceAttempt {
+  taskId: string;
+  rootTaskId: string;
+  attemptNumber: number;
+}
+
+export function planningAttemptTaskId(rootTaskId: string, attemptNumber: number): string {
+  return attemptNumber <= 1 ? rootTaskId : `${rootTaskId}:attempt:${attemptNumber}`;
+}
+
 function reportMetricsFailure(operation: string, error: unknown): void {
   // Metrics must never make the generation path fail.
   console.warn(`[planning-performance] ${operation} failed`, error);
@@ -90,6 +100,8 @@ export async function queuePlanningPerformanceRun(input: {
       where: { taskId: input.taskId },
       create: {
         taskId: input.taskId,
+        rootTaskId: input.taskId,
+        attemptNumber: 1,
         projectId: input.projectId,
         userId: input.userId,
         plannerArch: input.plannerArch,
@@ -99,7 +111,7 @@ export async function queuePlanningPerformanceRun(input: {
         queuedAt,
       },
       update: {
-        status: "queued",
+        // An idempotent enqueue must not reopen a terminal attempt.
         plannerArch: input.plannerArch,
         durationSeconds: input.durationSeconds,
         referenceImageCount: input.referenceImageCount,
@@ -111,23 +123,81 @@ export async function queuePlanningPerformanceRun(input: {
   }
 }
 
-export async function startPlanningPerformanceRun(taskId: string, startedAt = new Date()): Promise<void> {
+export async function startPlanningPerformanceRun(
+  rootTaskId: string,
+  options: {
+    attemptNumber?: number;
+    queuedAt?: Date;
+    startedAt?: Date;
+    checkpointResume?: boolean;
+  } = {},
+): Promise<PlanningPerformanceAttempt> {
+  const startedAt = options.startedAt ?? new Date();
   try {
-    const run = await prisma.videoPlanningRunMetric.findUnique({
-      where: { taskId },
-      select: { queuedAt: true, startedAt: true, queueDurationMs: true },
+    const root = await prisma.videoPlanningRunMetric.findFirst({
+      where: { rootTaskId },
+      orderBy: { attemptNumber: "asc" },
+      select: {
+        projectId: true,
+        userId: true,
+        plannerArch: true,
+        modelName: true,
+        durationSeconds: true,
+        referenceImageCount: true,
+      },
     });
-    if (!run) return;
+    if (!root) {
+      return { taskId: rootTaskId, rootTaskId, attemptNumber: options.attemptNumber ?? 1 };
+    }
+    const latest = await prisma.videoPlanningRunMetric.findFirst({
+      where: { rootTaskId },
+      orderBy: { attemptNumber: "desc" },
+      select: { attemptNumber: true, status: true },
+    });
+    const attemptNumber = Math.max(
+      1,
+      options.attemptNumber
+        ?? (latest?.status === "queued" || latest?.status === "running"
+          ? latest.attemptNumber
+          : (latest?.attemptNumber ?? 0) + 1),
+    );
+    const taskId = planningAttemptTaskId(rootTaskId, attemptNumber);
+    const queuedAt = options.queuedAt ?? startedAt;
+    const run = await prisma.videoPlanningRunMetric.upsert({
+      where: { rootTaskId_attemptNumber: { rootTaskId, attemptNumber } },
+      create: {
+        taskId,
+        rootTaskId,
+        attemptNumber,
+        projectId: root.projectId,
+        userId: root.userId,
+        status: "queued",
+        plannerArch: root.plannerArch,
+        modelName: root.modelName,
+        durationSeconds: root.durationSeconds,
+        referenceImageCount: root.referenceImageCount,
+        checkpointResume: options.checkpointResume ?? attemptNumber > 1,
+        queuedAt,
+      },
+      update: {},
+      select: { taskId: true, queuedAt: true, startedAt: true, queueDurationMs: true },
+    });
     await prisma.videoPlanningRunMetric.update({
-      where: { taskId },
+      where: { taskId: run.taskId },
       data: {
         status: "running",
         startedAt: run.startedAt ?? startedAt,
         queueDurationMs: run.queueDurationMs ?? Math.max(0, startedAt.getTime() - run.queuedAt.getTime()),
+        completedAt: null,
+        totalDurationMs: null,
+        failureStage: null,
+        errorCategory: null,
       },
     });
+    return { taskId: run.taskId, rootTaskId, attemptNumber };
   } catch (error) {
     reportMetricsFailure("start run", error);
+    return { taskId: rootTaskId, rootTaskId, attemptNumber: options.attemptNumber ?? 1 };
   }
 }
 
@@ -184,7 +254,7 @@ export async function finishPlanningPerformanceRun(input: {
   try {
     const run = await prisma.videoPlanningRunMetric.findUnique({
       where: { taskId: input.taskId },
-      select: { queuedAt: true, completedAt: true },
+      select: { startedAt: true, queuedAt: true, completedAt: true },
     });
     if (!run) return;
     if (run.completedAt) return;
@@ -194,7 +264,10 @@ export async function finishPlanningPerformanceRun(input: {
         status: input.status,
         segmentCount: input.segmentCount,
         completedAt,
-        totalDurationMs: Math.max(0, completedAt.getTime() - run.queuedAt.getTime()),
+        totalDurationMs: Math.max(
+          0,
+          completedAt.getTime() - (run.startedAt ?? run.queuedAt).getTime(),
+        ),
         failureStage: input.failureStage,
         errorCategory: input.errorCategory,
         jsonRepairCount: input.counters?.jsonRepairCount,
@@ -261,28 +334,54 @@ export async function getPlanningPerformanceBaseline(filters: {
   try {
     const [summaryRows, stageRows, modelRows] = await Promise.all([
       prisma.$queryRaw<AggregateRow[]>(Prisma.sql`
+        WITH filtered_attempts AS (
+          SELECT r.*
+          FROM "video_planning_run_metrics" r
+          ${where}
+        ),
+        logical_runs AS (
+          SELECT
+            r."root_task_id",
+            MIN(r."queued_at") AS "queued_at",
+            MAX(r."completed_at") AS "completed_at",
+            MAX(r."attempt_number") AS "attempt_count",
+            (ARRAY_AGG(r."status" ORDER BY r."attempt_number" DESC))[1] AS "status",
+            (ARRAY_AGG(r."total_duration_ms" ORDER BY r."attempt_number" DESC))[1] AS "latest_attempt_duration_ms",
+            BOOL_OR(r."json_repair_count" > 0) AS "had_json_repair",
+            BOOL_OR(r."single_take_repair_count" > 0) AS "had_single_take_repair",
+            BOOL_OR(r."story_contract_repair_count" > 0) AS "had_story_contract_repair",
+            BOOL_OR(r."checkpoint_resume") OR MAX(r."attempt_number") > 1 AS "checkpoint_resume",
+            MIN(r."queue_duration_ms") FILTER (WHERE r."attempt_number" = 1) AS "queue_duration_ms"
+          FROM filtered_attempts r
+          GROUP BY r."root_task_id"
+        )
         SELECT
           COUNT(*)::int AS sample_count,
           COUNT(*) FILTER (WHERE r."status" = 'completed')::int AS completed_count,
           COUNT(*) FILTER (WHERE r."status" = 'failed')::int AS failed_count,
-          percentile_cont(0.5) WITHIN GROUP (ORDER BY r."total_duration_ms")
+          percentile_cont(0.5) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (r."completed_at" - r."queued_at")) * 1000
+          )
             FILTER (WHERE r."status" = 'completed') AS p50_ms,
-          percentile_cont(0.95) WITHIN GROUP (ORDER BY r."total_duration_ms")
+          percentile_cont(0.95) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (r."completed_at" - r."queued_at")) * 1000
+          )
             FILTER (WHERE r."status" = 'completed') AS p95_ms,
-          (AVG(r."total_duration_ms") FILTER (WHERE r."status" = 'completed'))::float8 AS avg_ms,
+          (AVG(EXTRACT(EPOCH FROM (r."completed_at" - r."queued_at")) * 1000)
+            FILTER (WHERE r."status" = 'completed'))::float8 AS avg_ms,
           percentile_cont(0.5) WITHIN GROUP (ORDER BY r."queue_duration_ms")
             FILTER (WHERE r."queue_duration_ms" IS NOT NULL) AS queue_p50_ms,
           COUNT(*) FILTER (
             WHERE r."status" = 'completed'
-              AND r."json_repair_count" = 0
-              AND r."single_take_repair_count" = 0
-              AND r."story_contract_repair_count" = 0
+              AND r."attempt_count" = 1
+              AND NOT r."had_json_repair"
+              AND NOT r."had_single_take_repair"
+              AND NOT r."had_story_contract_repair"
           )::int AS first_pass_count,
-          COUNT(*) FILTER (WHERE r."json_repair_count" > 0)::int AS json_repair_count,
-          COUNT(*) FILTER (WHERE r."single_take_repair_count" > 0)::int AS single_take_repair_count,
+          COUNT(*) FILTER (WHERE r."had_json_repair")::int AS json_repair_count,
+          COUNT(*) FILTER (WHERE r."had_single_take_repair")::int AS single_take_repair_count,
           COUNT(*) FILTER (WHERE r."checkpoint_resume" = true)::int AS checkpoint_resume_count
-        FROM "video_planning_run_metrics" r
-        ${where}
+        FROM logical_runs r
       `),
       prisma.$queryRaw<StageAggregateRow[]>(Prisma.sql`
         SELECT

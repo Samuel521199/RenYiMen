@@ -109,6 +109,39 @@ export function compileAtomicVisualRequirements(input: {
     });
   }
 
+  const targetAnchorId = textField(input.targetContract, ["targetAnchorId", "target_anchor_id"]);
+  const isolatedSelfAnchor = textField(input.targetContract, ["isolationMode", "isolation_mode"]) === "single_asset"
+    ? targetAnchorId
+    : "";
+  const renderingStyleValue = input.targetContract.renderingStyle ?? input.targetContract.rendering_style;
+  const identityReferenceRequired =
+    input.targetContract.identityReferenceRequired === true
+    || input.targetContract.identity_reference_required === true;
+  if (identityReferenceRequired && targetAnchorId) {
+    add({
+      requirementId: `identity.user_reference.${stableHash(normalize(targetAnchorId))}`,
+      domain: "identity",
+      target: `The isolated target character ${targetAnchorId} must directly match the same character visible in the approved user reference: face design, head and horn geometry, body proportions, clothing, colors, and accessories.`,
+      severity: "hard",
+      authority: "approved_reference",
+      appliesTo: mediaStage,
+      tolerance: "Pose, crop, isolated background, and conservatively completed unseen body regions may vary. Visible identity-defining character features may not be redesigned.",
+      referenceAnchorIds: [targetAnchorId],
+    });
+  }
+  if (renderingStyleValue && typeof renderingStyleValue === "object") {
+    const renderingStyleText = JSON.stringify(renderingStyleValue);
+    add({
+      requirementId: `style.reference_lock.${stableHash(normalize(renderingStyleText))}`,
+      domain: "style",
+      target: `Rendering style must match the approved user reference and this hard style contract: ${renderingStyleText}`,
+      severity: "hard",
+      authority: "approved_reference",
+      appliesTo: mediaStage,
+      tolerance: "Pose, crop, and isolated background may change. Rendering medium, 2D/3D dimensionality, shading, edge treatment, surface language, and depth treatment may not drift.",
+      referenceAnchorIds: targetAnchorId ? [targetAnchorId] : undefined,
+    });
+  }
   const anchorIds = unique(readStringList(input.targetContract, [
     "effectiveRequiredAnchorIds",
     "effective_required_anchor_ids",
@@ -116,7 +149,7 @@ export function compileAtomicVisualRequirements(input: {
     "required_anchor_ids",
     "usesConsistencyAnchors",
     "uses_consistency_anchors",
-  ]));
+  ])).filter((anchorId) => anchorId !== isolatedSelfAnchor);
   for (const anchorId of anchorIds) {
     add({
       requirementId: `identity.anchor.${stableHash(normalize(anchorId))}`,
@@ -131,8 +164,9 @@ export function compileAtomicVisualRequirements(input: {
   }
 
   for (const [path, value] of collectAtomicContractStatements(input.targetContract)) {
+    if (isolatedSelfAnchor && /(?:effective|required)[_.]?anchor[_]?ids/i.test(path)) continue;
     const domain = atomicRequirementDomain(`${path} ${value}`);
-    const explicitHard = /(?:required|must|lock|exact|visibleevidence|identity|brand|logo|product|subjectcount|personcount|必须|必需|锁定|精确|身份|品牌|主体数量)/i.test(path);
+    const explicitHard = /(?:required|must|lock|exact|visibleevidence|identity|brand|logo|product|subjectcount|personcount|renderingstyle|rendering_style|stylereferencerequired|style_reference_required|必须|必需|锁定|精确|身份|品牌|主体数量|渲染风格)/i.test(path);
     add({
       requirementId: `contract.${normalizeRequirementPath(path)}.${stableHash(normalize(value))}`,
       domain,
@@ -143,6 +177,25 @@ export function compileAtomicVisualRequirements(input: {
       tolerance: explicitHard
         ? "Judge the stated visible target only; do not invent stricter geometry, wording, or styling."
         : "Minor decorative, pose, crop, and lighting variation is acceptable when the intended visible meaning remains clear.",
+    });
+  }
+
+  if (isolatedSelfAnchor) {
+    const descriptor = [
+      textField(input.targetContract, ["purpose", "purposeZh", "purpose_zh"]),
+      textField(input.targetContract, ["productState", "product_state"]),
+      textField(input.targetContract, ["characterState", "character_state"]),
+      textField(input.targetContract, ["scene"]),
+    ].filter(Boolean).join("; ");
+    const forbiddenAnchors = readStringList(input.targetContract, ["forbiddenAnchorIds", "forbidden_anchor_ids"]);
+    add({
+      requirementId: `identity.isolated_target.${stableHash(normalize(isolatedSelfAnchor))}`,
+      domain: "identity",
+      target: `The current output is the isolated asset ${isolatedSelfAnchor} described by the target contract${descriptor ? `: ${descriptor}` : ""}. The anchor ID is a label for this new asset, not an instruction to copy unrelated content from a project reference.${forbiddenAnchors.length ? ` It must not contain forbidden project anchors: ${forbiddenAnchors.join(", ")}.` : ""}`,
+      severity: "hard",
+      authority: "structured_contract",
+      appliesTo: mediaStage,
+      tolerance: "Judge the requested isolated asset against its own target contract and stated reference role only.",
     });
   }
 
@@ -330,7 +383,7 @@ function collectAtomicContractStatements(
 }
 
 function atomicContractPathRelevant(path: string): boolean {
-  return /required|visible|identity|character|person|product|brand|logo|text|title|ui|score|timer|layout|composition|position|scene|pose|gaze|camera|evidence|subject|appearance|clothing|accessor|构图|人物|角色|产品|品牌|文字|界面|分数|计时|场景|姿态|视线|服装|配饰/i.test(path);
+  return /required|visible|identity|character|person|product|brand|logo|text|title|ui|score|timer|layout|composition|position|scene|pose|gaze|camera|evidence|subject|appearance|clothing|accessor|rendering|style|medium|dimensionality|shading|edge|surface|depth|构图|人物|角色|产品|品牌|文字|界面|分数|计时|场景|姿态|视线|服装|配饰|渲染|风格|维度|明暗|边缘|材质|深度/i.test(path);
 }
 
 function normalizeRequirementPath(path: string): string {
@@ -347,6 +400,7 @@ function atomicRequirementDomain(value: string): AtomicVisualRequirementDomain {
   if (/logo|brand|text|word|spell|title|文字|字样|品牌|标志/i.test(value)) return "brand_text";
   if (/score|timer|hud|ui|button|分数|计时器|界面|按钮/i.test(value)) return "game_ui";
   if (/hand|finger|limb|anatom|手|指|肢体/i.test(value)) return "anatomy";
+  if (/rendering|visual style|style|medium|dimensionality|shading|edge treatment|surface treatment|depth treatment|2d|3d|cgi|vector|cel[- ]?shad|渲染|风格|维度|明暗|边缘|表面|深度/i.test(value)) return "style";
   if (/identity|face|character|person|product|clothing|accessor|身份|人物|角色|脸|产品|服装|配饰/i.test(value)) return "identity";
   if (/layout|composition|position|camera|scene|构图|布局|位置|镜头|场景/i.test(value)) return "layout";
   if (/continuity|previous|boundary|连续|上一|边界/i.test(value)) return "continuity";
@@ -376,6 +430,7 @@ function issueCategory(value: string): GenerationIssueLedgerEntry["category"] {
   if (/logo|brand|text|word|spell|文字|字样|品牌|标志/i.test(value)) return "text_brand";
   if (/score|timer|hud|ui|分数|计时器|界面/i.test(value)) return "game_ui";
   if (/hand|finger|limb|anatom|手|指|肢体/i.test(value)) return "anatomy";
+  if (/rendering|visual style|style|medium|dimensionality|shading|edge treatment|surface treatment|depth treatment|2d|3d|cgi|vector|cel[- ]?shad|渲染|风格|维度|明暗|边缘|表面|深度/i.test(value)) return "style";
   if (/identity|face|character|product|package|身份|人物|脸|产品|包装/i.test(value)) return "identity";
   if (/layout|composition|position|构图|布局|位置/i.test(value)) return "layout";
   if (/continuity|previous|连续|上一/i.test(value)) return "continuity";

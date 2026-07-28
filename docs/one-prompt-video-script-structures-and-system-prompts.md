@@ -2764,7 +2764,6 @@ export interface OnePromptVideoPlan {
   artifactMetadata?: Record<string, ArtifactMetadata>;
   mediaRevisionHistory?: Record<string, VideoMediaRevision[]>;
   generationQualityReports?: GenerationQualityReport[];
-  plannerShadow?: Record<string, unknown>;
   plannerWarnings?: string[];
   storyboardPlan?: unknown;
   promptDetailPlan?: VideoPromptDetailPlan;

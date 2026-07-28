@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   assemblePlanningAssetSpecs,
   planningDecompositionMode,
+  validateLocalJsonSchema,
 } from "./three-stage-planner.ts";
 import type { VideoConsistencyAnchor } from "./types.ts";
 
@@ -81,3 +82,22 @@ test("planning decomposition uses per-anchor bounded workers and checkpoint fing
   assert.match(plannerSource, /split_shadow/);
 });
 
+test("segment contracts use local strict schema validation because DashScope only transports JSON mode", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["source"],
+    properties: {
+      source: { type: "string", enum: ["verified"] },
+    },
+  };
+  assert.deepEqual(validateLocalJsonSchema({ source: "verified" }, schema), []);
+  assert.ok(validateLocalJsonSchema({ source: "guessed", extra: true }, schema).some(
+    (message) => message.includes("allowed enum"),
+  ));
+  assert.ok(validateLocalJsonSchema({ source: "guessed", extra: true }, schema).some(
+    (message) => message.includes("additional property"),
+  ));
+  assert.match(plannerSource, /json_object_plus_local_strict_schema/);
+  assert.doesNotMatch(plannerSource, /type:\s*"json_schema"/);
+});

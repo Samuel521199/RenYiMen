@@ -46,6 +46,16 @@ test("short mode inherits layout from an approved, quality-passed, or manually a
   assert.match(service, /Required transition scene-layout reference was not selected/);
 });
 
+test("root cameras and palette-only locations cannot deadlock boundary generation", () => {
+  const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
+  assert.match(service, /if \(!Number\.isInteger\(parentKeyframeNo\)\) continue/);
+  assert.match(service, /if \(!Number\.isInteger\(artifact\.parentKeyframeNo\)\) return \[\]/);
+  assert.match(service, /cameraLocationSupportsSpatialInheritance/);
+  assert.match(service, /artifact\.mode === "full" && !cameraLocationSupportsSpatialInheritance/);
+  assert.match(service, /mode: "short" as const/);
+  assert.match(service, /isVisibleEvidenceAnchor/);
+});
+
 test("boundary reference selection scopes transition candidates to its resolved segment", () => {
   const service = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(service, /collectTransitionReferenceCandidates\(params\.project, targetSegmentNo\)/);
@@ -64,6 +74,7 @@ test("URL deduplication preserves a mandatory transition alias over its parent-c
   );
   assert.match(dedupe, /referenceCandidateDedupePriority\(candidate\) > referenceCandidateDedupePriority\(current\)/);
   assert.match(dedupe, /candidate\.sourceType === "transition_reference" && candidate\.hardRequired/);
+  assert.match(dedupe, /candidate\.sourceType === "user_upload" && candidate\.hardRequired/);
 });
 
 test("required transition layout evidence bypasses generic conflict veto", () => {
@@ -71,7 +82,7 @@ test("required transition layout evidence bypasses generic conflict veto", () =>
   const evaluator = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/reference-vision-evaluator.ts"), "utf8");
   assert.match(selector, /isMandatoryTransitionCandidate/);
   assert.match(selector, /isMandatoryTransitionCandidate\(candidate\) \|\| candidate\.conflictScore < conflictThreshold/);
-  assert.match(evaluator, /candidate\.sourceType === "transition_reference" && candidate\.hardRequired/);
+  assert.match(evaluator, /candidate\.sourceType === "transition_reference" \|\| candidate\.sourceType === "user_upload"/);
 });
 
 test("generated bridges use a distinct artifact state and block composition until approval", () => {

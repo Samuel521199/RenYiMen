@@ -53,17 +53,11 @@ DRAFT
 
 ## 4. 三阶段规划器
 
-默认 `ONE_PROMPT_VIDEO_PLANNER_ARCH=v2`：
+系统固定使用当前 v2 多阶段规划器：
 
 1. Planning Architect：确定叙事、时间轴、风格、一致性锚点和资产。
 2. Storyboard/Shot Decomposer：按 segment 生成可审核镜头、子分镜、机位和运动约束。
 3. Prompt Detailer：编译图片与视频生成提示词及负面约束。
-
-可选模式：
-
-- `v2`：新规划器直接驱动生成。
-- `v2_shadow`：记录 v2 结果，但由 v1 兼容计划驱动生成。
-- `v1`：仅使用本地旧规划器，主要用于回滚。
 
 规划器会归一化大模型输出。新增字段必须保证缺失时有兼容默认值，不能让历史 `planJson` 无法读取。
 
@@ -112,7 +106,6 @@ DRAFT
 
 ```env
 DASHSCOPE_API_KEY=<secret>
-ONE_PROMPT_VIDEO_PLANNER_ARCH=v2
 ALIYUN_STORYBOARD_MODEL=qwen3.7-plus
 ALIYUN_IMAGE_MODEL=wan2.7-image-pro
 ALIYUN_I2V_MODEL=vidu/viduq3-turbo_start-end2video

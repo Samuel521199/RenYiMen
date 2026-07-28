@@ -95,10 +95,57 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
     const endFrame = recordOrUndefined(description.endFrameContract ?? description.end_frame_contract);
     const motion = recordOrUndefined(description.motionContract ?? description.motion_contract);
     const singleTake = recordOrUndefined(description.singleTakeContract ?? description.single_take_contract);
+    const videoPromptContract = record(
+      description.videoPromptContract ?? description.video_prompt_contract,
+    );
     if (!startFrame) pushMissingContract(issues, segmentNo, "START_FRAME_CONTRACT_MISSING", "start_frame_contract_missing", "startFrameContract");
     if (!endFrame) pushMissingContract(issues, segmentNo, "END_FRAME_CONTRACT_MISSING", "end_frame_contract_missing", "endFrameContract");
     if (!motion) pushMissingContract(issues, segmentNo, "MOTION_CONTRACT_MISSING", "motion_contract_missing", "motionContract");
     if (!singleTake) pushMissingContract(issues, segmentNo, "SINGLE_TAKE_CONTRACT_MISSING", "single_take_contract_missing", "singleTakeContract");
+    const usesEvidenceRefs = arrayRecords(
+      videoPromptContract.terminalRequirements ?? videoPromptContract.terminal_requirements,
+    ).some((requirement) => Array.isArray(requirement.evidenceRefs ?? requirement.evidence_refs));
+    if (motion && (usesEvidenceRefs || motion.version === "continuous-motion-contract-v1")) {
+      const subjectActions = arrayRecords(motion.subjectActions ?? motion.subject_actions);
+      const cameraMotion = recordOrUndefined(motion.cameraMotion ?? motion.camera_motion);
+      const cameraType = String(cameraMotion?.type ?? "");
+      const validCameraTypes = new Set([
+        "static",
+        "pan",
+        "tilt",
+        "dolly_in",
+        "dolly_out",
+        "truck_left",
+        "truck_right",
+        "pedestal_up",
+        "pedestal_down",
+        "orbit",
+        "zoom_in",
+        "zoom_out",
+        "handheld_follow",
+        "crane",
+      ]);
+      const motionSchemaValid =
+        motion.version === "continuous-motion-contract-v1"
+        && motion.continuous_time === true
+        && subjectActions.length > 0
+        && subjectActions.every((item) => Boolean(String(item.subject ?? "").trim())
+          && Boolean(String(item.action ?? "").trim()))
+        && Boolean(cameraMotion)
+        && validCameraTypes.has(cameraType);
+      if (!motionSchemaValid) {
+        push(issues, {
+          code: "CONTINUOUS_MOTION_CONTRACT_INVALID",
+          segmentNo,
+          reason: "continuous_motion_contract_schema_invalid",
+          messageZh: `片段 ${segmentNo} 的片段内运动合同不是可验证的 continuous-motion-contract-v1，需要仅重写当前片段。`,
+          sourcePath: `segmentRenderDescriptions[${segmentNo}].motionContract`,
+          evidenceType: "deterministic_contract",
+          confidence: 1,
+          repairScope: "segment",
+        });
+      }
+    }
 
     if (truthy(description.requiresCut ?? description.requires_cut) || truthy(singleTake?.requiresCut ?? singleTake?.requires_cut)) {
       push(issues, {
@@ -121,11 +168,13 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
         code: "SINGLE_TAKE_PHYSICALLY_UNREACHABLE",
         segmentNo,
         reason: "physically_unreachable",
-        messageZh: `片段 ${segmentNo} 的动作路径被标记为不可物理到达，需要先简化当前片段。`,
+        messageZh: `片段 ${segmentNo} 的动作路径被明确标记为不可物理到达，需要重新拆分当前片段。`,
         sourcePath: `segmentRenderDescriptions[${segmentNo}].singleTakeContract.physicallyReachable`,
         evidenceType: "model_assessment",
         confidence: 0.8,
-        repairScope: "segment",
+        structural: true,
+        repairScope: "timeline",
+        repairable: false,
       });
     }
 
@@ -152,8 +201,7 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
       { path: `segmentRenderDescriptions[${segmentNo}].singleTakeContract`, value: singleTake },
       {
         path: `segmentRenderDescriptions[${segmentNo}].videoPromptContract.motionSteps`,
-        value: record(description.videoPromptContract ?? description.video_prompt_contract).motionSteps
-          ?? record(description.videoPromptContract ?? description.video_prompt_contract).motion_steps,
+        value: videoPromptContract.motionSteps ?? videoPromptContract.motion_steps,
       },
       { path: `segments[${segmentNo}].videoPrompt`, value: segment?.videoPrompt ?? segment?.video_prompt },
       { path: `segments[${segmentNo}].motion`, value: segment?.motion },
@@ -164,20 +212,25 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
     ];
     const cutEvidence = executableRoots.flatMap((root) => findCutLanguageEvidence(root.value, root.path))[0];
     if (cutEvidence) {
+      const route = classifyPositiveCutInstruction(cutEvidence.text);
       push(issues, {
-        code: cutEvidence.path.includes("motionCheckpoints")
-          ? "MOTION_CHECKPOINT_CONTAINS_CUT"
-          : "INTERNAL_CUT_LANGUAGE",
+        code: route === "boundary_transition_leak"
+          ? "BOUNDARY_TRANSITION_LEAKED_INTO_SEGMENT"
+          : cutEvidence.path.includes("motionCheckpoints")
+            ? "MOTION_CHECKPOINT_CONTAINS_CUT"
+            : "INTERNAL_CUT_LANGUAGE",
         segmentNo,
-        reason: `positive_cut_instruction:${cutEvidence.path}`,
-        messageZh: `片段 ${segmentNo} 的可执行字段包含正向切镜或转场指令。`,
+        reason: `${route}:${cutEvidence.path}`,
+        messageZh: route === "boundary_transition_leak"
+          ? `片段 ${segmentNo} 把片段边界的剪辑计划写进了视频执行字段，应移回 final_transition_plan。`
+          : `片段 ${segmentNo} 的可执行字段使用了切镜措辞；先局部改写为同场景连续运动，不直接升级为时间线重规划。`,
         sourcePath: cutEvidence.path,
         matchedText: cutEvidence.text,
         evidenceType: "executable_instruction",
         confidence: 1,
-        structural: true,
-        repairScope: "timeline",
-        repairable: false,
+        structural: false,
+        repairScope: "segment",
+        repairable: true,
       });
     }
 
@@ -205,7 +258,7 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
     }
 
     const checkpoints = array(description.motionCheckpoints ?? description.motion_checkpoints);
-    const checkpointLimit = Math.max(2, Math.min(6, Math.ceil((durationSeconds || 5) / 2.5)));
+    const checkpointLimit = Math.max(1, Math.min(3, Math.ceil((durationSeconds || 5) / 2.5)));
     if (checkpoints.length > checkpointLimit) {
       push(issues, {
         code: "SINGLE_TAKE_CHECKPOINT_BUDGET_EXCEEDED",
@@ -302,11 +355,25 @@ function findCutLanguageEvidence(value: unknown, rootPath: string): Array<{ path
   });
 }
 
+function classifyPositiveCutInstruction(
+  text: string,
+): "wording_only" | "boundary_transition_leak" {
+  const normalized = stripNegativeCutClauses(text);
+  if (
+    /\b(?:after|before|between)\s+(?:segment|clip|shot)s?\b|\b(?:next|previous)\s+(?:segment|clip)\b/i.test(normalized)
+    || /(?:片段|视频段|成片段)[一二三四五六七八九十\d]*(?:结束|开始|之间|之后|以前|前|后)|(?:下一|上一)片段/.test(normalized)
+  ) {
+    return "boundary_transition_leak";
+  }
+  return "wording_only";
+}
+
 function stripNegativeCutClauses(value: string): string {
   return value
     .replace(/\bnot\s+as\s+(?:an?\s+)?(?:extra\s+video\s+clip|separate\s+shot|scene\s+transition)\b/gi, "")
     .replace(/\b(?:no|without|forbid(?:den)?|avoid|must not|do not|don't|never)\b[^.;\n]*/gi, "")
-    .replace(/(?:禁止|不得|不要|避免|不可|不能|无任何|无内部)[^。；\n]*/g, "");
+    .replace(/(?:禁止|不得|不要|避免|不可|不能|无任何|无内部)[^。；\n]*/g, "")
+    .replace(/无(?:剪辑|剪切|切割|切镜|跳切|淡入淡出|淡入|淡出|叠化|溶解|交叉溶解|蒙太奇|场景切换|场景交换|瞬移|硬过渡|硬视觉过渡)/g, "");
 }
 
 function executableTextLeaves(value: unknown, path: string, parentKey = ""): Array<{ path: string; text: string }> {

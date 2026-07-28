@@ -79,3 +79,42 @@ test("only a justified explicit exclusion can remove a derived anchor", () => {
   assert.deepEqual(result.contract.beatTargets[0]?.effectiveRequiredAnchorIds, []);
   assert.equal(result.contract.beatTargets[0]?.excludedAnchors[0]?.valid, true);
 });
+
+test("palette and style guides never become required visible anchors", () => {
+  const paletteManifest: VideoPlanningManifest = {
+    ...manifest,
+    timelineBlueprint: {
+      ...manifest.timelineBlueprint,
+      segments: [{
+        ...manifest.timelineBlueprint.segments[0],
+        requiredAnchorIds: ["character_main", "palette_1"],
+      }],
+    },
+    consistencyManifest: {
+      anchors: [
+        ...manifest.consistencyManifest.anchors,
+        {
+          id: "palette_1",
+          type: "palette_mood",
+          mustStayConsistent: true,
+          needsReferenceImage: false,
+          referenceStrength: "soft",
+        },
+      ],
+    },
+  };
+  const paletteEvents: NarrativeEvent[] = [{
+    ...events[0],
+    requiredAnchorIds: ["character_main", "palette_1"],
+  }];
+  const result = resolveAssetContract({
+    planningManifest: paletteManifest,
+    narrativeEvents: paletteEvents,
+    storyboardArtistPlan: {
+      story_beats: [{ beat_id: "beat_1", source_event_ids: ["event_1"], target_segment_nos: [1], required_anchor_ids: ["palette_1"] }],
+      storyboard_brief: [{ segment_no: 1, linked_beat_ids: ["beat_1"], required_anchor_ids: ["palette_1"] }],
+    },
+  });
+  assert.deepEqual(result.contract.segmentTargets[0]?.effectiveRequiredAnchorIds, ["character_main"]);
+  assert.deepEqual(result.contract.boundaryTargets.map((item) => item.effectiveRequiredAnchorIds), [["character_main"], ["character_main"]]);
+});

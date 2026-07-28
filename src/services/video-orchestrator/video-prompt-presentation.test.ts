@@ -12,7 +12,9 @@ const contract: VideoPromptContract = {
     priority: "hard",
     observableFact: "The heroine visibly holds the phone in the victorious pose.",
     acceptanceCriteria: "The final stable frames show the approved pose.",
+    evidenceRefs: [{ type: "approved_end_frame", id: "keyframe:2" }],
     source: "approved_end_frame",
+    sources: ["approved_end_frame"],
   }],
   motionSteps: [
     "The heroine raises the phone and turns toward the camera.",

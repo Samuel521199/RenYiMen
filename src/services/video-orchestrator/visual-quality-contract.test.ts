@@ -46,6 +46,53 @@ test("atomic visual requirements are bounded, stable and preserve explicit hard 
   assert.equal(first.some((item) => item.target.includes("warm rim light")), false);
 });
 
+test("a new isolated anchor is judged by its own contract instead of an unrelated project reference", () => {
+  const requirements = compileAtomicVisualRequirements({
+    targetContract: {
+      isolationMode: "single_asset",
+      targetAnchorId: "anchor_bg",
+      effectiveRequiredAnchorIds: ["anchor_bg"],
+      forbiddenAnchorIds: ["anchor_bull", "anchor_logo"],
+      purpose: "festive abstract background",
+      scene: "soft-focus colored bokeh with no characters, logos, or text",
+    },
+    purpose: "anchor_reference_image",
+  });
+  assert.equal(requirements.some((item) => item.referenceAnchorIds?.includes("anchor_bg")), false);
+  assert.equal(requirements.some((item) => item.requirementId.includes("effectiverequiredanchorids")), false);
+  const isolatedTarget = requirements.find((item) => item.requirementId.startsWith("identity.isolated_target."));
+  assert.equal(isolatedTarget?.severity, "hard");
+  assert.match(isolatedTarget?.target ?? "", /not an instruction to copy unrelated content/i);
+  assert.match(isolatedTarget?.target ?? "", /anchor_bull, anchor_logo/);
+});
+
+test("person asset compiles separate hard identity and rendering-style requirements", () => {
+  const requirements = compileAtomicVisualRequirements({
+    targetContract: {
+      isolationMode: "single_asset",
+      targetAnchorId: "hero_bull",
+      identityReferenceRequired: true,
+      styleReferenceRequired: true,
+      renderingStyle: {
+        medium: "stylized 3D CGI",
+        dimensionality: "3d",
+        shading: "smooth volumetric shading",
+        edgeTreatment: "no thick vector outlines",
+      },
+    },
+    purpose: "anchor_reference_image",
+  });
+  const identity = requirements.find((item) => item.requirementId.startsWith("identity.user_reference."));
+  const style = requirements.find((item) => item.requirementId.startsWith("style.reference_lock."));
+  assert.equal(identity?.authority, "approved_reference");
+  assert.equal(identity?.severity, "hard");
+  assert.match(identity?.target ?? "", /face design, head and horn geometry, body proportions, clothing, colors, and accessories/i);
+  assert.equal(style?.domain, "style");
+  assert.equal(style?.severity, "hard");
+  assert.match(style?.target ?? "", /stylized 3D CGI/);
+  assert.match(style?.tolerance ?? "", /may not drift/i);
+});
+
 test("requirement-backed issue identity survives evaluator wording changes", () => {
   const first = reconcileGenerationIssueLedger({
     candidateNo: 1,

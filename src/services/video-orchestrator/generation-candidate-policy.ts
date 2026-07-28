@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 export const GENERATION_INPUT_FINGERPRINT_VERSION = "generation-input-v1";
 export const QUALITY_EVALUATION_FINGERPRINT_VERSION = "quality-evaluation-v2";
-export const QUALITY_POLICY_VERSION = "quality-policy-v4";
-export const QUALITY_PROMPT_VERSION = "image-quality-prompt-v5";
+export const QUALITY_POLICY_VERSION = "quality-policy-v10";
+export const QUALITY_PROMPT_VERSION = "image-quality-prompt-v6";
 
 type CanonicalValue = null | boolean | number | string | CanonicalValue[] | { [key: string]: CanonicalValue | undefined };
 

@@ -24,6 +24,8 @@ export type VideoConsistencyAnchorType =
   | "vehicle"
   | "food"
   | "space_layout"
+  | "palette_mood"
+  | "graphic_backdrop"
   | "custom";
 
 export interface VideoAssetImageContract {
@@ -47,6 +49,18 @@ export interface VideoAssetImageContract {
     quality?: string;
     colorTemperature?: string;
   };
+  renderingStyle?: {
+    /** Concrete rendering medium such as stylized 3D CGI or flat vector illustration. */
+    medium?: string;
+    dimensionality?: "2d" | "2.5d" | "3d" | "mixed";
+    shading?: string;
+    edgeTreatment?: string;
+    surfaceTreatment?: string;
+    depthTreatment?: string;
+    /** The strongest source that established this style contract. */
+    authority?: "user_reference" | "global_style" | "planner";
+    forbiddenDrift?: string[];
+  };
   palette?: string[];
   materialDetails?: string[];
   intrinsicDetails?: string[];
@@ -62,6 +76,12 @@ export interface VideoConsistencyAnchor {
   mustStayConsistent: boolean;
   needsReferenceImage: boolean;
   referenceStrength?: "hard" | "medium" | "soft";
+  semanticRole?: "identity" | "palette_mood" | "rendering_style" | "graphic_backdrop" | "physical_scene";
+  referenceUsage?: {
+    role?: "hard_identity" | "scene_layout" | "style_only" | "palette_only" | "graphic_backdrop";
+    inherit?: string[];
+    forbidInherit?: string[];
+  };
   descriptionZh?: string;
   descriptionEn?: string;
   visualLock?: {
@@ -244,6 +264,7 @@ export interface VideoPlanKeyframe extends VideoAssetDependencyFields {
   imagePrompt: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
+  imagePromptEditContract?: ImagePromptEditContract;
   negativePromptGroups?: VideoNegativePromptGroups;
   negativePrompt: string;
   negativePromptZh?: string;
@@ -260,6 +281,8 @@ export type VideoConsistencyReferenceKind =
   | "vehicle"
   | "food"
   | "space_layout"
+  | "palette_mood"
+  | "graphic_backdrop"
   | "custom";
 
 export type VideoAssetCategory =
@@ -322,6 +345,7 @@ export interface VideoConsistencyReference {
   imagePrompt: string;
   imagePromptZh?: string;
   imagePromptEn?: string;
+  imagePromptEditContract?: ImagePromptEditContract;
   negativePromptGroups?: VideoNegativePromptGroups;
   negativePrompt: string;
   negativePromptZh?: string;
@@ -424,6 +448,42 @@ export interface VideoMicroShot extends VideoAssetDependencyFields {
   resolvedAt?: string;
   startBoundaryImageUrl?: string;
   endBoundaryImageUrl?: string;
+}
+
+export interface ImagePromptEditContract {
+  version: "image-prompt-edit-v1";
+  lastEditedLocale: "zh" | "en";
+  localizedDescription: { zh: string; en: string };
+  subject: {
+    count?: number;
+    descriptionZh: string;
+    descriptionEn: string;
+  };
+  composition: {
+    framing: string;
+    cameraAngle: string;
+    placement: string;
+    occupancy: string;
+  };
+  environment: {
+    backgroundZh: string;
+    backgroundEn: string;
+    foreground: string;
+    midground: string;
+    backgroundLayer: string;
+    spatialRelationships: string[];
+  };
+  lighting: {
+    direction: string;
+    quality: string;
+    colorTemperature: string;
+  };
+  palette: string[];
+  materialDetails: string[];
+  intrinsicDetails: string[];
+  forbiddenElements: string[];
+  acceptanceCriteria: string[];
+  creativeOverride: { zh: string; en: string };
 }
 
 export interface VideoAudioPlan {
@@ -956,7 +1016,7 @@ export interface VideoMediaConditionedSegmentPlan {
   resolvedMicroShots: VideoMicroShot[];
   microShotRevisionId: string;
   videoPromptContract: VideoPromptContract;
-  planningStatus: "media_conditioned" | "fallback";
+  planningStatus: "media_conditioned" | "media_conditioned_repaired" | "fallback";
   warnings: string[];
   refinedAt: string;
   modelName?: string;
@@ -970,12 +1030,30 @@ export interface VideoPlanningPhaseState {
   updatedAt: string;
 }
 
+export type VideoPromptEvidenceType =
+  | "user_input"
+  | "story_contract"
+  | "approved_end_frame"
+  | "planner_artifact";
+
+export interface VideoPromptEvidenceRef {
+  /** Typed provenance pointer emitted by the model and verified by application code. */
+  type: VideoPromptEvidenceType;
+  id: string;
+  /** Optional short quotation for human audit; never used to guess provenance. */
+  quote?: string;
+}
+
 export interface VideoPromptTerminalRequirement {
   requirementId: string;
   priority: "hard" | "soft";
   observableFact: string;
   acceptanceCriteria: string;
+  evidenceRefs: VideoPromptEvidenceRef[];
+  /** Deterministically compiled from evidenceRefs. The model does not author this field. */
   source: "user" | "story_contract" | "approved_end_frame" | "planner";
+  /** Preserves all provenances when one requirement is supported by multiple sources. */
+  sources: Array<"user" | "story_contract" | "approved_end_frame" | "planner">;
 }
 
 export interface VideoPromptContract {
@@ -1000,6 +1078,8 @@ export type CameraRelation =
 export interface CameraGraphNode {
   cameraId: string;
   segmentNos: number[];
+  /** Canonical physical scene contract. This is deliberately separate from palette/style anchors. */
+  sceneId?: string;
   locationId?: string;
   description?: string;
   parentCameraId?: string;
@@ -1023,6 +1103,25 @@ export interface CameraGraphEdge {
 export interface CameraGraph {
   cameras: CameraGraphNode[];
   relations: CameraGraphEdge[];
+}
+
+export interface VideoSceneContract {
+  version: "scene-contract-v1";
+  sceneId: string;
+  displayNameZh?: string;
+  displayNameEn?: string;
+  /** A physical location/space_layout anchor whose approved image is the spatial authority. */
+  layoutAnchorId?: string;
+  cameraIds: string[];
+  segmentNos: number[];
+  continuityMode: "single_space" | "independent_setup";
+  spatialLayoutLock: string;
+  cameraAxis?: string;
+  fixedLandmarks: string[];
+  /** Legacy projects may bind an already-approved boundary instead of regenerating an asset. */
+  authority:
+    | { kind: "scene_layout_asset"; anchorId: string }
+    | { kind: "approved_root_boundary"; keyframeNo: number };
 }
 
 export interface PlanValidationIssue {
@@ -1163,7 +1262,7 @@ export interface RollbackVideoMediaInput {
 }
 
 export interface GenerationQualityReport {
-  policyVersion?: "quality-policy-v2" | "quality-policy-v3" | "quality-policy-v4";
+  policyVersion?: "quality-policy-v2" | "quality-policy-v3" | "quality-policy-v4" | "quality-policy-v5" | "quality-policy-v6" | "quality-policy-v7" | "quality-policy-v8" | "quality-policy-v9" | "quality-policy-v10";
   evaluationStatus?: "completed" | "partial" | "adjudication_required" | "technical_failed" | "reference_missing" | "unavailable" | "not_run";
   technicalError?: string;
   technicalRetryable?: boolean;
@@ -1185,6 +1284,8 @@ export interface GenerationQualityReport {
   layoutScore: number | null;
   promptAlignmentScore: number | null;
   continuityScore: number | null;
+  styleFidelityScore?: number | null;
+  styleScoreApplicable?: boolean;
   singleTakeScore?: number | null;
   artifactIssues: string[];
   passed: boolean;
@@ -1207,6 +1308,8 @@ export interface GenerationQualityReport {
   adjudicationRequired?: boolean;
   adjudicationPerformed?: boolean;
   adjudicationReason?: string;
+  /** Legacy whole-image veto preserved for manual review without buying a second model call. */
+  unsupportedModelVetoDetected?: boolean;
   resolvedIssueIds?: string[];
   openHardIssueIds?: string[];
   deferredVideoIssueResults?: DeferredVideoIssueResult[];
@@ -1237,6 +1340,7 @@ export interface GenerationQualityReport {
 
 export type AtomicVisualRequirementDomain =
   | "identity"
+  | "style"
   | "layout"
   | "brand_text"
   | "game_ui"
@@ -1373,7 +1477,7 @@ export interface GenerationIssueLedgerEntry {
   fingerprint: string;
   requirementId?: string;
   defectType?: string;
-  category: "text_brand" | "game_ui" | "anatomy" | "identity" | "layout" | "continuity" | "artifact";
+  category: "text_brand" | "game_ui" | "anatomy" | "identity" | "style" | "layout" | "continuity" | "artifact";
   region?: string;
   summary: string;
   target?: string;
@@ -1452,6 +1556,7 @@ export interface OnePromptVideoPlan {
   storyboardBrief?: StoryboardBrief[];
   segmentRenderDescriptions?: SegmentRenderDescription[];
   cameraGraph?: CameraGraph;
+  sceneContracts?: VideoSceneContract[];
   transitionReferencePlan?: unknown[];
   transitionReferenceArtifacts?: TransitionReferenceArtifact[];
   finalTransitionPlan?: FinalTransitionPlan[];
@@ -1461,7 +1566,6 @@ export interface OnePromptVideoPlan {
   artifactMetadata?: Record<string, ArtifactMetadata>;
   mediaRevisionHistory?: Record<string, VideoMediaRevision[]>;
   generationQualityReports?: GenerationQualityReport[];
-  plannerShadow?: Record<string, unknown>;
   plannerWarnings?: string[];
   storyboardPlan?: unknown;
   promptDetailPlan?: VideoPromptDetailPlan;
@@ -1504,6 +1608,7 @@ export interface UpdateShotInput {
   camera?: string;
   action?: string;
   imagePrompt?: string;
+  imagePromptEditContract?: ImagePromptEditContract;
   videoPrompt?: string;
   negativePrompt?: string;
   subtitle?: string;

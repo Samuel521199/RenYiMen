@@ -73,6 +73,7 @@ export function readCameraGraph(value: unknown): CameraGraph {
     return [{
       cameraId,
       segmentNos: array(item.segmentNos ?? item.segment_nos ?? item.segments).map(number).filter((entry) => entry > 0),
+      sceneId: optionalText(item.sceneId ?? item.scene_id),
       locationId: optionalText(item.locationId ?? item.location_id),
       description: optionalText(item.description),
       parentCameraId: optionalText(item.parentCameraId ?? item.parent_camera_id),

@@ -315,6 +315,7 @@ function domainLabel(requirement: AtomicVisualRequirement, lang: QualityDisplayL
   if (lang === "en") return requirement.domain.replace("_", " ");
   return {
     identity: "身份",
+    style: "渲染风格",
     layout: "构图",
     brand_text: "品牌文字",
     game_ui: "界面",

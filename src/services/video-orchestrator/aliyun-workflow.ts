@@ -34,17 +34,26 @@ import {
   withProviderCapacity,
   type ProviderSchedulingContext,
 } from "./provider-capacity";
+import {
+  readProductionCircuit,
+  recordProductionCircuitFailure,
+  recordProductionCircuitSuccess,
+} from "./production-job-queue";
 
 const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const IMAGE_PATH = "/api/v1/services/aigc/image-generation/generation";
 const VIDEO_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
-const ONE_PROMPT_VIDEO_MODEL = "happyhorse-1.1-r2v";
+const ONE_PROMPT_VIDEO_MODEL = "wan2.7-i2v-2026-04-25";
 type DashScopeTaskStatus = "pending" | "running" | "succeeded" | "failed";
 
 export interface DashScopeTaskResult {
   status: DashScopeTaskStatus;
   resultUrl?: string;
   errorMessage?: string;
+  upstreamStatus?: string;
+  upstreamSubmittedAt?: string;
+  upstreamScheduledAt?: string;
+  upstreamEndedAt?: string;
   raw?: unknown;
 }
 
@@ -113,6 +122,8 @@ export async function submitAliyunImageTask(params: {
   negativePrompt?: string;
   referenceImageUrls?: string[];
   referenceUsageNotes?: string[];
+  /** Required references are contractual inputs and may never be dropped. */
+  referencePolicy?: "none" | "optional" | "required";
   aspectRatio: VideoAspectRatio;
   seed?: number;
   preparedPromptReport?: AliyunImagePromptPreparationReport;
@@ -123,6 +134,11 @@ export async function submitAliyunImageTask(params: {
   const referenceImageUrls = (params.referenceImageUrls ?? [])
     .filter(Boolean)
     .slice(0, ONE_PROMPT_MAX_REFERENCE_IMAGES);
+  const referencePolicy = params.referencePolicy
+    ?? (referenceImageUrls.length ? "optional" : "none");
+  if (referencePolicy === "required" && !referenceImageUrls.length) {
+    throw new Error("REQUIRED_IMAGE_REFERENCE_MISSING: generation blocked before provider submission");
+  }
   const finalPrompt = supportsNegativePrompt || !params.negativePrompt
     ? params.prompt
     : `${params.prompt}\nAvoid: ${params.negativePrompt}`;
@@ -179,6 +195,7 @@ export async function submitAliyunImageTask(params: {
     negativePromptLength: params.negativePrompt?.length ?? 0,
     submittedNegativePromptLength: fittedNegativePrompt.length,
     referenceImageCount: referenceImageUrls.length,
+    referencePolicy,
     supportsNegativePrompt,
     seed: params.seed,
   });
@@ -188,48 +205,42 @@ export async function submitAliyunImageTask(params: {
   if (params.schedulingContext && !lease) {
     throw new ProviderCapacityError("Image generation capacity is full; the image remains queued");
   }
+  let submittedTaskId = "";
   try {
-    const taskId = await submitDashScopeAsync(
+    submittedTaskId = await submitDashScopeAsync(
       IMAGE_PATH,
       buildBody(fittedPrompt, referenceImageUrls.length > 0),
       "阿里云万相图片生成",
     );
-    if (lease) await attachUpstreamTaskToProviderLease(lease.leaseToken, taskId);
-    return taskId;
-  } catch (error) {
-    if (!referenceImageUrls.length) {
-      if (lease) await returnProviderLeaseToQueue(lease.leaseToken, error).catch(() => undefined);
-      throw error;
+    if (lease) {
+      await attachUpstreamTaskToProviderLease(lease.leaseToken, submittedTaskId)
+        .catch((error) => logOnePromptVideo("aliyun.image.submit.lease_attach.error", {
+          taskId: submittedTaskId,
+          referencePolicy,
+          ...errorForLog(error),
+        }, "warn"));
     }
-    const fallbackPromptReport = await prepareAliyunImagePromptForSubmission(
-      params.prompt,
-      params.negativePrompt,
-    );
-    await logOnePromptVideo("aliyun.image.submit.reference_fallback", {
+    return submittedTaskId;
+  } catch (error) {
+    // Preserve the declared input contract. Retrying a referenced request as
+    // text-only can silently redesign a 3D identity as an unrelated 2D asset.
+    await logOnePromptVideo("aliyun.image.submit.reference_preserved_failure", {
       model: imageModel,
       referenceImageCount: referenceImageUrls.length,
-      submittedPromptLength: fallbackPromptReport.submittedLength,
-      modelCompactionAttempted: fallbackPromptReport.modelCompactionAttempted,
-      modelCompactionSucceeded: fallbackPromptReport.modelCompactionSucceeded,
+      referencePolicy,
+      textOnlyFallbackBlocked: true,
       ...errorForLog(error),
     }, "warn");
-    try {
-      const taskId = await submitDashScopeAsync(
-      IMAGE_PATH,
-      buildBody(fallbackPromptReport.prompt, false),
-      "阿里云万相图片生成",
-      );
-      if (lease) await attachUpstreamTaskToProviderLease(lease.leaseToken, taskId);
-      return taskId;
-    } catch (fallbackError) {
-      if (lease) await returnProviderLeaseToQueue(lease.leaseToken, fallbackError).catch(() => undefined);
-      throw fallbackError;
+    if (lease && !submittedTaskId) {
+      await returnProviderLeaseToQueue(lease.leaseToken, error).catch(() => undefined);
     }
+    throw error;
   }
 }
 
 const PRIORITY_PROMPT_MARKERS = [
   "MULTI-IMAGE INPUT MAP",
+  "AUTHORITATIVE PERSON IDENTITY + RENDERING STYLE REFERENCE CONTRACT",
   "MANDATORY RETRY CORRECTION",
   "INCREMENTAL CANDIDATE IMPROVEMENT",
   "LOCAL IMAGE REPAIR",
@@ -273,6 +284,20 @@ interface ImagePromptFitDetail {
   protectedUnits: ImagePromptUnit[];
 }
 
+export class ImagePromptContractBudgetError extends Error {
+  readonly fitReport: AliyunImagePromptFitReport;
+  readonly retryFromStage = "asset_contract";
+
+  constructor(reason: string, detail: ImagePromptFitDetail) {
+    super(
+      `Image prompt contract invalid: protected facts exceed the provider budget (${reason}). `
+      + "Repair the structured asset/frame contract; generation was not submitted.",
+    );
+    this.name = "ImagePromptContractBudgetError";
+    this.fitReport = detail.report;
+  }
+}
+
 export interface ProtectedImagePromptFact {
   id: string;
   text: string;
@@ -286,6 +311,10 @@ const IMAGE_PROMPT_PRIORITY_ORDER: ImagePromptUnitPriority[] = [
   "core",
   "decorative",
 ];
+
+function isProtectedPromptUnit(unit: ImagePromptUnit): boolean {
+  return unit.priority !== "decorative";
+}
 
 function sortPromptUnits(units: ImagePromptUnit[]): ImagePromptUnit[] {
   return [...units].sort(
@@ -487,27 +516,21 @@ function fitAliyunImagePromptDetailed(prompt: string): ImagePromptFitDetail {
   }
 
   const { units, removedDuplicateUnits } = imagePromptUnits(normalized);
-  const protectedUnits = units.filter((unit) =>
-    unit.priority === "repair" || unit.priority === "authority" || unit.priority === "negative"
-  );
+  const protectedUnits = units.filter(isProtectedPromptUnit);
   const hasCriticalUnits = protectedUnits.length > 0;
   let selection = selectPromptUnits(
     units,
     ONE_PROMPT_IMAGE_PROMPT_COMPACTION_THRESHOLD_CHARS,
     hasCriticalUnits,
   );
-  let omittedCriticalUnits = selection.omitted.filter((unit) =>
-    unit.priority === "repair" || unit.priority === "authority" || unit.priority === "negative"
-  );
+  let omittedCriticalUnits = selection.omitted.filter(isProtectedPromptUnit);
   if (omittedCriticalUnits.length) {
     selection = extendPromptSelectionWithCriticalUnits(
       selection,
       ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS,
       hasCriticalUnits,
     );
-    omittedCriticalUnits = selection.omitted.filter((unit) =>
-      unit.priority === "repair" || unit.priority === "authority" || unit.priority === "negative"
-    );
+    omittedCriticalUnits = selection.omitted.filter(isProtectedPromptUnit);
   }
   const header = hasCriticalUnits
     ? "CRITICAL GENERATION CONTRACT — APPLY BEFORE ALL OTHER DETAILS\n"
@@ -564,15 +587,45 @@ export function buildAliyunReferenceImageMap(
   if (!references.length) return "";
   return [
     "MULTI-IMAGE INPUT MAP — image numbers below exactly match the uploaded image order",
-    "Each input image has a narrow evidence role. Use only the attributes named in its role note. Everything else in that image is non-authoritative and must not be copied, blended, counted, or treated as a target.",
-    ...references.map((_, index) => [
-      `INPUT IMAGE ${index + 1}`,
-      `Role and allowed inheritance: ${referenceUsageNotes[index]?.trim() || "approved visual reference; use only details explicitly required by the target contract"}`,
-      "Scope boundary: inherit nothing outside this role.",
-    ].join("\n")),
-    "Global forbidden inheritance: unrelated people, pose, expression, background, layout, props, product instances, UI, score, timer, logos, text, lighting, and defects outside each stated role.",
-    "Cross-image rule: never merge unrelated subjects, text, UI, products, or backgrounds merely because they appear in an input image. When roles conflict, obey the target contract and the image explicitly assigned to that attribute.",
+    "Use only each image's named role. Never copy or merge anything outside that role.",
+    ...references.map((_, index) =>
+      `INPUT IMAGE ${index + 1}: ${compileReferenceRoleProtocol(referenceUsageNotes[index])}`
+    ),
+    "GLOBAL EXCLUSIONS: unrelated people, pose, expression, background, layout, props, duplicate products, UI, score, timer, logos, text, lighting, or defects.",
+    "Never merge unrelated subjects, text, UI, products, or backgrounds. If roles conflict, obey the target contract and the image explicitly assigned to that attribute.",
   ].join("\n\n");
+}
+
+export function compileReferenceRoleProtocol(value: string | undefined): string {
+  const note = value?.replace(/\s+/g, " ").trim() || "";
+  const target = note.match(/(?:person asset|asset|anchor)\s+([A-Za-z0-9_-]+)/i)?.[1];
+  const targetField = target ? `; target=${target}` : "";
+  const requiredLiterals = [
+    ...(note.match(/\b[A-Z][A-Z0-9_-]{2,}\b/g) ?? []),
+    ...(note.match(/"[^"]{1,80}"/g) ?? []),
+  ].slice(0, 8);
+  const literalField = requiredLiterals.length
+    ? `; required_literals=${requiredLiterals.join("|")}`
+    : "";
+  if (/HARD IDENTITY \+ HARD RENDERING STYLE|HARD RENDERING STYLE/i.test(note)) {
+    return `role=hard_identity_style${targetField}; inherit=identity,shape,outfit,render_medium,dimensionality,shading,materials; ignore=background,text,layout,unrelated_subjects${literalField}`;
+  }
+  if (/character identity only|identity evidence|identity only/i.test(note)) {
+    return `role=identity_only${targetField}; inherit=identity,shape,outfit; ignore=pose,background,layout,text,unrelated_subjects${literalField}`;
+  }
+  if (/scene[-_ ]layout|spatial layout|camera axis|fixed objects/i.test(note)) {
+    return `role=scene_layout${targetField}; inherit=geometry,axis,fixed_objects,lighting; ignore=identity,text,unrelated_subjects${literalField}`;
+  }
+  if (/style[- ]only|rendering medium|palette|line treatment/i.test(note)) {
+    return `role=style_only${targetField}; inherit=render_medium,palette,edge_treatment; ignore=identity,objects,background_layout,text${literalField}`;
+  }
+  if (/approved (?:source )?(?:ending|end|last) boundary/i.test(note)) {
+    return "role=approved_end_boundary; inherit=terminal_state,composition; ignore=unassigned_attributes";
+  }
+  if (/approved (?:source )?(?:starting|start|first) boundary/i.test(note)) {
+    return "role=approved_start_boundary; inherit=initial_state,composition; ignore=unassigned_attributes";
+  }
+  return `role=approved_reference${targetField}; inherit=contract_named_attributes; ignore=unassigned_pixels${literalField}`;
 }
 
 function assembledAliyunImagePrompt(
@@ -645,13 +698,12 @@ export function validateModelImagePromptCompaction(
 
 function imagePromptCompactionModel(): string {
   return process.env.ALIYUN_IMAGE_PROMPT_COMPACTION_MODEL?.trim()
-    || process.env.ALIYUN_STORYBOARD_MODEL?.trim()
-    || "qwen3.7-plus";
+    || "qwen-flash";
 }
 
 function imagePromptCompactionTimeoutMs(): number {
   const parsed = Number(process.env.ONE_PROMPT_IMAGE_PROMPT_COMPACTION_TIMEOUT_MS);
-  if (!Number.isFinite(parsed)) return 45_000;
+  if (!Number.isFinite(parsed)) return 10_000;
   return Math.max(5_000, Math.min(120_000, Math.round(parsed)));
 }
 
@@ -769,17 +821,46 @@ export async function prepareAliyunImagePromptForSubmission(
     modelCompactionSucceeded: false,
   };
   if (!detail.omittedCriticalUnits.length) return base;
-  if (process.env.ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION?.trim().toLowerCase() === "false") {
-    return {
-      ...base,
-      modelCompactionFailureReason: "disabled_by_configuration",
-    };
+  const modelCompactionEnabled =
+    process.env.ONE_PROMPT_IMAGE_PROMPT_MODEL_COMPACTION?.trim().toLowerCase() === "true";
+  if (!modelCompactionEnabled) {
+    throw new ImagePromptContractBudgetError("model_compaction_disabled", detail);
   }
 
   const facts = protectedImagePromptFacts(detail.protectedUnits);
+  const uniqueRequiredLiterals = [...new Set(facts.flatMap((fact) => fact.requiredLiterals))];
+  const requiredLiteralLength = uniqueRequiredLiterals.join("\n").length;
+  const protectedFactTextLength = facts.map((fact) => fact.text).join("\n").length;
+  if (
+    requiredLiteralLength > ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS
+    || protectedFactTextLength > ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS * 1.6
+  ) {
+    const failureReason = requiredLiteralLength > ONE_PROMPT_IMAGE_PROMPT_MAX_CHARS
+      ? `protected_literals_exceed_provider_budget:${requiredLiteralLength}`
+      : `protected_facts_exceed_lossless_compaction_budget:${protectedFactTextLength}`;
+    await logOnePromptVideo("aliyun.image.prompt_compaction.model.skipped", {
+      model: imagePromptCompactionModel(),
+      originalPromptLength: finalPrompt.length,
+      protectedFactCount: facts.length,
+      protectedFactTextLength,
+      requiredLiteralLength,
+      failureReason,
+      action: "generation_blocked_contract_repair_required",
+    }, "warn");
+    throw new ImagePromptContractBudgetError(failureReason, detail);
+  }
+  const circuitKey = `image-prompt-compaction:${imagePromptCompactionModel()}`;
+  const circuit = await readProductionCircuit(circuitKey);
+  if (circuit.open && circuit.openUntil) {
+    throw new ImagePromptContractBudgetError(
+      `model_compaction_circuit_open_until:${circuit.openUntil.toISOString()}`,
+      detail,
+    );
+  }
   const startedAtMs = Date.now();
   try {
     const modelResult = await compactImagePromptWithModel(finalPrompt, facts, schedulingContext);
+    await recordProductionCircuitSuccess(circuitKey);
     return {
       ...detail.report,
       prompt: modelResult.prompt,
@@ -795,23 +876,24 @@ export async function prepareAliyunImagePromptForSubmission(
     };
   } catch (error) {
     const failureReason = error instanceof Error ? error.message : String(error);
-    await logOnePromptVideo("aliyun.image.prompt_compaction.model.fallback", {
+    const failure = await recordProductionCircuitFailure({
+      key: circuitKey,
+      error,
+      threshold: 2,
+      cooldownMs: 5 * 60_000,
+    });
+    await logOnePromptVideo("aliyun.image.prompt_compaction.model.blocked", {
       model: imagePromptCompactionModel(),
       durationMs: Date.now() - startedAtMs,
       originalPromptLength: finalPrompt.length,
       protectedFactCount: facts.length,
       omittedCriticalUnitCount: detail.omittedCriticalUnits.length,
       failureReason,
-      fallback: "deterministic_semantic_unit_compaction",
+      consecutiveFailures: failure.consecutiveFailures,
+      circuitOpenUntil: failure.openUntil?.toISOString() ?? null,
+      action: "generation_blocked_contract_repair_required",
     }, "warn");
-    return {
-      ...base,
-      modelCompactionAttempted: true,
-      modelCompactionSucceeded: false,
-      modelCompactionModel: imagePromptCompactionModel(),
-      modelCompactionDurationMs: Date.now() - startedAtMs,
-      modelCompactionFailureReason: failureReason,
-    };
+    throw new ImagePromptContractBudgetError(`model_compaction_failed:${failureReason}`, detail);
   }
 }
 
@@ -863,12 +945,15 @@ export function aliyunImageToVideoCapabilities(): ImageToVideoProviderCapabiliti
 
 export function aliyunVideoImageInputCapabilities(): VideoProviderInputCapabilities {
   const modelId = onePromptI2vModel();
+  const normalizedModelId = modelId.toLowerCase();
   const requestedMode = customI2vModelEnabled()
     ? process.env.ALIYUN_I2V_INPUT_MODE?.trim().toLowerCase()
     : "";
-  const defaultMode = modelId.toLowerCase().includes("r2v")
-    ? "multi_reference"
-    : "first_frame_only";
+  const defaultMode = normalizedModelId.startsWith("wan2.7-i2v")
+    ? "native_first_last"
+    : normalizedModelId.includes("r2v")
+      ? "multi_reference"
+      : "first_frame_only";
   const mode = requestedMode === "multi_reference"
     || requestedMode === "native_first_last"
     || requestedMode === "native_first_last_plus_references"
@@ -877,10 +962,10 @@ export function aliyunVideoImageInputCapabilities(): VideoProviderInputCapabilit
   const configuredMax = Number(process.env.ALIYUN_I2V_MAX_IMAGES);
   const maxImages = mode === "first_frame_only"
     ? 1
-    : Number.isInteger(configuredMax) && configuredMax >= 2
-      ? Math.min(ONE_PROMPT_MAX_REFERENCE_IMAGES, configuredMax)
-      : mode === "native_first_last"
-        ? 2
+    : mode === "native_first_last"
+      ? 2
+      : Number.isInteger(configuredMax) && configuredMax >= 2
+        ? Math.min(ONE_PROMPT_MAX_REFERENCE_IMAGES, configuredMax)
         : ONE_PROMPT_MAX_REFERENCE_IMAGES;
   const referenceBinding = {
     transportRole: "reference_image",
@@ -893,11 +978,13 @@ export function aliyunVideoImageInputCapabilities(): VideoProviderInputCapabilit
     maxImages,
     maxPromptCharacters: 5000,
     supportsSemanticEndFramePrompt: true,
-    promptCanAddressInputOrder: true,
+    promptCanAddressInputOrder:
+      mode === "multi_reference" || mode === "native_first_last_plus_references",
     promptReferenceMode: mode === "multi_reference"
       ? "ordered_subject_action"
       : "plain_action",
     preservesTransportOrder: true,
+    nativeBoundariesCarryReferenceIdentity: mode === "native_first_last",
     referenceSelectionMode:
       process.env.ONE_PROMPT_VIDEO_SMART_REFERENCE_SELECTION?.trim().toLowerCase() === "false"
         ? "legacy_priority"
@@ -942,6 +1029,7 @@ export async function submitAliyunImageToVideoTask(params: {
   imageInputs?: VideoImageInput[];
   resolvedImageInputs?: ResolvedVideoImageInputs;
   prompt: string;
+  negativePrompt?: string;
   durationSeconds: number;
   endFrameRequirementLevel?: EndFrameRequirementLevel;
   schedulingContext?: VideoProviderSchedulingContext;
@@ -972,7 +1060,8 @@ export async function submitAliyunImageToVideoTask(params: {
       + "Reduce optional reference images or return to prompt compilation; hard boundary requirements will not be silently truncated.",
     );
   }
-  const duration = clamp(params.durationSeconds, 3, 15);
+  const isWan27I2v = i2vModel.toLowerCase().startsWith("wan2.7-i2v");
+  const duration = clamp(params.durationSeconds, isWan27I2v ? 2 : 3, 15);
   const resolution = process.env.ALIYUN_I2V_RESOLUTION?.trim() || "720P";
   const generateAudio = process.env.ALIYUN_I2V_AUDIO?.trim().toLowerCase() !== "false";
   const isHappyHorse = i2vModel.toLowerCase().includes("happyhorse");
@@ -980,13 +1069,19 @@ export async function submitAliyunImageToVideoTask(params: {
   // does not currently document an `audio` request parameter. Keep the
   // capability prompt-driven unless an explicit compatibility experiment
   // enables the legacy knob.
-  const sendAudioParameter = !isHappyHorse
-    || process.env.ALIYUN_HAPPYHORSE_SEND_AUDIO_PARAMETER?.trim().toLowerCase() === "true";
-  const promptExtend = process.env.ALIYUN_I2V_PROMPT_EXTEND?.trim().toLowerCase() === "true";
+  const sendAudioParameter = isHappyHorse
+    && process.env.ALIYUN_HAPPYHORSE_SEND_AUDIO_PARAMETER?.trim().toLowerCase() === "true";
+  const promptExtend = isWan27I2v
+    ? false
+    : process.env.ALIYUN_I2V_PROMPT_EXTEND?.trim().toLowerCase() === "true";
+  const negativePrompt = isWan27I2v
+    ? params.negativePrompt?.trim().slice(0, 500) ?? ""
+    : "";
   const body = {
     model: i2vModel,
     input: {
       prompt,
+      ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
       media: mapResolvedVideoImagesToTransport(resolvedImages, imageInputCapabilities),
     },
     parameters: {
@@ -1026,6 +1121,7 @@ export async function submitAliyunImageToVideoTask(params: {
     durationSeconds: duration,
     resolution,
     generateAudio,
+    negativePromptLength: negativePrompt.length,
     sendAudioParameter,
     audioControlMode: sendAudioParameter ? "request_parameter_and_prompt" : "prompt_only",
   });
@@ -1102,11 +1198,12 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
     }
     const output = isRecord(raw) && isRecord(raw.output) ? raw.output : undefined;
     const status = String(output?.task_status || "").toUpperCase();
+    const upstreamTiming = extractDashScopeTaskTiming(output);
     if (status === "SUCCEEDED") {
       const resultUrl = extractResultUrl(raw);
       const result = resultUrl
-        ? { status: "succeeded" as const, resultUrl, raw }
-        : { status: "failed" as const, errorMessage: "DashScope 任务成功但未解析到结果 URL", raw };
+        ? { status: "succeeded" as const, resultUrl, upstreamStatus: status, ...upstreamTiming, raw }
+        : { status: "failed" as const, errorMessage: "DashScope 任务成功但未解析到结果 URL", upstreamStatus: status, ...upstreamTiming, raw };
       await logOnePromptVideo("dashscope.task.query.response", {
         taskId,
         httpStatus: res.status,
@@ -1127,7 +1224,7 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
       return result;
     }
     if (status === "FAILED" || status === "CANCELED" || status === "UNKNOWN") {
-      const result = { status: "failed" as const, errorMessage: extractError(raw) || `DashScope 任务状态 ${status}`, raw };
+      const result = { status: "failed" as const, errorMessage: extractError(raw) || `DashScope 任务状态 ${status}`, upstreamStatus: status, ...upstreamTiming, raw };
       await logOnePromptVideo("dashscope.task.query.response", {
         taskId,
         httpStatus: res.status,
@@ -1141,7 +1238,12 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
       );
       return result;
     }
-    const result = { status: status === "RUNNING" ? "running" as const : "pending" as const, raw };
+    const result = {
+      status: status === "RUNNING" ? "running" as const : "pending" as const,
+      upstreamStatus: status,
+      ...upstreamTiming,
+      raw,
+    };
     await logOnePromptVideo("dashscope.task.query.response", {
       taskId,
       httpStatus: res.status,
@@ -1156,6 +1258,30 @@ export async function queryDashScopeTask(taskId: string): Promise<DashScopeTaskR
     await logOnePromptVideo("dashscope.task.query.error", { taskId, ...errorForLog(error) }, "error");
     throw error;
   }
+}
+
+function extractDashScopeTaskTiming(output: Record<string, unknown> | undefined): {
+  upstreamSubmittedAt?: string;
+  upstreamScheduledAt?: string;
+  upstreamEndedAt?: string;
+} {
+  const metrics = output && isRecord(output.task_metrics) ? output.task_metrics : undefined;
+  const readTimestamp = (...keys: string[]): string | undefined => {
+    for (const source of [output, metrics]) {
+      if (!source) continue;
+      for (const key of keys) {
+        const value = source[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+        if (typeof value === "number" && Number.isFinite(value)) return String(value);
+      }
+    }
+    return undefined;
+  };
+  return {
+    upstreamSubmittedAt: readTimestamp("submit_time", "submitted_at", "submitTime"),
+    upstreamScheduledAt: readTimestamp("scheduled_time", "scheduled_at", "start_time", "started_at", "scheduledTime"),
+    upstreamEndedAt: readTimestamp("end_time", "ended_at", "finish_time", "finished_at", "endTime"),
+  };
 }
 
 export async function submitImsComposeJob(params: {

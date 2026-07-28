@@ -6,6 +6,8 @@ import {
   buildLegacyVideoPromptContract,
   compileHappyHorseAudioContract,
   compileHappyHorseVideoPrompt,
+  compileAliyunVideoPrompt,
+  compileWan27VideoPrompt,
   resolveVideoAudioStrategy,
   resolveEndFrameRequirementLevel,
   validateVideoPromptContract,
@@ -56,6 +58,34 @@ test("planner JSON normalizes into a versioned video prompt contract without sel
   assert.deepEqual(contract?.motionSteps, ["Lift the product continuously.", "Settle beside the face."]);
 });
 
+test("typed evidence references deterministically compile provenance without model-authored source", () => {
+  const contract = videoPromptContractFromUnknown({
+    version: "video-prompt-contract-v1",
+    terminal_requirements: [{
+      requirement_id: "terminal.result",
+      priority: "hard",
+      observable_fact: "The approved result is visible.",
+      acceptance_criteria: "The final stable frames show it.",
+      evidence_refs: [
+        { type: "planner_artifact", id: "camera:camera_01" },
+        { type: "story_contract", id: "beat:beat_03" },
+        { type: "user_input", id: "user_prompt" },
+      ],
+    }],
+    motion_steps: ["Move continuously into the result."],
+    preserve_requirements: [],
+    forbidden_outcomes: [],
+    narrative_boundary: "",
+    shot_intent: "",
+  });
+  assert.equal(contract?.terminalRequirements[0]?.source, "user");
+  assert.deepEqual(
+    contract?.terminalRequirements[0]?.sources,
+    ["user", "story_contract", "planner"],
+  );
+  assert.equal(contract?.terminalRequirements[0]?.evidenceRefs.length, 3);
+});
+
 test("terminal provenance aliases are normalized locally while unknown owners still fail", () => {
   const base = {
     version: "video-prompt-contract-v1",
@@ -74,6 +104,15 @@ test("terminal provenance aliases are normalized locally while unknown owners st
   };
   const normalized = videoPromptContractFromUnknown(base);
   assert.equal(normalized?.terminalRequirements[0]?.source, "approved_end_frame");
+
+  const cameraGraphSource = videoPromptContractFromUnknown({
+    ...base,
+    terminal_requirements: [{
+      ...base.terminal_requirements[0],
+      source: "camera_graph_camera_01",
+    }],
+  });
+  assert.equal(cameraGraphSource?.terminalRequirements[0]?.source, "planner");
 
   assert.throws(
     () => videoPromptContractFromUnknown({
@@ -179,6 +218,57 @@ test("compiler does not label an R2V start reference as a hard native first fram
   assert.match(compiled.prompt, /role-labeled reference image/);
   assert.match(compiled.prompt, /APPROVED START REFERENCE TARGET/);
   assert.doesNotMatch(compiled.prompt, /1\. HARD START INPUT/);
+});
+
+test("Wan 2.7 compiler uses native boundary semantics and omits HappyHorse R2V instructions", () => {
+  const contract = buildLegacyVideoPromptContract({
+    terminalState: "The supplied closing composition is fully visible.",
+    motionPath: "The character lowers one hand and continuously turns toward the product.",
+    preserveRequirements: ["same character", "same product", "same camera axis"],
+    narrativeBoundary: "Do not begin the next scene.",
+    shotIntent: "Connect the two approved boundary images.",
+  });
+  const compiled = compileWan27VideoPrompt({
+    modelId: "wan2.7-i2v-2026-04-25",
+    durationSeconds: 10,
+    requirementLevel: "hard_exact",
+    startState: "native opening frame",
+    contract,
+    retryCorrections: [],
+    firstFrameIsNativeInput: true,
+    lastFrameIsNativeInput: true,
+  });
+  assert.match(compiled.prompt, /WAN 2\.7 NATIVE FIRST-LAST FRAME I2V/);
+  assert.match(compiled.prompt, /supplied FIRST_FRAME is the exact opening image/);
+  assert.match(compiled.prompt, /settle exactly into the supplied LAST_FRAME/);
+  assert.doesNotMatch(compiled.prompt, /HAPPYHORSE|role-labeled reference image|Image 1/);
+});
+
+test("Aliyun video prompt dispatch preserves HappyHorse and selects Wan 2.7 by model family", () => {
+  const contract = buildLegacyVideoPromptContract({
+    terminalState: "approved ending",
+    motionPath: "continuous movement",
+    preserveRequirements: [],
+    narrativeBoundary: "",
+    shotIntent: "",
+  });
+  const common = {
+    durationSeconds: 5,
+    requirementLevel: "hard_exact" as const,
+    startState: "approved opening",
+    contract,
+    retryCorrections: [],
+    firstFrameIsNativeInput: true,
+    lastFrameIsNativeInput: true,
+  };
+  assert.match(
+    compileAliyunVideoPrompt({ ...common, modelId: "wan2.7-i2v-2026-04-25" }).prompt,
+    /WAN 2\.7 NATIVE FIRST-LAST FRAME I2V/,
+  );
+  assert.match(
+    compileAliyunVideoPrompt({ ...common, modelId: "happyhorse-1.1-i2v" }).prompt,
+    /HAPPYHORSE FIRST-FRAME I2V/,
+  );
 });
 
 test("HappyHorse audio contract defaults to native ambience and forbids accidental speech", () => {

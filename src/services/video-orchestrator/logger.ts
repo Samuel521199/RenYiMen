@@ -147,10 +147,9 @@ function legacyModuleNameZh(event: string, data: Record<string, unknown>): strin
 }
 
 /**
- * The JSON log keeps every polling and synchronization event. The readable
- * ledger intentionally hides routine polling so a producer sees the actual
- * work: prompt preparation, model calls, checks, repairs and deliverables.
- * Slow or failed infrastructure calls are still surfaced.
+ * The readable ledger keeps candidate-level upstream polling because producers
+ * need to distinguish provider queue/render time from our own polling delay.
+ * Project/page refresh noise remains hidden unless it is slow or failed.
  */
 function shouldWriteReadableLog(
   event: string,
@@ -197,12 +196,47 @@ function formatProductionStepLine(
   if (repairMode) parts.push(`返修方式 ${humanRepairMode(repairMode)}`);
   const waitingMs = numberValue(data.waitingAfterQcMs);
   if (waitingMs !== undefined) parts.push(`质检后等待 ${formatDuration(waitingMs)}`);
+  const pollNo = numberValue(data.upstreamPollNo);
+  if (pollNo !== undefined) parts.push(`第 ${pollNo} 次轮询`);
+  const upstreamStatus = firstText(data, ["upstreamStatus"]);
+  if (upstreamStatus) parts.push(`上游状态 ${humanStatus(upstreamStatus)}`);
+  const elapsedSinceSubmissionMs = numberValue(data.elapsedSinceSubmissionMs);
+  if (elapsedSinceSubmissionMs !== undefined) parts.push(`提交后已等待 ${formatDuration(elapsedSinceSubmissionMs)}`);
+  const upstreamPollTotalMs = numberValue(data.upstreamPollTotalMs);
+  if (upstreamPollTotalMs !== undefined) parts.push(`查询接口累计 ${formatDuration(upstreamPollTotalMs)}`);
+  const nonQueryElapsedMs = numberValue(data.nonQueryElapsedMs);
+  if (nonQueryElapsedMs !== undefined) parts.push(`非查询耗时（上游处理+轮询间隔）${formatDuration(nonQueryElapsedMs)}`);
+  const providerQueueDurationMs = numberValue(data.providerQueueDurationMs);
+  if (providerQueueDurationMs !== undefined) parts.push(`上游排队 ${formatDuration(providerQueueDurationMs)}`);
+  const providerRenderDurationMs = numberValue(data.providerRenderDurationMs);
+  if (providerRenderDurationMs !== undefined) parts.push(`上游实际生成 ${formatDuration(providerRenderDurationMs)}`);
+  const pollDiscoveryDelayMs = numberValue(data.pollDiscoveryDelayMs);
+  if (pollDiscoveryDelayMs !== undefined) parts.push(`完成后发现延迟 ${formatDuration(pollDiscoveryDelayMs)}`);
+  const nextPollDelayMs = numberValue(data.nextPollDelayMs);
+  if (nextPollDelayMs !== undefined) parts.push(`预计 ${formatDuration(nextPollDelayMs)} 后再查`);
+  const qualityReferenceCount = numberValue(data.qualityReferenceCount);
+  const availableQualityReferenceCount = numberValue(data.availableQualityReferenceCount);
+  if (qualityReferenceCount !== undefined) {
+    parts.push(availableQualityReferenceCount !== undefined
+      ? `质检参考图 ${qualityReferenceCount}/${availableQualityReferenceCount} 张`
+      : `质检参考图 ${qualityReferenceCount} 张`);
+  }
+  const adjudicationReason = firstText(data, ["adjudicationReason"]);
+  if (adjudicationReason) parts.push(`二次裁决原因 ${humanAdjudicationReason(adjudicationReason)}`);
   if (typeof data.passed === "boolean") parts.push(`质检 ${data.passed ? "通过" : "打回"}`);
   const attempt = numberValue(data.attempt);
   if (attempt !== undefined && numberValue(data.candidateNo) === undefined) parts.push(`第 ${attempt} 轮`);
   const message = firstText(data, ["errorMessage", "message"]);
   if (message) parts.push(`${state === "失败" ? "原因" : "说明"} ${truncateReadable(message)}`);
   return parts.filter(Boolean).join(" | ");
+}
+
+function humanAdjudicationReason(value: string): string {
+  const labels: Record<string, string> = {
+    high_scores_conflict_with_confirmed_hard_evidence: "整体高分与一条低置信度硬证据冲突",
+    legacy_model_veto_without_supported_hard_evidence: "旧模型给出否决但没有可定位硬证据",
+  };
+  return labels[value] ?? value;
 }
 
 function humanExecutionMethod(value: string): string {
@@ -373,6 +407,9 @@ function humanEventLabel(event: string): string {
     "image.regenerate.start": "重新生成资产图片",
     "image.regenerate.success": "资产图片重新提交完成",
     "reference_selector.output": "选择生成参考图",
+    "reference_selector.vision_eval": "参考图视觉评估完成",
+    "reference_selector.vision_eval_joined": "复用同一批参考图的视觉评估",
+    "reference_selector.vision_eval_fallback": "参考图视觉评估未生效，已使用程序规则降级",
     "prompt_compiler.output": "编译本次生成提示词",
     "image.sync.submit.wait_consistency_references": "等待前置一致性资产完成",
     "image.sync.submit.wait_consistency_approval": "等待前置一致性资产审核锁定",
@@ -438,6 +475,10 @@ function readableDetails(data: Record<string, unknown>): string[] {
   appendDetail(details, "序号", data.clipIndex);
   appendDetail(details, "数量", data.clipCount ?? data.imageCount ?? data.runningCount);
   appendDetail(details, "模型", data.model);
+  appendDetail(details, "选择方式", data.selectionMode);
+  appendDetail(details, "候选图", data.candidateCount);
+  appendDetail(details, "超时上限", typeof data.timeoutMs === "number" ? formatDuration(data.timeoutMs) : undefined);
+  appendDetail(details, "降级原因", data.fallbackReason);
   appendDetail(details, "任务", shortId(data.taskId ?? data.imageTaskId ?? data.clipTaskId ?? data.jobId));
   appendDetail(details, "接口", data.route);
   appendDetail(details, "方式", data.mode);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { normalizePlanningStage } from "./planning-performance.ts";
+import { normalizePlanningStage, planningAttemptTaskId } from "./planning-performance.ts";
 
 const root = process.cwd();
 
@@ -32,6 +32,12 @@ test("normalizes segment and repair stage names for stable production percentile
   });
 });
 
+test("uses one stable root task id while assigning a unique id to every execution attempt", () => {
+  assert.equal(planningAttemptTaskId("root-task", 1), "root-task");
+  assert.equal(planningAttemptTaskId("root-task", 2), "root-task:attempt:2");
+  assert.equal(planningAttemptTaskId("root-task", 3), "root-task:attempt:3");
+});
+
 test("performance persistence stores timings and counters without prompts or media", async () => {
   const schema = await readFile(`${root}/prisma/schema.prisma`, "utf8");
   const service = await readFile(
@@ -44,8 +50,13 @@ test("performance persistence stores timings and counters without prompts or med
   );
   assert.match(schema, /model VideoPlanningRunMetric/);
   assert.match(schema, /model VideoPlanningStageMetric/);
+  assert.match(metricSchema, /rootTaskId\s+String/);
+  assert.match(metricSchema, /attemptNumber\s+Int/);
+  assert.match(metricSchema, /@@unique\(\[rootTaskId, attemptNumber\]\)/);
   assert.match(service, /percentile_cont\(0\.95\)/);
   assert.match(service, /first_pass_count/);
+  assert.match(service, /WITH filtered_attempts AS/);
+  assert.match(service, /logical_runs AS/);
   assert.doesNotMatch(metricSchema, /prompt|imageUrl|referenceUrl/i);
   assert.doesNotMatch(service, /systemPrompt|userContent|rawSummary/);
 });
@@ -60,10 +71,17 @@ test("planner lifecycle records queue, real model stages, and terminal state", a
     "utf8",
   );
   assert.match(projectService, /queuePlanningPerformanceRun\(\{/);
-  assert.match(projectService, /startPlanningPerformanceRun\(performanceTaskId\)/);
-  assert.match(projectService, /recordPlanningStageObservation\(performanceTaskId, metric\)/);
+  assert.match(projectService, /startPlanningPerformanceRun\(performanceTaskId,/);
+  assert.match(projectService, /recordPlanningStageObservation\(performanceAttemptTaskId, metric\)/);
   assert.match(projectService, /finishPlanningPerformanceRun\(\{/);
+  assert.match(projectService, /planningAttemptNumber: job\.attempt/);
+  assert.match(projectService, /counters: performanceCounters/);
   assert.match(planner, /reportPlannerStageMetric\(\{/);
+  assert.ok(
+    planner.indexOf("const storyContractRepairDurationMs = Date.now() - storyContractStartedAt")
+      < planner.indexOf("const semanticStoryResult = await ensureStoryboardSemanticQuality"),
+    "story contract repair timing must stop before the semantic critic starts",
+  );
 });
 
 test("admin baseline API and dashboard expose real P50 and P95 metrics", async () => {

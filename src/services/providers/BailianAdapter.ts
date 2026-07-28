@@ -211,7 +211,7 @@ function resolveDashScopeModel(payload: StandardPayload): string {
     ]) ?? "";
   if (fromFlag) return fromFlag;
   const tid = payload.templateId?.trim() ?? "";
-  if (tid && !tid.includes("/") && !tid.includes("\\") && tid.length < 128) return tid;
+  if (/^(?:wan|happyhorse|pixverse|kling|vidu)[a-z0-9._/-]*$/i.test(tid)) return tid;
   return "wan2.7-i2v-2026-04-25";
 }
 
@@ -236,8 +236,8 @@ function shouldForceHappyHorseModel(): boolean {
   const raw =
     process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL ??
     process.env.DASHSCOPE_FORCE_HAPPYHORSE_MODEL;
-  if (raw == null || raw.trim() === "") return true;
-  return !["0", "false", "off", "no"].includes(raw.trim().toLowerCase());
+  if (raw == null || raw.trim() === "") return false;
+  return ["1", "true", "on", "yes"].includes(raw.trim().toLowerCase());
 }
 
 /** 表单 / flags / 顶层 inputs 请求的成片时长（秒），钳制在 DashScope 常见区间 3–15 */
@@ -306,23 +306,35 @@ function buildR2vReferenceMediaList(
   return [];
 }
 
-/** 普通图生视频（i2v）：仅一张 `first_frame` */
-function buildI2vFirstFrameMedia(
+/** Wan I2V: one native first frame, optionally followed by one native last frame. */
+function buildI2vBoundaryMedia(
   singleImageUrl: string | undefined,
-  imageUrls: string[]
-): Array<{ type: "first_frame"; url: string }> {
+  imageUrls: string[],
+  explicitLastFrameUrl?: string,
+): Array<{ type: "first_frame" | "last_frame"; url: string }> {
   const trimmed =
     typeof singleImageUrl === "string" && singleImageUrl.trim() && /^https?:\/\//i.test(singleImageUrl.trim())
       ? singleImageUrl.trim()
       : undefined;
-  const url = trimmed ?? imageUrls[0];
-  if (!url) return [];
-  return [{ type: "first_frame", url }];
+  const firstUrl = trimmed ?? imageUrls[0];
+  if (!firstUrl) return [];
+  const explicitLast =
+    typeof explicitLastFrameUrl === "string"
+    && explicitLastFrameUrl.trim()
+    && /^https?:\/\//i.test(explicitLastFrameUrl.trim())
+      ? explicitLastFrameUrl.trim()
+      : undefined;
+  const lastUrl = explicitLast ?? imageUrls.find((url) => url !== firstUrl);
+  return [
+    { type: "first_frame", url: firstUrl },
+    ...(lastUrl ? [{ type: "last_frame" as const, url: lastUrl }] : []),
+  ];
 }
 
 /** 万相 / HappyHorse：`input.media`（r2v 为 `reference_image`，i2v 为 `first_frame`）+ `parameters` */
 export type BailianVideoSynthesisInputWan27 = {
   prompt: string;
+  negative_prompt?: string;
   media: Array<{ type: string; url: string }>;
 };
 
@@ -357,7 +369,8 @@ export class BailianAdapter implements IProviderAdapter {
     const targetModel = shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
-    const isR2v = targetModel.toLowerCase().includes("r2v");
+    const modelLc = targetModel.toLowerCase();
+    const isR2v = modelLc.includes("r2v");
     if (isR2v) {
       const referenceBinding = {
         transportRole: "reference_image",
@@ -383,16 +396,18 @@ export class BailianAdapter implements IProviderAdapter {
         },
       };
     }
+    const isWan27I2v = modelLc.startsWith("wan2.7-i2v");
     return {
       providerId: "ALIYUN_BAILIAN",
       modelId: targetModel,
       transportSchema: targetModel.toLowerCase().includes("wan2") || targetModel.toLowerCase().includes("happyhorse")
         ? "dashscope_media"
         : "named_fields",
-      maxImages: 1,
+      maxImages: isWan27I2v ? 2 : 1,
       maxPromptCharacters: 5000,
       supportsSemanticEndFramePrompt: true,
-      promptCanAddressInputOrder: true,
+      promptCanAddressInputOrder: false,
+      nativeBoundariesCarryReferenceIdentity: isWan27I2v,
       roleBindings: {
         first_frame: {
           transportRole: "first_frame",
@@ -400,6 +415,14 @@ export class BailianAdapter implements IProviderAdapter {
           nativeBoundaryControl: true,
           maxCount: 1,
         },
+        ...(isWan27I2v ? {
+          last_frame: {
+            transportRole: "last_frame",
+            fieldName: "last_frame_url",
+            nativeBoundaryControl: true,
+            maxCount: 1,
+          },
+        } : {}),
       },
     };
   }
@@ -433,6 +456,9 @@ export class BailianAdapter implements IProviderAdapter {
       readStringFlag(flags, ["imageUrl", "image_url", "firstFrameUrl", "first_frame_url"]) ??
       readStringFromNode(inputNode, ["image_url", "imageUrl", "first_frame_url", "firstFrameUrl"]) ??
       findFirstImageHttpUrl(payload.nodeInputs);
+    const lastFrameUrl =
+      readStringFlag(flags, ["lastFrameUrl", "last_frame_url", "endFrameUrl", "end_frame_url"]) ??
+      readStringFromNode(inputNode, ["last_frame_url", "lastFrameUrl", "end_frame_url", "endFrameUrl"]);
     const hasRefArray = refImageUrls.length > 0;
     const hasSingle = typeof imageUrl === "string" && imageUrl.trim() && /^https?:\/\//i.test(imageUrl.trim());
     if (!hasSingle && !hasRefArray) {
@@ -471,7 +497,7 @@ export class BailianAdapter implements IProviderAdapter {
         parameters.prompt_extend =
           readBooleanFlag(flags, ["prompt_extend", "promptExtend"]) ??
           readBooleanFromNode(inputNode, ["prompt_extend", "promptExtend"]) ??
-          true;
+          false;
       }
       if (isRecord(extraParams)) {
         Object.assign(parameters, extraParams);
@@ -480,12 +506,10 @@ export class BailianAdapter implements IProviderAdapter {
         delete parameters.prompt_extend;
         delete parameters.promptExtend;
       }
-      parameters.ratio = resolveRatio(payload, inputNode);
-
       const isR2v = modelLc.includes("r2v");
       const media = isR2v
         ? buildR2vReferenceMediaList(imageUrl, refImageUrls)
-        : buildI2vFirstFrameMedia(imageUrl, refImageUrls);
+        : buildI2vBoundaryMedia(imageUrl, refImageUrls, lastFrameUrl);
       if (media.length === 0) {
         throw new ProviderError(
           "无法组装图生视频所需的 input.media（请检查图片 URL）",
@@ -494,10 +518,20 @@ export class BailianAdapter implements IProviderAdapter {
         );
       }
 
+      if (!modelLc.startsWith("wan2.7-i2v")) {
+        parameters.ratio = resolveRatio(payload, inputNode);
+      }
+      const negativePrompt =
+        readStringFlag(flags, ["negativePrompt", "negative_prompt"]) ??
+        readStringFromNode(inputNode, ["negativePrompt", "negative_prompt"]);
+
       return {
         model: targetModel,
         input: {
           prompt: prompt || "",
+          ...(modelLc.startsWith("wan2.7-i2v") && negativePrompt
+            ? { negative_prompt: negativePrompt.slice(0, 500) }
+            : {}),
           media,
         },
         parameters,

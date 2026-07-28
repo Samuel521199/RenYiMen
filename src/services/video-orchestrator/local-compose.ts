@@ -368,7 +368,8 @@ function readOssConfig(): OssConfig {
   const accessKeyId = process.env.OSS_ACCESS_KEY_ID?.trim();
   const secretAccessKey = process.env.OSS_SECRET_ACCESS_KEY?.trim();
   const bucket = process.env.OSS_BUCKET_NAME?.trim();
-  const publicDomain = process.env.OSS_PUBLIC_DOMAIN?.trim();
+  const publicDomain = process.env.OSS_MEDIA_PUBLIC_DOMAIN?.trim()
+    || process.env.OSS_PUBLIC_DOMAIN?.trim();
   if (!region || !accessKeyId || !secretAccessKey || !bucket || !publicDomain) {
     throw new Error("Local composition needs OSS_REGION / OSS_ACCESS_KEY_ID / OSS_SECRET_ACCESS_KEY / OSS_BUCKET_NAME / OSS_PUBLIC_DOMAIN.");
   }
@@ -822,6 +823,8 @@ async function uploadFileToOss(cfg: OssConfig, key: string, filePath: string): P
     Body: body,
     ContentLength: body.length,
     ContentType: "video/mp4",
+    CacheControl: "public, max-age=31536000, immutable",
+    ContentDisposition: "inline",
   }));
   return buildPublicUrl(cfg.publicDomain, key);
 }

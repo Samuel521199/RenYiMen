@@ -4,7 +4,11 @@ import {
   structuredVisionAvailable,
   structuredVisionModelName,
 } from "./generation-quality-evaluator";
-import { videoPromptContractFromUnknown } from "./video-terminal-contract";
+import { frameContractContainsMotionProcess } from "./frame-contract";
+import {
+  validateVideoPromptContract,
+  videoPromptContractFromUnknown,
+} from "./video-terminal-contract";
 import type {
   SegmentRenderDescription,
   VideoBoundaryContract,
@@ -33,9 +37,24 @@ const MOTION_PLANNER_SYSTEM_PROMPT = [
   "Never add a cut, dissolve, teleport, scene replacement, hidden montage, new story event, or new asset.",
   "If the transition cannot be reached in the fixed duration as one continuous take, set physically_reachable=false and explain in warnings; do not disguise it.",
   "Return strict JSON only. The response must include start_frame_contract, end_frame_contract, motion_contract, single_take_contract with physically_reachable boolean, motion_checkpoints, and video_prompt_contract version video-prompt-contract-v1.",
+  "start_frame_contract and end_frame_contract are STATIC SNAPSHOTS. Every nested text field must describe only visible state at that instant; never describe movement, transition, process, or a from-to path there.",
   "Each motion_checkpoints item must describe a real intermediate state using local_time_seconds, purpose, scene, action, camera, visible_anchor_ids, reference_type (text, image_prompt, or mixed), and image_prompt when a reference image is required.",
+  "motion_checkpoints are internal states only: every local_time_seconds must be strictly greater than 0 and strictly less than the fixed duration. Do not repeat either boundary frame as a checkpoint.",
+  "The user message gives MAXIMUM_MOTION_CHECKPOINTS. Return no more than that number. Prefer a minimal preparation -> decisive action -> resolved intermediate path; do not pad the list.",
   "Treat the provisional micro shots as story intent only. Reconcile every checkpoint with the pixels in both approved boundary images and keep each state physically reachable from its neighbors.",
   "video_prompt_contract must contain 1-3 terminal_requirements with at least one hard item, 1-3 motion_steps, at most 5 preserve_requirements, at most 5 forbidden_outcomes, narrative_boundary, and shot_intent.",
+  "Every terminal_requirements item must contain these exact non-empty keys: requirement_id, priority (hard or soft), observable_fact, acceptance_criteria, and evidence_refs. Do not output source or sources; application code compiles provenance from typed evidence references.",
+  "motion_steps, preserve_requirements, and forbidden_outcomes must be arrays of non-empty strings, not arrays of objects.",
+].join("\n");
+
+const MOTION_PLANNER_REPAIR_SYSTEM_PROMPT = [
+  MOTION_PLANNER_SYSTEM_PROMPT,
+  "",
+  "STRUCTURED CONTRACT REPAIR MODE:",
+  "The previous response failed deterministic validation. Repair only the listed violations.",
+  "Return one complete replacement object for this segment, not a sparse patch and not an explanation.",
+  "Do not change approved story meaning, duration, boundary images, asset identities, camera axis, or fields that already satisfy the contract.",
+  "The deterministic validator will run again. A claim that the issue is fixed has no effect unless the returned JSON actually satisfies the exact schema.",
 ].join("\n");
 
 export async function observeApprovedBoundaryFrame(params: {
@@ -103,10 +122,15 @@ export async function planMediaConditionedSegment(params: {
 }): Promise<VideoMediaConditionedSegmentPlan> {
   const refinedAt = new Date().toISOString();
   if (!structuredVisionAvailable()) {
-    return fallbackPlan(params, refinedAt, "Structured vision is unavailable; retained the audited provisional motion contract.");
+    return validatedFallbackPlan(
+      params,
+      refinedAt,
+      "Structured vision is unavailable; retained an audited conservative fallback contract.",
+    );
   }
+  let raw: unknown;
   try {
-    const raw = await callStructuredVisionModel([
+    raw = await callStructuredVisionModel([
       {
         type: "text",
         text: [
@@ -116,7 +140,9 @@ export async function planMediaConditionedSegment(params: {
           `Observed start facts: ${JSON.stringify(params.startFacts)}`,
           `Observed end facts: ${JSON.stringify(params.endFacts)}`,
           `Provisional pre-image plan (advisory only): ${JSON.stringify(params.provisional ?? {})}`,
+          `ALLOWED_TERMINAL_EVIDENCE: ${JSON.stringify(mediaConditionedEvidenceCatalog(params))}`,
           `Fixed duration: ${params.segment.durationSeconds} seconds.`,
+          `MAXIMUM_MOTION_CHECKPOINTS: ${mediaConditionedCheckpointLimit(params.segment.durationSeconds)}.`,
           "Output only this segment. Do not change timings, boundaries, events, assets, or story meaning.",
         ].join("\n"),
       },
@@ -127,10 +153,48 @@ export async function planMediaConditionedSegment(params: {
     ], MOTION_PLANNER_SYSTEM_PROMPT, params.schedulingContext);
     return normalizeMediaPlan(raw, params, refinedAt);
   } catch (error) {
-    return fallbackPlan(
+    if (raw !== undefined && isMediaContractValidationError(error)) {
+      try {
+        const repairedRaw = await callStructuredVisionModel([
+          {
+            type: "text",
+            text: [
+              `VALIDATION_FAILURE: ${errorMessage(error)}`,
+              `INVALID_RESPONSE_TO_REPAIR: ${JSON.stringify(raw)}`,
+              `IMMUTABLE_SEGMENT: ${JSON.stringify(params.segment)}`,
+              `IMMUTABLE_START_BOUNDARY: ${JSON.stringify(params.startContract)}`,
+              `IMMUTABLE_END_BOUNDARY: ${JSON.stringify(params.endContract)}`,
+              `ALLOWED_TERMINAL_EVIDENCE: ${JSON.stringify(mediaConditionedEvidenceCatalog(params))}`,
+              `MAXIMUM_MOTION_CHECKPOINTS: ${mediaConditionedCheckpointLimit(params.segment.durationSeconds)}.`,
+              "Return the complete corrected segment contract only.",
+            ].join("\n"),
+          },
+          { type: "text", text: "START IMAGE — unchanged approved pixel authority." },
+          { type: "image_url", image_url: { url: params.startImageUrl } },
+          { type: "text", text: "END IMAGE — unchanged approved pixel authority." },
+          { type: "image_url", image_url: { url: params.endImageUrl } },
+        ], MOTION_PLANNER_REPAIR_SYSTEM_PROMPT, params.schedulingContext);
+        const repaired = normalizeMediaPlan(repairedRaw, params, refinedAt);
+        return {
+          ...repaired,
+          planningStatus: "media_conditioned_repaired",
+          warnings: [
+            ...repaired.warnings,
+            `The first media-conditioned response failed deterministic validation and was replaced by one scoped contract repair: ${errorMessage(error)}`,
+          ],
+        };
+      } catch (repairError) {
+        return validatedFallbackPlan(
+          params,
+          refinedAt,
+          `Media-conditioned contract repair failed; used an audited conservative fallback. Initial error: ${errorMessage(error)}. Repair error: ${errorMessage(repairError)}`,
+        );
+      }
+    }
+    return validatedFallbackPlan(
       params,
       refinedAt,
-      `Media-conditioned planning failed: ${error instanceof Error ? error.message : String(error)}`,
+      `Media-conditioned planning infrastructure failed; used an audited conservative fallback: ${errorMessage(error)}`,
     );
   }
 }
@@ -169,7 +233,7 @@ function normalizeMediaPlan(
   });
   const microShotRevisionId = resolvedMicroShots[0]?.resolvedRevisionId
     ?? buildResolvedRevisionId(params, resolvedMicroShots);
-  return {
+  const normalized: VideoMediaConditionedSegmentPlan = {
     version: "media-conditioned-segment-v1",
     segmentNo: params.segment.segmentNo,
     startKeyframeNo: params.segment.startKeyframeNo,
@@ -189,9 +253,12 @@ function normalizeMediaPlan(
     refinedAt,
     modelName: structuredVisionModelName(),
   };
+  validateMediaConditionedEvidence(normalized, params);
+  validateMediaConditionedSegmentPlan(normalized, params.segment);
+  return normalized;
 }
 
-function fallbackPlan(
+function validatedFallbackPlan(
   params: Parameters<typeof planMediaConditionedSegment>[0],
   refinedAt: string,
   warning: string,
@@ -202,7 +269,7 @@ function fallbackPlan(
       ?? params.segment.usesConsistencyAnchors
       ?? [],
   };
-  const existingContract = videoPromptContractFromUnknown(provisional);
+  const existingContract = readValidVideoPromptContract(provisional);
   const videoPromptContract: VideoPromptContract = existingContract ?? {
     version: "video-prompt-contract-v1",
     terminalRequirements: [{
@@ -215,7 +282,12 @@ function fallbackPlan(
         params.endFacts.composition,
       ].filter(Boolean).join("; "),
       acceptanceCriteria: "The final stable frames visibly match the approved end boundary image and its canonical story state.",
+      evidenceRefs: [{
+        type: "approved_end_frame",
+        id: `keyframe:${params.segment.endKeyframeNo}`,
+      }],
       source: "approved_end_frame",
+      sources: ["approved_end_frame"],
     }],
     motionSteps: [
       params.segment.motion
@@ -235,8 +307,12 @@ function fallbackPlan(
   const fallbackCheckpoints = params.provisional?.motionCheckpoints?.length
     ? params.provisional.motionCheckpoints
     : params.segment.microShots ?? [];
+  const boundedFallbackCheckpoints = compactFallbackCheckpoints(
+    fallbackCheckpoints,
+    mediaConditionedCheckpointLimit(params.segment.durationSeconds),
+  );
   const resolvedMicroShots = materializeResolvedMicroShots({
-    checkpoints: fallbackCheckpoints,
+    checkpoints: boundedFallbackCheckpoints,
     segment: params.segment,
     startFacts: params.startFacts,
     endFacts: params.endFacts,
@@ -247,18 +323,18 @@ function fallbackPlan(
   });
   const microShotRevisionId = resolvedMicroShots[0]?.resolvedRevisionId
     ?? buildResolvedRevisionId(params, resolvedMicroShots);
-  return {
+  const fallback: VideoMediaConditionedSegmentPlan = {
     version: "media-conditioned-segment-v1",
     segmentNo: params.segment.segmentNo,
     startKeyframeNo: params.segment.startKeyframeNo,
     endKeyframeNo: params.segment.endKeyframeNo,
     startBoundaryImageUrl: params.startImageUrl,
     endBoundaryImageUrl: params.endImageUrl,
-    startFrameContract: params.provisional?.startFrameContract ?? {
+    startFrameContract: {
       canonicalBoundary: params.startContract,
       observedFacts: params.startFacts,
     },
-    endFrameContract: params.provisional?.endFrameContract ?? {
+    endFrameContract: {
       canonicalBoundary: params.endContract,
       observedFacts: params.endFacts,
     },
@@ -282,6 +358,9 @@ function fallbackPlan(
     warnings: [warning],
     refinedAt,
   };
+  validateMediaConditionedEvidence(fallback, params);
+  validateMediaConditionedSegmentPlan(fallback, params.segment);
+  return fallback;
 }
 
 function fallbackObservation(
@@ -347,7 +426,144 @@ function normalizeCheckpoints(value: unknown, segment: VideoPlanSegment): VideoM
       );
     }
   }
+  const limit = mediaConditionedCheckpointLimit(segment.durationSeconds);
+  if (checkpoints.length > limit) {
+    throw new Error(
+      `Segment ${segment.segmentNo} returned ${checkpoints.length} motion checkpoints; maximum is ${limit}.`,
+    );
+  }
   return checkpoints;
+}
+
+export function mediaConditionedCheckpointLimit(durationSeconds: number): number {
+  return Math.max(1, Math.min(3, Math.ceil(Math.max(0.1, durationSeconds) / 2.5)));
+}
+
+/**
+ * The fallback path may only reuse already-authored provisional checkpoints.
+ * It never rewrites their prose. When the legacy plan exceeds the current
+ * contract, retain evenly distributed states so the first/middle/last intent
+ * survives while the fallback itself remains schema-valid.
+ */
+export function compactFallbackCheckpoints(
+  checkpoints: VideoMicroShot[],
+  limit: number,
+): VideoMicroShot[] {
+  if (checkpoints.length <= limit) return checkpoints;
+  if (limit <= 1) return [checkpoints[Math.floor((checkpoints.length - 1) / 2)]];
+  const selectedIndexes = new Set<number>();
+  for (let index = 0; index < limit; index += 1) {
+    selectedIndexes.add(Math.round((index * (checkpoints.length - 1)) / (limit - 1)));
+  }
+  return checkpoints.filter((_checkpoint, index) => selectedIndexes.has(index));
+}
+
+export function validateMediaConditionedSegmentPlan(
+  plan: VideoMediaConditionedSegmentPlan,
+  segment: VideoPlanSegment,
+): void {
+  if (!Object.keys(plan.startFrameContract).length) throw new Error("Missing start_frame_contract.");
+  if (!Object.keys(plan.endFrameContract).length) throw new Error("Missing end_frame_contract.");
+  if (!Object.keys(plan.motionContract).length) throw new Error("Missing motion_contract.");
+  if (!Object.keys(plan.singleTakeContract).length) throw new Error("Missing single_take_contract.");
+  if (frameContractContainsMotionProcess(plan.startFrameContract)) {
+    throw new Error("start_frame_contract must contain only one static snapshot.");
+  }
+  if (frameContractContainsMotionProcess(plan.endFrameContract)) {
+    throw new Error("end_frame_contract must contain only one static snapshot.");
+  }
+  const limit = mediaConditionedCheckpointLimit(segment.durationSeconds);
+  if (plan.motionCheckpoints.length > limit) {
+    throw new Error(
+      `Segment ${segment.segmentNo} has ${plan.motionCheckpoints.length} checkpoints; maximum is ${limit}.`,
+    );
+  }
+  const ordered = [...plan.motionCheckpoints].sort(
+    (left, right) => left.localTimeSeconds - right.localTimeSeconds,
+  );
+  ordered.forEach((checkpoint, index) => {
+    if (
+      checkpoint.localTimeSeconds <= 0
+      || checkpoint.localTimeSeconds >= segment.durationSeconds
+      || (index > 0 && checkpoint.localTimeSeconds <= ordered[index - 1].localTimeSeconds)
+    ) {
+      throw new Error(
+        `Segment ${segment.segmentNo} checkpoint ${checkpoint.microShotNo} is not a strictly ordered internal state.`,
+      );
+    }
+  });
+  validateVideoPromptContract(plan.videoPromptContract);
+}
+
+function isMediaContractValidationError(error: unknown): boolean {
+  return /contract|checkpoint|strictly ordered|motion_steps|terminal_requirements|forbidden_outcomes|preserve_requirements|physically_reachable|json/i.test(
+    errorMessage(error),
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function readValidVideoPromptContract(value: unknown): VideoPromptContract | undefined {
+  try {
+    const contract = videoPromptContractFromUnknown(value);
+    if (!contract) return undefined;
+    validateVideoPromptContract(contract);
+    return contract;
+  } catch {
+    return undefined;
+  }
+}
+
+function mediaConditionedEvidenceCatalog(
+  params: Parameters<typeof planMediaConditionedSegment>[0],
+): Array<{ type: string; id: string }> {
+  const refs: Array<{ type: string; id: string }> = [{
+    type: "approved_end_frame",
+    id: `keyframe:${params.endContract.keyframeNo}`,
+  }, {
+    type: "planner_artifact",
+    id: `segment:${params.segment.segmentNo}`,
+  }];
+  for (const beatId of params.segment.linkedBeatIds ?? []) {
+    refs.push({ type: "story_contract", id: `beat:${beatId}` });
+  }
+  for (const evidenceId of params.segment.keyEvidenceIds ?? []) {
+    refs.push({ type: "story_contract", id: `evidence:${evidenceId}` });
+  }
+  for (const anchorId of params.segment.effectiveRequiredAnchorIds
+    ?? params.segment.usesConsistencyAnchors
+    ?? []) {
+    refs.push({ type: "story_contract", id: `anchor:${anchorId}` });
+  }
+  const provisionalContract = readValidVideoPromptContract(params.provisional);
+  for (const requirement of provisionalContract?.terminalRequirements ?? []) {
+    for (const ref of requirement.evidenceRefs) {
+      refs.push({ type: ref.type, id: ref.id });
+    }
+  }
+  return Array.from(
+    new Map(refs.map((ref) => [`${ref.type}:${ref.id}`, ref])).values(),
+  );
+}
+
+function validateMediaConditionedEvidence(
+  plan: VideoMediaConditionedSegmentPlan,
+  params: Parameters<typeof planMediaConditionedSegment>[0],
+): void {
+  const allowed = new Set(
+    mediaConditionedEvidenceCatalog(params).map((ref) => `${ref.type}:${ref.id}`),
+  );
+  for (const requirement of plan.videoPromptContract.terminalRequirements) {
+    for (const ref of requirement.evidenceRefs) {
+      if (!allowed.has(`${ref.type}:${ref.id}`)) {
+        throw new Error(
+          `terminal_requirements evidence "${ref.type}:${ref.id}" is not present in ALLOWED_TERMINAL_EVIDENCE.`,
+        );
+      }
+    }
+  }
 }
 
 export function materializeResolvedMicroShots(params: {

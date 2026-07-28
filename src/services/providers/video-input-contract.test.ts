@@ -10,6 +10,8 @@ import {
   aliyunVideoImageInputCapabilities,
   assembleVideoSubmissionPrompt,
 } from "../video-orchestrator/aliyun-workflow.ts";
+import { BailianAdapter } from "./BailianAdapter.ts";
+import type { StandardPayload } from "./types.ts";
 
 const inputs: VideoImageInput[] = [{
   id: "start",
@@ -136,7 +138,11 @@ test("explicit Aliyun custom-model mode maps approved boundaries to native first
     process.env.ALIYUN_I2V_MAX_IMAGES = "5";
     const capabilities = aliyunVideoImageInputCapabilities();
     const resolved = resolveVideoImageInputs({
-      inputs,
+      inputs: inputs.map((input) =>
+        input.role === "character_identity"
+          ? { ...input, requiredForSegment: true, anchorId: "character:hero" }
+          : input
+      ),
       capabilities,
       endFrameRequirementLevel: "hard_exact",
     });
@@ -155,7 +161,7 @@ test("explicit Aliyun custom-model mode maps approved boundaries to native first
   }
 });
 
-test("built-in HappyHorse R2V transports start, end, and identity images as ordered references", () => {
+test("built-in Wan 2.7 I2V transports only native first and last frame boundaries", () => {
   const previous = {
     enabled: process.env.ALIYUN_I2V_ALLOW_CUSTOM_MODEL,
     model: process.env.ALIYUN_I2V_MODEL,
@@ -166,42 +172,127 @@ test("built-in HappyHorse R2V transports start, end, and identity images as orde
     process.env.ALIYUN_I2V_MODEL = "ignored-custom-model";
     process.env.ALIYUN_I2V_INPUT_MODE = "first_frame_only";
     const capabilities = aliyunVideoImageInputCapabilities();
-    const nineInputs: VideoImageInput[] = [
-      ...inputs,
-      ...Array.from({ length: 6 }, (_, index) => ({
-        id: `extra-${index + 1}`,
-        role: "custom_reference" as const,
-        url: `https://example.com/extra-${index + 1}.png`,
-        authority: "reference_only" as const,
-        instruction: `Scoped reference ${index + 1}.`,
-        allowedUse: ["explicitly scoped attribute"],
-        forbiddenUse: ["unrelated content"],
-      })),
-    ];
     const resolved = resolveVideoImageInputs({
-      inputs: nineInputs,
+      inputs: inputs.map((input) =>
+        input.role === "character_identity"
+          ? { ...input, requiredForSegment: true, anchorId: "character:hero" }
+          : input
+      ),
       capabilities,
-      endFrameRequirementLevel: "hard_semantic",
+      endFrameRequirementLevel: "hard_exact",
     });
-    assert.equal(capabilities.modelId, "happyhorse-1.1-r2v");
-    assert.equal(capabilities.maxImages, 9);
-    assert.equal(resolved.transported.length, 9);
-    assert.equal(resolved.nativeFirstFrame, false);
-    assert.equal(resolved.nativeLastFrame, false);
+    assert.equal(capabilities.modelId, "wan2.7-i2v-2026-04-25");
+    assert.equal(capabilities.maxImages, 2);
+    assert.equal(resolved.nativeFirstFrame, true);
+    assert.equal(resolved.nativeLastFrame, true);
     const transported = mapResolvedVideoImagesToTransport(resolved, capabilities);
-    assert.ok(Array.isArray(transported));
-    assert.deepEqual(transported.slice(0, 3), [
-      { type: "reference_image", url: "https://example.com/start.png" },
-      { type: "reference_image", url: "https://example.com/end.png" },
-      { type: "reference_image", url: "https://example.com/character.png" },
+    assert.deepEqual(transported, [
+      { type: "first_frame", url: "https://example.com/start.png" },
+      { type: "last_frame", url: "https://example.com/end.png" },
     ]);
-    assert.match(resolved.promptRoleMap, /\[Image 1\] = FIRST_FRAME/);
-    assert.match(resolved.promptRoleMap, /\[Image 2\] = LAST_FRAME/);
-    assert.match(resolved.promptRoleMap, /\[Image 9\] = CUSTOM_REFERENCE/);
+    assert.equal(resolved.promptRoleMap, "");
+    assert.ok(resolved.evaluationOnly.some((item) => item.role === "character_identity"));
+    assert.deepEqual(resolved.coverage.uncoveredHardAnchorIds, []);
   } finally {
     restoreEnv("ALIYUN_I2V_ALLOW_CUSTOM_MODEL", previous.enabled);
     restoreEnv("ALIYUN_I2V_MODEL", previous.model);
     restoreEnv("ALIYUN_I2V_INPUT_MODE", previous.mode);
+  }
+});
+
+test("HappyHorse R2V compatibility profile remains available without native boundary claims", () => {
+  const previous = {
+    enabled: process.env.ALIYUN_I2V_ALLOW_CUSTOM_MODEL,
+    model: process.env.ALIYUN_I2V_MODEL,
+    mode: process.env.ALIYUN_I2V_INPUT_MODE,
+    max: process.env.ALIYUN_I2V_MAX_IMAGES,
+  };
+  try {
+    process.env.ALIYUN_I2V_ALLOW_CUSTOM_MODEL = "true";
+    process.env.ALIYUN_I2V_MODEL = "happyhorse-1.1-r2v";
+    process.env.ALIYUN_I2V_INPUT_MODE = "multi_reference";
+    process.env.ALIYUN_I2V_MAX_IMAGES = "9";
+    const capabilities = aliyunVideoImageInputCapabilities();
+    const resolved = resolveVideoImageInputs({
+      inputs,
+      capabilities,
+      endFrameRequirementLevel: "hard_semantic",
+    });
+    assert.equal(capabilities.modelId, "happyhorse-1.1-r2v");
+    assert.equal(resolved.nativeFirstFrame, false);
+    assert.equal(resolved.nativeLastFrame, false);
+    assert.deepEqual(mapResolvedVideoImagesToTransport(resolved, capabilities), [
+      { type: "reference_image", url: "https://example.com/start.png" },
+      { type: "reference_image", url: "https://example.com/end.png" },
+      { type: "reference_image", url: "https://example.com/character.png" },
+    ]);
+  } finally {
+    restoreEnv("ALIYUN_I2V_ALLOW_CUSTOM_MODEL", previous.enabled);
+    restoreEnv("ALIYUN_I2V_MODEL", previous.model);
+    restoreEnv("ALIYUN_I2V_INPUT_MODE", previous.mode);
+    restoreEnv("ALIYUN_I2V_MAX_IMAGES", previous.max);
+  }
+});
+
+test("Bailian gateway defaults to Wan 2.7 native first-last payload without R2V parameters", () => {
+  const previous = {
+    force: process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL,
+    legacyForce: process.env.DASHSCOPE_FORCE_HAPPYHORSE_MODEL,
+  };
+  try {
+    delete process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL;
+    delete process.env.DASHSCOPE_FORCE_HAPPYHORSE_MODEL;
+    const payload: StandardPayload = {
+      templateId: "bailian-wanx-i2v",
+      nodeInputs: {
+        input: {
+          firstFrameUrl: "https://example.com/start.png",
+          lastFrameUrl: "https://example.com/end.png",
+          prompt: "The camera moves continuously between the supplied boundary images.",
+          negativePrompt: "cut, dissolve",
+          duration: 10,
+          ratio: "9:16",
+        },
+      },
+    };
+    const adapter = new BailianAdapter();
+    const capabilities = adapter.getVideoInputCapabilities(payload);
+    const body = adapter.buildPayload(payload);
+    assert.equal(capabilities.modelId, "wan2.7-i2v-2026-04-25");
+    assert.equal(capabilities.roleBindings.last_frame?.nativeBoundaryControl, true);
+    assert.equal(capabilities.maxImages, 2);
+    assert.equal(body.model, "wan2.7-i2v-2026-04-25");
+    assert.ok("media" in body.input);
+    assert.deepEqual(body.input.media, [
+      { type: "first_frame", url: "https://example.com/start.png" },
+      { type: "last_frame", url: "https://example.com/end.png" },
+    ]);
+    assert.equal(body.input.negative_prompt, "cut, dissolve");
+    assert.equal(body.parameters?.prompt_extend, false);
+    assert.equal(body.parameters?.ratio, undefined);
+  } finally {
+    restoreEnv("BAILIAN_FORCE_HAPPYHORSE_MODEL", previous.force);
+    restoreEnv("DASHSCOPE_FORCE_HAPPYHORSE_MODEL", previous.legacyForce);
+  }
+});
+
+test("Bailian gateway keeps the explicit HappyHorse compatibility switch", () => {
+  const previous = process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL;
+  try {
+    process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL = "true";
+    const payload: StandardPayload = {
+      templateId: "bailian-wanx-i2v",
+      nodeInputs: {
+        input: {
+          firstFrameUrl: "https://example.com/start.png",
+          prompt: "A continuous camera move.",
+        },
+      },
+    };
+    const body = new BailianAdapter().buildPayload(payload);
+    assert.equal(body.model, "happyhorse-1.1-i2v");
+  } finally {
+    restoreEnv("BAILIAN_FORCE_HAPPYHORSE_MODEL", previous);
   }
 });
 

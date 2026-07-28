@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 import {
   validatePlanningNarrativeContract,
@@ -170,7 +172,7 @@ test("adjacent story functions may share one event but reversed order still fail
       conflictEventIds: ["event_2"],
       turningPointEventIds: ["event_2"],
       payoffEventIds: ["event_3"],
-      ctaEventIds: ["event_4"],
+      ctaEventIds: ["event_3"],
     },
     narrativeEvents,
     timelineSegments,
@@ -189,6 +191,18 @@ test("adjacent story functions may share one event but reversed order still fail
     timelineSegments,
   });
   assert.ok(reversed.issues.some((issue) => issue.code === "STRATEGY_FUNCTION_ORDER_INVALID"));
+});
+
+test("planner prompts contain no strict distinct-event ordering rule", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "src/services/video-orchestrator/three-stage-planner.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /hook < conflict < turning[_ ]point < payoff < CTA/);
+  assert.doesNotMatch(source, /hook before conflict before turning point before payoff before CTA/);
+  assert.match(source, /Adjacent functions may bind the same observable event/);
+  assert.match(source, /do not invent a second event merely to make their IDs different/);
+  assert.match(source, /only actual reversal is invalid/);
 });
 
 test("planning narrative contract rejects Color Blitz hook leaking the turning point", () => {

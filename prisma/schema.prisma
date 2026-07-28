@@ -73,6 +73,7 @@ model User {
   videoProjects       VideoProject[]
   providerVideoLeases VideoProviderTaskLease[]
   videoPlanningRuns   VideoPlanningRunMetric[]
+  videoProductionJobs VideoProductionJob[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -111,6 +112,7 @@ model VideoProject {
   transitionReferences      VideoTransitionReference[]
   artifactMetadataRows      VideoArtifactMetadata[]
   planningPerformanceRuns   VideoPlanningRunMetric[]
+  productionJobs            VideoProductionJob[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -147,9 +149,58 @@ model VideoProviderTaskLease {
   @@map("video_provider_task_leases")
 }
 
+model VideoProductionJob {
+  id             String   @id @default(cuid())
+  projectId      String   @map("project_id")
+  userId         String   @map("user_id")
+  artifactId     String?  @map("artifact_id")
+  targetId       String?  @map("target_id")
+  kind           String
+  stage          String
+  status         String   @default("queued")
+  priority       Int      @default(0)
+  payload        Json     @default("{}")
+  idempotencyKey String   @unique @map("idempotency_key")
+  leaseToken     String?  @unique @map("lease_token")
+  workerId       String?  @map("worker_id")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  availableAt    DateTime @default(now()) @map("available_at")
+  attempt        Int      @default(0)
+  maxAttempts    Int      @default(5) @map("max_attempts")
+  lastError      String?  @map("last_error") @db.Text
+  startedAt      DateTime? @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+
+  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, priority])
+  @@index([projectId, status, stage])
+  @@index([kind, status, availableAt])
+  @@index([leaseExpiresAt])
+  @@map("video_production_jobs")
+}
+
+model VideoProductionCircuit {
+  key                String   @id
+  consecutiveFailures Int     @default(0) @map("consecutive_failures")
+  openUntil          DateTime? @map("open_until")
+  lastError          String?  @map("last_error") @db.Text
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@index([openUntil])
+  @@map("video_production_circuits")
+}
+
 model VideoPlanningRunMetric {
   id                         String                     @id @default(cuid())
   taskId                     String                     @unique @map("task_id")
+  rootTaskId                 String                     @map("root_task_id")
+  attemptNumber              Int                        @default(1) @map("attempt_number")
   projectId                  String                     @map("project_id")
   userId                     String                     @map("user_id")
   status                     String                     @default("queued")
@@ -182,6 +233,8 @@ model VideoPlanningRunMetric {
   @@index([durationSeconds, completedAt])
   @@index([modelName, completedAt])
   @@index([userId, completedAt])
+  @@unique([rootTaskId, attemptNumber])
+  @@index([rootTaskId, completedAt])
   @@map("video_planning_run_metrics")
 }
 
@@ -396,6 +449,11 @@ model VideoGenerationCandidate {
   retryInstruction String?  @map("retry_instruction") @db.Text
   errorMessage     String?  @map("error_message") @db.Text
   metadata         Json?
+  upstreamSubmittedAt     DateTime? @map("upstream_submitted_at")
+  upstreamPollCount       Int       @default(0) @map("upstream_poll_count")
+  upstreamPollTotalMs     Int       @default(0) @map("upstream_poll_total_ms")
+  upstreamLastPolledAt    DateTime? @map("upstream_last_polled_at")
+  upstreamCompletedSeenAt DateTime? @map("upstream_completed_seen_at")
 
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 

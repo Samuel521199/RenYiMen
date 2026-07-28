@@ -47,6 +47,16 @@ test("Chinese no-any-cut prompt-detailer wording is treated as a prohibition", (
   assert.equal(auditSingleTakePlan(value).passed, true);
 });
 
+test("Chinese repeated no-cut wording from prompt detailer is treated as a prohibition", () => {
+  const value = plan({
+    segments: [{
+      segmentNo: 1,
+      videoPrompt: "连续单镜头视频，无剪辑、无跳切、无淡入淡出。摄像机平滑向前推进。禁止：内部切割、场景切换、瞬移。",
+    }],
+  });
+  assert.equal(auditSingleTakePlan(value).passed, true);
+});
+
 test("fallback micro-shot safety wording is not mistaken for a scene transition", () => {
   const value = plan({
     segments: [{
@@ -74,12 +84,12 @@ test("requiresCut requests a real timeline boundary", () => {
   assert.throws(() => assertSingleTakeAuditPassed(value), SingleTakeAuditError);
 });
 
-test("high risk and unreachable motion request a scoped segment repair", () => {
+test("explicitly unreachable motion requests a real segment split", () => {
   const value = plan();
   const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
   description.singleTakeContract = { requiresCut: false, riskLevel: "high", physicallyReachable: false };
   const result = auditSingleTakePlan(value);
-  assert.equal(result.action, "repair_segment");
+  assert.equal(result.action, "replan_timeline");
   assert.ok(result.issues.some((item) => item.code === "SINGLE_TAKE_HIGH_RISK"));
   assert.ok(result.issues.some((item) => item.code === "SINGLE_TAKE_PHYSICALLY_UNREACHABLE"));
 });
@@ -107,13 +117,52 @@ test("missing contracts request contract-only repair", () => {
   assert.ok(result.issues.every((item) => item.repairScope === "contract"));
 });
 
-test("positive internal dissolve language is rejected instead of rewritten", () => {
+test("wording-only internal dissolve language requests a local segment rewrite", () => {
   const value = plan();
   const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
   description.motionContract = { path: "人物走到中点，然后 dissolve to a new shot" };
   const result = auditSingleTakePlan(value);
   assert.ok(result.issues.some((item) => item.code === "INTERNAL_CUT_LANGUAGE"));
-  assert.equal(result.action, "replan_timeline");
+  assert.equal(result.action, "repair_segment");
+  assert.ok(result.issues.some((item) =>
+    item.code === "INTERNAL_CUT_LANGUAGE"
+    && item.repairable
+    && !item.structural));
+});
+
+test("a boundary transition leaked into executable motion is routed back to the segment contract", () => {
+  const value = plan();
+  const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  description.motionContract = { path: "片段1结束后淡出，切换到片段2" };
+  const result = auditSingleTakePlan(value);
+  assert.equal(result.action, "repair_segment");
+  assert.ok(result.issues.some((item) =>
+    item.code === "BOUNDARY_TRANSITION_LEAKED_INTO_SEGMENT"
+    && item.repairScope === "segment"));
+});
+
+test("new evidence-based contracts require a structured continuous motion contract", () => {
+  const value = plan();
+  const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  description.videoPromptContract = {
+    version: "video-prompt-contract-v1",
+    terminalRequirements: [{
+      requirementId: "terminal.result",
+      priority: "hard",
+      observableFact: "Result visible.",
+      acceptanceCriteria: "Visible at the end.",
+      evidenceRefs: [{ type: "approved_end_frame", id: "keyframe:2" }],
+    }],
+    motionSteps: ["Move continuously."],
+    preserveRequirements: [],
+    forbiddenOutcomes: [],
+    narrativeBoundary: "",
+    shotIntent: "",
+  };
+  description.motionContract = { subjectMotion: "Move continuously." };
+  const result = auditSingleTakePlan(value);
+  assert.equal(result.action, "repair_segment");
+  assert.ok(result.issues.some((item) => item.code === "CONTINUOUS_MOTION_CONTRACT_INVALID"));
 });
 
 test("small timing overflow repairs one segment while severe overflow replans timeline", () => {

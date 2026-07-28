@@ -24,6 +24,7 @@ import {
   reconcileGenerationIssueLedger,
 } from "./visual-quality-contract";
 import { withProviderCapacity, type ProviderSchedulingContext } from "./provider-capacity";
+import { QUALITY_POLICY_VERSION } from "./generation-candidate-policy";
 
 const IMAGE_QUALITY_SYSTEM_PROMPT = [
   "You are an evidence-based visual evidence extractor for production advertising imagery. You are not the final quality judge and you do not plan repairs.",
@@ -37,7 +38,7 @@ const IMAGE_QUALITY_SYSTEM_PROMPT = [
   "Describe every direction from the viewer/image perspective only: viewer-left, viewer-right, up, or down. Never write ambiguous phrases such as 'character right (viewer left)'.",
   "For head or eye direction, specify a viewer-relative direction, an approximate yaw/pitch range when useful, and a normalized gaze target point. A turned head is not automatically a failed gaze; cite visible pupil/head evidence.",
   "For countable UI or product elements, report the visible count and location without inventing an expected value outside the atomic requirement.",
-  "Return evaluationConfidence, the four summary scores, visible counts, wrongTextDetected, and observations[]. Every observation must include requirementId, status, confidence, evidenceSource=current_output|reference_only|unavailable, description, and normalizedRegion when visible.",
+  "Return evaluationConfidence, identityScore, layoutScore, promptAlignmentScore, continuityScore, styleFidelityScore, visible counts, wrongTextDetected, and observations[]. Every observation must include requirementId, status, confidence, evidenceSource=current_output|reference_only|unavailable, description, and normalizedRegion when visible.",
   "Output strict JSON only.",
 ].join("\n");
 
@@ -141,7 +142,8 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
         allowGameUi: params.visualContract.allowGameUi,
         allowBrandText: params.visualContract.allowBrandText,
       })}` : "",
-      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore (0..100), productInstanceCount, personInstanceCount, wrongTextDetected, and observations[].",
+      "Return strict JSON with evaluationConfidence (0..1), identityScore, layoutScore, promptAlignmentScore, continuityScore, styleFidelityScore (all 0..100), productInstanceCount, personInstanceCount, wrongTextDetected, and observations[].",
+      "styleFidelityScore compares rendering medium, 2D/3D dimensionality, shading, edge treatment, surface language, and depth treatment only when a hard style reference/contract is supplied. Do not penalize permitted pose, crop, or isolated-background changes.",
       "Each observations[] item must be {requirementId,status,confidence,evidenceSource,description,observedText,expectedText,normalizedRegion}. status is satisfied|violated|unknown|not_applicable. evidenceSource is current_output|reference_only|unavailable.",
       "Do not output a whole-image passed boolean. Do not output correctionActions, artifactIssues, repair mode, retry stage, or requirements absent from Atomic visual requirements.",
       "Authority rule for exact appearance and text: an approved reference image outranks planner-written descriptions. Compare the generated logo, UI, product, and character directly with the corresponding approved reference. Do not invent forbidden or required wording that is absent from the authoritative source.",
@@ -181,7 +183,9 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     executionMethod: "program",
     durationMs: Date.now() - qualityPromptStartedAtMs,
     model: qualityVisionModel(),
-    resultZh: "已写入原子视觉要求、按角色筛选的参考图和当前候选图；上一轮诊断不进入主检查",
+    qualityReferenceCount: localizedReferences.length,
+    availableQualityReferenceCount: params.selectedReferenceUrls.filter((url) => Boolean(url?.trim())).length,
+    resultZh: `已写入 ${atomicRequirements.length} 条原子视觉要求，并从可用参考图中按角色筛选 ${localizedReferences.length} 张；上一轮诊断不进入主检查`,
   });
   const evaluationStartedAt = Date.now();
   try {
@@ -201,9 +205,17 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
       durationMs: modelDurationMs,
       resultZh: "视觉大模型已返回质检意见",
     });
-    const decisionStartedAtMs = Date.now();
     let normalized = normalizeImageQualityResponse(raw, params);
     if (normalized.adjudicationRequired) {
+      const adjudicationStartedAtMs = Date.now();
+      await logOnePromptVideo("production.step.start", {
+        moduleNameZh,
+        stepNameZh: "视觉大模型二次裁决候选图",
+        executionMethod: "vision_model",
+        model: qualityAdjudicationModel(),
+        adjudicationReason: normalized.adjudicationReason,
+        resultZh: "第一次检查的高分与低置信度硬证据冲突，开始只复核争议要求",
+      });
       await logOnePromptVideo("generation_quality.image_adjudication.start", {
         assetId: params.assetId,
         candidateId: params.candidateId,
@@ -232,14 +244,29 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
         adjudicationPerformed: true,
         adjudicationReason: normalized.adjudicationReason,
       };
+      const adjudicationDurationMs = Date.now() - adjudicationStartedAtMs;
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh,
+        stepNameZh: "视觉大模型二次裁决候选图",
+        executionMethod: "vision_model",
+        model: qualityAdjudicationModel(),
+        durationMs: adjudicationDurationMs,
+        passed: normalized.passed,
+        adjudicationReason: normalized.adjudicationReason,
+        resultZh: normalized.passed
+          ? "争议证据复核后通过"
+          : "争议证据复核后仍未通过；不会继续对同一输入重复裁决",
+      });
       await logOnePromptVideo("generation_quality.image_adjudication.completed", {
         assetId: params.assetId,
         candidateId: params.candidateId,
         model: qualityAdjudicationModel(),
+        durationMs: adjudicationDurationMs,
         passed: normalized.passed,
         hardFailureReasons: normalized.hardFailureReasons,
       });
     }
+    const decisionStartedAtMs = Date.now();
     const report = {
       ...normalized,
       evaluationModel: qualityVisionModel(),
@@ -296,7 +323,7 @@ function selectRoleDiverseQualityReferences(
     const value = note?.toLowerCase() ?? "";
     if (/identity|character|person|face|人物|角色|身份|脸/.test(value)) return "identity";
     if (/brand|logo|text|品牌|标志|文字/.test(value)) return "brand";
-    if (/product|package|产品|包装/.test(value)) return "product";
+    if (/product|package|prop|card|产品|包装|道具|牌/.test(value)) return "product";
     if (/layout|scene|camera|space|构图|场景|镜头|空间/.test(value)) return "layout";
     if (/ui|score|timer|game|界面|分数|计时|游戏/.test(value)) return "ui";
     return "other";
@@ -362,7 +389,11 @@ function mergeImageAdjudication(
   adjudication: unknown,
   requirements: AtomicVisualRequirement[],
 ): Record<string, unknown> {
-  const merged: Record<string, unknown> = { ...record(primary), passed: true };
+  const merged: Record<string, unknown> = {
+    ...record(primary),
+    passed: true,
+    evidenceAdjudicated: true,
+  };
   const source = record(adjudication);
   const items = Array.isArray(source.adjudications) ? source.adjudications : [];
   const requirementIds = new Set(requirements.map((item) => item.requirementId));
@@ -638,10 +669,12 @@ function decideImageRepair(
     report.layoutScore,
     report.promptAlignmentScore,
     report.continuityScore,
+    ...(report.styleScoreApplicable ? [report.styleFidelityScore] : []),
   ].filter((score): score is number => typeof score === "number");
-  const minimumScore = scores.length === 4 ? Math.min(...scores) : null;
+  const expectedScoreCount = report.styleScoreApplicable ? 5 : 4;
+  const minimumScore = scores.length === expectedScoreCount ? Math.min(...scores) : null;
   const globalStructuralFailure =
-    /wrong (?:scene|subject count|person count|product count)|extra (?:person|people|character|subject|product)|multiple (?:people|characters|subjects)|missing (?:main )?(?:person|character|product|scene)|entire (?:scene|composition|layout)|identity (?:failure|mismatch)|unrelated (?:background|scene)|scene replacement|background contamination|asset isolation|全局|整体|错误场景|主体数量|人物数量|产品数量|额外人物|额外角色|缺少主体|身份严重|背景污染|资产隔离/i.test(issueText);
+    /wrong (?:scene|subject count|person count|product count)|extra (?:person|people|character|subject|product)|multiple (?:people|characters|subjects)|missing (?:main )?(?:person|character|product|scene)|entire (?:scene|composition|layout)|identity (?:failure|mismatch)|unrelated (?:background|scene)|scene replacement|background contamination|asset isolation|rendering medium mismatch|dimensionality drift|3d to 2d|2d to 3d|flat vector drift|全局|整体|错误场景|主体数量|人物数量|产品数量|额外人物|额外角色|缺少主体|身份严重|背景污染|资产隔离|渲染介质不一致|维度漂移|三维变二维/i.test(issueText);
   const isolatedAssetContamination = params.purpose === "anchor_reference_image"
     && /background|scenery|environment|poster|ui|title|extra character|second character|multiple (?:people|characters|subjects)|场景|背景|海报|界面|标题|其他角色|多个角色/i.test(issueText);
   const severeScoreFailure = minimumScore != null && minimumScore < 55;
@@ -879,6 +912,7 @@ function normalizeDeferredVideoIssueResults(
 
 export function generationQualityCompositeScore(report: GenerationQualityReport): number | null {
   const values = [report.identityScore, report.layoutScore, report.promptAlignmentScore, report.continuityScore];
+  if (report.styleScoreApplicable && typeof report.styleFidelityScore === "number") values.push(report.styleFidelityScore);
   if (typeof report.singleTakeScore === "number") values.push(report.singleTakeScore);
   if (typeof report.firstFrameConsistencyScore === "number") values.push(report.firstFrameConsistencyScore);
   if (typeof report.checkpointOrderScore === "number") values.push(report.checkpointOrderScore);
@@ -938,7 +972,27 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
   const layoutScore = optionalScore(source.layoutScore ?? source.layout_score);
   const promptAlignmentScore = optionalScore(source.promptAlignmentScore ?? source.prompt_alignment_score);
   const continuityScore = optionalScore(source.continuityScore ?? source.continuity_score);
-  const scoreSetComplete = identityScore != null && layoutScore != null && promptAlignmentScore != null && continuityScore != null;
+  const styleFidelityScore = optionalScore(source.styleFidelityScore ?? source.style_fidelity_score ?? source.styleScore ?? source.style_score);
+  const selectedReferenceCount = params.selectedReferenceUrls.filter((url) => Boolean(url?.trim())).length;
+  const hasRenderingStyleContract = Boolean(
+    params.targetContract.renderingStyle
+    ?? params.targetContract.rendering_style
+    ?? params.targetContract.styleReferenceRequired
+    ?? params.targetContract.style_reference_required
+  );
+  const hasHardStyleReference = params.referenceUsageNotes.some((note) =>
+    /HARD IDENTITY \+ HARD RENDERING STYLE|HARD RENDERING STYLE|STYLE_REFERENCE_HARD/i.test(note)
+  );
+  const styleScoreApplicable =
+    selectedReferenceCount > 0
+    && (hasRenderingStyleContract || hasHardStyleReference)
+    && (params.assetCategory === "person" || params.purpose === "anchor_reference_image");
+  const scoreSetComplete =
+    identityScore != null
+    && layoutScore != null
+    && promptAlignmentScore != null
+    && continuityScore != null
+    && (!styleScoreApplicable || styleFidelityScore != null);
   const wrongTextDetected = source.wrongTextDetected === true || source.wrong_text_detected === true;
   const productInstanceCount = count(source.productInstanceCount ?? source.product_instance_count);
   const personInstanceCount = count(source.personInstanceCount ?? source.person_instance_count);
@@ -972,7 +1026,46 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     ...rawArtifactIssues.filter((issue) => !invalidForStageIssues.includes(issue)),
     ...suspectedContractConflicts.map((item) => `Unverified evaluator contract suspicion: ${item}`),
   ]);
-  const scoreGatePassed = scoreSetComplete && identityScore >= 65 && layoutScore >= 60 && promptAlignmentScore >= 65 && continuityScore >= 60;
+  const scoreGatePassed =
+    scoreSetComplete
+    && identityScore >= 65
+    && layoutScore >= 60
+    && promptAlignmentScore >= 65
+    && continuityScore >= 60
+    && (!styleScoreApplicable || (styleFidelityScore ?? 0) >= 80);
+  const hardAtomicRequirements = atomicRequirements.filter((requirement) => requirement.severity === "hard");
+  const satisfiedHardRequirementCount = hardAtomicRequirements.filter((requirement) => evidenceObservations.some((observation) =>
+      observation.requirementId === requirement.requirementId
+      && observation.status === "satisfied"
+      && observation.confidence >= 0.8
+      && observation.evidenceSource === "current_output"
+  )).length;
+  const hasConfirmedHardEvidenceViolation = hardAtomicRequirements.some((requirement) => evidenceObservations.some((observation) =>
+    observation.requirementId === requirement.requirementId
+    && observation.status === "violated"
+    && observation.confidence >= 0.8
+    && observation.evidenceSource === "current_output"
+  ));
+  const hardEvidenceSupportsScaleOverride =
+    hardAtomicRequirements.length > 0
+    && satisfiedHardRequirementCount / hardAtomicRequirements.length >= 0.8
+    && !hasConfirmedHardEvidenceViolation;
+  // Some vision endpoints occasionally emit 0..1 dimension scores despite
+  // being asked for 0..100, while their requirement-level evidence is
+  // complete and unanimously satisfied. Preserve the raw scores and let the
+  // deterministic hard-evidence gate resolve this scale mismatch. A second
+  // vision pass can leak unrelated reference content into isolated assets,
+  // so this case must not trigger either adjudication or paid regeneration.
+  const lowScoreSatisfiedEvidenceConflict =
+    scoreSetComplete
+    && !scoreGatePassed
+    && hardEvidenceSupportsScaleOverride
+    && (evaluationConfidence ?? 0) >= 0.8
+    && artifactIssues.length === 0
+    && correctionActions.length === 0
+    && !wrongTextDetected;
+  const satisfiedHardEvidenceOverridesScores = lowScoreSatisfiedEvidenceConflict;
+  const effectiveScoreGatePassed = scoreGatePassed || satisfiedHardEvidenceOverridesScores;
   // The vision model's boolean is advisory. For exact brand/logo lock assets,
   // use explicit deterministic gates so minor decorative/layout comments do
   // not veto an otherwise strong, usable logo. Exact-text or person leakage
@@ -984,6 +1077,8 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     && continuityScore >= 70
     && !wrongTextDetected
     && personInstanceCount === 0;
+  const effectiveBrandVisualGatePassed = brandVisualGatePassed
+    || (satisfiedHardEvidenceOverridesScores && !wrongTextDetected && personInstanceCount === 0);
   const exactTextHardGate = params.requiresExactBrandText
     || params.visualContract?.exactTextAuthority === "approved_reference"
     || params.visualContract?.exactTextAuthority === "structured_contract";
@@ -1013,12 +1108,15 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     ...contractConflicts,
     ...confirmedHardRequirementViolations,
     ...confirmedLegacyViolations,
-    identityScore != null && identityScore < 65 ? `identity score ${identityScore} is below 65` : "",
-    layoutScore != null && layoutScore < 60 ? `layout score ${layoutScore} is below 60` : "",
-    promptAlignmentScore != null && promptAlignmentScore < 65 ? `prompt alignment score ${promptAlignmentScore} is below 65` : "",
-    continuityScore != null && continuityScore < 60 ? `continuity score ${continuityScore} is below 60` : "",
+    !satisfiedHardEvidenceOverridesScores && identityScore != null && identityScore < 65 ? `identity score ${identityScore} is below 65` : "",
+    !satisfiedHardEvidenceOverridesScores && layoutScore != null && layoutScore < 60 ? `layout score ${layoutScore} is below 60` : "",
+    !satisfiedHardEvidenceOverridesScores && promptAlignmentScore != null && promptAlignmentScore < 65 ? `prompt alignment score ${promptAlignmentScore} is below 65` : "",
+    !satisfiedHardEvidenceOverridesScores && continuityScore != null && continuityScore < 60 ? `continuity score ${continuityScore} is below 60` : "",
+    !satisfiedHardEvidenceOverridesScores && styleScoreApplicable && styleFidelityScore != null && styleFidelityScore < 80
+      ? `style fidelity score ${styleFidelityScore} is below 80`
+      : "",
     wrongTextDetected && exactTextHardGate ? "authoritative locked text is visibly wrong" : "",
-    params.requiresExactBrandText && !brandVisualGatePassed ? "isolated brand asset failed its deterministic identity/layout/text gate" : "",
+    params.requiresExactBrandText && !effectiveBrandVisualGatePassed ? "isolated brand asset failed its deterministic identity/layout/text gate" : "",
   ]);
   const lowConfidence = evaluationConfidence != null && evaluationConfidence < 0.7;
   const unsupportedModelVeto =
@@ -1027,21 +1125,34 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     && scoreGatePassed
     && !lowConfidence
     && hardFailureReasons.length === 0;
+  const ambiguousConfirmedHardRequirementViolations = evidenceObservations.filter((observation) => {
+    const requirement = atomicRequirements.find((item) => item.requirementId === observation.requirementId);
+    return requirement?.severity === "hard"
+      && observation.status === "violated"
+      && observation.evidenceSource === "current_output"
+      && observation.confidence >= 0.8
+      && observation.confidence < 0.9;
+  });
   const highScoreEvidenceConflict =
-    confirmedHardRequirementViolations.length > 0
+    ambiguousConfirmedHardRequirementViolations.length > 0
+    && (evaluationConfidence ?? 0) >= 0.8
     && identityScore != null && identityScore >= 85
     && layoutScore != null && layoutScore >= 80
     && promptAlignmentScore != null && promptAlignmentScore >= 80
-    && continuityScore != null && continuityScore >= 80;
-  const adjudicationRequired = unsupportedModelVeto || highScoreEvidenceConflict;
+    && continuityScore != null && continuityScore >= 80
+    && (!styleScoreApplicable || (styleFidelityScore ?? 0) >= 80);
+  const adjudicationRequired = highScoreEvidenceConflict;
   // The model supplies evidence; the deterministic policy owns the decision.
-  // A legacy whole-image veto with no supported hard evidence is adjudicated
-  // once instead of immediately triggering paid media regeneration.
+  // A whole-image model veto without localized hard evidence is preserved for
+  // manual review, but no longer purchases a second model call. Adjudication is
+  // reserved for a narrow band where otherwise-high scores conflict with only
+  // moderately confident (0.8..<0.9) hard evidence. Clear hard violations are
+  // not re-asked until a model happens to pass.
   const passed =
     !unsupportedModelVeto
     && scoreSetComplete
     && !lowConfidence
-    && scoreGatePassed
+    && effectiveScoreGatePassed
     && hardFailureReasons.length === 0;
   const issueLedger = reconcileGenerationIssueLedger({
     previous: params.previousQualityReport,
@@ -1063,34 +1174,32 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
       return requirement ? [`Unresolved evidence for ${requirement.requirementId}: ${requirement.target}`] : [];
     }),
   ]);
-  const qualityDecision = !scoreSetComplete || lowConfidence || adjudicationRequired
-    ? "review" as const
-    : contractConflictsVerified
+  const qualityDecision = contractConflictsVerified
     ? "blocked" as const
+    : !scoreSetComplete || lowConfidence || adjudicationRequired || unsupportedModelVeto || suspectedContractConflicts.length > 0
+      ? "review" as const
     : passed
       ? softSuggestions.length === 0 ? "pass" as const : "recommended" as const
       : "retry" as const;
-  const retryFromStage = !scoreSetComplete || lowConfidence || adjudicationRequired
-    ? "manual" as const
-    : contractConflictsVerified
+  const retryFromStage = contractConflictsVerified
     ? "stage3" as const
-    : suspectedContractConflicts.length
-      ? "generation" as const
+    : !scoreSetComplete || lowConfidence || adjudicationRequired || unsupportedModelVeto || suspectedContractConflicts.length > 0
+      ? "manual" as const
       : retryStage(source.retryFromStage ?? source.retry_from_stage);
   const suppliedRetryInstruction = suspectedContractConflicts.length && !contractConflictsVerified
     ? ""
     : text(source.retryInstruction ?? source.retry_instruction);
   const expectedAnchorIds = contractAnchorIds(params.targetContract);
-  const selectedReferenceCount = params.selectedReferenceUrls.filter((url) => Boolean(url?.trim())).length;
   const referenceComparable = expectedAnchorIds.length === 0 || selectedReferenceCount > 0;
   const referenceText = `${expectedAnchorIds.join(" ")} ${params.referenceUsageNotes.join(" ")}`.toLowerCase();
   const comparableChecks = uniqueStrings([
     selectedReferenceCount > 0 ? "layout" : "",
     expectedAnchorIds.length > 0 && selectedReferenceCount > 0 ? "identity" : "",
+    styleScoreApplicable ? "style" : "",
     /product|logo|brand|ui|产品|品牌|界面/.test(referenceText) && selectedReferenceCount > 0 ? "product" : "",
   ]);
   return {
-    policyVersion: "quality-policy-v4",
+    policyVersion: QUALITY_POLICY_VERSION,
     evaluationStatus: adjudicationRequired
       ? "adjudication_required"
       : scoreSetComplete && !lowConfidence ? "completed" : "partial",
@@ -1115,6 +1224,8 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     layoutScore,
     promptAlignmentScore,
     continuityScore,
+    styleFidelityScore,
+    styleScoreApplicable,
     productInstanceCount,
     personInstanceCount,
     wrongTextDetected,
@@ -1123,9 +1234,7 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     atomicRequirements,
     evidenceObservations,
     adjudicationRequired,
-    adjudicationReason: unsupportedModelVeto
-      ? "legacy_model_veto_without_supported_hard_evidence"
-      : highScoreEvidenceConflict
+    adjudicationReason: highScoreEvidenceConflict
         ? "high_scores_conflict_with_confirmed_hard_evidence"
         : undefined,
     contractConflicts,
@@ -1139,12 +1248,13 @@ function normalizeReport(value: unknown, params: BaseEvaluationParams): Generati
     softSuggestions,
     passed,
     originalPassed: modelDecisionProvided ? originalPassed : undefined,
+    unsupportedModelVetoDetected: unsupportedModelVeto || undefined,
     retryInstruction: adjudicationRequired
       ? "Re-adjudicate the disputed visual evidence for this existing candidate. Do not regenerate the media."
       : !scoreSetComplete || lowConfidence
       ? "Retry visual quality evaluation for this existing candidate because required evidence was incomplete or evaluator confidence was low. Do not regenerate the media."
       : !passed || correctionActions.length > 0
-      ? concreteRetryInstruction({ correctionActions, contractConflicts, suppliedRetryInstruction, identityScore, layoutScore, promptAlignmentScore, continuityScore })
+      ? concreteRetryInstruction({ correctionActions, contractConflicts, suppliedRetryInstruction, identityScore, layoutScore, promptAlignmentScore, continuityScore, styleFidelityScore })
       : suppliedRetryInstruction || undefined,
     retryFromStage,
     contentBased: true,
@@ -1283,6 +1393,7 @@ function concreteRetryInstruction(params: {
   layoutScore: number | null;
   promptAlignmentScore: number | null;
   continuityScore: number | null;
+  styleFidelityScore: number | null;
 }): string {
   if (params.contractConflicts.length) {
     return `Do not regenerate until these prompt-contract conflicts are resolved: ${params.contractConflicts.join("; ")}. Keep the target contract and explicit required-visible evidence authoritative over generic negative defaults.`;
@@ -1308,12 +1419,12 @@ function concreteRetryInstruction(params: {
     });
     return `Apply these exact corrections in the next generation:\n${actions.join("\n")}\nKeep all unlisted high-scoring identity, layout, clothing, scene, and continuity details unchanged. Treat every direction as viewer-relative; normalized coordinates use top-left=(0,0), bottom-right=(1,1).`;
   }
-  return params.suppliedRetryInstruction || `Regenerate with a concrete correction plan for identity ${params.identityScore}, layout ${params.layoutScore}, prompt alignment ${params.promptAlignmentScore}, and continuity ${params.continuityScore}; specify the exact region, element, target state, and preserved content for every failed issue.`;
+  return params.suppliedRetryInstruction || `Regenerate with a concrete correction plan for identity ${params.identityScore}, layout ${params.layoutScore}, prompt alignment ${params.promptAlignmentScore}, continuity ${params.continuityScore}, and style fidelity ${params.styleFidelityScore}; specify the exact region, element, target state, rendering medium, and preserved content for every failed issue.`;
 }
 
 function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFromStage: GenerationQualityReport["retryFromStage"]): GenerationQualityReport {
   return {
-    policyVersion: "quality-policy-v4",
+    policyVersion: QUALITY_POLICY_VERSION,
     evaluationStatus: "technical_failed",
     technicalError: issue,
     technicalRetryable: true,
@@ -1325,6 +1436,8 @@ function evaluationFailure(params: BaseEvaluationParams, issue: string, retryFro
     layoutScore: null,
     promptAlignmentScore: null,
     continuityScore: null,
+    styleFidelityScore: null,
+    styleScoreApplicable: false,
     artifactIssues: [issue],
     passed: false,
     originalPassed: false,
@@ -1364,7 +1477,7 @@ function missingReferenceQualityReport(params: BaseEvaluationParams): Generation
   if (expectedAnchorIds.length === 0 || params.selectedReferenceUrls.some((url) => Boolean(url?.trim()))) return undefined;
   const issue = `缺少资产合同要求的可比参考图：${expectedAnchorIds.join("、")}`;
   return {
-    policyVersion: "quality-policy-v4",
+    policyVersion: QUALITY_POLICY_VERSION,
     evaluationStatus: "reference_missing",
     technicalRetryable: false,
     referenceComparable: false,
@@ -1382,6 +1495,8 @@ function missingReferenceQualityReport(params: BaseEvaluationParams): Generation
     layoutScore: null,
     promptAlignmentScore: null,
     continuityScore: null,
+    styleFidelityScore: null,
+    styleScoreApplicable: false,
     artifactIssues: [issue],
     passed: false,
     originalPassed: false,
@@ -1437,6 +1552,8 @@ function legacyQualityFallback(params: BaseEvaluationParams, video: boolean): Ge
     layoutScore: null,
     promptAlignmentScore: null,
     continuityScore: null,
+    styleFidelityScore: null,
+    styleScoreApplicable: false,
     singleTakeScore: video ? null : undefined,
     artifactIssues: passed ? [] : [!hasMedia ? "missing generated media url" : "generation prompt is too short"],
     passed,

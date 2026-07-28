@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { materializeResolvedMicroShots } from "./media-conditioned-planner";
+import {
+  compactFallbackCheckpoints,
+  materializeResolvedMicroShots,
+  mediaConditionedCheckpointLimit,
+  validateMediaConditionedSegmentPlan,
+} from "./media-conditioned-planner";
 import type {
   VideoMicroShot,
   VideoObservedBoundaryFacts,
@@ -119,4 +124,79 @@ test("resolved revision is deterministic for the same boundaries and changes wit
 
   assert.equal(first[0].resolvedRevisionId, repeated[0].resolvedRevisionId);
   assert.notEqual(first[0].resolvedRevisionId, changed[0].resolvedRevisionId);
+});
+
+test("media-conditioned checkpoint budget is capped at three", () => {
+  assert.equal(mediaConditionedCheckpointLimit(2), 1);
+  assert.equal(mediaConditionedCheckpointLimit(7), 3);
+  assert.equal(mediaConditionedCheckpointLimit(30), 3);
+});
+
+test("legacy fallback checkpoint compaction preserves authored first, middle, and last states", () => {
+  const checkpoints = Array.from({ length: 5 }, (_value, index) => ({
+    ...intent,
+    microShotNo: index + 1,
+    localTimeSeconds: index + 1,
+    absoluteTimeSeconds: 10 + index + 1,
+    purpose: `state-${index + 1}`,
+  }));
+
+  const compacted = compactFallbackCheckpoints(checkpoints, 3);
+
+  assert.deepEqual(compacted.map((item) => item.purpose), ["state-1", "state-3", "state-5"]);
+  assert.equal(compactFallbackCheckpoints(checkpoints, 5), checkpoints);
+});
+
+test("media-conditioned stage contract rejects invalid output before downstream generation", () => {
+  const checkpoints = Array.from({ length: 4 }, (_value, index) => ({
+    ...intent,
+    microShotNo: index + 1,
+    localTimeSeconds: index + 1,
+    absoluteTimeSeconds: 10 + index + 1,
+  }));
+  const plan = {
+    version: "media-conditioned-segment-v1" as const,
+    segmentNo: segment.segmentNo,
+    startKeyframeNo: segment.startKeyframeNo,
+    endKeyframeNo: segment.endKeyframeNo,
+    startBoundaryImageUrl: "https://example.com/start.png",
+    endBoundaryImageUrl: "https://example.com/end.png",
+    startFrameContract: { state: "The heroine is moving from left to right." },
+    endFrameContract: { state: "The heroine stands on the right." },
+    motionContract: { subjectMotion: "Move right." },
+    singleTakeContract: { physicallyReachable: true },
+    motionCheckpoints: checkpoints,
+    resolvedMicroShots: checkpoints,
+    microShotRevisionId: "revision",
+    videoPromptContract: {
+      version: "video-prompt-contract-v1" as const,
+      terminalRequirements: [{
+        requirementId: "end",
+        priority: "hard" as const,
+        observableFact: "The heroine stands on the right.",
+        acceptanceCriteria: "Visible in the final stable frames.",
+        evidenceRefs: [{ type: "approved_end_frame" as const, id: "keyframe:2" }],
+        source: "approved_end_frame" as const,
+        sources: ["approved_end_frame" as const],
+      }],
+      motionSteps: ["Move continuously to the right."],
+      preserveRequirements: [],
+      forbiddenOutcomes: [],
+      narrativeBoundary: "Do not add later events.",
+      shotIntent: "Show the move.",
+    },
+    planningStatus: "media_conditioned" as const,
+    warnings: [],
+    refinedAt: "2026-07-28T00:00:00.000Z",
+  };
+
+  assert.throws(
+    () => validateMediaConditionedSegmentPlan(plan, segment),
+    /static snapshot/,
+  );
+  plan.startFrameContract = { state: "The heroine stands on the left." };
+  assert.throws(
+    () => validateMediaConditionedSegmentPlan(plan, segment),
+    /maximum is 2/,
+  );
 });

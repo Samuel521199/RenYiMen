@@ -94,7 +94,7 @@ test("quality fingerprint reuses only the same media and evaluation contract", (
   }));
   assert.notEqual(first, buildQualityEvaluationFingerprint({
     ...base,
-    qualityPolicyVersion: "quality-policy-v5",
+    qualityPolicyVersion: "quality-policy-v9",
   }));
   assert.notEqual(first, buildQualityEvaluationFingerprint({
     ...base,
@@ -137,6 +137,6 @@ test("persistent quality cache has a project-scoped unique key and atomic lease"
   assert.match(cache, /PrismaClientKnownRequestError/);
   assert.match(cache, /status === "completed" && existing\.reportJson/);
   assert.match(cache, /status: "technical_failed"/);
-  assert.equal(QUALITY_POLICY_VERSION, "quality-policy-v4");
-  assert.equal(QUALITY_PROMPT_VERSION, "image-quality-prompt-v5");
+  assert.equal(QUALITY_POLICY_VERSION, "quality-policy-v10");
+  assert.equal(QUALITY_PROMPT_VERSION, "image-quality-prompt-v6");
 });
