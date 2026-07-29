@@ -103,7 +103,12 @@ function normalizeCategory(category: string | null | undefined, errorCode: strin
   if (category === "capacity" || category === "internal_capacity") return "capacity";
   if (category === "scheduling" || category === "internal_scheduling") return "scheduling";
   if (category === "authorization" || category === "provider_auth") return "authorization";
-  if (category === "provider" || category === "provider_network" || category === "provider_rate_limit") return "provider";
+  if (
+    category === "provider"
+    || category === "provider_network"
+    || category === "provider_rate_limit"
+    || category === "provider_quota"
+  ) return "provider";
   if (category === "state") return "state";
   if (/CONTRACT|PLAN_FIELD_ALIAS_CONFLICT/.test(errorCode)) return "contract";
   if (/CAPACITY|LEASE_UNAVAILABLE/.test(errorCode)) return "capacity";
@@ -113,6 +118,7 @@ function normalizeCategory(category: string | null | undefined, errorCode: strin
 }
 
 function defaultRetryable(errorCode: string, category: ProductionErrorCategory): boolean {
+  if (errorCode === "PROVIDER_QUOTA_EXHAUSTED") return false;
   if (category === "provider" || category === "capacity") return true;
   return /TIMEOUT|RATE_LIMIT|NETWORK|TEMPORARY/.test(errorCode);
 }
@@ -122,6 +128,7 @@ function defaultRecoveryAction(
   category: ProductionErrorCategory,
   retryable: boolean,
 ): string {
+  if (errorCode === "PROVIDER_QUOTA_EXHAUSTED") return "CHECK_PROVIDER_BILLING";
   if (category === "contract") return "REPAIR_CONTRACT";
   if (errorCode === "NO_COMPATIBLE_WORKER") return "DEPLOY_COMPATIBLE_WORKER";
   if (errorCode === "STATE_INVARIANT_VIOLATION") return "REBUILD_TASK_GRAPH";
@@ -134,6 +141,21 @@ function displayMessageFor(
   recoveryAction: string,
   message?: string | null,
 ): StructuredProductionError["displayMessage"] {
+  if (errorCode === "PROVIDER_QUOTA_EXHAUSTED") {
+    return {
+      zh: "上游翻译或模型额度已用尽。已保留任务检查点，请检查服务套餐和账单后继续。",
+      en: "The upstream translation or model quota is exhausted. The checkpoint was preserved; check the provider plan and billing before continuing.",
+    };
+  }
+  if (
+    errorCode === "INFRASTRUCTURE_RECOVERY_QUEUED"
+    || errorCode === "INFRASTRUCTURE_RECOVERY_DEGRADED"
+  ) {
+    return {
+      zh: "Worker、租约或上游网络发生临时中断，已完成内容和检查点均已保留；系统正在自动恢复，无需重新创建项目或手动重试。",
+      en: "A Worker, lease, or upstream network interruption occurred. Completed work and checkpoints were preserved, and automatic recovery is in progress; no project recreation or manual retry is needed.",
+    };
+  }
   if (errorCode === "STRUCTURED_OUTPUT_SYNTAX_ERROR") {
     const stage = structuredOutputStage(message);
     const label = structuredOutputStageLabel(stage);
@@ -153,6 +175,12 @@ function displayMessageFor(
     };
   }
   if (category === "contract") {
+    if (message && /第\d+片段/u.test(message)) {
+      return {
+        zh: message,
+        en: `A segment contract failed validation. Completed segments were preserved. Diagnostic: ${message}`,
+      };
+    }
     return {
       zh: "执行合同未通过校验。系统已保留完成内容，请修复合同后继续。",
       en: "The execution contract failed validation. Completed work was preserved; repair the contract before continuing.",

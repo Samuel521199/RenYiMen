@@ -5,6 +5,8 @@ import {
   capacityRetryDelayMs,
   classifyVideoProductionError,
   classifyVideoProductionFailure,
+  failureBudgetForCategory,
+  infrastructureRetryDelayMs,
   ProductionSchedulingInvariantError,
 } from "./production-job-queue";
 import {
@@ -67,6 +69,10 @@ const phaseOneInvariantMigrationSource = readFileSync(
   new URL("../../../prisma/migrations/20260728233000_archive_legacy_reconcile_and_enforce_active_target_job/migration.sql", import.meta.url),
   "utf8",
 );
+const retryBudgetMigrationSource = readFileSync(
+  new URL("../../../prisma/migrations/20260729103000_split_video_job_retry_budgets/migration.sql", import.meta.url),
+  "utf8",
+);
 const mediaPlannerSource = readFileSync(
   new URL("./media-conditioned-planner.ts", import.meta.url),
   "utf8",
@@ -121,7 +127,14 @@ test("durable jobs expose the complete production state machine and lease before
   const statusTypeSource = queueSource.slice(statusTypeStart, statusTypeEnd);
   assert.doesNotMatch(statusTypeSource, /"waiting_dependency"|"preparing_prompt"|"submitted"|"generating"|"terminal_failed"/);
   assert.match(queueSource, /leaseExpiresAt/);
-  assert.match(queueSource, /attempt:\s*\{\s*increment:\s*1\s*\}/);
+  const claimStart = queueSource.indexOf("export async function claimNextVideoProductionJob");
+  const claimEnd = queueSource.indexOf("export async function recoverExpiredVideoProductionJobLeases", claimStart);
+  assert.doesNotMatch(
+    queueSource.slice(claimStart, claimEnd),
+    /attempt:\s*\{\s*increment:\s*1\s*\}/,
+  );
+  assert.match(queueSource, /modelAttempt:\s*\{\s*increment:\s*1\s*\}/);
+  assert.match(queueSource, /stageRepairAttempt:\s*\{\s*increment:\s*1\s*\}/);
 });
 
 test("capacity waits reuse one target job with bounded exponential backoff", () => {
@@ -134,7 +147,7 @@ test("capacity waits reuse one target job with bounded exponential backoff", () 
   assert.match(queueSource, /capacityWaitCount/);
   assert.match(queueSource, /CAPACITY_WAIT_MAX_COUNT\s*=\s*12/);
   assert.match(queueSource, /CAPACITY_WAIT_MAX_AGE_MS\s*=\s*30\s*\*\s*60_000/);
-  assert.match(queueSource, /attempt:\s*\{\s*decrement:/);
+  assert.doesNotMatch(queueSource, /attempt:\s*\{\s*decrement:/);
 });
 
 test("image submission jobs are target-scoped and capacity denial cannot complete as submitted", () => {
@@ -267,7 +280,8 @@ test("clip submission keeps provider polling on the same durable target job", ()
 });
 
 test("local development runs the same isolated worker lanes as production", () => {
-  assert.match(devRunnerSource, /"--watch"/);
+  assert.doesNotMatch(devRunnerSource, /"--watch"/);
+  assert.match(devRunnerSource, /VIDEO_PRODUCTION_RUNTIME_VERSION:\s*devRuntimeVersion/);
   for (const kinds of [
     "planning",
     "image_prepare_submit,micro_shot_prepare_submit",
@@ -276,6 +290,46 @@ test("local development runs the same isolated worker lanes as production", () =
   ]) {
     assert.ok(devRunnerSource.includes(kinds));
   }
+});
+
+test("Worker interruptions have a separate recovery budget and never consume business attempts", () => {
+  assert.equal(infrastructureRetryDelayMs(1), 2_000);
+  assert.equal(infrastructureRetryDelayMs(2), 4_000);
+  assert.equal(infrastructureRetryDelayMs(6), 60_000);
+  assert.equal(infrastructureRetryDelayMs(100), 60_000);
+  for (const field of [
+    "modelAttempt",
+    "stageRepairAttempt",
+    "infrastructureAttempt",
+    "leaseLossCount",
+    "userRetryCount",
+    "deploymentGraceUntil",
+  ]) {
+    assert.match(schemaSource, new RegExp(field));
+  }
+  assert.match(queueSource, /recoverExpiredVideoProductionJobLeases/);
+  assert.match(queueSource, /AUTO_RETRY_INFRASTRUCTURE/);
+  assert.match(queueSource, /isInfrastructureRetryCategory\(input\.category\)/);
+  assert.match(queueSource, /reason:\s*input\.category === "provider_rate_limit"/);
+  const recoveryStart = queueSource.indexOf("export async function recoverExpiredVideoProductionJobLeases");
+  const recoveryEnd = queueSource.indexOf("export async function releaseVideoProductionJobForInfrastructure", recoveryStart);
+  assert.doesNotMatch(
+    queueSource.slice(recoveryStart, recoveryEnd),
+    /attempt:\s*\{\s*increment:/,
+  );
+  assert.match(retryBudgetMigrationSource, /plannerCheckpoint/);
+  assert.match(retryBudgetMigrationSource, /INFRASTRUCTURE_RECOVERY_QUEUED/);
+});
+
+test("Worker shutdown drains the active lease and requeues it if the grace period expires", () => {
+  assert.match(workerSource, /shouldStop:\s*\(\)\s*=>\s*stopping/);
+  assert.match(workerSource, /beginVideoProductionDeploymentDrain/);
+  assert.match(workerSource, /releaseVideoProductionJobForInfrastructure/);
+  assert.match(workerSource, /VIDEO_PRODUCTION_WORKER_SHUTDOWN_GRACE_MS/);
+  assert.match(queueSource, /DEFAULT_DEPLOYMENT_GRACE_MS\s*=\s*10\s*\*\s*60_000/);
+  assert.match(queueSource, /lastInterruptionReason:\s*"deployment_draining"/);
+  assert.match(queueSource, /GREATEST\([\s\S]*deployment_grace_until/);
+  assert.match(composeSource, /stop_grace_period:\s*10m30s/);
 });
 
 test("candidate selection and asset confirmation are separate human states", () => {
@@ -328,6 +382,12 @@ test("production failures preserve capacity, throttling, and scheduler semantics
     classifyVideoProductionFailure(new Error("HTTP 429 too many requests")).category,
     "provider_rate_limit",
   );
+  const quota = classifyVideoProductionFailure(
+    new Error("You exceeded your current quota: token-limit; check billing details"),
+  );
+  assert.equal(quota.disposition, "terminal");
+  assert.equal(quota.category, "provider_quota");
+  assert.equal(failureBudgetForCategory(quota.category), "none");
   assert.equal(
     classifyVideoProductionFailure(
       new ProductionSchedulingInvariantError("image_prepare_submit requires a non-empty targetId"),

@@ -216,6 +216,16 @@ const PROJECT_INCLUDE = {
       priority: true,
       attempt: true,
       maxAttempts: true,
+      modelAttempt: true,
+      maxModelAttempts: true,
+      stageRepairAttempt: true,
+      maxStageRepairAttempts: true,
+      infrastructureAttempt: true,
+      maxInfrastructureAttempts: true,
+      leaseLossCount: true,
+      userRetryCount: true,
+      lastInterruptionReason: true,
+      deploymentGraceUntil: true,
       lastError: true,
       errorCategory: true,
       errorCode: true,
@@ -569,6 +579,7 @@ export function serializeVideoProject(project: VideoProjectRecord) {
     productionJobs: project.productionJobs.map((job) => ({
       ...job,
       availableAt: job.availableAt.toISOString(),
+      deploymentGraceUntil: job.deploymentGraceUntil?.toISOString() ?? null,
       startedAt: job.startedAt?.toISOString() ?? null,
       completedAt: job.completedAt?.toISOString() ?? null,
       progressAt: job.progressAt.toISOString(),
@@ -639,7 +650,11 @@ function deriveProductionState(project: VideoProjectRecord): {
     hasPendingJobs: pending.length > 0,
     queuedCount: queued.length,
     runningCount: running.length,
-    retryingCount: queued.filter((job) => job.attempt > 0).length,
+    retryingCount: queued.filter((job) =>
+      job.attempt > 0
+      || job.infrastructureAttempt > 0
+      || job.recoveryAction === "AUTO_RETRY_INFRASTRUCTURE"
+    ).length,
     oldestQueuedAt: oldestQueued?.createdAt.toISOString() ?? null,
     oldestQueuedAgeMs,
     workerUnavailable,
@@ -791,7 +806,9 @@ function buildProjectTaskGraph(
     queuedAt: planningJob?.createdAt.toISOString() ?? project.createdAt.toISOString(),
     startedAt: planningJob?.startedAt?.toISOString() ?? plannerProgress?.startedAt,
     completedAt: planningComplete ? project.updatedAt.toISOString() : undefined,
-    attempt: planningJob?.attempt ?? plannerProgress?.attempt ?? 1,
+    attempt: planningJob
+      ? Math.max(1, planningJob.attempt + 1)
+      : plannerProgress?.attempt ?? 1,
     retryReason: planningJob?.lastError
       ?? (plannerProgress?.status === "failed" ? project.errorMessage ?? plannerProgress.detailZh : undefined),
     correctionStrategy: plannerProgress?.stage.includes("repair") ? plannerProgress.detailZh : undefined,
@@ -1190,6 +1207,8 @@ function taskGraphGenerationNode(params: {
     status = job.errorCategory === "internal_capacity"
       ? "waiting_capacity"
       : job.attempt > 0
+        || job.infrastructureAttempt > 0
+        || job.recoveryAction === "AUTO_RETRY_INFRASTRUCTURE"
         ? "retrying"
         : "reserved";
   } else status = "blocked";
@@ -9544,6 +9563,17 @@ export async function pumpVideoProductionJobs(options: {
   workerId?: string;
   runtimeVersion?: string;
   kinds?: VideoProductionJobKind[];
+  shouldStop?: () => boolean;
+  onLeaseAcquired?: (lease: {
+    id: string;
+    projectId: string;
+    leaseToken: string;
+  }) => Promise<void> | void;
+  onLeaseReleased?: (lease: {
+    id: string;
+    projectId: string;
+    leaseToken: string;
+  }) => Promise<void> | void;
 } = {}): Promise<{
   claimedCount: number;
   completedCount: number;
@@ -9560,6 +9590,7 @@ export async function pumpVideoProductionJobs(options: {
   let failedCount = 0;
   let meaningfulProgressCount = 0;
   for (let index = 0; index < maxJobs; index += 1) {
+    if (options.shouldStop?.()) break;
     const job = await claimNextVideoProductionJob({
       workerId,
       runtimeVersion,
@@ -9568,6 +9599,12 @@ export async function pumpVideoProductionJobs(options: {
       leaseMs: 3 * 60_000,
     });
     if (!job?.leaseToken) break;
+    const activeLease = {
+      id: job.id,
+      projectId: job.projectId,
+      leaseToken: job.leaseToken,
+    };
+    await options.onLeaseAcquired?.(activeLease);
     claimedCount += 1;
     let leaseLost = false;
     let heartbeatInFlight = false;
@@ -9692,6 +9729,7 @@ export async function pumpVideoProductionJobs(options: {
       }, outcome === "failed" ? "error" : "warn");
     } finally {
       clearInterval(heartbeat);
+      await options.onLeaseReleased?.(activeLease);
       await persistProjectProductionProjection(job.projectId).catch((error) =>
         logOnePromptVideo("production_projection.persist.error", {
           projectId: job.projectId,
@@ -9787,6 +9825,10 @@ async function processClaimedVideoProductionJob(
     kind: job.kind,
     stage: job.stage,
     attempt: job.attempt,
+    modelAttempt: job.modelAttempt,
+    stageRepairAttempt: job.stageRepairAttempt,
+    infrastructureAttempt: job.infrastructureAttempt,
+    leaseLossCount: job.leaseLossCount,
   });
   if (
     (
@@ -9804,7 +9846,7 @@ async function processClaimedVideoProductionJob(
     if (!taskId) throw new Error("Durable planning job is missing taskId");
     await planVideoProject(job.userId, job.projectId, undefined, {
       planningTaskId: taskId,
-      planningAttemptNumber: job.attempt,
+      planningAttemptNumber: Math.max(1, job.modelAttempt + 1),
       planningAttemptQueuedAt: job.availableAt,
     });
     return { stage: "planning", meaningfulProgress: true };

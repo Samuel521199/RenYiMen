@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   clearLocalTranslationCacheForTests,
   localizeChineseDisplayFields,
+  localizeChineseDisplayFieldsNonCritical,
   prepareEnglishOnlyModelRequestBody,
+  ProviderQuotaError,
 } from "./local-translation";
 
 type QwenMtRequest = {
@@ -171,6 +173,80 @@ test("reuses cached Qwen-MT translations without another upstream request", asyn
     assert.equal(first.metrics.translatedTexts, 1);
     assert.equal(second.metrics.translatedTexts, 0);
     assert.equal(second.metrics.cacheHits, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnvironment();
+  }
+});
+
+test("Qwen token-limit responses become typed provider quota errors", async () => {
+  const restoreEnvironment = withQwenMtTestEnvironment();
+  const previousFetch = globalThis.fetch;
+  clearLocalTranslationCacheForTests();
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: {
+      code: "token-limit",
+      message: "You exceeded your current quota, please check billing details.",
+    },
+  }), { status: 402, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => prepareEnglishOnlyModelRequestBody({
+        messages: [{ role: "user", content: "需要翻译的内容" }],
+      }),
+      (error: unknown) =>
+        error instanceof ProviderQuotaError
+        && error.code === "PROVIDER_QUOTA_EXHAUSTED"
+        && error.recoveryAction === "CHECK_PROVIDER_BILLING",
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnvironment();
+  }
+});
+
+test("display localization quota failure preserves canonical output and schedules cache warming", async () => {
+  const restoreEnvironment = withQwenMtTestEnvironment();
+  const previousFetch = globalThis.fetch;
+  clearLocalTranslationCacheForTests();
+  let quotaExhausted = true;
+  let fetchCount = 0;
+  let scheduledRetry: (() => void) | undefined;
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    if (quotaExhausted) {
+      return new Response(JSON.stringify({
+        error: { code: "token-limit", message: "quota exceeded" },
+      }), { status: 402, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: "英雄登场" } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const canonical = { purpose_en: "Hero enters", purpose_zh: "Hero enters" };
+    const result = await localizeChineseDisplayFieldsNonCritical(canonical, {
+      scheduleRetry: (work) => {
+        scheduledRetry = work;
+      },
+    });
+    assert.equal(result.deferred, true);
+    assert.deepEqual(result.value, canonical);
+    assert.ok(result.deferredError instanceof ProviderQuotaError);
+    assert.equal(typeof scheduledRetry, "function");
+
+    quotaExhausted = false;
+    scheduledRetry?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const localized = await localizeChineseDisplayFields(canonical);
+    assert.deepEqual(localized.value, {
+      purpose_en: "Hero enters",
+      purpose_zh: "英雄登场",
+    });
+    assert.equal(localized.metrics.cacheHits, 1);
+    assert.equal(fetchCount, 2);
   } finally {
     globalThis.fetch = previousFetch;
     restoreEnvironment();

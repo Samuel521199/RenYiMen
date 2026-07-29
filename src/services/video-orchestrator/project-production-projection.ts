@@ -94,29 +94,53 @@ export function projectProductionProjection(input: {
   const executingJobs = activeJobs.filter((job) => job.status !== "waiting_review");
   if (executingJobs.length) {
     const authoritative = [...executingJobs].sort(compareActiveJobs)[0];
-    const operationalError = authoritative.errorCode === "NO_COMPATIBLE_WORKER";
+    const infrastructureRecovery =
+      authoritative.recoveryAction === "AUTO_RETRY_INFRASTRUCTURE"
+      || authoritative.errorCode === "INFRASTRUCTURE_RECOVERY_QUEUED"
+      || authoritative.errorCode === "INFRASTRUCTURE_RECOVERY_DEGRADED";
+    const operationalError = authoritative.errorCode === "NO_COMPATIBLE_WORKER"
+      || infrastructureRecovery;
     const structuredError = operationalError
       ? structuredProductionError({
-          errorCode: authoritative.errorCode || "NO_COMPATIBLE_WORKER",
+          errorCode: authoritative.errorCode || (
+            infrastructureRecovery
+              ? "INFRASTRUCTURE_RECOVERY_QUEUED"
+              : "NO_COMPATIBLE_WORKER"
+          ),
           category: "scheduling",
+          retryable: infrastructureRecovery,
           targetId: authoritative.targetId,
           artifactId: authoritative.artifactId,
           recoveryAction:
-            authoritative.recoveryAction || "DEPLOY_COMPATIBLE_WORKER",
+            authoritative.recoveryAction || (
+              infrastructureRecovery
+                ? "AUTO_RETRY_INFRASTRUCTURE"
+                : "DEPLOY_COMPATIBLE_WORKER"
+            ),
           message:
-            authoritative.lastError || "No compatible Worker is available.",
+            authoritative.lastError || (
+              infrastructureRecovery
+                ? "Worker interruption detected; automatic recovery is queued."
+                : "No compatible Worker is available."
+            ),
         })
       : null;
     return {
       ...base,
-      status: generatingStatusForJob(authoritative),
+      status: infrastructureRecovery
+        ? "WAITING_RECOVERY"
+        : generatingStatusForJob(authoritative),
       source: "production_job",
       frontierNodeId: frontierNode(nodes)?.id,
       ...(operationalError
         ? {
             ...(structuredError ?? {}),
             errorMessage:
-              authoritative.lastError || "No compatible Worker is available.",
+              authoritative.lastError || (
+                infrastructureRecovery
+                  ? "Worker interruption detected; automatic recovery is queued."
+                  : "No compatible Worker is available."
+              ),
           }
         : {}),
     };

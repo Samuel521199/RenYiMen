@@ -1,5 +1,8 @@
 import { pumpVideoProductionJobs } from "../src/services/video-orchestrator/project-service";
 import {
+  beginVideoProductionDeploymentDrain,
+  DEFAULT_DEPLOYMENT_GRACE_MS,
+  releaseVideoProductionJobForInfrastructure,
   SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
   type VideoProductionJobKind,
 } from "../src/services/video-orchestrator/production-job-queue";
@@ -17,11 +20,62 @@ const batchSize = boundedInt("VIDEO_PRODUCTION_WORKER_BATCH_SIZE", 20, 1, 100);
 const kinds = productionJobKinds(process.env.VIDEO_PRODUCTION_WORKER_KINDS);
 const runOnce = process.env.VIDEO_PRODUCTION_WORKER_ONCE === "1";
 const runtimeVersion = resolveVideoProductionRuntimeVersion();
+const shutdownGraceMs = boundedInt(
+  "VIDEO_PRODUCTION_WORKER_SHUTDOWN_GRACE_MS",
+  DEFAULT_DEPLOYMENT_GRACE_MS,
+  30_000,
+  30 * 60_000,
+);
 
 async function main(): Promise<void> {
   let stopping = false;
-  process.on("SIGINT", () => { stopping = true; });
-  process.on("SIGTERM", () => { stopping = true; });
+  let activeLease: { id: string; projectId: string; leaseToken: string } | null = null;
+  let shutdownTimer: NodeJS.Timeout | undefined;
+  let shutdownSignalCount = 0;
+  const releaseActiveLease = async (
+    reason: "worker_shutdown" | "deployment_restart" | "worker_abort",
+  ): Promise<void> => {
+    const lease = activeLease;
+    if (!lease) return;
+    activeLease = null;
+    await releaseVideoProductionJobForInfrastructure({
+      id: lease.id,
+      leaseToken: lease.leaseToken,
+      reason,
+    }).catch((error) =>
+      console.error("[video-production-worker] failed to release active lease", {
+        jobId: lease.id,
+        error,
+      }));
+  };
+  const requestStop = (signal: NodeJS.Signals) => {
+    shutdownSignalCount += 1;
+    stopping = true;
+    const lease = activeLease;
+    console.info("[video-production-worker] drain requested", {
+      workerId,
+      signal,
+      currentJobId: lease?.id ?? null,
+      shutdownGraceMs,
+    });
+    if (lease) {
+      void beginVideoProductionDeploymentDrain({
+        id: lease.id,
+        leaseToken: lease.leaseToken,
+        graceMs: shutdownGraceMs,
+      });
+    }
+    if (shutdownSignalCount > 1) {
+      void releaseActiveLease("worker_abort").finally(() => process.exit(0));
+      return;
+    }
+    shutdownTimer ??= setTimeout(() => {
+      void releaseActiveLease("deployment_restart").finally(() => process.exit(0));
+    }, shutdownGraceMs);
+    shutdownTimer.unref?.();
+  };
+  process.on("SIGINT", () => requestStop("SIGINT"));
+  process.on("SIGTERM", () => requestStop("SIGTERM"));
 
   console.info("[video-production-worker] started", {
     workerId,
@@ -45,6 +99,30 @@ async function main(): Promise<void> {
         runtimeVersion,
         maxJobs: batchSize,
         kinds,
+        shouldStop: () => stopping,
+        onLeaseAcquired: async (lease) => {
+          activeLease = lease;
+          await heartbeatVideoProductionWorker({
+            workerId,
+            runtimeVersion,
+            supportedKinds: kinds,
+            supportedPayloadVersions: SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
+            processId: process.pid,
+            currentJobId: lease.id,
+            claimed: true,
+          });
+        },
+        onLeaseReleased: async (lease) => {
+          if (activeLease?.id === lease.id) activeLease = null;
+          await heartbeatVideoProductionWorker({
+            workerId,
+            runtimeVersion,
+            supportedKinds: kinds,
+            supportedPayloadVersions: SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
+            processId: process.pid,
+            currentJobId: null,
+          });
+        },
       });
       await heartbeatVideoProductionWorker({
         workerId,
@@ -71,6 +149,7 @@ async function main(): Promise<void> {
     }
   }
 
+  if (shutdownTimer) clearTimeout(shutdownTimer);
   console.info("[video-production-worker] stopped", { workerId });
   await prisma.$disconnect();
 }

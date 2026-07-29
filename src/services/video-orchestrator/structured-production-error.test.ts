@@ -26,3 +26,39 @@ test("uses a specific label for another structured-output stage", () => {
 
   assert.match(error.displayMessage.zh, /分镜拆解阶段/);
 });
+
+test("describes infrastructure recovery as automatic and checkpoint-safe", () => {
+  const error = structuredProductionError({
+    errorCode: "INFRASTRUCTURE_RECOVERY_QUEUED",
+    category: "scheduling",
+    retryable: true,
+    recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+  });
+
+  assert.match(error.displayMessage.zh, /检查点均已保留/);
+  assert.match(error.displayMessage.zh, /自动恢复/);
+  assert.match(error.displayMessage.zh, /无需.*手动重试/);
+});
+
+test("provider quota exhaustion is non-retryable and points to billing", () => {
+  const error = structuredProductionError({
+    errorCode: "PROVIDER_QUOTA_EXHAUSTED",
+    category: "provider_quota",
+  });
+  assert.equal(error.retryable, false);
+  assert.equal(error.recoveryAction, "CHECK_PROVIDER_BILLING");
+  assert.match(error.displayMessage.zh, /额度已用尽/);
+  assert.match(error.displayMessage.en, /quota is exhausted/i);
+});
+
+test("segment contract diagnostics keep the concrete field path for the UI", () => {
+  const message = "第4片段 motion_contract.camera_motion 缺失。相同合同错误连续出现两次。";
+  const error = structuredProductionError({
+    errorCode: "EXECUTION_CONTRACT_INVALID",
+    category: "contract_validation",
+    recoveryAction: "REPAIR_CONTRACT",
+    message,
+  });
+  assert.equal(error.displayMessage.zh, message);
+  assert.match(error.displayMessage.en, /motion_contract\.camera_motion/);
+});

@@ -13,9 +13,37 @@ interface QwenMtResponse {
     };
   }>;
   error?: {
+    code?: string;
     message?: string;
   };
+  code?: string;
   message?: string;
+}
+
+export class ProviderQuotaError extends Error {
+  readonly code = "PROVIDER_QUOTA_EXHAUSTED";
+  readonly provider = "qwen-mt";
+  readonly recoveryAction = "CHECK_PROVIDER_BILLING";
+  readonly httpStatus?: number;
+
+  constructor(message: string, httpStatus?: number) {
+    super(message);
+    this.name = "ProviderQuotaError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+function qwenResponseError(
+  raw: QwenMtResponse,
+  status: number,
+  fallback: string,
+): Error {
+  const message = raw.error?.message || raw.message || fallback;
+  const code = raw.error?.code || raw.code || "";
+  if (/token[-_ ]?limit|quota|insufficient[_ -]?balance|billing/i.test(`${code} ${message}`)) {
+    return new ProviderQuotaError(message, status);
+  }
+  return new Error(message);
 }
 
 function qwenTranslationFallbackModel(): string {
@@ -278,10 +306,10 @@ async function requestOneWithQwenMt(
 
   const raw = await response.json().catch(() => ({})) as QwenMtResponse;
   if (!response.ok) {
-    throw new Error(
-      raw.error?.message
-      || raw.message
-      || `Qwen-MT translation failed with HTTP ${response.status}`,
+    throw qwenResponseError(
+      raw,
+      response.status,
+      `Qwen-MT translation failed with HTTP ${response.status}`,
     );
   }
   const translated = raw.choices?.[0]?.message?.content?.trim();
@@ -320,10 +348,10 @@ async function requestOneWithQwenChatFallback(
     });
     const raw = await response.json().catch(() => ({})) as QwenMtResponse;
     if (!response.ok) {
-      throw new Error(
-        raw.error?.message
-        || raw.message
-        || `Qwen translation fallback failed with HTTP ${response.status}`,
+      throw qwenResponseError(
+        raw,
+        response.status,
+        `Qwen translation fallback failed with HTTP ${response.status}`,
       );
     }
     const translated = raw.choices?.[0]?.message?.content?.trim();
@@ -366,10 +394,10 @@ async function normalizeEnglishResidueWithQwen(text: string): Promise<string> {
     });
     const raw = await response.json().catch(() => ({})) as QwenMtResponse;
     if (!response.ok) {
-      throw new Error(
-        raw.error?.message
-        || raw.message
-        || `Qwen English normalization failed with HTTP ${response.status}`,
+      throw qwenResponseError(
+        raw,
+        response.status,
+        `Qwen English normalization failed with HTTP ${response.status}`,
       );
     }
     const normalized = raw.choices?.[0]?.message?.content?.trim();
@@ -418,10 +446,10 @@ async function translateBatchWithQwenChatFallback(
     });
     const raw = await response.json().catch(() => ({})) as QwenMtResponse;
     if (!response.ok) {
-      throw new Error(
-        raw.error?.message
-        || raw.message
-        || `Qwen batch translation failed with HTTP ${response.status}`,
+      throw qwenResponseError(
+        raw,
+        response.status,
+        `Qwen batch translation failed with HTTP ${response.status}`,
       );
     }
     const content = raw.choices?.[0]?.message?.content?.trim();
@@ -818,6 +846,39 @@ export async function localizeChineseDisplayFields(
     value: replaceChineseDisplayStrings(value, replacements),
     metrics: translated.metrics,
   };
+}
+
+export async function localizeChineseDisplayFieldsNonCritical(
+  value: unknown,
+  options: {
+    scheduleRetry?: (work: () => void) => void;
+  } = {},
+): Promise<{
+  value: unknown;
+  metrics: TranslationMetrics;
+  deferred: boolean;
+  deferredError?: unknown;
+}> {
+  try {
+    const localized = await localizeChineseDisplayFields(value);
+    return { ...localized, deferred: false };
+  } catch (error) {
+    const scheduleRetry = options.scheduleRetry ?? ((work: () => void) => {
+      const timer = setTimeout(work, 60_000);
+      timer.unref?.();
+    });
+    scheduleRetry(() => {
+      // The retry safely warms the translation cache. Canonical English output
+      // has already continued through the pipeline and remains authoritative.
+      void localizeChineseDisplayFields(value).catch(() => undefined);
+    });
+    return {
+      value,
+      metrics: { cacheHits: 0, translatedTexts: 0, durationMs: 0 },
+      deferred: true,
+      deferredError: error,
+    };
+  }
 }
 
 export function clearLocalTranslationCacheForTests(): void {

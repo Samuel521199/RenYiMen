@@ -14,6 +14,7 @@ export class StoryboardStageError extends Error {
   readonly httpStatus?: number;
   readonly validationErrors?: readonly string[];
   readonly stage?: string;
+  readonly rawCandidate?: unknown;
 
   constructor(
     message: string,
@@ -23,6 +24,7 @@ export class StoryboardStageError extends Error {
       httpStatus?: number;
       validationErrors?: readonly string[];
       stage?: string;
+      rawCandidate?: unknown;
       cause?: unknown;
     },
   ) {
@@ -33,6 +35,7 @@ export class StoryboardStageError extends Error {
     this.httpStatus = options.httpStatus;
     this.validationErrors = options.validationErrors;
     this.stage = options.stage;
+    this.rawCandidate = options.rawCandidate;
   }
 }
 

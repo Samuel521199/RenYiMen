@@ -91,7 +91,9 @@ import { createVideoPlan } from "./planner";
 import {
   advanceStructuredFailureState,
   formatStructuredContractIssues,
+  sanitizeStructuredCandidate,
   shouldStopStructuredFailureRetry,
+  systemicStructuredFailureSegments,
   structuredContractIssueFingerprint,
   structuredStageJsonSchema,
   validateStructuredStageValue,
@@ -106,7 +108,7 @@ import {
   type SegmentShotDecomposerOutput,
 } from "./segment-shot-decomposer-contract";
 import {
-  localizeChineseDisplayFields,
+  localizeChineseDisplayFieldsNonCritical,
   prepareEnglishOnlyModelRequestBody,
 } from "./local-translation";
 import { JsonStageStreamAssembler } from "./json-stage-stream-assembler";
@@ -1910,6 +1912,22 @@ function contractIssuesFromStageError(error: unknown): StructuredContractIssue[]
       message: separator > 0 ? rawMessage.slice(separator + 2) : rawMessage,
     };
   });
+}
+
+function structuredIssueUserSummary(
+  segmentNo: number,
+  issues: readonly StructuredContractIssue[],
+): string {
+  const details = issues.slice(0, 3).map((issue) => {
+    const path = issue.path
+      .replace(/^\$\.shot_decomposer_plan\.segment_render_descriptions\[\d+\]\.?/, "")
+      .replace(/^\$\./, "");
+    const reason = /required/i.test(issue.message)
+      ? "缺失"
+      : issue.message;
+    return `${path || "合同结构"} ${reason}`;
+  });
+  return `第${segmentNo}片段 ${details.join("；")}`;
 }
 
 export class TimelineReplanRequiredError extends Error {
@@ -3730,13 +3748,25 @@ async function executeStructuredStage<T = unknown>(params: {
             retryable: true,
             validationErrors,
             stage: params.stage,
+            rawCandidate: contractResult.raw,
           },
         );
       }
       parsed = contractResult.value;
     }
     throwIfBatchCancelled(params.stage, params.signal);
-    const localized = await localizeChineseDisplayFields(parsed);
+    const localized = await localizeChineseDisplayFieldsNonCritical(parsed);
+    if (localized.deferred) {
+      await logOnePromptVideo("local_translation.model_output.deferred", {
+        stage: params.stage,
+        source: "en",
+        target: "zh",
+        disposition: "non_critical_display_fallback",
+        canonicalOutputPreserved: true,
+        backgroundRetryScheduled: true,
+        error: errorForLog(localized.deferredError),
+      }, "warn");
+    }
     throwIfBatchCancelled(params.stage, params.signal);
     if (localized.metrics.translatedTexts || localized.metrics.cacheHits) {
       await logOnePromptVideo("local_translation.model_output.localized", {
@@ -5632,15 +5662,67 @@ async function createShotDecomposerPlan(params: {
           },
           contractIssuesFromStageError(error),
         );
-        const state = advanceStructuredFailureState(
+        const issues = contractIssuesFromStageError(error);
+        const state = {
+          ...advanceStructuredFailureState(
           params.checkpoint.structuredFailures?.[structuredFailureKey],
           identity,
-        );
+          ),
+          issues,
+          candidatePreview: sanitizeStructuredCandidate(
+            error instanceof StoryboardStageError ? error.rawCandidate : undefined,
+          ),
+        };
         params.checkpoint.structuredFailures = {
           ...(params.checkpoint.structuredFailures ?? {}),
           [structuredFailureKey]: state,
         };
+        const systemicMatches = Object.entries(params.checkpoint.structuredFailures)
+          .filter(([, failure]) =>
+            failure.schemaVersion === state.schemaVersion
+            && failure.issueFingerprint === state.issueFingerprint
+            && Number.isInteger(failure.segment)
+          );
+        const affectedSegments = systemicStructuredFailureSegments(
+          systemicMatches.map(([, failure]) => failure),
+          state,
+        );
+        if (affectedSegments.length >= 2) {
+          for (const [key, failure] of systemicMatches) {
+            params.checkpoint.structuredFailures[key] = {
+              ...failure,
+              systemic: true,
+              affectedSegments,
+            };
+          }
+        }
         await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+        if (affectedSegments.length >= 2) {
+          await logOnePromptVideo("aliyun.storyboard.structured_contract.systemic_circuit_opened", {
+            stage,
+            segmentNo: segment.segmentNo,
+            affectedSegments,
+            schemaVersion: state.schemaVersion,
+            issueFingerprint: state.issueFingerprint,
+            issues,
+            disposition: "contract_repair_required",
+          }, "error");
+          throw new StoryboardStageError(
+            `${structuredIssueUserSummary(segment.segmentNo, issues)}。相同合同错误同时出现在分段 ${affectedSegments.join("、")}，已停止继续调用模型，请修复系统 Schema 或提示词后从失败分段恢复。`,
+            {
+              code: "contract_validation_error",
+              retryable: false,
+              validationErrors: error instanceof StoryboardStageError
+                ? error.validationErrors
+                : [feedback],
+              stage,
+              rawCandidate: error instanceof StoryboardStageError
+                ? error.rawCandidate
+                : undefined,
+              cause: error,
+            },
+          );
+        }
         if (shouldStopStructuredFailureRetry(state)) {
           await logOnePromptVideo("aliyun.storyboard.structured_contract.retry_stopped", {
             stage,
@@ -5651,7 +5733,7 @@ async function createShotDecomposerPlan(params: {
             disposition: "contract_repair_required",
           }, "error");
           throw new StoryboardStageError(
-            `Structured contract failure was unchanged twice for ${stage}, segment ${segment.segmentNo}, schema ${state.schemaVersion}. Automatic retry stopped; contract repair or manual review is required.`,
+            `${structuredIssueUserSummary(segment.segmentNo, issues)}。相同合同错误连续出现两次，已停止继续调用模型；请局部修复该分段合同。`,
             {
               code: "contract_validation_error",
               retryable: false,
@@ -5659,6 +5741,9 @@ async function createShotDecomposerPlan(params: {
                 ? error.validationErrors
                 : [feedback],
               stage,
+              rawCandidate: error instanceof StoryboardStageError
+                ? error.rawCandidate
+                : undefined,
               cause: error,
             },
           );
@@ -10046,7 +10131,7 @@ function legacyPlannerInputFingerprint(input: PlanVideoProjectInput): string {
   })).digest("hex");
 }
 
-function checkpointFailureStage(error: unknown): AliyunStoryboardProgressStage | "final_validation" {
+function checkpointFailureStage(error: unknown): string {
   if (error instanceof PlanningArchitectRouteConflictError) return "planning_architect";
   if (isStructuredOutputSyntaxError(error)) {
     return error.stage as AliyunStoryboardProgressStage;
@@ -10128,13 +10213,30 @@ function failedSegmentNosFromError(error: unknown): number[] {
   return [...segmentNos].sort((left, right) => left - right);
 }
 
+export interface ScopedPlannerFailureStage {
+  raw: string;
+  baseStage: string;
+  segmentNo?: number;
+}
+
+export function parseScopedPlannerFailureStage(stage: string): ScopedPlannerFailureStage {
+  const scoped = stage.match(/^(shot_decomposer|prompt_detailer)_s(\d+)$/);
+  if (!scoped) return { raw: stage, baseStage: stage };
+  return {
+    raw: stage,
+    baseStage: scoped[1],
+    segmentNo: Number(scoped[2]),
+  };
+}
+
 export function invalidatePlannerCheckpointAfterFailure(
   checkpoint: AliyunStoryboardPlannerCheckpoint,
-  failedStage: AliyunStoryboardProgressStage | "final_validation",
+  failedStage: string,
   error: unknown,
 ): AliyunStoryboardPlannerCheckpoint {
-  const stage = String(failedStage);
-  const fingerprint = checkpointFailureFingerprint(stage, error);
+  const scopedStage = parseScopedPlannerFailureStage(String(failedStage));
+  const stage = scopedStage.baseStage;
+  const fingerprint = checkpointFailureFingerprint(scopedStage.raw, error);
   const sameFailure = checkpoint.lastFailure?.fingerprint === fingerprint.fingerprint;
 
   if (stage === "reference_fact_extractor") {
@@ -10195,9 +10297,31 @@ export function invalidatePlannerCheckpointAfterFailure(
     checkpoint.timelineChangeHistory = [];
     checkpoint.resumeFromStage = "storyboard_artist";
   } else if (stage === "prompt_detailer") {
-    checkpoint.promptDetailSegmentPlans = {};
+    if (scopedStage.segmentNo !== undefined) {
+      delete checkpoint.promptDetailSegmentPlans?.[String(scopedStage.segmentNo)];
+    } else {
+      checkpoint.promptDetailSegmentPlans = {};
+    }
     checkpoint.finalPromptRepairAttempts = 0;
     checkpoint.resumeFromStage = "prompt_detailer";
+  } else if (stage === "shot_decomposer") {
+    const failedSegmentNos = scopedStage.segmentNo === undefined
+      ? failedSegmentNosFromError(error)
+      : [scopedStage.segmentNo];
+    if (failedSegmentNos.length) {
+      for (const segmentNo of failedSegmentNos) {
+        const key = String(segmentNo);
+        delete checkpoint.shotDecomposerSegmentPlans?.[key];
+        delete checkpoint.approvedShotDecomposerSegmentPlans?.[key];
+        delete checkpoint.promptDetailSegmentPlans?.[key];
+      }
+    } else {
+      checkpoint.shotDecomposerSegmentPlans = {};
+      checkpoint.approvedShotDecomposerSegmentPlans = {};
+      checkpoint.promptDetailSegmentPlans = {};
+    }
+    checkpoint.finalPromptRepairAttempts = 0;
+    checkpoint.resumeFromStage = "shot_decomposer";
   } else if (stage === "final_validation") {
     const failedSegmentNos = failedSegmentNosFromError(error);
     for (const segmentNo of failedSegmentNos) {
@@ -10221,7 +10345,7 @@ export function invalidatePlannerCheckpointAfterFailure(
   const invalidatedAt = new Date().toISOString();
   checkpoint.lastFailure = {
     ...fingerprint,
-    stage,
+    stage: scopedStage.raw,
     count: sameFailure ? (checkpoint.lastFailure?.count ?? 1) + 1 : 1,
     invalidatedAt,
   };
@@ -10869,6 +10993,30 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
             lastSeenAt: typeof value.lastSeenAt === "string"
               ? value.lastSeenAt
               : new Date().toISOString(),
+            issues: Array.isArray(value.issues)
+              ? value.issues.flatMap((issue) => {
+                  if (
+                    !isRecord(issue)
+                    || typeof issue.path !== "string"
+                    || typeof issue.code !== "string"
+                    || typeof issue.kind !== "string"
+                    || typeof issue.message !== "string"
+                  ) return [];
+                  return [{
+                    path: issue.path,
+                    code: issue.code,
+                    kind: issue.kind as StructuredContractIssue["kind"],
+                    message: issue.message,
+                  }];
+                })
+              : undefined,
+            candidatePreview: sanitizeStructuredCandidate(value.candidatePreview),
+            systemic: value.systemic === true,
+            affectedSegments: Array.isArray(value.affectedSegments)
+              ? value.affectedSegments
+                  .map(numberFrom)
+                  .filter((segmentNo) => Number.isInteger(segmentNo) && segmentNo > 0)
+              : undefined,
           } satisfies StructuredFailureState]];
         }),
       )

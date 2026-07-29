@@ -5,6 +5,7 @@ x-video-production-worker: &video-production-worker
     context: .
     dockerfile: Dockerfile
     target: worker
+  stop_grace_period: 10m30s
   depends_on:
     - db
     - workbench-backend
@@ -18,6 +19,7 @@ x-video-production-worker: &video-production-worker
     MODEL_TRANSLATION_PROVIDER: qwen-mt
     QWEN_MT_MODEL: qwen-mt-plus
     LOCAL_TRANSLATION_BASE_URL: http://libretranslate:5000
+    VIDEO_PRODUCTION_WORKER_SHUTDOWN_GRACE_MS: ${VIDEO_PRODUCTION_WORKER_SHUTDOWN_GRACE_MS:-600000}
     NODE_ENV: production
 
 services:

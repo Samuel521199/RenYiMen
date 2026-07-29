@@ -176,6 +176,16 @@ model VideoProductionJob {
   progressAt            DateTime  @default(now()) @map("progress_at")
   startedAt             DateTime? @map("started_at")
   completedAt           DateTime? @map("completed_at")
+  modelAttempt          Int       @default(0) @map("model_attempt")
+  maxModelAttempts      Int       @default(3) @map("max_model_attempts")
+  stageRepairAttempt    Int       @default(0) @map("stage_repair_attempt")
+  maxStageRepairAttempts Int      @default(3) @map("max_stage_repair_attempts")
+  infrastructureAttempt Int       @default(0) @map("infrastructure_attempt")
+  maxInfrastructureAttempts Int   @default(50) @map("max_infrastructure_attempts")
+  leaseLossCount        Int       @default(0) @map("lease_loss_count")
+  userRetryCount        Int       @default(0) @map("user_retry_count")
+  lastInterruptionReason String?  @map("last_interruption_reason") @db.Text
+  deploymentGraceUntil DateTime? @map("deployment_grace_until")
 
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)

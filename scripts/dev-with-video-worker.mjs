@@ -7,6 +7,13 @@ const { loadEnvConfig } = require("@next/env");
 loadEnvConfig(process.cwd(), true);
 const children = new Set();
 let stopping = false;
+const devRuntimeVersion =
+  process.env.VIDEO_PRODUCTION_RUNTIME_VERSION?.trim()
+  || `dev-session-${Date.now().toString(36)}`;
+const devEnvironment = {
+  ...process.env,
+  VIDEO_PRODUCTION_RUNTIME_VERSION: devRuntimeVersion,
+};
 
 function start(label, args, env = process.env) {
   const child = spawn(process.execPath, args, {
@@ -39,7 +46,7 @@ function stop(signal) {
 process.on("SIGINT", () => stop("SIGINT"));
 process.on("SIGTERM", () => stop("SIGTERM"));
 
-start("web", [nextCli, "dev", "--turbopack", "--port", "3001"]);
+start("web", [nextCli, "dev", "--turbopack", "--port", "3001"], devEnvironment);
 for (const worker of [
   { label: "planning worker", id: "local-planning", kinds: "planning" },
   { label: "image worker", id: "local-image", kinds: "image_prepare_submit,micro_shot_prepare_submit" },
@@ -48,9 +55,9 @@ for (const worker of [
 ]) {
   start(
     worker.label,
-    ["--watch", "--watch-preserve-output", "--import", "tsx", "scripts/video-production-worker.ts"],
+    ["--import", "tsx", "scripts/video-production-worker.ts"],
     {
-      ...process.env,
+      ...devEnvironment,
       VIDEO_PRODUCTION_WORKER_ID: worker.id,
       VIDEO_PRODUCTION_WORKER_KINDS: worker.kinds,
     },

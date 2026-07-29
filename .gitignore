@@ -6,6 +6,7 @@ node_modules
 
 # Build / Next
 .next
+.next-codex-build/
 out
 build
 dist

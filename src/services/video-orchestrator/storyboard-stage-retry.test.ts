@@ -16,6 +16,7 @@ import {
   migrateCheckpointV13ToV14,
   mergeTargetedShotDecomposerRepair,
   normalizeAliyunStoryboardPlannerCheckpoint,
+  parseScopedPlannerFailureStage,
 } from "./three-stage-planner";
 
 test("shot decomposer retry only reruns the failed stage", async () => {
@@ -41,6 +42,94 @@ test("shot decomposer retry only reruns the failed stage", async () => {
   assert.equal(result, "segment-4");
   assert.equal(attempts, 3);
   assert.deepEqual(delays, [2000, 4000]);
+});
+
+test("scoped shot stage parsing identifies the base stage and segment", () => {
+  assert.deepEqual(parseScopedPlannerFailureStage("shot_decomposer_s4"), {
+    raw: "shot_decomposer_s4",
+    baseStage: "shot_decomposer",
+    segmentNo: 4,
+  });
+  assert.deepEqual(parseScopedPlannerFailureStage("storyboard_artist"), {
+    raw: "storyboard_artist",
+    baseStage: "storyboard_artist",
+  });
+});
+
+test("scoped shot contract failure invalidates only the failed segment", () => {
+  const input = {
+    userPrompt: "Product story",
+    aspectRatio: "9:16" as const,
+    durationSeconds: 30,
+    referenceImageUrls: [],
+  };
+  const checkpoint = normalizeAliyunStoryboardPlannerCheckpoint(undefined, input);
+  checkpoint.shotDecomposerSegmentPlans = {
+    "1": { segment: 1 },
+    "3": { segment: 3 },
+    "4": { segment: 4 },
+  };
+  checkpoint.approvedShotDecomposerSegmentPlans = {
+    "1": { approved: 1 },
+    "3": { approved: 3 },
+    "4": { approved: 4 },
+  };
+  checkpoint.promptDetailSegmentPlans = {
+    "1": { segmentVideoPrompts: [] },
+    "3": { segmentVideoPrompts: [] },
+    "4": { segmentVideoPrompts: [] },
+  };
+
+  invalidatePlannerCheckpointAfterFailure(
+    checkpoint,
+    "shot_decomposer_s4",
+    new StoryboardStageError("segment 4 motion contract missing", {
+      code: "contract_validation_error",
+      retryable: false,
+      stage: "shot_decomposer_s4",
+    }),
+  );
+
+  assert.deepEqual(Object.keys(checkpoint.shotDecomposerSegmentPlans), ["1", "3"]);
+  assert.deepEqual(Object.keys(checkpoint.approvedShotDecomposerSegmentPlans), ["1", "3"]);
+  assert.deepEqual(Object.keys(checkpoint.promptDetailSegmentPlans), ["1", "3"]);
+  assert.equal(checkpoint.resumeFromStage, "shot_decomposer");
+  assert.equal(checkpoint.lastFailure?.stage, "shot_decomposer_s4");
+});
+
+test("checkpoint normalization preserves bounded structured diagnostics", () => {
+  const input = {
+    userPrompt: "Product story",
+    aspectRatio: "9:16" as const,
+    durationSeconds: 30,
+    referenceImageUrls: [],
+  };
+  const checkpoint = normalizeAliyunStoryboardPlannerCheckpoint(undefined, input);
+  checkpoint.structuredFailures = {
+    "shot_decomposer_s4:segment=4:schema=segment-shot-decomposer-v1": {
+      stage: "shot_decomposer_s4",
+      segment: 4,
+      schemaVersion: "segment-shot-decomposer-v1",
+      issueFingerprint: "fingerprint",
+      count: 2,
+      lastSeenAt: new Date().toISOString(),
+      issues: [{
+        path: "$.motion_contract.camera_motion",
+        code: "invalid_type",
+        kind: "shape",
+        message: "Required",
+      }],
+      candidatePreview: { authorization: "secret", prompt: "safe" },
+      systemic: true,
+      affectedSegments: [2, 4],
+    },
+  };
+
+  const normalized = normalizeAliyunStoryboardPlannerCheckpoint(checkpoint, input);
+  const failure = Object.values(normalized.structuredFailures ?? {})[0];
+  assert.equal(failure.issues?.[0]?.path, "$.motion_contract.camera_motion");
+  assert.deepEqual(failure.affectedSegments, [2, 4]);
+  assert.equal((failure.candidatePreview as Record<string, unknown>).authorization, "[redacted]");
 });
 
 test("non-retryable upstream errors fail immediately", async () => {

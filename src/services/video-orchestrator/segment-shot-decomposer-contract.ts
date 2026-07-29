@@ -244,12 +244,24 @@ function normalizeSegmentShotDecomposerAliases(raw: unknown): unknown {
   for (const value of descriptions) {
     if (!isRecord(value)) continue;
     renameAlias(value, "videoPromptContract", "video_prompt_contract");
+    renameAlias(value, "video prompt contract", "video_prompt_contract");
     renameAlias(value, "motionContract", "motion_contract");
+    renameAlias(value, "motion contract", "motion_contract");
     const videoContract = isRecord(value.video_prompt_contract) ? value.video_prompt_contract : undefined;
     if (videoContract) renameAlias(videoContract, "motionSteps", "motion_steps");
+    if (videoContract) renameAlias(videoContract, "motion steps", "motion_steps");
     const motionContract = isRecord(value.motion_contract) ? value.motion_contract : undefined;
     if (!motionContract) continue;
     renameAlias(motionContract, "propPaths", "prop_paths");
+    renameAlias(motionContract, "prop paths", "prop_paths");
+    renameAlias(motionContract, "cameraMotion", "camera_motion");
+    renameAlias(motionContract, "camera motion", "camera_motion");
+    renameAlias(motionContract, "continuousTime", "continuous_time");
+    renameAlias(motionContract, "continuous time", "continuous_time");
+    const cameraMotion = isRecord(motionContract.camera_motion)
+      ? motionContract.camera_motion
+      : undefined;
+    if (cameraMotion?.type === "pull_back") cameraMotion.type = "dolly_out";
     if (Array.isArray(motionContract.prop_paths)) {
       motionContract.prop_paths = motionContract.prop_paths.map((item) =>
         isRecord(item)

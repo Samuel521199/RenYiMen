@@ -253,6 +253,16 @@ interface VideoProject {
     status: string;
     attempt: number;
     maxAttempts: number;
+    modelAttempt: number;
+    maxModelAttempts: number;
+    stageRepairAttempt: number;
+    maxStageRepairAttempts: number;
+    infrastructureAttempt: number;
+    maxInfrastructureAttempts: number;
+    leaseLossCount: number;
+    userRetryCount: number;
+    lastInterruptionReason?: string | null;
+    deploymentGraceUntil?: string | null;
     lastError?: string | null;
     errorCategory?: string | null;
     errorCode?: string | null;
@@ -1462,6 +1472,7 @@ export default function OnePromptVideoPage() {
   const [planningProjectIds, setPlanningProjectIds] = useState<string[]>([]);
   const [uploadingReferences, setUploadingReferences] = useState(false);
   const [error, setError] = useState("");
+  const [projectionAuthExpired, setProjectionAuthExpired] = useState(false);
   const [message, setMessage] = useState("");
   const [optimisticProgress, setOptimisticProgress] = useState<OptimisticProgress | null>(null);
   const [progressNow, setProgressNow] = useState(() => Date.now());
@@ -1496,6 +1507,7 @@ export default function OnePromptVideoPage() {
   const selectedProjectIdRef = useRef("");
   const pollingProjectIdsRef = useRef<Set<string>>(new Set());
   const deletedProjectIdsRef = useRef<Set<string>>(new Set());
+  const projectionAuthExpiredRef = useRef(false);
 
   const segmentEditorItems = useMemo(() => project?.segments ?? [], [project?.segments]);
   const selectedSegment = useMemo(
@@ -1681,8 +1693,10 @@ export default function OnePromptVideoPage() {
     ? project.errorMessage
     : null;
   const localizedActionError = error ? localizeWorkflowError(error, pageLang) : null;
-  const localizedProjectError = project?.productionProjection?.displayMessage?.[pageLang]
-    ?? (visibleProjectError ? localizeWorkflowError(visibleProjectError, pageLang) : null);
+  const localizedProjectError = projectionAuthExpired
+    ? null
+    : project?.productionProjection?.displayMessage?.[pageLang]
+      ?? (visibleProjectError ? localizeWorkflowError(visibleProjectError, pageLang) : null);
 
   useEffect(() => {
     setPrompt((current) => (DEFAULT_PROMPTS.includes(current) ? copy.defaultPrompt : current));
@@ -1875,16 +1889,28 @@ export default function OnePromptVideoPage() {
   }, [selectedProjectId]);
 
   const pollProjectProjection = useCallback(async (projectId: string, options?: { silent?: boolean }) => {
+    if (projectionAuthExpiredRef.current) return;
     if (deletedProjectIdsRef.current.has(projectId)) return;
     if (pollingProjectIdsRef.current.has(projectId)) return;
     pollingProjectIdsRef.current.add(projectId);
     try {
       const res = await fetchJson(`/api/video-projects/${projectId}`, copy);
       if (res.project && !deletedProjectIdsRef.current.has(projectId)) {
+        projectionAuthExpiredRef.current = false;
+        setProjectionAuthExpired(false);
         rememberProject(res.project);
         if (selectedProjectIdRef.current === projectId) setError("");
       }
     } catch (err) {
+      if (err instanceof WorkflowApiError && err.status === 401) {
+        projectionAuthExpiredRef.current = true;
+        setProjectionAuthExpired(true);
+        setOptimisticProgress(null);
+        setGenerationProjectId("");
+        setGenerationAbortController(null);
+        setError("");
+        return;
+      }
       if (!options?.silent) setError(err instanceof Error ? err.message : copy.actionFailed);
     } finally {
       pollingProjectIdsRef.current.delete(projectId);
@@ -1892,12 +1918,12 @@ export default function OnePromptVideoPage() {
   }, [copy, rememberProject]);
 
   useEffect(() => {
-    if (!runningProjectIds.length) return;
+    if (!runningProjectIds.length || projectionAuthExpired) return;
     const timer = window.setInterval(() => {
       for (const projectId of runningProjectIds) void pollProjectProjection(projectId, { silent: projectId !== selectedProjectId });
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [pollProjectProjection, runningProjectIds, selectedProjectId]);
+  }, [pollProjectProjection, projectionAuthExpired, runningProjectIds, selectedProjectId]);
 
   useEffect(() => {
     if (!optimisticProgress?.active || !generationProjectId || project?.id !== generationProjectId) return;
@@ -1918,6 +1944,8 @@ export default function OnePromptVideoPage() {
   async function loadProjects() {
     try {
       const res = await fetchJson("/api/video-projects", copy);
+      projectionAuthExpiredRef.current = false;
+      setProjectionAuthExpired(false);
       const nextProjects = sortProjects(
         (res.projects ?? []).filter((item) => !deletedProjectIdsRef.current.has(item.id)),
       );
@@ -1927,6 +1955,15 @@ export default function OnePromptVideoPage() {
       const active = nextProjects.find((item) => item.id === storedId) ?? nextProjects[0];
       activateProject(active);
     } catch (err) {
+      if (err instanceof WorkflowApiError && err.status === 401) {
+        projectionAuthExpiredRef.current = true;
+        setProjectionAuthExpired(true);
+        setOptimisticProgress(null);
+        setGenerationProjectId("");
+        setGenerationAbortController(null);
+        setError("");
+        return;
+      }
       setError(err instanceof Error ? err.message : copy.loadFailed);
     }
   }
@@ -3280,6 +3317,18 @@ export default function OnePromptVideoPage() {
         {localizedActionError && (
           <div className="rounded-md border border-red-300/15 bg-red-400/[0.06] px-4 py-3 text-sm text-red-200">
             {localizedActionError}
+          </div>
+        )}
+
+        {projectionAuthExpired && (
+          <div
+            role="alert"
+            data-testid="projection-auth-expired"
+            className="rounded-md border border-amber-300/25 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-100"
+          >
+            {pageLang === "zh"
+              ? "登录已失效，项目轮询已经停止；当前页面数据可能过期，请重新登录后刷新。"
+              : "Your session expired. Project polling stopped and the data on this page may be stale. Sign in again and refresh."}
           </div>
         )}
 

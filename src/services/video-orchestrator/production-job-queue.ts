@@ -58,6 +58,7 @@ export type VideoProductionErrorDisposition =
 export type VideoProductionErrorCategory =
   | "internal_capacity"
   | "provider_rate_limit"
+  | "provider_quota"
   | "internal_scheduling"
   | "provider_auth"
   | "provider_network"
@@ -82,6 +83,9 @@ const DEFAULT_LEASE_MS = 2 * 60_000;
 const WORKER_HEARTBEAT_COMPATIBILITY_MS = 2 * 60_000;
 const CAPACITY_WAIT_MAX_COUNT = 12;
 const CAPACITY_WAIT_MAX_AGE_MS = 30 * 60_000;
+export const DEFAULT_DEPLOYMENT_GRACE_MS = 10 * 60_000;
+const INFRASTRUCTURE_RETRY_BASE_MS = 2_000;
+const INFRASTRUCTURE_RETRY_MAX_MS = 60_000;
 
 export async function enqueueVideoProductionJob(input: {
   projectId: string;
@@ -95,6 +99,9 @@ export async function enqueueVideoProductionJob(input: {
   priority?: number;
   availableAt?: Date;
   maxAttempts?: number;
+  maxModelAttempts?: number;
+  maxStageRepairAttempts?: number;
+  maxInfrastructureAttempts?: number;
   reactivateFailed?: boolean;
 }): Promise<{ id: string; created: boolean }> {
   const targetId = normalizeTargetId(input.targetId);
@@ -172,6 +179,15 @@ export async function enqueueVideoProductionJob(input: {
           payload,
           attempt: 0,
           maxAttempts: input.maxAttempts ?? 5,
+          modelAttempt: 0,
+          maxModelAttempts: input.maxModelAttempts ?? 3,
+          stageRepairAttempt: 0,
+          maxStageRepairAttempts: input.maxStageRepairAttempts ?? 3,
+          infrastructureAttempt: 0,
+          maxInfrastructureAttempts: input.maxInfrastructureAttempts ?? 50,
+          leaseLossCount: 0,
+          lastInterruptionReason: null,
+          deploymentGraceUntil: null,
           availableAt: input.availableAt ?? new Date(),
           leaseToken: null,
           leaseExpiresAt: null,
@@ -208,6 +224,9 @@ export async function enqueueVideoProductionJob(input: {
         priority: input.priority ?? 0,
         availableAt: input.availableAt ?? new Date(),
         maxAttempts: input.maxAttempts ?? 5,
+        maxModelAttempts: input.maxModelAttempts ?? 3,
+        maxStageRepairAttempts: input.maxStageRepairAttempts ?? 3,
+        maxInfrastructureAttempts: input.maxInfrastructureAttempts ?? 50,
       },
       select: { id: true },
     });
@@ -274,6 +293,9 @@ export async function retryFailedVideoProductionJobById(input: {
         requiredWorkerVersion,
         claimedWorkerVersion: null,
         attempt: 0,
+        modelAttempt: 0,
+        stageRepairAttempt: 0,
+        userRetryCount: { increment: 1 },
         availableAt: new Date(),
         leaseToken: null,
         workerId: null,
@@ -284,6 +306,8 @@ export async function retryFailedVideoProductionJobById(input: {
         errorCategory: null,
         errorCode: null,
         recoveryAction: null,
+        lastInterruptionReason: null,
+        deploymentGraceUntil: null,
         progressAt: new Date(),
       },
     });
@@ -351,27 +375,19 @@ export async function claimNextVideoProductionJob(input: {
   const supportedPayloadVersions = input.supportedPayloadVersions?.length
     ? [...new Set(input.supportedPayloadVersions)]
     : [...SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS];
+  await recoverLegacyLeaseExhaustedJobs(now);
+  await recoverExpiredVideoProductionJobLeases(now);
+  await adoptInfrastructureRecoveryJobs({
+    runtimeVersion,
+    kinds: input.kinds,
+    supportedPayloadVersions,
+  });
   const compatibilityWhere = workerCompatibilityWhere({
     runtimeVersion,
     supportedPayloadVersions,
   });
-  await prisma.videoProductionJob.updateMany({
-    where: {
-      status: { in: ["claimed", "running"] },
-      leaseExpiresAt: { lte: now },
-    },
-    data: {
-      status: "queued",
-      leaseToken: null,
-      workerId: null,
-      claimedWorkerVersion: null,
-      leaseExpiresAt: null,
-      availableAt: now,
-      lastError: "Worker lease expired; job returned to the durable queue.",
-    },
-  });
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let claimRace = 0; claimRace < 8; claimRace += 1) {
     const candidate = await prisma.videoProductionJob.findFirst({
       where: {
         status: { in: ["queued", "waiting_upstream"] },
@@ -384,19 +400,6 @@ export async function claimNextVideoProductionJob(input: {
     if (!candidate) {
       await annotateNoCompatibleWorker({ kinds: input.kinds });
       return null;
-    }
-    if (candidate.attempt >= candidate.maxAttempts) {
-      await prisma.videoProductionJob.updateMany({
-        where: { id: candidate.id, status: candidate.status },
-        data: {
-          status: "failed",
-          completedAt: now,
-          lastError: candidate.lastError || "Maximum durable job attempts exhausted.",
-          errorCode: candidate.errorCode || "RETRY_EXHAUSTED",
-          recoveryAction: candidate.recoveryAction || "RETRY_JOB",
-        },
-      });
-      continue;
     }
     const leaseToken = randomUUID();
     const claimed = await prisma.videoProductionJob.updateMany({
@@ -413,11 +416,11 @@ export async function claimNextVideoProductionJob(input: {
         claimedWorkerVersion: runtimeVersion,
         leaseExpiresAt: new Date(now.getTime() + Math.max(30_000, input.leaseMs ?? DEFAULT_LEASE_MS)),
         startedAt: candidate.startedAt ?? now,
-        attempt: { increment: 1 },
         lastError: null,
         errorCategory: null,
         errorCode: null,
         recoveryAction: null,
+        deploymentGraceUntil: null,
         ...(candidate.startedAt ? {} : { progressAt: now }),
       },
     });
@@ -425,6 +428,277 @@ export async function claimNextVideoProductionJob(input: {
     return prisma.videoProductionJob.findUnique({ where: { id: candidate.id } }) as Promise<NonNullable<VideoProductionJobRecord>>;
   }
   return null;
+}
+
+export async function recoverExpiredVideoProductionJobLeases(
+  now = new Date(),
+): Promise<number> {
+  const expired = await prisma.videoProductionJob.findMany({
+    where: {
+      status: { in: ["claimed", "running"] },
+      leaseExpiresAt: { lte: now },
+    },
+    select: {
+      id: true,
+      projectId: true,
+      stage: true,
+      infrastructureAttempt: true,
+      maxInfrastructureAttempts: true,
+    },
+  });
+  let recovered = 0;
+  for (const job of expired) {
+    const nextInfrastructureAttempt = job.infrastructureAttempt + 1;
+    const degraded = nextInfrastructureAttempt > job.maxInfrastructureAttempts;
+    const result = await prisma.$transaction(async (tx) => {
+      const updated = await tx.videoProductionJob.updateMany({
+        where: {
+          id: job.id,
+          status: { in: ["claimed", "running"] },
+          leaseExpiresAt: { lte: now },
+        },
+        data: {
+          status: job.stage === "provider_polling" ? "waiting_upstream" : "queued",
+          leaseToken: null,
+          workerId: null,
+          claimedWorkerVersion: null,
+          leaseExpiresAt: null,
+          deploymentGraceUntil: null,
+          availableAt: new Date(
+            now.getTime() + infrastructureRetryDelayMs(nextInfrastructureAttempt),
+          ),
+          infrastructureAttempt: { increment: 1 },
+          leaseLossCount: { increment: 1 },
+          lastInterruptionReason: "worker_lease_expired",
+          lastError:
+            "Worker lease expired. Durable state was preserved and automatic recovery was queued.",
+          errorCategory: "internal_scheduling",
+          errorCode: degraded
+            ? "INFRASTRUCTURE_RECOVERY_DEGRADED"
+            : "INFRASTRUCTURE_RECOVERY_QUEUED",
+          recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+          completedAt: null,
+        },
+      });
+      if (updated.count !== 1) return updated;
+      await tx.videoProject.updateMany({
+        where: { id: job.projectId },
+        data: {
+          status: VideoProjectStatus.WAITING_RECOVERY,
+          errorMessage: null,
+        },
+      });
+      return updated;
+    });
+    recovered += result.count;
+  }
+  return recovered;
+}
+
+export async function releaseVideoProductionJobForInfrastructure(input: {
+  id: string;
+  leaseToken: string;
+  reason:
+    | "worker_shutdown"
+    | "deployment_restart"
+    | "worker_abort"
+    | "provider_network"
+    | "provider_rate_limit";
+  error?: unknown;
+  category?: VideoProductionErrorCategory;
+  now?: Date;
+}): Promise<boolean> {
+  const now = input.now ?? new Date();
+  const current = await prisma.videoProductionJob.findFirst({
+    where: {
+      id: input.id,
+      leaseToken: input.leaseToken,
+      status: { in: ["claimed", "running"] },
+    },
+    select: {
+      projectId: true,
+      stage: true,
+      infrastructureAttempt: true,
+      maxInfrastructureAttempts: true,
+    },
+  });
+  if (!current) return false;
+  const degraded =
+    current.infrastructureAttempt + 1 > current.maxInfrastructureAttempts;
+  const interruptionMessage = input.error === undefined
+    ? "Worker stopped before completion. Durable state was preserved and automatic recovery was queued."
+    : input.error instanceof Error
+      ? input.error.message
+      : String(input.error);
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.videoProductionJob.updateMany({
+      where: {
+        id: input.id,
+        leaseToken: input.leaseToken,
+        status: { in: ["claimed", "running"] },
+      },
+      data: {
+        status: current.stage === "provider_polling" ? "waiting_upstream" : "queued",
+        leaseToken: null,
+        workerId: null,
+        claimedWorkerVersion: null,
+        leaseExpiresAt: null,
+        deploymentGraceUntil: null,
+        availableAt: new Date(
+          now.getTime() + infrastructureRetryDelayMs(current.infrastructureAttempt + 1),
+        ),
+        infrastructureAttempt: { increment: 1 },
+        lastInterruptionReason: input.reason,
+        lastError: interruptionMessage,
+        errorCategory: input.category ?? "internal_scheduling",
+        errorCode: degraded
+          ? "INFRASTRUCTURE_RECOVERY_DEGRADED"
+          : "INFRASTRUCTURE_RECOVERY_QUEUED",
+        recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+        completedAt: null,
+      },
+    });
+    if (result.count !== 1) return result;
+    await tx.videoProject.updateMany({
+      where: { id: current.projectId },
+      data: {
+        status: VideoProjectStatus.WAITING_RECOVERY,
+        errorMessage: null,
+      },
+    });
+    return result;
+  });
+  return updated.count === 1;
+}
+
+export async function beginVideoProductionDeploymentDrain(input: {
+  id: string;
+  leaseToken: string;
+  graceMs?: number;
+  now?: Date;
+}): Promise<boolean> {
+  const now = input.now ?? new Date();
+  const graceUntil = new Date(
+    now.getTime() + Math.max(30_000, input.graceMs ?? DEFAULT_DEPLOYMENT_GRACE_MS),
+  );
+  const updated = await prisma.videoProductionJob.updateMany({
+    where: {
+      id: input.id,
+      leaseToken: input.leaseToken,
+      status: { in: ["claimed", "running"] },
+    },
+    data: {
+      leaseExpiresAt: graceUntil,
+      deploymentGraceUntil: graceUntil,
+      lastInterruptionReason: "deployment_draining",
+    },
+  });
+  return updated.count === 1;
+}
+
+async function recoverLegacyLeaseExhaustedJobs(now: Date): Promise<number> {
+  const candidates = await prisma.videoProductionJob.findMany({
+    where: {
+      status: "failed",
+      errorCode: "RETRY_EXHAUSTED",
+      lastError: "Worker lease expired; job returned to the durable queue.",
+    },
+    select: {
+      id: true,
+      kind: true,
+      projectId: true,
+      attempt: true,
+      project: { select: { planJson: true } },
+    },
+  });
+  let recovered = 0;
+  for (const candidate of candidates) {
+    if (
+      candidate.kind === "planning"
+      && !hasPlannerCheckpoint(candidate.project.planJson)
+    ) {
+      continue;
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.videoProductionJob.updateMany({
+        where: {
+          id: candidate.id,
+          status: "failed",
+          errorCode: "RETRY_EXHAUSTED",
+          lastError: "Worker lease expired; job returned to the durable queue.",
+        },
+        data: {
+          status: "queued",
+          attempt: 0,
+          modelAttempt: 0,
+          infrastructureAttempt: { increment: Math.max(1, candidate.attempt) },
+          leaseLossCount: { increment: Math.max(1, candidate.attempt) },
+          availableAt: now,
+          completedAt: null,
+          leaseToken: null,
+          workerId: null,
+          claimedWorkerVersion: null,
+          leaseExpiresAt: null,
+          lastInterruptionReason: "legacy_worker_lease_expired",
+          lastError:
+            "Legacy Worker lease failures were recognized as infrastructure interruptions; automatic recovery was queued.",
+          errorCategory: "internal_scheduling",
+          errorCode: "INFRASTRUCTURE_RECOVERY_QUEUED",
+          recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+        },
+      });
+      if (result.count !== 1) return result;
+      await tx.videoProject.updateMany({
+        where: { id: candidate.projectId },
+        data: {
+          status: VideoProjectStatus.WAITING_RECOVERY,
+          errorMessage: null,
+        },
+      });
+      return result;
+    });
+    recovered += updated.count;
+  }
+  return recovered;
+}
+
+async function adoptInfrastructureRecoveryJobs(input: {
+  runtimeVersion: string;
+  kinds?: VideoProductionJobKind[];
+  supportedPayloadVersions: number[];
+}): Promise<number> {
+  const candidates = await prisma.videoProductionJob.findMany({
+    where: {
+      status: { in: ["queued", "waiting_upstream"] },
+      recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+      requiredWorkerVersion: { not: input.runtimeVersion },
+      ...(input.kinds?.length ? { kind: { in: input.kinds } } : {}),
+    },
+    select: { id: true, payload: true },
+  });
+  let adopted = 0;
+  for (const candidate of candidates) {
+    const payload = jsonObject(candidate.payload);
+    if (!input.supportedPayloadVersions.includes(Number(payload.payloadSchemaVersion))) {
+      continue;
+    }
+    const updated = await prisma.videoProductionJob.updateMany({
+      where: {
+        id: candidate.id,
+        status: { in: ["queued", "waiting_upstream"] },
+        recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+      },
+      data: {
+        requiredWorkerVersion: input.runtimeVersion,
+        payload: versionedPayload(
+          candidate.payload as Prisma.InputJsonValue,
+          input.runtimeVersion,
+        ),
+      },
+    });
+    adopted += updated.count;
+  }
+  return adopted;
 }
 
 export async function annotateNoCompatibleWorker(input: {
@@ -500,11 +774,22 @@ export async function heartbeatVideoProductionJob(
   leaseToken: string,
   leaseMs = DEFAULT_LEASE_MS,
 ): Promise<boolean> {
-  const updated = await prisma.videoProductionJob.updateMany({
-    where: { id, leaseToken, status: { in: ["claimed", "running"] }, leaseExpiresAt: { gt: new Date() } },
-    data: { leaseExpiresAt: new Date(Date.now() + Math.max(30_000, leaseMs)) },
-  });
-  return updated.count === 1;
+  const now = new Date();
+  const heartbeatExpiry = new Date(
+    now.getTime() + Math.max(30_000, leaseMs),
+  );
+  const updated = await prisma.$executeRaw`
+    UPDATE "video_production_jobs"
+    SET "lease_expires_at" = GREATEST(
+      ${heartbeatExpiry},
+      COALESCE("deployment_grace_until", ${heartbeatExpiry})
+    )
+    WHERE "id" = ${id}
+      AND "lease_token" = ${leaseToken}
+      AND "status" IN ('claimed', 'running')
+      AND "lease_expires_at" > ${now}
+  `;
+  return updated === 1;
 }
 
 export async function assertVideoProductionJobLease(
@@ -586,12 +871,33 @@ export async function retryVideoProductionJob(input: {
   stage?: VideoProductionStage;
   category?: VideoProductionErrorCategory;
 }): Promise<"queued" | "failed" | "lost"> {
+  if (isInfrastructureRetryCategory(input.category)) {
+    const released = await releaseVideoProductionJobForInfrastructure({
+      id: input.id,
+      leaseToken: input.leaseToken,
+      reason: input.category === "provider_rate_limit"
+        ? "provider_rate_limit"
+        : "provider_network",
+      error: input.error,
+      category: input.category,
+    });
+    return released ? "queued" : "lost";
+  }
   const current = await prisma.videoProductionJob.findFirst({
     where: { id: input.id, leaseToken: input.leaseToken, status: { in: ["claimed", "running"] }, leaseExpiresAt: { gt: new Date() } },
-    select: { attempt: true, maxAttempts: true, stage: true },
+    select: {
+      attempt: true,
+      maxAttempts: true,
+      modelAttempt: true,
+      maxModelAttempts: true,
+      stage: true,
+    },
   });
   if (!current) return "lost";
-  const failed = current.attempt >= current.maxAttempts;
+  const nextAttempt = current.attempt + 1;
+  const nextModelAttempt = current.modelAttempt + 1;
+  const failed = nextAttempt >= current.maxAttempts
+    || nextModelAttempt >= current.maxModelAttempts;
   if (failed) {
     const settled = await failVideoProductionJob({
       id: input.id,
@@ -601,6 +907,7 @@ export async function retryVideoProductionJob(input: {
       category: input.category,
       errorCode: "RETRY_EXHAUSTED",
       recoveryAction: "RETRY_JOB",
+      budget: "model",
     });
     return settled ? "failed" : "lost";
   }
@@ -608,8 +915,10 @@ export async function retryVideoProductionJob(input: {
     where: { id: input.id, leaseToken: input.leaseToken, status: { in: ["claimed", "running"] }, leaseExpiresAt: { gt: new Date() } },
     data: {
       status: "queued",
+      attempt: { increment: 1 },
+      modelAttempt: { increment: 1 },
       ...(input.stage ? { stage: input.stage } : {}),
-      availableAt: new Date(Date.now() + Math.max(0, input.retryDelayMs ?? retryDelayForAttempt(current.attempt))),
+      availableAt: new Date(Date.now() + Math.max(0, input.retryDelayMs ?? retryDelayForAttempt(nextModelAttempt))),
       completedAt: null,
       leaseToken: null,
       workerId: null,
@@ -669,9 +978,6 @@ export async function deferVideoProductionJobForCapacity(input: {
       data: {
         status: paused ? "failed" : "queued",
         stage: current.stage,
-        // Capacity was not granted, so no provider submission attempt occurred.
-        // Keep the durable job's real failure budget intact.
-        attempt: { decrement: Math.min(1, current.attempt) },
         availableAt: nextCapacityRetryAt,
         completedAt: paused ? now : null,
         leaseToken: null,
@@ -721,11 +1027,13 @@ export async function failVideoProductionJob(input: {
   category?: VideoProductionErrorCategory;
   errorCode?: string;
   recoveryAction?: string;
+  budget?: "model" | "stage" | "business" | "none";
 }): Promise<boolean> {
   const now = new Date();
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   const errorCode = input.errorCode ?? "PRODUCTION_JOB_FAILED";
   const recoveryAction = input.recoveryAction ?? "RETRY_JOB";
+  const budget = input.budget ?? failureBudgetForCategory(input.category);
   return prisma.$transaction(async (tx) => {
     const current = await tx.videoProductionJob.findFirst({
       where: {
@@ -771,6 +1079,9 @@ export async function failVideoProductionJob(input: {
         errorCategory: input.category,
         errorCode,
         recoveryAction,
+        ...(budget === "none" ? {} : { attempt: { increment: 1 } }),
+        ...(budget === "model" ? { modelAttempt: { increment: 1 } } : {}),
+        ...(budget === "stage" ? { stageRepairAttempt: { increment: 1 } } : {}),
       },
     });
     if (updated.count !== 1) return false;
@@ -843,6 +1154,17 @@ export function classifyVideoProductionFailure(error: unknown): VideoProductionF
     : error && typeof error === "object" && typeof Reflect.get(error, "message") === "string"
       ? String(Reflect.get(error, "message"))
       : String(error);
+  if (
+    name === "ProviderQuotaError"
+    || code === "PROVIDER_QUOTA_EXHAUSTED"
+    || /token[-_ ]?limit|quota exceeded|exceeded your current quota|insufficient[_ -]?balance|billing details/i.test(message)
+  ) {
+    return failure(
+      "terminal",
+      "provider_quota",
+      "上游翻译或模型额度已用尽；请检查套餐和账单。任务检查点已保留，不会按未知错误盲目重试。",
+    );
+  }
   if (
     name === "ProviderCapacityError"
     || code === "CAPACITY_EXHAUSTED"
@@ -917,7 +1239,6 @@ export async function rescheduleVideoProductionJob(input: {
       status: input.stage === "provider_polling" ? "waiting_upstream" : "queued",
       stage: input.stage,
       availableAt: input.availableAt,
-      attempt: { decrement: 1 },
       leaseToken: null,
       workerId: null,
       claimedWorkerVersion: null,
@@ -944,6 +1265,48 @@ export class LostProductionJobLeaseError extends Error {
     super(`Video production job lease was lost: ${jobId}`);
     this.name = "LostProductionJobLeaseError";
   }
+}
+
+export function infrastructureRetryDelayMs(infrastructureAttempt: number): number {
+  const normalizedAttempt = Math.max(1, Math.round(infrastructureAttempt));
+  return Math.min(
+    INFRASTRUCTURE_RETRY_MAX_MS,
+    INFRASTRUCTURE_RETRY_BASE_MS * (2 ** Math.min(5, normalizedAttempt - 1)),
+  );
+}
+
+export function failureBudgetForCategory(
+  category: VideoProductionErrorCategory | undefined,
+): "model" | "stage" | "business" | "none" {
+  if (category === "structured_output_syntax" || category === "contract_validation") {
+    return "stage";
+  }
+  if (
+    category === "provider_auth"
+    || category === "unknown"
+  ) {
+    return "model";
+  }
+  if (
+    category === "internal_capacity"
+    || category === "internal_scheduling"
+    || category === "provider_quota"
+  ) {
+    return "none";
+  }
+  return "business";
+}
+
+function isInfrastructureRetryCategory(
+  category: VideoProductionErrorCategory | undefined,
+): category is "provider_network" | "provider_rate_limit" {
+  return category === "provider_network" || category === "provider_rate_limit";
+}
+
+function hasPlannerCheckpoint(value: Prisma.JsonValue | null): boolean {
+  if (!isJsonObject(value)) return false;
+  return value.plannerCheckpoint !== undefined
+    && isJsonObject(value.plannerCheckpoint);
 }
 
 function normalizeTargetId(value: string | undefined): string | undefined {

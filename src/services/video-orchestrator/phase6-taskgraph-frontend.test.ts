@@ -59,6 +59,14 @@ test("projection polling is GET-only and the legacy sync route is removed", () =
   assert.equal(existsSync(syncRoutePath), false);
 });
 
+test("projection polling freezes stale state and stops after an authentication failure", () => {
+  assert.match(page, /err instanceof WorkflowApiError && err\.status === 401/);
+  assert.match(page, /projectionAuthExpiredRef\.current = true/);
+  assert.match(page, /if \(!runningProjectIds\.length \|\| projectionAuthExpired\) return/);
+  assert.match(page, /data-testid="projection-auth-expired"/);
+  assert.match(page, /登录已失效，项目轮询已经停止/);
+});
+
 test("backend exposes the canonical taskGraph view model and no shots compatibility output", () => {
   for (const field of ["currentNode", "status", "progress", "allowedActions", "recoveryAction"]) {
     assert.match(taskGraph, new RegExp(`\\b${field}\\b`));

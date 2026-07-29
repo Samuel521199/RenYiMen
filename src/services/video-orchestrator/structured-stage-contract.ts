@@ -34,6 +34,10 @@ export interface StructuredFailureIdentity {
 export interface StructuredFailureState extends StructuredFailureIdentity {
   count: number;
   lastSeenAt: string;
+  issues?: StructuredContractIssue[];
+  candidatePreview?: unknown;
+  systemic?: boolean;
+  affectedSegments?: number[];
 }
 
 export function structuredStageJsonSchema<T>(
@@ -116,8 +120,48 @@ export function shouldStopStructuredFailureRetry(
   return state.count >= Math.max(1, threshold);
 }
 
+export function systemicStructuredFailureSegments(
+  failures: Iterable<StructuredFailureState>,
+  current: StructuredFailureState,
+): number[] {
+  return [...new Set(
+    [...failures].flatMap((failure) =>
+      failure.schemaVersion === current.schemaVersion
+      && failure.issueFingerprint === current.issueFingerprint
+      && failure.segment !== undefined
+        ? [failure.segment]
+        : []
+    ),
+  )].sort((left, right) => left - right);
+}
+
 export function formatStructuredContractIssues(issues: StructuredContractIssue[]): string {
   return issues.map((issue) => `${issue.path}: ${issue.message}`).join("; ");
+}
+
+export function sanitizeStructuredCandidate(raw: unknown): unknown {
+  return sanitizeValue(raw, 0);
+}
+
+function sanitizeValue(value: unknown, depth: number): unknown {
+  if (depth >= 6) return "[depth-limited]";
+  if (typeof value === "string") {
+    if (/^data:/i.test(value)) return "[data-url-redacted]";
+    return value.length > 500 ? `${value.slice(0, 500)}…[truncated]` : value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => sanitizeValue(item, depth + 1));
+  }
+  if (!value || typeof value !== "object") return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value).slice(0, 80)) {
+    if (/authorization|api[_-]?key|token|secret|cookie/i.test(key)) {
+      output[key] = "[redacted]";
+      continue;
+    }
+    output[key] = sanitizeValue(item, depth + 1);
+  }
+  return output;
 }
 
 function zodIssuePath(path: Array<string | number>): string {

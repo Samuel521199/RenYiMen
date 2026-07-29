@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   advanceStructuredFailureState,
+  sanitizeStructuredCandidate,
   shouldStopStructuredFailureRetry,
   structuredContractIssueFingerprint,
+  systemicStructuredFailureSegments,
   structuredStageJsonSchema,
   validateStructuredStageValue,
 } from "./structured-stage-contract.ts";
@@ -51,6 +53,38 @@ test("safe aliases normalize but lossy prop objects remain contract failures", (
   ));
 });
 
+test("space-separated motion aliases and pull_back normalize deterministically", () => {
+  const value = structuredClone(segmentShotDecomposerExample) as unknown as Record<string, any>;
+  const description = value.shot_decomposer_plan.segment_render_descriptions[0];
+  const motionContract = description.motion_contract;
+  delete description.motion_contract;
+  description["motion contract"] = {
+    "camera motion": { ...motionContract.camera_motion, type: "pull_back" },
+    "prop paths": motionContract.prop_paths,
+    "continuous time": motionContract.continuous_time,
+    subject_actions: motionContract.subject_actions,
+    version: motionContract.version,
+  };
+
+  const result = validateStructuredStageValue(segmentShotDecomposerContract, value);
+  assert.equal(result.status, "valid");
+  if (result.status !== "valid") return;
+  const normalized = result.value.shot_decomposer_plan.segment_render_descriptions[0];
+  assert.equal(normalized.motion_contract.camera_motion.type, "dolly_out");
+  assert.equal("motion contract" in normalized, false);
+});
+
+test("structured candidate diagnostics are bounded and redact credentials", () => {
+  const preview = sanitizeStructuredCandidate({
+    authorization: "Bearer secret",
+    prompt: "x".repeat(700),
+    data: "data:image/png;base64,abc",
+  }) as Record<string, unknown>;
+  assert.equal(preview.authorization, "[redacted]");
+  assert.match(String(preview.prompt), /\[truncated\]$/);
+  assert.equal(preview.data, "[data-url-redacted]");
+});
+
 test("motion_steps above the contract limit is a semantic issue", () => {
   const value = structuredClone(segmentShotDecomposerExample) as unknown as Record<string, any>;
   value.shot_decomposer_plan.segment_render_descriptions[0]
@@ -80,6 +114,18 @@ test("empty endpoint and single-take contracts are rejected before final audit",
   ]) {
     assert.ok(result.issues.some((issue) => issue.path.endsWith(`.${field}`)));
   }
+});
+
+test("missing contract objects are never guessed by deterministic normalization", () => {
+  const value = structuredClone(segmentShotDecomposerExample) as unknown as Record<string, any>;
+  const description = value.shot_decomposer_plan.segment_render_descriptions[0];
+  delete description.motion_contract;
+  delete description.start_frame_contract;
+  const result = validateStructuredStageValue(segmentShotDecomposerContract, value);
+  assert.equal(result.status, "repairable");
+  if (result.status !== "repairable") return;
+  assert.ok(result.issues.some((issue) => issue.path.endsWith(".motion_contract")));
+  assert.ok(result.issues.some((issue) => issue.path.endsWith(".start_frame_contract")));
 });
 
 test("unchanged stage, segment, schema version, and issue fingerprint stops at two", () => {
@@ -125,4 +171,24 @@ test("a changed issue fingerprint resets the consecutive count", () => {
   const first = advanceStructuredFailureState(undefined, firstIdentity);
   const changed = advanceStructuredFailureState(first, changedIdentity);
   assert.equal(changed.count, 1);
+});
+
+test("the same contract issue across multiple segments opens a systemic circuit", () => {
+  const issue = [{
+    path: "$.motion_contract.camera_motion",
+    code: "invalid_type",
+    kind: "shape" as const,
+    message: "Required",
+  }];
+  const first = advanceStructuredFailureState(undefined, structuredContractIssueFingerprint({
+    stage: "shot_decomposer_s2",
+    segment: 2,
+    schemaVersion: "segment-shot-decomposer-v1",
+  }, issue));
+  const second = advanceStructuredFailureState(undefined, structuredContractIssueFingerprint({
+    stage: "shot_decomposer_s4",
+    segment: 4,
+    schemaVersion: "segment-shot-decomposer-v1",
+  }, issue));
+  assert.deepEqual(systemicStructuredFailureSegments([first, second], second), [2, 4]);
 });

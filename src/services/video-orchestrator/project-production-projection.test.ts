@@ -52,6 +52,31 @@ test("an incompatible queued job remains active but exposes an operational error
   assert.equal(projection.recoveryAction, "DEPLOY_COMPATIBLE_WORKER");
 });
 
+test("an infrastructure-interrupted job projects automatic recovery instead of planning failure", () => {
+  const projection = projectProductionProjection({
+    ...base,
+    jobs: [{
+      id: "recovering-planning-job",
+      kind: "planning",
+      stage: "planning",
+      status: "queued",
+      errorCode: "INFRASTRUCTURE_RECOVERY_QUEUED",
+      recoveryAction: "AUTO_RETRY_INFRASTRUCTURE",
+      lastError: "Worker restarted; checkpoint preserved.",
+    }],
+    taskGraphNodes: [{
+      id: "planning",
+      type: "planning",
+      status: "running",
+    }],
+  });
+
+  assert.equal(projection.status, "WAITING_RECOVERY");
+  assert.equal(projection.retryable, true);
+  assert.equal(projection.recoveryAction, "AUTO_RETRY_INFRASTRUCTURE");
+  assert.match(projection.displayMessage?.zh ?? "", /自动恢复/);
+});
+
 test("a failed job always produces a structured recovery projection", () => {
   const projection = projectProductionProjection({
     ...base,
