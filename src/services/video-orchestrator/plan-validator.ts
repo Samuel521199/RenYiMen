@@ -9,6 +9,10 @@ import {
 } from "./anchor-semantics";
 import type { VideoConsistencyAnchor } from "./types";
 import { ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS } from "@/lib/one-prompt-video-limits";
+import {
+  assertCanonicalPlanContract,
+  NonCanonicalPlanFieldError,
+} from "./canonical-plan-contract";
 
 export type PlanValidationStage = "planning" | "keyframe_generation" | "micro_shot_generation" | "video_generation";
 
@@ -39,8 +43,20 @@ export function assertPlanValidForGeneration(plan: unknown, context: PlanValidat
 }
 
 export function validateOnePromptVideoPlan(planValue: unknown, context: PlanValidationContext = {}): PlanValidationIssue[] {
-  const plan = record(planValue);
   const issues: PlanValidationIssue[] = [];
+  let plan: Record<string, unknown>;
+  try {
+    plan = assertCanonicalPlanContract(planValue);
+  } catch (error) {
+    if (!(error instanceof NonCanonicalPlanFieldError)) throw error;
+    return error.paths.map((path) => ({
+      code: error.code,
+      severity: "error" as const,
+      artifactId: path,
+      messageZh: `Legacy plan field is no longer accepted: ${path}. Run the completed field migration before execution.`,
+      retryFromStage: "planning",
+    }));
+  }
   const staticImageStage =
     context.stage === "keyframe_generation"
     || context.stage === "micro_shot_generation";
@@ -174,6 +190,7 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
       validateAnchorCoverage(issues, microShot, `segment:${segmentNo}:micro_shot:${number(microShot.microShotNo ?? microShot.micro_shot_no)}`);
     }
   }
+  validateAnchorRegistryUsage(plan, issues);
   for (const edge of graph.relations) {
     if (!cameraIds.has(edge.fromCameraId) || !cameraIds.has(edge.toCameraId)) error(issues, "MISSING_CAMERA_RELATION_NODE", `camera:${edge.toCameraId}`, `Camera Graph relation 引用了不存在的机位。`, "stage_2a_storyboard");
   }
@@ -353,6 +370,60 @@ function validateAnchorSemanticRoles(
   }
 }
 
+function validateAnchorRegistryUsage(
+  plan: Record<string, unknown>,
+  issues: PlanValidationIssue[],
+): void {
+  const anchors = readAnchors(plan);
+  const usage = new Map<string, Set<string>>();
+  const recordUsage = (artifactId: string, value: unknown) => {
+    for (const anchorId of strings(value)) {
+      const artifacts = usage.get(anchorId) ?? new Set<string>();
+      artifacts.add(artifactId);
+      usage.set(anchorId, artifacts);
+    }
+  };
+  for (const event of arrayRecords(plan.narrativeEvents ?? plan.narrative_events)) {
+    const eventId = text(event.eventId ?? event.event_id) || "unknown";
+    recordUsage(`event:${eventId}`, event.requiredAnchorIds ?? event.required_anchor_ids);
+  }
+  for (const keyframe of arrayRecords(plan.keyframes)) {
+    const keyframeNo = number(keyframe.keyframeNo ?? keyframe.keyframe_no);
+    recordUsage(`keyframe:${keyframeNo}`, keyframe.usesConsistencyAnchors ?? keyframe.uses_consistency_anchors);
+  }
+  for (const segment of arrayRecords(plan.segments)) {
+    const segmentNo = number(segment.segmentNo ?? segment.segment_no);
+    recordUsage(`segment:${segmentNo}`, segment.usesConsistencyAnchors ?? segment.uses_consistency_anchors);
+    for (const microShot of arrayRecords(segment.microShots ?? segment.micro_shots)) {
+      const microShotNo = number(microShot.microShotNo ?? microShot.micro_shot_no);
+      recordUsage(
+        `segment:${segmentNo}:micro_shot:${microShotNo}`,
+        microShot.usesConsistencyAnchors ?? microShot.uses_consistency_anchors,
+      );
+    }
+  }
+  for (const brief of arrayRecords(plan.storyboardBrief ?? plan.storyboard_brief)) {
+    const segmentNo = number(brief.segmentNo ?? brief.segment_no);
+    recordUsage(
+      `storyboard_brief:${segmentNo}`,
+      brief.requiredAnchorIds ?? brief.required_anchor_ids ?? brief.visibleAnchorIds ?? brief.visible_anchor_ids,
+    );
+  }
+
+  for (const anchor of anchors) {
+    if (anchor.status !== "approved") continue;
+    const usageCount = usage.get(anchor.id)?.size ?? 0;
+    if (usageCount > 0) continue;
+    warning(
+      issues,
+      "APPROVED_ANCHOR_UNUSED_DOWNSTREAM",
+      `anchor:${anchor.id}`,
+      `一致性锚点 ${anchor.displayNameZh || anchor.displayNameEn || anchor.id} 已通过准入，但事件、关键帧、片段、子分镜和分镜简报均未引用，应删除或回退到锚点准入阶段检查。`,
+      "stage_1_timeline",
+    );
+  }
+}
+
 function anchorFromRecord(source: Record<string, unknown>): VideoConsistencyAnchor {
   const contract = record(source.assetImageContract ?? source.asset_image_contract);
   const environment = record(contract.environment);
@@ -368,6 +439,13 @@ function anchorFromRecord(source: Record<string, unknown>): VideoConsistencyAnch
     descriptionEn: text(source.descriptionEn ?? source.description_en),
     imagePromptZh: text(source.imagePromptZh ?? source.image_prompt_zh),
     imagePromptEn: text(source.imagePromptEn ?? source.image_prompt_en),
+    usedByEventIds: strings(source.usedByEventIds ?? source.used_by_event_ids),
+    reuseCount: number(source.reuseCount ?? source.reuse_count),
+    lockDimensions: strings(source.lockDimensions ?? source.lock_dimensions),
+    admissionReason: text(source.admissionReason ?? source.admission_reason),
+    admissionRule: text(source.admissionRule ?? source.admission_rule),
+    admissionScore: number(source.admissionScore ?? source.admission_score),
+    status: text(source.status) as VideoConsistencyAnchor["status"],
     assetImageContract: Object.keys(contract).length ? {
       subjectCount: number(contract.subjectCount ?? contract.subject_count),
       subjectDescription: text(contract.subjectDescription ?? contract.subject_description),

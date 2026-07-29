@@ -1,0 +1,31 @@
+{
+  "fixtureVersion": 1,
+  "sampleId": "planning-route-game-ad-v1",
+  "purpose": "Planning route classification regression baseline",
+  "provenance": {
+    "type": "verbatim_project_input",
+    "sourceProjectIds": [
+      "cms2zysqx0005tvto5sa0cbf1",
+      "cms30whhb0001tv803pawxrde"
+    ],
+    "sourceFile": "00-project.md"
+  },
+  "input": {
+    "prompt": "如图这个游戏，我要做一个30s的广告宣传片，要求引人入胜，画面精良，且整个视频前后人物要一致",
+    "durationSeconds": 30,
+    "aspectRatio": "9:16",
+    "stylePreset": "游戏广告",
+    "referenceImageCount": 1,
+    "referenceImageRequirement": "测试运行必须使用同一张已冻结的游戏参考图；如果参考图资产不可用，应将该次运行标记为不可比，而不是替换图片。"
+  },
+  "expectedRoute": {
+    "videoCategory": "game",
+    "templateId": "game_bonus_payoff",
+    "chronologyMode": "chronological"
+  },
+  "comparisonFields": [
+    "videoCategory",
+    "templateId",
+    "chronologyMode"
+  ]
+}

@@ -79,7 +79,7 @@ test("planner lifecycle records queue, real model stages, and terminal state", a
   assert.match(planner, /reportPlannerStageMetric\(\{/);
   assert.ok(
     planner.indexOf("const storyContractRepairDurationMs = Date.now() - storyContractStartedAt")
-      < planner.indexOf("const semanticStoryResult = await ensureStoryboardSemanticQuality"),
+      < planner.indexOf("semanticStoryResult = await ensureStoryboardSemanticQuality"),
     "story contract repair timing must stop before the semantic critic starts",
   );
 });

@@ -6,6 +6,7 @@ import {
   serializeVideoProject,
   updateVideoProject,
 } from "@/services/video-orchestrator/project-service";
+import { nonCanonicalPlanErrorDetails } from "@/services/video-orchestrator/canonical-plan-contract";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +22,20 @@ export async function GET(_req: Request, ctx: RouteContext) {
   }
 
   const { projectId } = await ctx.params;
-  const project = await getVideoProject(session.user.id, projectId);
+  let project;
+  try {
+    project = await getVideoProject(session.user.id, projectId);
+  } catch (error) {
+    const conflict = nonCanonicalPlanErrorDetails(error);
+    if (conflict) {
+      return NextResponse.json({
+        ok: false,
+        error: error instanceof Error ? error.message : conflict.errorCode,
+        ...conflict,
+      }, { status: 409 });
+    }
+    throw error;
+  }
   if (!project) {
     return NextResponse.json({ ok: false, error: "项目不存在或无权访问" }, { status: 404 });
   }
@@ -54,6 +68,14 @@ export async function PATCH(req: Request, ctx: RouteContext) {
     return NextResponse.json({ ok: true, project: serializeVideoProject(project) });
   } catch (error) {
     console.error("[video-projects] PATCH failed", error);
+    const conflict = nonCanonicalPlanErrorDetails(error);
+    if (conflict) {
+      return NextResponse.json({
+        ok: false,
+        error: error instanceof Error ? error.message : conflict.errorCode,
+        ...conflict,
+      }, { status: 409 });
+    }
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : "项目更新失败" },
       { status: 400 },

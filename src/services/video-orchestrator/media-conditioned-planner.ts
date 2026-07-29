@@ -4,7 +4,10 @@ import {
   structuredVisionAvailable,
   structuredVisionModelName,
 } from "./generation-quality-evaluator";
-import { frameContractContainsMotionProcess } from "./frame-contract";
+import {
+  frameContractContainsMotionProcess,
+  staticizeEndpointText,
+} from "./frame-contract";
 import {
   validateVideoPromptContract,
   videoPromptContractFromUnknown,
@@ -18,7 +21,11 @@ import type {
   VideoPlanSegment,
   VideoPromptContract,
 } from "./types";
-import type { ProviderSchedulingContext } from "./provider-capacity";
+import { ExecutionContractMissingError } from "./execution-contract-error";
+import {
+  isProviderCapacityError,
+  type ProviderSchedulingContext,
+} from "./provider-capacity";
 
 const OBSERVATION_SYSTEM_PROMPT = [
   "You are a Boundary Frame Observer.",
@@ -38,6 +45,8 @@ const MOTION_PLANNER_SYSTEM_PROMPT = [
   "If the transition cannot be reached in the fixed duration as one continuous take, set physically_reachable=false and explain in warnings; do not disguise it.",
   "Return strict JSON only. The response must include start_frame_contract, end_frame_contract, motion_contract, single_take_contract with physically_reachable boolean, motion_checkpoints, and video_prompt_contract version video-prompt-contract-v1.",
   "start_frame_contract and end_frame_contract are STATIC SNAPSHOTS. Every nested text field must describe only visible state at that instant; never describe movement, transition, process, or a from-to path there.",
+  "motion_contract must use version continuous-motion-contract-v1 with subject_actions [{subject, action}], camera_motion {type, start, end}, prop_paths [], and continuous_time=true.",
+  "camera_motion.type must be exactly one of: static, pan, tilt, dolly_in, dolly_out, truck_left, truck_right, pedestal_up, pedestal_down, orbit, zoom_in, zoom_out, handheld_follow, crane.",
   "Each motion_checkpoints item must describe a real intermediate state using local_time_seconds, purpose, scene, action, camera, visible_anchor_ids, reference_type (text, image_prompt, or mixed), and image_prompt when a reference image is required.",
   "motion_checkpoints are internal states only: every local_time_seconds must be strictly greater than 0 and strictly less than the fixed duration. Do not repeat either boundary frame as a checkpoint.",
   "The user message gives MAXIMUM_MOTION_CHECKPOINTS. Return no more than that number. Prefer a minimal preparation -> decisive action -> resolved intermediate path; do not pad the list.",
@@ -101,6 +110,7 @@ export async function observeApprovedBoundaryFrame(params: {
       uncertainties: stringArray(source.uncertainties),
     };
   } catch (error) {
+    if (isProviderCapacityError(error)) throw error;
     const fallback = fallbackObservation(params.contract, params.imageUrl, observedAt);
     fallback.uncertainties = [
       `Vision observation failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -122,10 +132,12 @@ export async function planMediaConditionedSegment(params: {
 }): Promise<VideoMediaConditionedSegmentPlan> {
   const refinedAt = new Date().toISOString();
   if (!structuredVisionAvailable()) {
-    return validatedFallbackPlan(
-      params,
-      refinedAt,
-      "Structured vision is unavailable; retained an audited conservative fallback contract.",
+    throw new ExecutionContractMissingError(
+      `Segment ${params.segment.segmentNo} cannot produce a canonical media-conditioned execution contract because structured vision is unavailable.`,
+      {
+        targetId: `segment:${params.segment.segmentNo}`,
+        artifactId: `segment:${params.segment.segmentNo}:video`,
+      },
     );
   }
   let raw: unknown;
@@ -184,17 +196,25 @@ export async function planMediaConditionedSegment(params: {
           ],
         };
       } catch (repairError) {
-        return validatedFallbackPlan(
-          params,
-          refinedAt,
-          `Media-conditioned contract repair failed; used an audited conservative fallback. Initial error: ${errorMessage(error)}. Repair error: ${errorMessage(repairError)}`,
+        if (isProviderCapacityError(repairError)) throw repairError;
+        throw new ExecutionContractMissingError(
+          `Segment ${params.segment.segmentNo} media-conditioned contract repair failed: ${errorMessage(repairError)}`,
+          {
+            targetId: `segment:${params.segment.segmentNo}`,
+            artifactId: `segment:${params.segment.segmentNo}:video`,
+            cause: error,
+          },
         );
       }
     }
-    return validatedFallbackPlan(
-      params,
-      refinedAt,
-      `Media-conditioned planning infrastructure failed; used an audited conservative fallback: ${errorMessage(error)}`,
+    if (isProviderCapacityError(error)) throw error;
+    throw new ExecutionContractMissingError(
+      `Segment ${params.segment.segmentNo} did not produce a canonical media-conditioned execution contract: ${errorMessage(error)}`,
+      {
+        targetId: `segment:${params.segment.segmentNo}`,
+        artifactId: `segment:${params.segment.segmentNo}:video`,
+        cause: error,
+      },
     );
   }
 }
@@ -206,18 +226,17 @@ function normalizeMediaPlan(
 ): VideoMediaConditionedSegmentPlan {
   const source = record(value);
   const singleTake = record(source.single_take_contract ?? source.singleTakeContract);
-  const physicallyReachable = booleanValue(
-    singleTake.physically_reachable ?? singleTake.physicallyReachable,
-    false,
-  );
+  const physicallyReachableValue =
+    singleTake.physically_reachable ?? singleTake.physicallyReachable;
+  if (typeof physicallyReachableValue !== "boolean") {
+    throw new Error("single_take_contract.physically_reachable must be a boolean.");
+  }
+  const physicallyReachable = physicallyReachableValue;
   const promptContract = videoPromptContractFromUnknown(
     source.video_prompt_contract ?? source.videoPromptContract,
   );
   if (!promptContract) throw new Error("Missing video_prompt_contract.");
   const warnings = stringArray(source.warnings);
-  if (!physicallyReachable && !warnings.length) {
-    warnings.push("The approved boundary images are not physically reachable as one continuous take.");
-  }
   const resolvedMicroShots = materializeResolvedMicroShots({
     checkpoints: normalizeCheckpoints(
       source.motion_checkpoints ?? source.motionCheckpoints,
@@ -240,9 +259,21 @@ function normalizeMediaPlan(
     endKeyframeNo: params.segment.endKeyframeNo,
     startBoundaryImageUrl: params.startImageUrl,
     endBoundaryImageUrl: params.endImageUrl,
-    startFrameContract: record(source.start_frame_contract ?? source.startFrameContract),
-    endFrameContract: record(source.end_frame_contract ?? source.endFrameContract),
-    motionContract: record(source.motion_contract ?? source.motionContract),
+    // Approved boundary pixels are the endpoint authority. The motion planner
+    // may describe the path between them, but it must not rewrite either
+    // endpoint or turn a still frame into a temporal process.
+    startFrameContract: staticFrameContractFromApprovedBoundary(
+      params.startContract,
+      params.startFacts,
+    ),
+    endFrameContract: staticFrameContractFromApprovedBoundary(
+      params.endContract,
+      params.endFacts,
+    ),
+    motionContract: canonicalMotionContractFromPlannerOutput(
+      source.motion_contract ?? source.motionContract,
+      params,
+    ),
     singleTakeContract: { ...singleTake, physicallyReachable },
     motionCheckpoints: resolvedMicroShots,
     resolvedMicroShots,
@@ -258,109 +289,118 @@ function normalizeMediaPlan(
   return normalized;
 }
 
-function validatedFallbackPlan(
-  params: Parameters<typeof planMediaConditionedSegment>[0],
-  refinedAt: string,
-  warning: string,
-): VideoMediaConditionedSegmentPlan {
-  const provisional = params.provisional ?? {
-    segmentNo: params.segment.segmentNo,
-    visibleAnchorIds: params.segment.effectiveRequiredAnchorIds
-      ?? params.segment.usesConsistencyAnchors
-      ?? [],
-  };
-  const existingContract = readValidVideoPromptContract(provisional);
-  const videoPromptContract: VideoPromptContract = existingContract ?? {
-    version: "video-prompt-contract-v1",
-    terminalRequirements: [{
-      requirementId: `segment_${params.segment.segmentNo}_approved_end`,
-      priority: "hard",
-      observableFact: [
-        params.endFacts.scene,
-        params.endFacts.characterState,
-        params.endFacts.productState,
-        params.endFacts.composition,
-      ].filter(Boolean).join("; "),
-      acceptanceCriteria: "The final stable frames visibly match the approved end boundary image and its canonical story state.",
-      evidenceRefs: [{
-        type: "approved_end_frame",
-        id: `keyframe:${params.segment.endKeyframeNo}`,
-      }],
-      source: "approved_end_frame",
-      sources: ["approved_end_frame"],
-    }],
-    motionSteps: [
-      params.segment.motion
-      || params.segment.subjectMotion
-      || "Use the shortest physically plausible continuous path between the approved boundary states.",
-    ],
-    preserveRequirements: [
-      "Preserve approved identities, product appearance, scene continuity, and camera axis.",
-    ],
-    forbiddenOutcomes: [
-      "No cut, dissolve, teleportation, scene replacement, montage, or duplicated subject.",
-    ],
-    narrativeBoundary: `Animate only segment ${params.segment.segmentNo}; do not introduce later story events.`,
-    shotIntent: params.segment.purpose,
-  };
-  const provisionalSingleTake = provisional.singleTakeContract ?? {};
-  const fallbackCheckpoints = params.provisional?.motionCheckpoints?.length
-    ? params.provisional.motionCheckpoints
-    : params.segment.microShots ?? [];
-  const boundedFallbackCheckpoints = compactFallbackCheckpoints(
-    fallbackCheckpoints,
-    mediaConditionedCheckpointLimit(params.segment.durationSeconds),
+export function staticFrameContractFromApprovedBoundary(
+  contract: VideoBoundaryContract,
+  facts: VideoObservedBoundaryFacts,
+): Record<string, unknown> {
+  const still = (value: string | undefined, fallback = "") =>
+    staticizeEndpointText(value?.trim() || fallback.trim());
+  const anchorPositions = Object.fromEntries(
+    Object.entries(facts.anchorPositions).map(([anchorId, position]) => [
+      anchorId,
+      still(position),
+    ]),
   );
-  const resolvedMicroShots = materializeResolvedMicroShots({
-    checkpoints: boundedFallbackCheckpoints,
-    segment: params.segment,
-    startFacts: params.startFacts,
-    endFacts: params.endFacts,
-    startImageUrl: params.startImageUrl,
-    endImageUrl: params.endImageUrl,
-    refinedAt,
-    planningSource: "legacy_fallback",
-  });
-  const microShotRevisionId = resolvedMicroShots[0]?.resolvedRevisionId
-    ?? buildResolvedRevisionId(params, resolvedMicroShots);
-  const fallback: VideoMediaConditionedSegmentPlan = {
-    version: "media-conditioned-segment-v1",
-    segmentNo: params.segment.segmentNo,
-    startKeyframeNo: params.segment.startKeyframeNo,
-    endKeyframeNo: params.segment.endKeyframeNo,
-    startBoundaryImageUrl: params.startImageUrl,
-    endBoundaryImageUrl: params.endImageUrl,
-    startFrameContract: {
-      canonicalBoundary: params.startContract,
-      observedFacts: params.startFacts,
-    },
-    endFrameContract: {
-      canonicalBoundary: params.endContract,
-      observedFacts: params.endFacts,
-    },
-    motionContract: params.provisional?.motionContract ?? {
-      subjectMotion: params.segment.subjectMotion || params.segment.motion,
-      environmentMotion: params.segment.environmentMotion,
-    },
-    singleTakeContract: {
-      ...provisionalSingleTake,
-      physicallyReachable: booleanValue(
-        provisionalSingleTake.physicallyReachable
-          ?? provisionalSingleTake.physically_reachable,
-        true,
+
+  return {
+    keyframeNo: contract.keyframeNo,
+    timeSeconds: contract.timeSeconds,
+    imageUrl: facts.imageUrl,
+    sceneState: still(facts.scene, contract.scene),
+    cameraView: still(facts.cameraView, contract.cameraId ?? ""),
+    composition: still(facts.composition, contract.compositionIntent ?? ""),
+    characterState: still(facts.characterState, contract.characterState),
+    productState: still(facts.productState, contract.productState),
+    anchorPositions,
+    occlusions: facts.occlusions.map((value) => still(value)).filter(Boolean),
+    lighting: still(facts.lighting),
+    staticStateOnly: true,
+    authority: "approved_boundary_image",
+  };
+}
+
+export function canonicalMotionContractFromPlannerOutput(
+  value: unknown,
+  params: Pick<
+    Parameters<typeof planMediaConditionedSegment>[0],
+    "segment" | "startFacts" | "endFacts"
+  >,
+): Record<string, unknown> {
+  const source = record(value);
+  const canonicalActions = Array.isArray(source.subject_actions)
+    ? source.subject_actions.map(record).flatMap((item) => {
+      const subject = stringValue(item.subject, "");
+      const action = stringValue(item.action, "");
+      return subject && action ? [{ subject, action }] : [];
+    })
+    : [];
+  const fallbackAction = stringValue(
+    source.subject_action ?? source.subjectAction,
+    params.segment.subjectMotion || params.segment.motion,
+  );
+  const subjectActions = canonicalActions.length
+    ? canonicalActions
+    : [{
+      subject: params.segment.effectiveRequiredAnchorIds?.[0]
+        ?? params.segment.usesConsistencyAnchors?.[0]
+        ?? "primary_subject",
+      action: fallbackAction,
+    }];
+  const cameraSource = record(source.camera_motion ?? source.cameraMotion);
+  const cameraType = canonicalCameraMotionType(
+    cameraSource.type ?? source.type ?? source.camera_action ?? source.cameraAction,
+  );
+  const propPaths = stringArray(source.prop_paths ?? source.propPaths);
+
+  return {
+    version: "continuous-motion-contract-v1",
+    subject_actions: subjectActions,
+    camera_motion: {
+      type: cameraType,
+      start: stringValue(
+        cameraSource.start,
+        params.startFacts.cameraView || params.startFacts.composition || "approved start framing",
+      ),
+      end: stringValue(
+        cameraSource.end,
+        params.endFacts.cameraView || params.endFacts.composition || "approved end framing",
       ),
     },
-    motionCheckpoints: resolvedMicroShots,
-    resolvedMicroShots,
-    microShotRevisionId,
-    videoPromptContract,
-    planningStatus: "fallback",
-    warnings: [warning],
-    refinedAt,
+    prop_paths: propPaths,
+    continuous_time: true,
   };
-  validateMediaConditionedEvidence(fallback, params);
-  validateMediaConditionedSegmentPlan(fallback, params.segment);
-  return fallback;
+}
+
+function canonicalCameraMotionType(value: unknown):
+  | "static"
+  | "pan"
+  | "tilt"
+  | "dolly_in"
+  | "dolly_out"
+  | "truck_left"
+  | "truck_right"
+  | "pedestal_up"
+  | "pedestal_down"
+  | "orbit"
+  | "zoom_in"
+  | "zoom_out"
+  | "handheld_follow"
+  | "crane" {
+  const text = String(value ?? "").toLowerCase();
+  if (/dolly.?out|pull.?back|pull.?out/.test(text)) return "dolly_out";
+  if (/dolly.?in|push.?in|push|approach/.test(text)) return "dolly_in";
+  if (/truck.?left/.test(text)) return "truck_left";
+  if (/truck.?right/.test(text)) return "truck_right";
+  if (/pedestal.?up/.test(text)) return "pedestal_up";
+  if (/pedestal.?down/.test(text)) return "pedestal_down";
+  if (/handheld|follow/.test(text)) return "handheld_follow";
+  if (/zoom.?out/.test(text)) return "zoom_out";
+  if (/zoom.?in|zoom/.test(text)) return "zoom_in";
+  if (/orbit|arc/.test(text)) return "orbit";
+  if (/crane|jib/.test(text)) return "crane";
+  if (/tilt/.test(text)) return "tilt";
+  if (/pan/.test(text)) return "pan";
+  return "static";
 }
 
 function fallbackObservation(
@@ -466,6 +506,16 @@ export function validateMediaConditionedSegmentPlan(
   if (!Object.keys(plan.endFrameContract).length) throw new Error("Missing end_frame_contract.");
   if (!Object.keys(plan.motionContract).length) throw new Error("Missing motion_contract.");
   if (!Object.keys(plan.singleTakeContract).length) throw new Error("Missing single_take_contract.");
+  if (!plan.singleTakeContract.physicallyReachable) {
+    const requiresCut = plan.singleTakeContract.requires_cut
+      ?? plan.singleTakeContract.requiresCut;
+    if (requiresCut !== true || plan.warnings.length === 0) {
+      throw new Error(
+        "single_take_contract is internally inconsistent: physically_reachable=false "
+        + "requires requires_cut=true and an explicit warning.",
+      );
+    }
+  }
   if (frameContractContainsMotionProcess(plan.startFrameContract)) {
     throw new Error("start_frame_contract must contain only one static snapshot.");
   }
@@ -574,7 +624,7 @@ export function materializeResolvedMicroShots(params: {
   startImageUrl: string;
   endImageUrl: string;
   refinedAt: string;
-  planningSource: "media_conditioned" | "legacy_fallback";
+  planningSource: "media_conditioned";
 }): VideoMicroShot[] {
   const intents = params.segment.microShots ?? [];
   const checkpoints = params.checkpoints.length ? params.checkpoints : intents;
@@ -645,7 +695,6 @@ export function materializeResolvedMicroShots(params: {
       usesConsistencyAnchors: anchors,
       prompt: checkpoint.prompt || intent?.prompt || action,
       imageUrl: undefined,
-      imageTaskId: undefined,
       imageStatus: "idle" as const,
       errorMessage: undefined,
       planningSource: params.planningSource,

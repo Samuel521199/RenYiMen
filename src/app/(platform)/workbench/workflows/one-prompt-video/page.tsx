@@ -8,7 +8,6 @@ import { zoomViewAtPoint } from "@/lib/zoomable-image-math";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import {
   compileImagePromptDisplay,
-  compileImagePromptForProvider,
   createImagePromptEditContract,
   normalizeImagePromptEditContract,
   updateLocalizedImagePromptDescription,
@@ -54,7 +53,9 @@ type ProjectStatus =
   | "COMPOSING"
   | "FINAL_REVIEW"
   | "DONE"
-  | "FAILED";
+  | "FAILED"
+  | "WAITING_RECOVERY"
+  | "STATE_INVARIANT_VIOLATION";
 
 type ShotStatus =
   | "SCRIPT_READY"
@@ -73,7 +74,7 @@ type PageLang = "zh" | "en";
 type ProjectView = "assets" | "frames" | "clips" | "final";
 type WorkflowStageKey = "PLAN_REVIEW" | "ASSET_LIBRARY_REVIEW" | "IMAGE_REVIEW" | "MICRO_SHOT_REVIEW" | "CLIP_REVIEW" | "FINAL_REVIEW";
 type RollbackTarget = "PLAN_REVIEW" | "ASSET_LIBRARY_REVIEW" | "IMAGE_REVIEW" | "MICRO_SHOT_REVIEW" | "CLIP_REVIEW";
-type OptimisticProgressPhase = "creating" | "understanding" | "storyboard" | "prompts" | "waiting" | "done" | "failed" | "stopped";
+type OptimisticProgressPhase = "understanding" | "storyboard" | "prompts" | "waiting" | "resuming" | "done" | "failed" | "stopped";
 
 interface OptimisticProgress {
   active: boolean;
@@ -144,8 +145,6 @@ interface MicroShot {
   imagePromptZh?: string;
   imagePromptEn?: string;
   imageUrl?: string;
-  imageTaskId?: string;
-  imageStatus?: "idle" | "pending" | "running" | "ready" | "failed";
   errorMessage?: string;
   prompt: string;
   promptZh?: string;
@@ -163,44 +162,6 @@ interface AudioPlan {
   linesZh?: string[];
   linesEn?: string[];
   rationale?: string;
-}
-
-interface VideoShot {
-  id: string;
-  shotNo: number;
-  status: ShotStatus;
-  durationSeconds: number;
-  purpose: string;
-  purposeZh?: string;
-  purposeEn?: string;
-  camera: string;
-  action: string;
-  imagePrompt: string;
-  imagePromptZh?: string;
-  imagePromptEn?: string;
-  videoPrompt: string;
-  videoPromptZh?: string;
-  videoPromptEn?: string;
-  boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut" | string;
-  outputMode?: string;
-  constraints?: string[];
-  timedPrompts?: TimedPrompt[];
-  microShots?: MicroShot[];
-  audioPlan?: AudioPlan;
-  negativePrompt: string;
-  negativePromptZh?: string;
-  negativePromptEn?: string;
-  subtitle: string;
-  imageUrl?: string | null;
-  endImageUrl?: string | null;
-  clipUrl?: string | null;
-  qualityScore?: number | null;
-  errorMessage?: string | null;
-  locked: boolean;
-  startKeyframeNo?: number;
-  endKeyframeNo?: number;
-  startTimeSeconds?: number;
-  endTimeSeconds?: number;
 }
 
 interface VideoKeyframe {
@@ -234,19 +195,38 @@ interface VideoSegment {
   status: ShotStatus;
   startKeyframeNo: number;
   endKeyframeNo: number;
+  startTimeSeconds?: number;
+  endTimeSeconds?: number;
   durationSeconds: number;
   boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut" | string;
   purpose?: string;
   purposeZh?: string;
   purposeEn?: string;
   motion?: string;
+  action?: string;
   camera?: string;
+  imagePrompt?: string;
+  imagePromptZh?: string;
+  imagePromptEn?: string;
   videoPrompt?: string;
+  videoPromptZh?: string;
+  videoPromptEn?: string;
+  constraints?: string[];
+  timedPrompts?: TimedPrompt[];
+  microShots?: MicroShot[];
+  audioPlan?: AudioPlan;
   negativePrompt?: string;
   negativePromptZh?: string;
   negativePromptEn?: string;
   subtitle?: string;
+  imageUrl?: string | null;
+  startImageUrl?: string | null;
+  endImageUrl?: string | null;
+  outputMode?: string;
   clipUrl?: string | null;
+  qualityScore?: number | null;
+  errorMessage?: string | null;
+  locked?: boolean;
 }
 
 interface VideoProject {
@@ -263,7 +243,6 @@ interface VideoProject {
   updatedAt: string;
   keyframes?: VideoKeyframe[];
   segments?: VideoSegment[];
-  shots: VideoShot[];
   generationCandidates?: GenerationCandidate[];
   plannerProgress?: PlannerProgress;
   taskGraph?: ProjectTaskGraphSnapshot;
@@ -275,6 +254,13 @@ interface VideoProject {
     attempt: number;
     maxAttempts: number;
     lastError?: string | null;
+    errorCategory?: string | null;
+    errorCode?: string | null;
+    recoveryAction?: string | null;
+    workerId?: string | null;
+    requiredWorkerVersion?: string | null;
+    claimedWorkerVersion?: string | null;
+    progressAt: string;
     availableAt: string;
     startedAt?: string | null;
     completedAt?: string | null;
@@ -289,6 +275,31 @@ interface VideoProject {
     oldestQueuedAt: string | null;
     oldestQueuedAgeMs: number;
     workerUnavailable: boolean;
+    workerStalled: boolean;
+    workerHealth: "idle" | "healthy" | "unavailable" | "stalled";
+    lastMeaningfulProgressAt: string | null;
+    upstreamAcceptedCount: number;
+    submissionState: "not_submitted" | "upstream_accepted" | "upstream_running";
+  };
+  productionProjection?: {
+    status: ProjectStatus;
+    source: "production_job" | "review_gate" | "task_graph" | "invariant";
+    activeJobIds: string[];
+    failedJobId?: string;
+    frontierNodeId?: string;
+    errorCode?: string;
+    category?: string;
+    retryable?: boolean;
+    targetId?: string | null;
+    artifactId?: string | null;
+    recoveryAction?: string;
+    errorMessage?: string;
+    displayMessage?: {
+      zh: string;
+      en: string;
+    };
+    completedArtifactCount: number;
+    totalArtifactCount: number;
   };
   humanWorkflowState?: {
     state: "none" | "waiting_candidate_selection" | "waiting_asset_confirmation" | "waiting_boundary_confirmation";
@@ -315,6 +326,20 @@ type ProjectTaskStatus =
 interface ProjectTaskGraphSnapshot {
   version: "project-task-graph-v1";
   generatedAt: string;
+  currentNode: string | null;
+  status: ProjectTaskStatus | "idle";
+  progress: {
+    percent: number;
+    completed: number;
+    total: number;
+  };
+  allowedActions: Array<
+    | "WAIT_FOR_WORKER"
+    | "APPROVE_CURRENT_NODE"
+    | "RESUME_CURRENT_NODE"
+    | "EXECUTE_RECOVERY_ACTION"
+  >;
+  recoveryAction: string | null;
   percent: number;
   completedWeight: number;
   totalWeight: number;
@@ -323,6 +348,8 @@ interface ProjectTaskGraphSnapshot {
   cancelledTaskCount: number;
   nodes: Array<{
     id: string;
+    type: "planning" | "review_gate" | "asset_image" | "boundary_image" | "micro_shot_image" | "segment_video" | "composition";
+    targetId: string;
     labelZh: string;
     labelEn: string;
     status: ProjectTaskStatus;
@@ -371,6 +398,8 @@ interface GenerationCandidate {
 }
 
 interface PlanDebugData {
+  approvedRouteContract?: PlanningRouteContractData;
+  routeClassification?: RouteClassificationDebugData;
   narrativeEvents?: unknown[];
   creativeStrategy?: CreativeStrategyData;
   storyBeats?: StoryBeatData[];
@@ -392,6 +421,48 @@ interface PlanDebugData {
   storyQualityReport?: StoryQualityReport;
   storySemanticReview?: Record<string, unknown>;
   plannerWarnings?: unknown[];
+}
+
+interface PlanningRouteContractData {
+  videoCategory?: string;
+  templateId?: string;
+  chronologyMode?: string;
+  hookMode?: string;
+  hookRevealLevel?: string;
+  requiresReturnPoint?: boolean;
+  categoryReason?: string;
+  templateReason?: string;
+  chronologyReason?: string;
+  categoryConfidence?: number;
+  templateConfidence?: number;
+  chronologyConfidence?: number;
+  fallbackUsed?: boolean;
+  fallbackReason?: string | null;
+  ambiguityCodes?: string[];
+  [key: string]: unknown;
+}
+
+interface RouteClassificationDebugData {
+  authority?: "model" | "user";
+  locked?: boolean;
+  status?: string | null;
+  routeContract?: PlanningRouteContractData;
+  modelName?: string | null;
+  modelDurationMs?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  gateResult?: { status?: string; issues?: unknown[]; repairs?: unknown[] } | null;
+  repairCount?: number;
+  fallbackInfo?: { userVisibleWarning?: string; fallbackReason?: string } | null;
+}
+
+interface PlanningRouteDraft {
+  videoCategory: string;
+  templateId: string;
+  chronologyMode: string;
+  hookMode: string;
+  hookRevealLevel: string;
+  requiresReturnPoint: boolean;
 }
 
 interface VisualStyleGuide {
@@ -660,9 +731,36 @@ type EditableDebugSection = "events" | "anchors" | "states";
 
 interface ApiResponse {
   ok: boolean;
+  accepted?: boolean;
   error?: string;
+  errorCode?: string;
+  category?: string;
+  retryable?: boolean;
+  targetId?: string | null;
+  artifactId?: string | null;
+  recoveryAction?: string;
+  displayMessage?: {
+    zh: string;
+    en: string;
+  };
+  currentStatus?: ProjectStatus;
   project?: VideoProject;
   projects?: VideoProject[];
+}
+
+class WorkflowApiError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+    readonly category = "unknown",
+    readonly retryable = false,
+    readonly recoveryAction = "NONE",
+    readonly displayMessage?: { zh: string; en: string },
+  ) {
+    super(message);
+    this.name = "WorkflowApiError";
+  }
 }
 
 type Copy = {
@@ -711,7 +809,7 @@ type Copy = {
   rollbackTo: string;
   rollbackConfirm: string;
   rollbackDone: string;
-  shots: string;
+  segments: string;
   assetLibrary: string;
   frames: string;
   autoShotPlan: string;
@@ -759,7 +857,7 @@ type Copy = {
   finalVideoNotReady: string;
   firstLastFrameClips: string;
   downloadClip: string;
-  saveShot: string;
+  saveSegment: string;
   editShot: string;
   regenerate: string;
   undo: string;
@@ -769,7 +867,7 @@ type Copy = {
   mediaRolledBack: string;
   languageButton: string;
   planned: string;
-  saved: (shotNo: number) => string;
+  saved: (segmentNo: number) => string;
   keyframesReady: string;
   keyframeRegenerated: string;
   referenceApproved: string;
@@ -840,14 +938,14 @@ const TEXT: Record<PageLang, Copy> = {
     approveFrames: "\u786e\u8ba4\u8fb9\u754c\u53c2\u8003\u5e27",
     approveReference: "\u786e\u8ba4\u53c2\u8003\u56fe",
     approveMicroShots: "\u786e\u8ba4\u5185\u90e8\u5b50\u5206\u955c",
-    approveClips: "\u786e\u8ba4\u7247\u6bb5\u5e76\u5408\u6210",
+    approveClips: "\u786e\u8ba4\u5168\u90e8\u7247\u6bb5",
     confirmFinal: "\u786e\u8ba4\u6210\u7247",
     recomposeFinal: "\u91cd\u65b0\u5408\u6210\u6210\u7247",
     rollback: "\u56de\u9000",
     rollbackTo: "\u56de\u9000\u5230",
     rollbackConfirm: "\u786e\u5b9a\u8981\u56de\u9000\u5230\u9009\u4e2d\u9636\u6bb5\u5417\uff1f\u9009\u4e2d\u9636\u6bb5\u4e4b\u540e\u7684\u751f\u6210\u7ed3\u679c\u53ef\u80fd\u4f1a\u88ab\u6e05\u7a7a\u6216\u89e3\u9501\u3002",
     rollbackDone: "\u5df2\u56de\u9000\u5230\u9009\u4e2d\u9636\u6bb5",
-    shots: "\u955c\u5934",
+    segments: "\u7247\u6bb5",
     assetLibrary: "资产库",
     frames: "\u8fb9\u754c\u53c2\u8003\u5e27",
     autoShotPlan: "AI \u81ea\u52a8\u62c6\u955c",
@@ -895,7 +993,7 @@ const TEXT: Record<PageLang, Copy> = {
     finalVideoNotReady: "\u6700\u7ec8\u6210\u7247\u5c1a\u672a\u751f\u6210\u3002",
     firstLastFrameClips: "\u9996\u5c3e\u5e27\u5206\u955c\u7247\u6bb5",
     downloadClip: "\u4e0b\u8f7d\u5206\u955c\u89c6\u9891",
-    saveShot: "\u4fdd\u5b58\u955c\u5934",
+    saveSegment: "\u4fdd\u5b58\u955c\u5934",
     editShot: "编辑镜头",
     regenerate: "\u91cd\u751f\u6210",
     undo: "撤销",
@@ -905,7 +1003,7 @@ const TEXT: Record<PageLang, Copy> = {
     mediaRolledBack: "已回退到上一版本",
     languageButton: "EN",
     planned: "\u5206\u955c\u811a\u672c\u5df2\u751f\u6210",
-    saved: (shotNo) => `\u955c\u5934 ${shotNo} \u5df2\u4fdd\u5b58`,
+    saved: (segmentNo) => `\u955c\u5934 ${segmentNo} \u5df2\u4fdd\u5b58`,
     keyframesReady: "\u8fb9\u754c\u53c2\u8003\u5e27\u751f\u6210\u4efb\u52a1\u5df2\u63d0\u4ea4\uff0c\u6b63\u5728\u8f6e\u8be2\u7ed3\u679c",
     keyframeRegenerated: "\u8fb9\u754c\u53c2\u8003\u5e27\u5df2\u91cd\u751f\u6210",
     referenceApproved: "\u53c2\u8003\u56fe\u5df2\u786e\u8ba4",
@@ -949,6 +1047,8 @@ const TEXT: Record<PageLang, Copy> = {
       FINAL_REVIEW: "\u6210\u7247\u5ba1\u6838",
       DONE: "\u5df2\u5b8c\u6210",
       FAILED: "\u5931\u8d25",
+      WAITING_RECOVERY: "\u7b49\u5f85\u6062\u590d",
+      STATE_INVARIANT_VIOLATION: "\u72b6\u6001\u5f02\u5e38",
     },
     shotStatus: {
       SCRIPT_READY: "\u811a\u672c",
@@ -1017,14 +1117,14 @@ const TEXT: Record<PageLang, Copy> = {
     approveFrames: "Approve boundary frames",
     approveReference: "Approve reference",
     approveMicroShots: "Approve internal micro-shots",
-    approveClips: "Approve clips and compose",
+    approveClips: "Approve all clips",
     confirmFinal: "Approve final",
     recomposeFinal: "Recompose final",
     rollback: "Rollback",
     rollbackTo: "Rollback to",
     rollbackConfirm: "Rollback to the selected stage? Outputs after that stage may be cleared or unlocked.",
     rollbackDone: "Rolled back to the selected stage",
-    shots: "Shots",
+    segments: "Segments",
     assetLibrary: "Asset library",
     frames: "boundary frames",
     autoShotPlan: "AI decides shots",
@@ -1072,7 +1172,7 @@ const TEXT: Record<PageLang, Copy> = {
     finalVideoNotReady: "Final video is not ready yet.",
     firstLastFrameClips: "first-last-frame clips",
     downloadClip: "Download clip",
-    saveShot: "Save shot",
+    saveSegment: "Save shot",
     editShot: "Edit shot",
     regenerate: "Regenerate",
     undo: "Undo",
@@ -1082,7 +1182,7 @@ const TEXT: Record<PageLang, Copy> = {
     mediaRolledBack: "Previous version restored",
     languageButton: "\u4e2d\u6587",
     planned: "Storyboard plan generated",
-    saved: (shotNo) => `Shot ${shotNo} saved`,
+    saved: (segmentNo) => `Shot ${segmentNo} saved`,
     keyframesReady: "Boundary reference frame generation tasks submitted. Polling results.",
     keyframeRegenerated: "Boundary reference frame regenerated",
     referenceApproved: "Reference approved",
@@ -1126,6 +1226,8 @@ const TEXT: Record<PageLang, Copy> = {
       FINAL_REVIEW: "Final review",
       DONE: "Done",
       FAILED: "Failed",
+      WAITING_RECOVERY: "Waiting for recovery",
+      STATE_INVARIANT_VIOLATION: "State invariant violation",
     },
     shotStatus: {
       SCRIPT_READY: "Script",
@@ -1174,12 +1276,10 @@ const DETAIL_PANEL_WIDTH_STORAGE_KEY = "one-prompt-video-detail-panel-width";
 const DETAIL_PREVIEW_HEIGHT_STORAGE_KEY = "one-prompt-video-detail-preview-height";
 const CUSTOM_STYLE_VALUE = "__custom";
 const KNOWN_STYLE_PRESETS = new Set(["cinematic", "product", "guofeng", "short_drama", "ecommerce"]);
-const MANUAL_STOP_MESSAGE = "Generation stopped by user";
 const DETAIL_PANEL_MIN_WIDTH = 280;
 const DETAIL_PANEL_MAX_WIDTH = 720;
 const DETAIL_PREVIEW_MIN_HEIGHT = 180;
 const DETAIL_PREVIEW_MAX_HEIGHT = 760;
-const RUNNING_PROJECT_STATUSES: ProjectStatus[] = ["PLANNING", "IMAGE_GENERATING", "CLIP_GENERATING", "COMPOSING"];
 
 function clampProjectDuration(value: number): number {
   if (!Number.isFinite(value)) return 30;
@@ -1196,12 +1296,10 @@ function clampDetailPreviewHeight(value: number): number {
   return Math.max(DETAIL_PREVIEW_MIN_HEIGHT, Math.min(DETAIL_PREVIEW_MAX_HEIGHT, Math.round(value)));
 }
 
-function isManualStopError(errorMessage?: string | null): boolean {
-  return errorMessage === MANUAL_STOP_MESSAGE;
-}
-
-function isManualStopProject(project?: Pick<VideoProject, "status" | "errorMessage"> | null): boolean {
-  return Boolean(project && project.status === "FAILED" && isManualStopError(project.errorMessage));
+function isProjectRecoveryState(status: ProjectStatus): boolean {
+  return status === "FAILED"
+    || status === "WAITING_RECOVERY"
+    || status === "STATE_INVARIANT_VIOLATION";
 }
 
 function localizeWorkflowError(message: string, lang: PageLang): string {
@@ -1301,48 +1399,6 @@ function localizeWorkflowError(message: string, lang: PageLang): string {
   return normalized;
 }
 
-function workflowNoticeForMessage(message: string, lang: PageLang): { title: string; detail: string } | null {
-  if (/Approve and lock each person front view before generating its side and back views/i.test(message)) {
-    return lang === "zh"
-      ? {
-          title: "等待人物正面图确认",
-          detail: "请在资产库中确认并锁定每个人物的正面参考图。对应侧面和背面图随后会自动继续生成。",
-        }
-      : {
-          title: "Waiting for front-view approval",
-          detail: "Approve and lock each person's front reference image. The corresponding side and back views will continue automatically.",
-        };
-  }
-  if (/Hard consistency reference images are ready\. Lock or approve them before generating boundary keyframes/i.test(message)) {
-    return lang === "zh"
-      ? {
-          title: "等待资产参考图确认",
-          detail: "资产参考图已经生成。确认并锁定它们后，系统会继续生成边界关键帧。",
-        }
-      : {
-          title: "Waiting for asset-reference approval",
-          detail: "Asset references are ready. Approve and lock them to continue boundary-keyframe generation.",
-        };
-  }
-  const frontierMatch = message.match(/当前生成前沿为 KF(\d+)(?:，依赖 KF(\d+))?/);
-  if (!frontierMatch) return null;
-  const frontier = `KF${Number(frontierMatch[1])}`;
-  const dependency = frontierMatch[2] ? `KF${Number(frontierMatch[2])}` : "";
-  return lang === "zh"
-    ? {
-        title: "等待前置镜头确认",
-        detail: dependency
-          ? `${frontier} 正在等待 ${dependency} 的当前版本通过质检或由你确认。确认后，后续镜头会自动继续生成。`
-          : `${frontier} 正在等待前置镜头确认。确认后，后续镜头会自动继续生成。`,
-      }
-    : {
-        title: "Waiting for an earlier shot",
-        detail: dependency
-          ? `${frontier} is waiting for the current ${dependency} version to pass quality review or be accepted by you. Generation will continue automatically afterward.`
-          : `${frontier} is waiting for its preceding shot to be confirmed. Generation will continue automatically afterward.`,
-      };
-}
-
 function localizeQualityIssue(issue: string, lang: PageLang): string {
   const normalized = issue.trim();
   if (!normalized) return "";
@@ -1360,8 +1416,8 @@ function localizeQualityIssue(issue: string, lang: PageLang): string {
   return normalized;
 }
 
-function shotStatusLabel(status: ShotStatus, errorMessage: string | null | undefined, copy: Copy): string {
-  return status === "FAILED" && isManualStopError(errorMessage) ? copy.generationStopped : copy.shotStatus[status];
+function shotStatusLabel(status: ShotStatus, _errorMessage: string | null | undefined, copy: Copy): string {
+  return copy.shotStatus[status];
 }
 
 function formatProgressPercent(value: number): string {
@@ -1370,6 +1426,7 @@ function formatProgressPercent(value: number): string {
 }
 
 export default function OnePromptVideoPage() {
+  const migrationFrozen = process.env.NEXT_PUBLIC_ONE_PROMPT_MIGRATION_FROZEN === "true";
   const { lang, toggleLang } = useLanguage();
   const pageLang: PageLang = lang === "en" ? "en" : "zh";
   const copy = TEXT[pageLang];
@@ -1385,14 +1442,13 @@ export default function OnePromptVideoPage() {
   const [deletingProjectId, setDeletingProjectId] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
   const [project, setProject] = useState<VideoProject | null>(null);
-  const [selectedShotId, setSelectedShotId] = useState("");
+  const [selectedSegmentId, setSelectedSegmentId] = useState("");
   const [selectedKeyframeId, setSelectedKeyframeId] = useState("");
   const [previewKeyframeId, setPreviewKeyframeId] = useState("");
   const [previewMicroShot, setPreviewMicroShot] = useState<{ title: string; imageUrl: string; imagePrompt: string } | null>(null);
   const [projectView, setProjectView] = useState<ProjectView>("clips");
-  const [draft, setDraft] = useState<Partial<VideoShot>>({});
+  const [draft, setDraft] = useState<Partial<VideoSegment>>({});
   const [keyframeDraft, setKeyframeDraft] = useState<Partial<VideoKeyframe>>({});
-  const [imagePromptEditorMode, setImagePromptEditorMode] = useState<"description" | "json" | "provider">("description");
   const [imagePromptJsonDraft, setImagePromptJsonDraft] = useState("");
   const [imagePromptJsonError, setImagePromptJsonError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1414,7 +1470,7 @@ export default function OnePromptVideoPage() {
   const [stoppingGeneration, setStoppingGeneration] = useState(false);
   const [setupPanelCollapsed, setSetupPanelCollapsed] = useState(false);
   const [workflowProgressCollapsed, setWorkflowProgressCollapsed] = useState(false);
-  const [shotEditorOpen, setShotEditorOpen] = useState(false);
+  const [segmentEditorOpen, setSegmentEditorOpen] = useState(false);
   const [microShotHelpOpen, setMicroShotHelpOpen] = useState<"detail" | "modal" | null>(null);
   const [expandedMicroShotKeys, setExpandedMicroShotKeys] = useState<Set<string>>(() => new Set());
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
@@ -1438,11 +1494,13 @@ export default function OnePromptVideoPage() {
   const projectLayoutRef = useRef<HTMLElement | null>(null);
   const detailPanelRef = useRef<HTMLElement | null>(null);
   const selectedProjectIdRef = useRef("");
-  const syncingProjectIdsRef = useRef<Set<string>>(new Set());
+  const pollingProjectIdsRef = useRef<Set<string>>(new Set());
+  const deletedProjectIdsRef = useRef<Set<string>>(new Set());
 
-  const selectedShot = useMemo(
-    () => project?.shots.find((shot) => shot.id === selectedShotId) ?? project?.shots[0],
-    [project, selectedShotId],
+  const segmentEditorItems = useMemo(() => project?.segments ?? [], [project?.segments]);
+  const selectedSegment = useMemo(
+    () => segmentEditorItems.find((segment) => segment.id === selectedSegmentId) ?? segmentEditorItems[0],
+    [segmentEditorItems, selectedSegmentId],
   );
   const selectedKeyframe = useMemo(
     () => project?.keyframes?.find((keyframe) => keyframe.id === selectedKeyframeId),
@@ -1456,12 +1514,12 @@ export default function OnePromptVideoPage() {
     () => new Map((project?.keyframes ?? []).map((keyframe) => [keyframe.keyframeNo, keyframe])),
     [project?.keyframes],
   );
-  const selectedStartKeyframe = selectedShot?.startKeyframeNo ? keyframeByNo.get(selectedShot.startKeyframeNo) : undefined;
-  const selectedEndKeyframe = selectedShot?.endKeyframeNo ? keyframeByNo.get(selectedShot.endKeyframeNo) : undefined;
+  const selectedStartKeyframe = selectedSegment?.startKeyframeNo ? keyframeByNo.get(selectedSegment.startKeyframeNo) : undefined;
+  const selectedEndKeyframe = selectedSegment?.endKeyframeNo ? keyframeByNo.get(selectedSegment.endKeyframeNo) : undefined;
   const debugCopy = DEBUG_COPY[pageLang];
   const debugContext = useMemo(
-    () => buildDebugContext(project, selectedShot, selectedKeyframe),
-    [project, selectedKeyframe, selectedShot],
+    () => buildDebugContext(project, selectedSegment, selectedKeyframe),
+    [project, selectedKeyframe, selectedSegment],
   );
   const currentReferenceSelections = useMemo(
     () => currentReferenceDebugItems(project?.planDebug, debugContext.targetIds),
@@ -1520,25 +1578,21 @@ export default function OnePromptVideoPage() {
   const nextPreviewKeyframe = previewKeyframeIndex >= 0 && previewKeyframeIndex < previewKeyframeSequence.length - 1
     ? previewKeyframeSequence[previewKeyframeIndex + 1]
     : undefined;
-  const keyframeTotal = project?.keyframes?.length || project?.shots.length || 0;
+  const keyframeTotal = project?.keyframes?.length ?? 0;
   const assetTotal = assetKeyframes.length;
-  const boundaryTotal = boundaryKeyframes.length || project?.shots.length || 0;
+  const boundaryTotal = boundaryKeyframes.length;
   const previewTotalDuration = project?.durationSeconds ?? previewKeyframe?.timeSeconds ?? 30;
-  const segmentTotal = project?.segments?.length || project?.shots.length || 0;
-  const completeImages = project?.keyframes?.length
-    ? project.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
-    : project?.shots.filter((shot) => Boolean(shot.imageUrl)).length ?? 0;
-  const completeAssets = assetKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl) && (keyframe.locked || keyframe.status === "IMAGE_APPROVED")).length;
+  const segmentTotal = project?.segments?.length ?? 0;
+  const completeImages = project?.keyframes?.filter((keyframe) => Boolean(keyframe.imageUrl)).length ?? 0;
+  const completeAssets = assetKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length;
   const generatedAssets = assetKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length;
-  const completeBoundaryImages = boundaryKeyframes.length
-    ? boundaryKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
-    : project?.shots.filter((shot) => Boolean(shot.imageUrl)).length ?? 0;
-  const completeClips = project?.segments?.length
-    ? project.segments.filter((segment) => Boolean(segment.clipUrl) || segment.status === "CLIP_READY" || segment.status === "CLIP_APPROVED").length
-    : project?.shots.filter((shot) => Boolean(shot.clipUrl) || shot.status === "CLIP_READY" || shot.status === "CLIP_APPROVED").length ?? 0;
+  const completeBoundaryImages = boundaryKeyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length;
+  const completeClips = project?.segments?.filter((segment) =>
+    Boolean(segment.clipUrl) || segment.status === "CLIP_READY" || segment.status === "CLIP_APPROVED"
+  ).length ?? 0;
   const microShotImageStats = project ? microShotImageProgress(project) : { required: 0, ready: 0, running: 0, failed: 0, missing: 0 };
   const consistencyKeyframes = assetKeyframes;
-  const consistencyKeyframesApproved = consistencyKeyframes.every((keyframe) => Boolean(keyframe.imageUrl) && (keyframe.locked || keyframe.status === "IMAGE_APPROVED"));
+  const consistencyKeyframesApproved = taskGraphNodeCompleted(project?.taskGraph, "review:assets");
   const consistencyKeyframesReady = consistencyKeyframes.length > 0 && consistencyKeyframes.every((keyframe) => Boolean(keyframe.imageUrl));
   const hasUnsavedKeyframeChanges = Boolean(
     selectedKeyframe &&
@@ -1550,90 +1604,59 @@ export default function OnePromptVideoPage() {
     ),
   );
   const hasPendingBoundaryKeyframes = boundaryKeyframes.some((keyframe) => !keyframe.imageUrl);
-  const keyframesApproved = Boolean(project?.keyframes?.length && project.keyframes.every((keyframe) => keyframe.status === "IMAGE_APPROVED" || keyframe.locked));
-  const effectiveProjectStatus = project ? effectiveReviewStatus(project.status, keyframesApproved) : null;
-  const activeWorkflowStage = project
-    ? workflowStageForProject(project.status, effectiveProjectStatus, assetTotal, consistencyKeyframesApproved)
-    : null;
+  const keyframesApproved = taskGraphNodeCompleted(project?.taskGraph, "review:boundaries");
+  const effectiveProjectStatus = project?.status ?? null;
+  const activeWorkflowStage = workflowStageForTaskGraph(project?.taskGraph);
   const runningProjectIds = useMemo(
     () => Array.from(new Set([
       ...projects
-        .filter((item) =>
-          RUNNING_PROJECT_STATUSES.includes(item.status)
-          || hasRunningMicroShotImage(item)
-          || hasRunningGenerationCandidate(item)
-          || hasPendingProductionWork(item)
-        )
+        .filter((item) => taskGraphIsWorkerActive(item.taskGraph))
         .map((item) => item.id),
       ...planningProjectIds,
     ])),
     [planningProjectIds, projects],
   );
-  const canApproveScript = Boolean(project && project.shots.length > 0 && project.status === "PLAN_REVIEW");
-  const canApproveAssets = Boolean(project && (project.status === "IMAGE_REVIEW" || project.status === "FAILED") && consistencyKeyframesReady && !consistencyKeyframesApproved);
-  const canContinueBoundaryFrames = Boolean(project && project.status === "IMAGE_REVIEW" && hasPendingBoundaryKeyframes && consistencyKeyframesApproved);
-  const canApproveFrames = Boolean(project && keyframeTotal > 0 && completeImages === keyframeTotal && project.status === "IMAGE_REVIEW" && !keyframesApproved);
-  const canApproveMicroShots = Boolean(project && effectiveProjectStatus === "MICRO_SHOT_REVIEW" && microShotImageStats.running === 0 && microShotImageStats.failed === 0 && microShotImageStats.missing === 0);
-  const canApproveClips = Boolean(project && segmentTotal > 0 && completeClips === segmentTotal && project.status === "CLIP_REVIEW");
-  const canConfirmFinal = Boolean(project && project.status === "FINAL_REVIEW");
+  const taskGraphAllowsApproval = project?.taskGraph?.allowedActions.includes("APPROVE_CURRENT_NODE") ?? false;
+  const currentTaskNodeId = project?.taskGraph?.currentNode ?? null;
+  const canApproveScript = Boolean(project && currentTaskNodeId === "review:plan" && taskGraphAllowsApproval);
+  const canApproveAssets = Boolean(project && currentTaskNodeId === "review:assets" && taskGraphAllowsApproval);
+  const canContinueBoundaryFrames = Boolean(project && currentTaskNodeId?.startsWith("boundary-image:") && project.taskGraph?.allowedActions.includes("RESUME_CURRENT_NODE"));
+  const canApproveFrames = Boolean(project && currentTaskNodeId === "review:boundaries" && taskGraphAllowsApproval);
+  const canApproveMicroShots = Boolean(project && currentTaskNodeId === "review:micro-shots" && taskGraphAllowsApproval);
+  const canApproveClips = Boolean(project && currentTaskNodeId === "review:clips" && taskGraphAllowsApproval);
+  const canConfirmFinal = Boolean(project && currentTaskNodeId === "review:final" && taskGraphAllowsApproval);
   const rollbackOptions = useMemo(
-    () => effectiveProjectStatus ? rollbackTargetsForStatus(effectiveProjectStatus, consistencyKeyframesApproved) : [],
-    [consistencyKeyframesApproved, effectiveProjectStatus],
+    () => rollbackTargetsForTaskGraph(project?.taskGraph),
+    [project?.taskGraph],
   );
   const canStopGeneration = Boolean(
     generationAbortController ||
     optimisticProgress?.active ||
-    (project && RUNNING_PROJECT_STATUSES.includes(project.status)),
+    taskGraphIsWorkerActive(project?.taskGraph),
   );
   const planGenerationBusy = Boolean(
     creatingPlan ||
-    project?.status === "PLANNING",
+    project?.taskGraph?.currentNode === "planning" && taskGraphIsWorkerActive(project.taskGraph),
   );
   const canPlanSelectedDraft = project?.status === "DRAFT";
   const effectiveStylePreset = useMemo(
     () => (stylePreset === CUSTOM_STYLE_VALUE ? customStylePreset.trim() : stylePreset),
     [customStylePreset, stylePreset],
   );
-  const canCreateAndPlan = !creatingPlan && prompt.trim().length >= 4 && effectiveStylePreset.length > 0 && (!project || canPlanSelectedDraft);
+  const canCreateAndPlan = !migrationFrozen && !creatingPlan && prompt.trim().length >= 4 && effectiveStylePreset.length > 0 && (!project || canPlanSelectedDraft);
   const workflowProgress = useMemo(() => {
     if (optimisticProgress) {
-      return optimisticWorkflowProgressView({
-        ...optimisticProgress,
-        phase: "creating",
-        percent: 1,
-      }, pageLang);
+      return optimisticWorkflowProgressView(optimisticProgress, pageLang);
     }
-    if (!project || !effectiveProjectStatus) return null;
-    if (effectiveProjectStatus === "PLANNING") {
-      return plannerWorkflowProgressView(project.plannerProgress, pageLang, project.taskGraph, progressNow);
-    }
-    return projectWorkflowProgressView(
-      project,
-      projectProgress(project, effectiveProjectStatus),
-      pageLang,
-      effectiveProjectStatus,
-      {
-        assetTotal,
-        generatedAssets,
-        approvedAssets: completeAssets,
-        assetsApproved: consistencyKeyframesApproved,
-        boundaryTotal,
-        generatedBoundaryImages: completeBoundaryImages,
-      },
-      progressNow,
-    );
+    return project?.taskGraph
+      ? taskGraphWorkflowProgressView(project.taskGraph, pageLang, progressNow, project.productionState)
+      : null;
   }, [
-    assetTotal,
-    boundaryTotal,
-    completeAssets,
-    completeBoundaryImages,
-    consistencyKeyframesApproved,
-    effectiveProjectStatus,
-    generatedAssets,
     optimisticProgress,
     pageLang,
     progressNow,
-    project,
+    project?.productionState,
+    project?.taskGraph,
   ]);
   const workflowProgressBarClass =
     workflowProgress?.tone === "failed"
@@ -1651,25 +1674,15 @@ export default function OnePromptVideoPage() {
     project && (
       generationProjectId === project.id ||
       optimisticProgress?.active ||
-      RUNNING_PROJECT_STATUSES.includes(project.status) ||
-      hasRunningGenerationCandidate(project) ||
-      project.plannerProgress?.status === "queued" ||
-      project.plannerProgress?.status === "running"
+      taskGraphIsWorkerActive(project.taskGraph)
     ),
   );
-  const visibleProjectError = project?.errorMessage && !isManualStopProject(project) && !generationRecoveryActive
+  const visibleProjectError = project?.errorMessage && !generationRecoveryActive
     ? project.errorMessage
     : null;
-  const projectWorkflowNotice = visibleProjectError ? workflowNoticeForMessage(visibleProjectError, pageLang) : null;
-  const canResumeRecoverableImageReview = Boolean(
-    project
-    && project.status === "IMAGE_REVIEW"
-    && visibleProjectError
-    && !projectWorkflowNotice
-    && !generationRecoveryActive,
-  );
   const localizedActionError = error ? localizeWorkflowError(error, pageLang) : null;
-  const localizedProjectError = visibleProjectError && !projectWorkflowNotice ? localizeWorkflowError(visibleProjectError, pageLang) : null;
+  const localizedProjectError = project?.productionProjection?.displayMessage?.[pageLang]
+    ?? (visibleProjectError ? localizeWorkflowError(visibleProjectError, pageLang) : null);
 
   useEffect(() => {
     setPrompt((current) => (DEFAULT_PROMPTS.includes(current) ? copy.defaultPrompt : current));
@@ -1762,11 +1775,11 @@ export default function OnePromptVideoPage() {
   }, [effectiveProjectStatus, optimisticProgress?.active, project?.taskGraph]);
 
   useEffect(() => {
-    if (!project?.shots.length) return;
-    if (!selectedShotId || !project.shots.some((shot) => shot.id === selectedShotId)) {
-      setSelectedShotId(project.shots[0].id);
+    if (!segmentEditorItems.length) return;
+    if (!selectedSegmentId || !segmentEditorItems.some((segment) => segment.id === selectedSegmentId)) {
+      setSelectedSegmentId(segmentEditorItems[0].id);
     }
-  }, [project, selectedShotId]);
+  }, [segmentEditorItems, selectedSegmentId]);
 
   useEffect(() => {
     if (!selectedKeyframeId) return;
@@ -1809,35 +1822,35 @@ export default function OnePromptVideoPage() {
   }, [previewMicroShot]);
 
   useEffect(() => {
-    if (!shotEditorOpen) return;
-    if (!selectedShot) {
-      setShotEditorOpen(false);
+    if (!segmentEditorOpen) return;
+    if (!selectedSegment) {
+      setSegmentEditorOpen(false);
       return;
     }
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setShotEditorOpen(false);
+      if (event.key === "Escape") setSegmentEditorOpen(false);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedShot, shotEditorOpen]);
+  }, [selectedSegment, segmentEditorOpen]);
 
   useEffect(() => {
-    if (!selectedShot) return;
+    if (!selectedSegment) return;
     setDraft({
-      purpose: localizedShotPurpose(selectedShot, pageLang),
-      camera: selectedShot.camera,
-      action: selectedShot.action,
-      imagePrompt: localizedShotPrompt(selectedShot, "image", pageLang),
-      videoPrompt: localizedShotPrompt(selectedShot, "video", pageLang),
-      negativePrompt: localizedShotNegativePrompt(selectedShot, pageLang),
-      subtitle: selectedShot.subtitle,
-      durationSeconds: selectedShot.durationSeconds,
-      microShots: selectedShot.microShots ?? [],
+      purpose: localizedSegmentPurpose(selectedSegment, pageLang),
+      camera: selectedSegment.camera,
+      action: selectedSegment.action,
+      imagePrompt: localizedSegmentPrompt(selectedSegment, "image", pageLang),
+      videoPrompt: localizedSegmentPrompt(selectedSegment, "video", pageLang),
+      negativePrompt: localizedSegmentNegativePrompt(selectedSegment, pageLang),
+      subtitle: selectedSegment.subtitle,
+      durationSeconds: selectedSegment.durationSeconds,
+      microShots: selectedSegment.microShots ?? [],
     });
     // Project polling replaces the shot object even while the user is editing
     // this same shot. Do not let that overwrite unsaved draft changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedShot?.id, pageLang]);
+  }, [selectedSegment?.id, pageLang]);
 
   useEffect(() => {
     if (!selectedKeyframe) return;
@@ -1853,6 +1866,7 @@ export default function OnePromptVideoPage() {
   }, [selectedKeyframe, pageLang]);
 
   const rememberProject = useCallback((nextProject: VideoProject) => {
+    if (deletedProjectIdsRef.current.has(nextProject.id)) return;
     setProjects((current) => sortProjects(upsertProject(current, nextProject)));
     setProject((current) => {
       if (current?.id === nextProject.id || selectedProjectId === nextProject.id) return nextProject;
@@ -1860,29 +1874,30 @@ export default function OnePromptVideoPage() {
     });
   }, [selectedProjectId]);
 
-  const syncProject = useCallback(async (projectId: string, options?: { silent?: boolean }) => {
-    if (syncingProjectIdsRef.current.has(projectId)) return;
-    syncingProjectIdsRef.current.add(projectId);
+  const pollProjectProjection = useCallback(async (projectId: string, options?: { silent?: boolean }) => {
+    if (deletedProjectIdsRef.current.has(projectId)) return;
+    if (pollingProjectIdsRef.current.has(projectId)) return;
+    pollingProjectIdsRef.current.add(projectId);
     try {
-      const res = await fetchJson(`/api/video-projects/${projectId}/sync`, copy, { method: "POST" });
-      if (res.project) {
+      const res = await fetchJson(`/api/video-projects/${projectId}`, copy);
+      if (res.project && !deletedProjectIdsRef.current.has(projectId)) {
         rememberProject(res.project);
         if (selectedProjectIdRef.current === projectId) setError("");
       }
     } catch (err) {
       if (!options?.silent) setError(err instanceof Error ? err.message : copy.actionFailed);
     } finally {
-      syncingProjectIdsRef.current.delete(projectId);
+      pollingProjectIdsRef.current.delete(projectId);
     }
   }, [copy, rememberProject]);
 
   useEffect(() => {
     if (!runningProjectIds.length) return;
     const timer = window.setInterval(() => {
-      for (const projectId of runningProjectIds) void syncProject(projectId, { silent: projectId !== selectedProjectId });
+      for (const projectId of runningProjectIds) void pollProjectProjection(projectId, { silent: projectId !== selectedProjectId });
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [runningProjectIds, selectedProjectId, syncProject]);
+  }, [pollProjectProjection, runningProjectIds, selectedProjectId]);
 
   useEffect(() => {
     if (!optimisticProgress?.active || !generationProjectId || project?.id !== generationProjectId) return;
@@ -1892,9 +1907,7 @@ export default function OnePromptVideoPage() {
     if (loading) return;
     if (
       project
-      && !RUNNING_PROJECT_STATUSES.includes(project.status)
-      && !hasRunningMicroShotImage(project)
-      && !hasRunningGenerationCandidate(project)
+      && !taskGraphIsWorkerActive(project.taskGraph)
     ) {
       setGenerationAbortController(null);
       setGenerationProjectId("");
@@ -1905,7 +1918,9 @@ export default function OnePromptVideoPage() {
   async function loadProjects() {
     try {
       const res = await fetchJson("/api/video-projects", copy);
-      const nextProjects = sortProjects(res.projects ?? []);
+      const nextProjects = sortProjects(
+        (res.projects ?? []).filter((item) => !deletedProjectIdsRef.current.has(item.id)),
+      );
       setProjects(nextProjects);
       if (!nextProjects.length) return;
       const storedId = typeof window !== "undefined" ? window.localStorage.getItem(PROJECT_STORAGE_KEY) || "" : "";
@@ -1917,14 +1932,14 @@ export default function OnePromptVideoPage() {
   }
 
   function activateProject(nextProject: VideoProject) {
-    const nextView = projectViewForStatus(nextProject.status);
+    const nextView = projectViewForTaskGraph(nextProject.taskGraph);
     const firstAssetKeyframe = nextProject.keyframes?.filter((keyframe) => keyframe.keyframeNo < 0).sort((a, b) => assetKeyframeSortRank(a) - assetKeyframeSortRank(b))[0];
     const firstBoundaryKeyframe = nextProject.keyframes?.filter((keyframe) => keyframe.keyframeNo > 0).sort((a, b) => a.keyframeNo - b.keyframeNo)[0];
     setSelectedProjectId(nextProject.id);
     setProject(nextProject);
-    setSelectedShotId(nextView === "clips" ? nextProject.shots[0]?.id ?? "" : "");
+    setSelectedSegmentId(nextView === "clips" ? nextProject.segments?.[0]?.id ?? "" : "");
     setSelectedKeyframeId(nextView === "assets" ? firstAssetKeyframe?.id ?? "" : nextView === "frames" ? firstBoundaryKeyframe?.id ?? "" : "");
-    setShotEditorOpen(false);
+    setSegmentEditorOpen(false);
     setProjectView(nextView);
     setPrompt(nextProject.userPrompt);
     setReferenceImageUrls(nextProject.referenceImageUrls ?? []);
@@ -1939,12 +1954,12 @@ export default function OnePromptVideoPage() {
       setCustomStylePreset(projectStylePreset);
     }
     if (typeof window !== "undefined") window.localStorage.setItem(PROJECT_STORAGE_KEY, nextProject.id);
-    void syncProject(nextProject.id, { silent: true });
+    void pollProjectProjection(nextProject.id, { silent: true });
   }
 
   function selectShot(shotId: string) {
     setProjectView("clips");
-    setSelectedShotId(shotId);
+    setSelectedSegmentId(shotId);
     setSelectedKeyframeId("");
   }
 
@@ -1952,8 +1967,8 @@ export default function OnePromptVideoPage() {
     const keyframe = project?.keyframes?.find((item) => item.id === keyframeId);
     setProjectView(keyframe && keyframe.keyframeNo < 0 ? "assets" : "frames");
     setSelectedKeyframeId(keyframeId);
-    setSelectedShotId("");
-    setShotEditorOpen(false);
+    setSelectedSegmentId("");
+    setSegmentEditorOpen(false);
   }
 
   function previewDetailHeight(height: number) {
@@ -1970,9 +1985,9 @@ export default function OnePromptVideoPage() {
     }
   }
 
-  function openShotEditor(shotId: string) {
+  function openSegmentEditor(shotId: string) {
     selectShot(shotId);
-    setShotEditorOpen(true);
+    setSegmentEditorOpen(true);
   }
 
   function beginEditProject(nextProject: VideoProject) {
@@ -2002,6 +2017,7 @@ export default function OnePromptVideoPage() {
   async function deleteProject(projectId: string) {
     if (deletingProjectId) return;
     if (typeof window !== "undefined" && !window.confirm(copy.deleteProjectConfirm)) return;
+    deletedProjectIdsRef.current.add(projectId);
     setDeletingProjectId(projectId);
     setError("");
     setMessage("");
@@ -2017,9 +2033,9 @@ export default function OnePromptVideoPage() {
         } else {
           setSelectedProjectId("");
           setProject(null);
-          setSelectedShotId("");
+          setSelectedSegmentId("");
           setSelectedKeyframeId("");
-          setShotEditorOpen(false);
+          setSegmentEditorOpen(false);
           setDraft({});
           setKeyframeDraft({});
           setPrompt(copy.defaultPrompt);
@@ -2033,6 +2049,7 @@ export default function OnePromptVideoPage() {
       }
       setMessage(copy.projectDeleted);
     } catch (err) {
+      deletedProjectIdsRef.current.delete(projectId);
       setError(err instanceof Error ? err.message : copy.actionFailed);
     } finally {
       setDeletingProjectId("");
@@ -2042,9 +2059,9 @@ export default function OnePromptVideoPage() {
   function startNewProject() {
     setSelectedProjectId("");
     setProject(null);
-    setSelectedShotId("");
+    setSelectedSegmentId("");
     setSelectedKeyframeId("");
-    setShotEditorOpen(false);
+    setSegmentEditorOpen(false);
     setDraft({});
     setKeyframeDraft({});
     cancelEditProject();
@@ -2086,13 +2103,17 @@ export default function OnePromptVideoPage() {
   }
 
   async function createAndPlan() {
+    if (migrationFrozen) {
+      setError(pageLang === "zh" ? "架构迁移期间已暂停新建一句话成片任务。" : "New one-prompt video jobs are paused during the architecture migration.");
+      return;
+    }
     if (!canCreateAndPlan) return;
     setCreatingPlan(true);
     setError("");
     setMessage("");
     const startedAt = Date.now();
     setProgressNow(startedAt);
-    setOptimisticProgress({ active: true, phase: "creating", percent: 3, startedAt });
+    setOptimisticProgress({ active: true, phase: "waiting", percent: 3, startedAt });
     try {
       const totalDurationSeconds = clampProjectDuration(durationSeconds);
       const planPayload = {
@@ -2143,7 +2164,7 @@ export default function OnePromptVideoPage() {
       }
     } catch (planError) {
       try {
-        const synced = await fetchJson(`/api/video-projects/${projectId}/sync`, copy, { method: "POST" });
+        const synced = await fetchJson(`/api/video-projects/${projectId}`, copy);
         if (synced.project) {
           rememberProject(synced.project);
           if (synced.project.status === "PLANNING" || synced.project.status === "PLAN_REVIEW") return;
@@ -2201,43 +2222,50 @@ export default function OnePromptVideoPage() {
   }
 
   async function resumeProject() {
+    if (migrationFrozen) {
+      setError(pageLang === "zh" ? "架构迁移期间已暂停继续生成。" : "Resume is paused during the architecture migration.");
+      return;
+    }
     if (!project) return;
     const controller = new AbortController();
-    const requiresFullReplan =
-      project.status === "FAILED" &&
-      project.shots.length === 0 &&
-      (project.keyframes?.length ?? 0) === 0 &&
-      (project.segments?.length ?? 0) === 0;
-    if (requiresFullReplan) {
-      const projectId = project.id;
-      const planningProject: VideoProject = { ...project, status: "PLANNING", errorMessage: null };
-      setError("");
-      setMessage(copy.resumeStarted);
-      setGenerationAbortController(controller);
-      setGenerationProjectId(projectId);
-      setStoppingGeneration(false);
-      setPlanningProjectIds((current) => current.includes(projectId) ? current : [...current, projectId]);
-      setOptimisticProgress({ active: true, phase: "waiting", percent: Math.max(workflowProgress?.percent ?? 8, 10), startedAt: Date.now() });
-      rememberProject(planningProject);
-      activateProject(planningProject);
-      void resumePlanningProjectInBackground(projectId, controller);
+    const allowedActions = project.taskGraph?.allowedActions ?? [];
+    if (!allowedActions.includes("RESUME_CURRENT_NODE") && !allowedActions.includes("EXECUTE_RECOVERY_ACTION")) {
+      setError(pageLang === "zh" ? "当前任务图没有可执行的恢复动作，请刷新项目状态。" : "The task graph has no executable recovery action. Refresh the project state.");
       return;
     }
     let resumedRunning = false;
     setGenerationAbortController(controller);
     setGenerationProjectId(project.id);
     setStoppingGeneration(false);
-    setOptimisticProgress({ active: true, phase: "waiting", percent: Math.max(workflowProgress?.percent ?? 8, 10), startedAt: Date.now() - 110000 });
+    setOptimisticProgress({ active: true, phase: "resuming", percent: Math.max(workflowProgress?.percent ?? 8, 10), startedAt: Date.now() - 110000 });
     await runAction(async () => {
-      const res = await fetchJson(`/api/video-projects/${project.id}/resume`, copy, {
+      const recoveryAction = project.productionProjection?.recoveryAction
+        ?? project.taskGraph?.recoveryAction;
+      const failedJobId = project.productionProjection?.failedJobId;
+      const command = allowedActions.includes("EXECUTE_RECOVERY_ACTION")
+        ? recoveryAction === "REPAIR_CONTRACT"
+          ? {
+              path: `/api/video-projects/${project.id}/repair-contract`,
+              body: { jobId: failedJobId },
+            }
+          : {
+              path: `/api/video-projects/${project.id}/retry-job`,
+              body: { jobId: failedJobId },
+            }
+        : {
+            path: `/api/video-projects/${project.id}/continue-task-graph`,
+            body: { expectedNodeId: project.taskGraph?.currentNode },
+          };
+      const res = await fetchJson(command.path, copy, {
         method: "POST",
+        body: JSON.stringify(command.body),
         signal: controller.signal,
       });
       if (!res.project) throw new Error(copy.actionFailed);
       rememberProject(res.project);
       activateProject(res.project);
-      setProjectView(projectViewForStatus(res.project.status));
-      resumedRunning = RUNNING_PROJECT_STATUSES.includes(res.project.status);
+      setProjectView(projectViewForTaskGraph(res.project.taskGraph));
+      resumedRunning = taskGraphIsWorkerActive(res.project.taskGraph);
       if (!resumedRunning) {
         setOptimisticProgress(null);
         setGenerationAbortController(null);
@@ -2249,37 +2277,6 @@ export default function OnePromptVideoPage() {
       setGenerationAbortController(null);
       setGenerationProjectId("");
       setOptimisticProgress((current) => current?.phase === "stopped" ? current : null);
-    }
-  }
-
-  async function resumePlanningProjectInBackground(projectId: string, controller: AbortController) {
-    try {
-      const res = await fetchJson(`/api/video-projects/${projectId}/resume`, copy, {
-        method: "POST",
-        signal: controller.signal,
-      });
-      if (!res.project) throw new Error(copy.actionFailed);
-      rememberProject(res.project);
-      setOptimisticProgress(null);
-      if (selectedProjectIdRef.current === projectId) setMessage(copy.resumeStarted);
-    } catch (resumeError) {
-      if (resumeError instanceof DOMException && resumeError.name === "AbortError") {
-        if (selectedProjectIdRef.current === projectId) setMessage(copy.generationStopped);
-      } else {
-        try {
-          await syncProject(projectId, { silent: true });
-        } catch {
-          // Keep the original resume error visible below.
-        }
-        setOptimisticProgress(null);
-        if (selectedProjectIdRef.current === projectId) {
-          setError(resumeError instanceof Error ? resumeError.message : copy.actionFailed);
-        }
-      }
-    } finally {
-      setPlanningProjectIds((current) => current.filter((id) => id !== projectId));
-      setGenerationAbortController((current) => current === controller ? null : current);
-      setGenerationProjectId((current) => current === projectId ? "" : current);
     }
   }
 
@@ -2373,10 +2370,10 @@ export default function OnePromptVideoPage() {
   }
 
   function originalShotDraftValue(field: "durationSeconds" | "purpose" | "action" | "camera" | "subtitle" | "videoPrompt"): string | number {
-    if (!selectedShot) return "";
-    if (field === "purpose") return localizedShotPurpose(selectedShot, pageLang);
-    if (field === "videoPrompt") return localizedShotPrompt(selectedShot, "video", pageLang);
-    return selectedShot[field] ?? "";
+    if (!selectedSegment) return "";
+    if (field === "purpose") return localizedSegmentPurpose(selectedSegment, pageLang);
+    if (field === "videoPrompt") return localizedSegmentPrompt(selectedSegment, "video", pageLang);
+    return selectedSegment[field] ?? "";
   }
 
   function undoShotField(field: "durationSeconds" | "purpose" | "action" | "camera" | "subtitle" | "videoPrompt") {
@@ -2390,7 +2387,7 @@ export default function OnePromptVideoPage() {
   function undoDraftMicroShot(index: number) {
     const current = ((draft.microShots as MicroShot[] | undefined) ?? [])[index];
     if (!current) return;
-    const original = selectedShot?.microShots?.find((item) => item.microShotNo === current.microShotNo);
+    const original = selectedSegment?.microShots?.find((item) => item.microShotNo === current.microShotNo);
     if (!original) {
       removeDraftMicroShot(index);
       return;
@@ -2405,20 +2402,20 @@ export default function OnePromptVideoPage() {
   function microShotChanged(index: number): boolean {
     const current = ((draft.microShots as MicroShot[] | undefined) ?? [])[index];
     if (!current) return false;
-    const original = selectedShot?.microShots?.find((item) => item.microShotNo === current.microShotNo);
+    const original = selectedSegment?.microShots?.find((item) => item.microShotNo === current.microShotNo);
     return !original || JSON.stringify(current) !== JSON.stringify(original);
   }
 
   function addDraftMicroShot() {
     setDraft((current) => {
       const items = [...((current.microShots as MicroShot[] | undefined) ?? [])];
-      const duration = Number(current.durationSeconds ?? selectedShot?.durationSeconds ?? 3);
+      const duration = Number(current.durationSeconds ?? selectedSegment?.durationSeconds ?? 3);
       const localTimeSeconds = Math.max(0, Math.min(duration, items.length ? Math.round(duration / 2) : 0));
       const nextMicroShotNo = Math.max(0, ...items.map((item) => Number(item.microShotNo) || 0)) + 1;
       items.push({
         microShotNo: nextMicroShotNo,
         localTimeSeconds,
-        absoluteTimeSeconds: (selectedShot?.startTimeSeconds ?? 0) + localTimeSeconds,
+        absoluteTimeSeconds: (selectedSegment?.startTimeSeconds ?? 0) + localTimeSeconds,
         purpose: "",
         scene: "",
         action: "",
@@ -2455,11 +2452,11 @@ export default function OnePromptVideoPage() {
       : `${label} was removed from the draft; click “Save shot” to apply`);
   }
 
-  async function saveShot() {
-    if (!project || !selectedShot) return;
-    if (!confirmArtifactImpact(project, [`segment:${selectedShot.shotNo}`], pageLang)) return;
+  async function saveSegment() {
+    if (!project || !selectedSegment) return;
+    if (!confirmArtifactImpact(project, [`segment:${selectedSegment.segmentNo}`], pageLang)) return;
     await runAction(async () => {
-      const res = await fetchJson(`/api/video-projects/${project.id}/shots/${selectedShot.id}`, copy, {
+      const res = await fetchJson(`/api/video-projects/${project.id}/segments/${selectedSegment.id}`, copy, {
         method: "PATCH",
         body: JSON.stringify({
           purpose: draft.purpose,
@@ -2476,31 +2473,31 @@ export default function OnePromptVideoPage() {
       });
       if (!res.project) throw new Error(copy.saveFailed);
       rememberProject(res.project);
-      const savedShot = res.project.shots.find((shot: VideoShot) => shot.id === selectedShot.id);
-      if (savedShot) {
+      const savedSegment = res.project.segments?.find((segment: VideoSegment) => segment.id === selectedSegment.id);
+      if (savedSegment) {
         setDraft({
-          purpose: localizedShotPurpose(savedShot, pageLang),
-          camera: savedShot.camera,
-          action: savedShot.action,
-          imagePrompt: localizedShotPrompt(savedShot, "image", pageLang),
-          videoPrompt: localizedShotPrompt(savedShot, "video", pageLang),
-          negativePrompt: localizedShotNegativePrompt(savedShot, pageLang),
-          subtitle: savedShot.subtitle,
-          durationSeconds: savedShot.durationSeconds,
-          microShots: savedShot.microShots ?? [],
+          purpose: localizedSegmentPurpose(savedSegment, pageLang),
+          camera: savedSegment.camera,
+          action: savedSegment.action ?? savedSegment.motion,
+          imagePrompt: localizedSegmentPrompt(savedSegment, "image", pageLang),
+          videoPrompt: localizedSegmentPrompt(savedSegment, "video", pageLang),
+          negativePrompt: localizedSegmentNegativePrompt(savedSegment, pageLang),
+          subtitle: savedSegment.subtitle,
+          durationSeconds: savedSegment.durationSeconds,
+          microShots: savedSegment.microShots ?? [],
         });
       }
-      setMessage(copy.saved(selectedShot.shotNo));
+      setMessage(copy.saved(selectedSegment.segmentNo));
     });
   }
 
   async function generateMicroShotImage(index: number) {
-    if (!project || !selectedShot) return;
+    if (!project || !selectedSegment) return;
     const microShot = ((draft.microShots as MicroShot[] | undefined) ?? [])[index];
     if (!microShot) return;
     await runAction(async () => {
       const res = await fetchJson(
-        `/api/video-projects/${project.id}/shots/${selectedShot.id}/micro-shots/${microShot.microShotNo}/image`,
+        `/api/video-projects/${project.id}/segments/${selectedSegment.id}/micro-shots/${microShot.microShotNo}/image`,
         copy,
         {
           method: "POST",
@@ -2532,7 +2529,7 @@ export default function OnePromptVideoPage() {
     setError("");
     setMessage("");
     try {
-      const res = await fetchJson(`/api/video-projects/${project.id}/shots/${selectedKeyframe.id}`, copy, {
+      const res = await fetchJson(`/api/video-projects/${project.id}/keyframes/${selectedKeyframe.id}`, copy, {
         method: "PATCH",
         body: JSON.stringify({ ...keyframeDraft, locale: pageLang }),
       });
@@ -2613,6 +2610,25 @@ export default function OnePromptVideoPage() {
     });
   }
 
+  async function savePlanningRoute(draftValue: PlanningRouteDraft) {
+    if (!project) return;
+    await runAction(async () => {
+      const res = await fetchJson(`/api/video-projects/${project.id}/route-classification`, copy, {
+        method: "PATCH",
+        body: JSON.stringify(draftValue),
+      });
+      if (!res.project) throw new Error(copy.saveFailed);
+      rememberProject(res.project);
+      setMessage(res.accepted
+        ? pageLang === "zh"
+          ? "任务分类与叙事路线已由用户锁定，正在按失效范围重新生成 Planning。"
+          : "The route is now user-locked. Planning is regenerating from the invalidation boundary."
+        : pageLang === "zh"
+          ? "任务分类与叙事路线已由用户保存并锁定。"
+          : "The route was saved and locked by the user.");
+    });
+  }
+
   function originalDebugSection(section: EditableDebugSection): string {
     const value = section === "events"
       ? project?.planDebug?.narrativeEvents
@@ -2650,13 +2666,13 @@ export default function OnePromptVideoPage() {
     try {
       await runAction(async () => {
         if (selectedKeyframe?.id === shotId && hasUnsavedKeyframeChanges) {
-          const saved = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}`, copy, {
+          const saved = await fetchJson(`/api/video-projects/${project.id}/keyframes/${shotId}`, copy, {
             method: "PATCH",
             body: JSON.stringify({ ...keyframeDraft, locale: pageLang }),
           });
           if (!saved.project) throw new Error(copy.saveFailed);
         }
-        const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}/image`, copy, { method: "POST" });
+        const res = await fetchJson(`/api/video-projects/${project.id}/keyframes/${shotId}/image`, copy, { method: "POST" });
         if (!res.project) throw new Error(copy.regenerateFailed);
         rememberProject(res.project);
         setMessage(copy.keyframeRegenerated);
@@ -2672,10 +2688,10 @@ export default function OnePromptVideoPage() {
 
   async function regenerateClip(shotId: string) {
     if (!project) return;
-    if (selectedShot?.id === shotId && !confirmArtifactImpact(project, [`segment:${selectedShot.shotNo}:prompt`], pageLang)) return;
+    if (selectedSegment?.id === shotId && !confirmArtifactImpact(project, [`segment:${selectedSegment.segmentNo}:prompt`], pageLang)) return;
     await runAction(async () => {
-      if (selectedShot?.id === shotId) {
-        const saved = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}`, copy, {
+      if (selectedSegment?.id === shotId) {
+        const saved = await fetchJson(`/api/video-projects/${project.id}/segments/${shotId}`, copy, {
           method: "PATCH",
           body: JSON.stringify({
             purpose: draft.purpose,
@@ -2691,7 +2707,7 @@ export default function OnePromptVideoPage() {
         });
         if (!saved.project) throw new Error(copy.saveFailed);
       }
-      const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shotId}/clip`, copy, { method: "POST" });
+      const res = await fetchJson(`/api/video-projects/${project.id}/segments/${shotId}/clip`, copy, { method: "POST" });
       if (!res.project) throw new Error(copy.regenerateFailed);
       rememberProject(res.project);
       setProjectView("clips");
@@ -2792,13 +2808,13 @@ export default function OnePromptVideoPage() {
     });
   }
 
-  async function toggleLock(shot: Pick<VideoShot | VideoKeyframe, "id" | "locked">) {
+  async function toggleLock(shot: Pick<VideoKeyframe, "id" | "locked">) {
     if (!project) return;
     setLockingKeyframeIds((current) => current.includes(shot.id) ? current : [...current, shot.id]);
     setError("");
     setMessage("");
     try {
-      const res = await fetchJson(`/api/video-projects/${project.id}/shots/${shot.id}`, copy, {
+      const res = await fetchJson(`/api/video-projects/${project.id}/keyframes/${shot.id}`, copy, {
         method: "PATCH",
         body: JSON.stringify({ locked: !shot.locked }),
       });
@@ -2815,7 +2831,7 @@ export default function OnePromptVideoPage() {
   async function approveImages() {
     if (!project) return;
     await runAction(async () => {
-      const res = await fetchJson(`/api/video-projects/${project.id}/approve-images`, copy, { method: "POST" });
+      const res = await fetchJson(`/api/video-projects/${project.id}/approve-keyframes`, copy, { method: "POST" });
       if (!res.project) throw new Error(copy.approveFailed);
       rememberProject(res.project);
       setMessage(copy.framesApproved);
@@ -2847,10 +2863,10 @@ export default function OnePromptVideoPage() {
   async function approveClips() {
     if (!project) return;
     await runAction(async () => {
-      const res = await fetchJson(`/api/video-projects/${project.id}/compose`, copy, { method: "POST" });
+      const res = await fetchJson(`/api/video-projects/${project.id}/approve-clips`, copy, { method: "POST" });
       if (!res.project) throw new Error(copy.approveFailed);
       rememberProject(res.project);
-      setMessage(copy.clipsComposed);
+      setMessage(copy.updated);
     });
   }
 
@@ -2890,8 +2906,8 @@ export default function OnePromptVideoPage() {
       });
       if (!res.project) throw new Error(copy.approveFailed);
       rememberProject(res.project);
-      setProjectView(projectViewForStatus(res.project.status));
-      setSelectedShotId(res.project.shots[0]?.id ?? "");
+      setProjectView(projectViewForTaskGraph(res.project.taskGraph));
+      setSelectedSegmentId(res.project.segments?.[0]?.id ?? "");
       setSelectedKeyframeId(res.project.keyframes?.[0]?.id ?? "");
       setMessage(copy.rollbackDone);
     } catch (err) {
@@ -2933,15 +2949,7 @@ export default function OnePromptVideoPage() {
         className: "border-emerald-400/30 bg-emerald-400/10 text-emerald-100 hover:bg-emerald-400/15",
       };
     }
-    if (project.status === "FAILED") {
-      return {
-        label: copy.resumeGeneration,
-        icon: <RefreshCw className="h-4 w-4" />,
-        onClick: resumeProject,
-        className: "border-amber-300/30 bg-amber-300/10 text-amber-100 hover:bg-amber-300/15",
-      };
-    }
-    if (canResumeRecoverableImageReview) {
+    if (project.taskGraph?.allowedActions.includes("EXECUTE_RECOVERY_ACTION")) {
       return {
         label: copy.resumeGeneration,
         icon: <RefreshCw className="h-4 w-4" />,
@@ -2989,12 +2997,22 @@ export default function OnePromptVideoPage() {
         className: "border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15",
       };
     }
-    if (canConfirmFinal && project.status !== "DONE") {
+    if (canConfirmFinal) {
       return {
         label: copy.confirmFinal,
         icon: <Check className="h-4 w-4" />,
         onClick: confirmFinal,
         className: "border-amber-300/30 bg-amber-300/10 text-amber-100 hover:bg-amber-300/15",
+      };
+    }
+    if (project.taskGraph?.allowedActions.includes("RESUME_CURRENT_NODE")) {
+      return {
+        label: project.taskGraph.currentNode === "composition"
+          ? (pageLang === "zh" ? "开始合成成片" : "Compose final video")
+          : copy.resumeGeneration,
+        icon: <RefreshCw className="h-4 w-4" />,
+        onClick: resumeProject,
+        className: "border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15",
       };
     }
     return null;
@@ -3022,6 +3040,13 @@ export default function OnePromptVideoPage() {
             </button>
           </div>
         </header>
+        {migrationFrozen ? (
+          <div className="rounded-md border border-amber-300/30 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+            {pageLang === "zh"
+              ? "架构迁移维护中：已暂停新建项目和继续生成，现有项目仅供查看。"
+              : "Architecture migration in progress: creating and resuming projects is paused; existing projects are read-only."}
+          </div>
+        ) : null}
 
         <section className="overflow-hidden rounded-md border border-white/10 bg-slate-950/70 shadow-[0_18px_60px_rgba(0,0,0,0.22)]">
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
@@ -3061,7 +3086,7 @@ export default function OnePromptVideoPage() {
           {projects.length ? (
             <div className="subtle-scrollbar grid max-h-[360px] min-w-0 gap-2 overflow-y-auto overflow-x-hidden pr-1">
               {projects.map((item) => {
-                const progress = projectProgress(item);
+                const progressPercent = item.taskGraph?.progress.percent ?? 0;
                 const active = item.id === project?.id;
                 const editing = editingProjectId === item.id;
                 return (
@@ -3113,7 +3138,7 @@ export default function OnePromptVideoPage() {
                       </div>
                     </div>
                     <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
-                      <div className="h-full rounded-full bg-cyan-400" style={{ width: `${progress.percent}%` }} />
+                      <div className="h-full rounded-full bg-cyan-400" style={{ width: `${progressPercent}%` }} />
                     </div>
                   </div>
                 );
@@ -3258,18 +3283,6 @@ export default function OnePromptVideoPage() {
           </div>
         )}
 
-        {projectWorkflowNotice && (
-          <div className="flex items-start gap-3 rounded-lg border border-sky-300/15 bg-sky-400/[0.045] px-4 py-3 shadow-[0_10px_30px_rgba(2,132,199,0.04)]">
-            <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-sky-300/10 text-sky-200">
-              <CircleHelp className="h-4 w-4" />
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-slate-100">{projectWorkflowNotice.title}</p>
-              <p className="mt-1 text-xs leading-5 text-slate-400">{projectWorkflowNotice.detail}</p>
-            </div>
-          </div>
-        )}
-
         {localizedProjectError && localizedProjectError !== localizedActionError && (
           <div className="rounded-md border border-rose-300/15 bg-rose-400/[0.06] px-4 py-3 text-sm text-rose-200">
             {localizedProjectError}
@@ -3283,7 +3296,7 @@ export default function OnePromptVideoPage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-xl font-semibold text-white">{project.title || copy.untitled}</h2>
-                  <p className="mt-1 text-sm text-slate-500">{project.durationSeconds}s / {project.aspectRatio} / {keyframeTotal} {copy.frames} / {segmentTotal} {copy.shots}</p>
+                  <p className="mt-1 text-sm text-slate-500">{project.durationSeconds}s / {project.aspectRatio} / {keyframeTotal} {copy.frames} / {segmentTotal} {copy.segments}</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -3302,7 +3315,7 @@ export default function OnePromptVideoPage() {
                     <button
                       type="button"
                       onClick={primaryStageAction.onClick}
-                      disabled={loading}
+                      disabled={loading || (migrationFrozen && primaryStageAction.onClick === resumeProject)}
                       aria-busy={loading}
                       className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium disabled:opacity-50 ${primaryStageAction.className}`}
                     >
@@ -3317,7 +3330,7 @@ export default function OnePromptVideoPage() {
                 {([
                   { key: "assets" as const, label: copy.assetLibrary, meta: `${completeAssets}/${assetTotal}` },
                   { key: "frames" as const, label: copy.frames, meta: `${completeBoundaryImages}/${boundaryTotal}` },
-                  { key: "clips" as const, label: copy.shots, meta: `${completeClips}/${segmentTotal}` },
+                  { key: "clips" as const, label: copy.segments, meta: `${completeClips}/${segmentTotal}` },
       { key: "final" as const, label: copy.finalVideo, meta: project.finalVideoUrl ? copy.ready : copy.pending },
                 ]).map((item) => (
                   <button
@@ -3327,10 +3340,10 @@ export default function OnePromptVideoPage() {
                       setProjectView(item.key);
                       if (item.key === "assets") {
                         setSelectedKeyframeId(orderedAssetKeyframes[0]?.id ?? "");
-                        setSelectedShotId("");
+                        setSelectedSegmentId("");
                       } else if (item.key === "frames") {
                         setSelectedKeyframeId(orderedBoundaryKeyframes[0]?.id ?? "");
-                        setSelectedShotId("");
+                        setSelectedSegmentId("");
                       } else {
                         setSelectedKeyframeId("");
                       }
@@ -3347,6 +3360,15 @@ export default function OnePromptVideoPage() {
                 ))}
               </div>
               </div>
+
+              {(project.status === "PLAN_REVIEW" || currentTaskNodeId === "review:plan") && (
+                <PlanningRouteReview
+                  lang={pageLang}
+                  project={project}
+                  loading={loading}
+                  onSave={savePlanningRoute}
+                />
+              )}
 
               {debugPanelOpen && (
                 <PlanDebugPanel
@@ -3595,16 +3617,16 @@ export default function OnePromptVideoPage() {
               {projectView === "clips" && (
               <section className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-slate-200">{copy.shots} {completeClips}/{segmentTotal}</h3>
+                  <h3 className="text-sm font-semibold text-slate-200">{copy.segments} {completeClips}/{segmentTotal}</h3>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                {project.shots.map((shot) => (
+                {segmentEditorItems.map((shot) => (
                   <div
                     key={shot.id}
                     role="button"
                     tabIndex={0}
                     onClick={() => selectShot(shot.id)}
-                    onDoubleClick={() => openShotEditor(shot.id)}
+                    onDoubleClick={() => openSegmentEditor(shot.id)}
                     title={pageLang === "zh" ? "双击编辑镜头" : "Double-click to edit shot"}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
@@ -3613,7 +3635,7 @@ export default function OnePromptVideoPage() {
                       }
                     }}
                     className={`overflow-hidden rounded-md border bg-white/[0.03] outline-none transition ${
-                      selectedShot?.id === shot.id && !selectedKeyframe
+                      selectedSegment?.id === shot.id && !selectedKeyframe
                         ? "border-cyan-400/60 ring-1 ring-cyan-400/30"
                         : "border-white/10 hover:border-cyan-400/35 focus-visible:border-cyan-400/60"
                     }`}
@@ -3624,16 +3646,16 @@ export default function OnePromptVideoPage() {
                       ) : (
                         <button type="button" onClick={() => selectShot(shot.id)} className="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-slate-500">
                           <Clapperboard className="h-5 w-5" />
-                          <span>{copy.shot} {String(shot.shotNo).padStart(2, "0")}</span>
+                          <span>{copy.shot} {String(shot.segmentNo).padStart(2, "0")}</span>
                         </button>
                       )}
                     </div>
                     <div className="space-y-2 px-3 py-3">
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-semibold text-white">{copy.shot} {String(shot.shotNo).padStart(2, "0")}</p>
+                        <p className="text-sm font-semibold text-white">{copy.shot} {String(shot.segmentNo).padStart(2, "0")}</p>
                         <span className="text-xs text-slate-500">{shot.durationSeconds}s</span>
                       </div>
-                      <p className="line-clamp-2 min-h-10 text-sm leading-5 text-slate-300">{localizedShotPurpose(shot, pageLang)}</p>
+                      <p className="line-clamp-2 min-h-10 text-sm leading-5 text-slate-300">{localizedSegmentPurpose(shot, pageLang)}</p>
                     </div>
                   </div>
                 ))}
@@ -3786,23 +3808,7 @@ export default function OnePromptVideoPage() {
                   <Field label={copy.purpose} onUndo={() => undoKeyframeField("purpose")} canUndo={keyframeFieldChanged("purpose")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={5} value={String(keyframeDraft.purpose ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, purpose: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
                   <Field label={copy.imagePrompt} onUndo={() => undoKeyframeField("imagePrompt")} canUndo={keyframeFieldChanged("imagePrompt")} undoLabel={copy.undo}>
                     <div className="space-y-2.5">
-                      <div className="grid grid-cols-3 gap-1 rounded-md border border-white/[0.08] bg-slate-950/60 p-1 text-[10px]">
-                        {([
-                          ["description", pageLang === "zh" ? "画面描述" : "Description"],
-                          ["json", pageLang === "zh" ? "生成合同 JSON" : "Contract JSON"],
-                          ["provider", pageLang === "zh" ? "实际提交 Prompt" : "Provider prompt"],
-                        ] as const).map(([mode, label]) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => setImagePromptEditorMode(mode)}
-                            className={`rounded px-2 py-1.5 transition ${imagePromptEditorMode === mode ? "bg-cyan-300/10 text-cyan-100" : "text-slate-500 hover:text-slate-300"}`}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                      {imagePromptEditorMode === "description" ? (() => {
+                      {(() => {
                         const contract = normalizeImagePromptEditContract(
                           keyframeDraft.imagePromptEditContract,
                           keyframeContractFallback(selectedKeyframe),
@@ -3864,37 +3870,8 @@ export default function OnePromptVideoPage() {
                               />
                             </label>
                           </div>
-                          <p className="text-[10px] leading-4 text-emerald-200/65">
-                            {pageLang === "zh" ? "这里的修改会同步写入生成合同，并重新编译实际提交 Prompt。" : "Edits here update the generation contract and recompile the provider prompt."}
-                          </p>
                         </div>;
-                      })() : imagePromptEditorMode === "json" ? <div className="space-y-1.5">
-                        <AutoResizeTextarea
-                          minRows={12}
-                          maxRows={24}
-                          value={imagePromptJsonDraft}
-                          onChange={(event) => updateKeyframePromptJson(event.target.value)}
-                          spellCheck={false}
-                          className="w-full resize-none rounded-md border border-white/10 bg-slate-950 px-3 py-2 font-mono text-[11px] leading-5 text-slate-200 outline-none focus:border-cyan-400"
-                        />
-                        {imagePromptJsonError ? <p className="text-[10px] leading-4 text-rose-300">{imagePromptJsonError}</p> : <p className="text-[10px] leading-4 text-slate-500">{pageLang === "zh" ? "保存前会执行 Schema 校验；JSON 与上方画面描述编辑的是同一份合同。" : "Schema validation runs before save. JSON and the description edit the same contract."}</p>}
-                      </div> : <div className="space-y-1.5">
-                        <AutoResizeTextarea
-                          minRows={10}
-                          maxRows={22}
-                          readOnly
-                          value={compileImagePromptForProvider(normalizeImagePromptEditContract(
-                            keyframeDraft.imagePromptEditContract,
-                            keyframeContractFallback(selectedKeyframe),
-                          ))}
-                          className="w-full resize-none rounded-md border border-white/[0.06] bg-black/25 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400 outline-none"
-                        />
-                        <p className="text-[10px] leading-4 text-slate-500">
-                          {pageLang === "zh"
-                            ? "只读预览。它由生成合同自动编译；真正请求时仍会追加已批准参考图、返修和安全约束。"
-                            : "Read-only compiled preview. Approved-reference, repair, and safety constraints are appended when the request is dispatched."}
-                        </p>
-                      </div>}
+                      })()}
                     </div>
                   </Field>
                   <Field label={copy.negativePrompt} onUndo={() => undoKeyframeField("negativePrompt")} canUndo={keyframeFieldChanged("negativePrompt")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={7} value={String(keyframeDraft.negativePrompt ?? "")} onChange={(event) => setKeyframeDraft((current) => ({ ...current, negativePrompt: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
@@ -3941,11 +3918,11 @@ export default function OnePromptVideoPage() {
                     </button>
                   )}
                 </div>
-              ) : Boolean(selectedShot) ? (
+              ) : Boolean(selectedSegment) ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedShot!.shotNo).padStart(2, "0")}</h3>
-                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot!.status, selectedShot!.errorMessage, copy)}</span>
+                    <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedSegment!.segmentNo).padStart(2, "0")}</h3>
+                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedSegment!.status, selectedSegment!.errorMessage, copy)}</span>
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center justify-end gap-3">
@@ -3957,8 +3934,8 @@ export default function OnePromptVideoPage() {
                       />
                     </div>
                     <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
-                      {selectedShot!.clipUrl ? (
-                        <video src={selectedShot!.clipUrl} controls playsInline preload="metadata" poster={selectedShot!.imageUrl || undefined} className="h-full w-full object-contain" />
+                      {selectedSegment!.clipUrl ? (
+                        <video src={selectedSegment!.clipUrl} controls playsInline preload="metadata" poster={selectedSegment!.imageUrl || undefined} className="h-full w-full object-contain" />
                       ) : (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
                           <Clapperboard className="h-5 w-5" />
@@ -3966,26 +3943,26 @@ export default function OnePromptVideoPage() {
                         </div>
                       )}
                     </div>
-                    {selectedShot!.startKeyframeNo && selectedShot!.endKeyframeNo && (
-                      <p className="text-xs text-slate-500">{safeBoundaryRangeLabel(selectedShot!, keyframeByNo, project.durationSeconds, pageLang)}</p>
+                    {selectedSegment!.startKeyframeNo && selectedSegment!.endKeyframeNo && (
+                      <p className="text-xs text-slate-500">{safeBoundaryRangeLabel(selectedSegment!, keyframeByNo, project.durationSeconds, pageLang)}</p>
                     )}
                   </div>
                   <GenerationCandidatePicker
                     projectId={project.id}
-                    candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "segment_video")}
+                    candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedSegment!.id && candidate.kind === "segment_video")}
                     lang={pageLang}
                     loading={loading}
                     selectingCandidateId={selectingCandidateId}
-                    posterUrl={selectedShot!.imageUrl}
+                    posterUrl={selectedSegment!.imageUrl}
                     onSelect={chooseGenerationCandidate}
-                    onRetry={() => regenerateClip(selectedShot!.id)}
+                    onRetry={() => regenerateClip(selectedSegment!.id)}
                     onRecheck={recheckGenerationCandidate}
                     onAnalyzeVideo={analyzeVideoCandidate}
                   />
-                  <p className="text-sm leading-6 text-slate-300">{localizedShotPurpose(selectedShot!, pageLang)}</p>
+                  <p className="text-sm leading-6 text-slate-300">{localizedSegmentPurpose(selectedSegment!, pageLang)}</p>
                   <button
                     type="button"
-                    onClick={() => openShotEditor(selectedShot!.id)}
+                    onClick={() => openSegmentEditor(selectedSegment!.id)}
                     className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400"
                   >
                     <Pencil className="h-4 w-4" />
@@ -3993,283 +3970,18 @@ export default function OnePromptVideoPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => regenerateClip(selectedShot!.id)}
-                    disabled={loading || !selectedShot!.startKeyframeNo || !selectedShot!.endKeyframeNo}
+                    onClick={() => regenerateClip(selectedSegment!.id)}
+                    disabled={loading || !selectedSegment!.startKeyframeNo || !selectedSegment!.endKeyframeNo}
                     className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-white/[0.03] text-sm font-medium text-slate-300 hover:bg-white/[0.06] disabled:opacity-50"
                   >
                     <RefreshCw className="h-4 w-4" />
                     {copy.regenerate}
                   </button>
-                  {hasMediaRevision(project, "segment_clip", selectedShot!.id) && (
-                    <button type="button" onClick={() => rollbackMedia("segment_clip", selectedShot!.id)} disabled={loading} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-amber-300/25 bg-amber-300/5 text-sm text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
+                  {hasMediaRevision(project, "segment_clip", selectedSegment!.id) && (
+                    <button type="button" onClick={() => rollbackMedia("segment_clip", selectedSegment!.id)} disabled={loading} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-amber-300/25 bg-amber-300/5 text-sm text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
                       <Undo2 className="h-4 w-4" /> {copy.rollbackMedia}
                     </button>
                   )}
-                </div>
-              ) : (false as boolean) && selectedShot ? (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-base font-semibold text-white">{copy.shot} {String(selectedShot.shotNo).padStart(2, "0")}</h3>
-                    <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot.status, selectedShot.errorMessage, copy)}</span>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-xs font-medium text-slate-500">{selectedShot.clipUrl ? copy.clipPreview : copy.videoPrompt}</p>
-                      <PreviewSizeControl
-                        label={copy.previewSize}
-                        value={detailPreviewHeight}
-                        onPreview={previewDetailHeight}
-                        onCommit={commitDetailHeight}
-                      />
-                    </div>
-                    <div className="h-[var(--detail-preview-height)] overflow-hidden rounded-md border border-white/10 bg-slate-900">
-                      {selectedShot.clipUrl ? (
-                        <video src={selectedShot.clipUrl} controls playsInline preload="metadata" poster={selectedShot.imageUrl || undefined} className="h-full w-full object-contain" />
-                      ) : (
-                        <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
-                          <Clapperboard className="h-5 w-5" />
-                          <span>{copy.clipPreview}</span>
-                        </div>
-                      )}
-                    </div>
-                    {selectedShot.startKeyframeNo && selectedShot.endKeyframeNo && (
-                      <p className="text-xs text-slate-500">{safeBoundaryRangeLabel(selectedShot, keyframeByNo, project.durationSeconds, pageLang)}</p>
-                    )}
-                    {(selectedStartKeyframe || selectedEndKeyframe) && (
-                      <div className="grid grid-cols-2 gap-2">
-                        {[selectedStartKeyframe, selectedEndKeyframe].map((keyframe) => (
-                          <div key={keyframe?.id ?? "empty"} className="overflow-hidden rounded-md border border-white/10 bg-slate-900">
-                            <div className={`relative ${aspectClass(project.aspectRatio)}`}>
-                              {keyframe?.imageUrl ? (
-                                <img src={previewImageSrc(keyframe.imageUrl)} alt={safeBoundaryFrameLabel(keyframe, project.durationSeconds, pageLang)} className="h-full w-full object-cover" />
-                              ) : (
-                                <div className="flex h-full items-center justify-center text-xs text-slate-600">KF</div>
-                              )}
-                              {keyframe && (
-                                <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
-                                  {safeBoundaryFrameShortLabel(keyframe, project.durationSeconds, pageLang)}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {selectedShot.clipUrl && (
-                      <a href={shotClipDownloadUrl(project.id, selectedShot.id)} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 text-sm font-medium text-cyan-100 hover:bg-cyan-400/15">
-                        <Download className="h-4 w-4" />
-                        {copy.downloadClip}
-                      </a>
-                    )}
-                    <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        {selectedShot.boundaryMode && (
-                          <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
-                            {copy.boundaryMode}: {selectedShot.boundaryMode}
-                          </span>
-                        )}
-                        {selectedShot.outputMode && (
-                          <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100">
-                            {copy.outputMode}: {selectedShot.outputMode}
-                          </span>
-                        )}
-                        <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
-                          {copy.segmentDurationPolicy}
-                        </span>
-                      </div>
-                      {Boolean(selectedShot.constraints?.length) && (
-                        <div className="space-y-1">
-                          <p className="text-xs font-medium text-slate-500">{copy.constraints}</p>
-                          <div className="flex flex-wrap gap-1.5">
-                            {selectedShot.constraints?.map((constraint) => (
-                              <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
-                                {constraint}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {Boolean(selectedShot.timedPrompts?.length) && (
-                        <div className="space-y-1">
-                          <p className="text-xs font-medium text-slate-500">{copy.timedPrompts}</p>
-                          {selectedShot.timedPrompts?.map((item) => (
-                            <p key={`${item.timeSeconds}-${item.prompt}`} className="text-xs leading-5 text-amber-100/75">
-                              {timedPromptRangeLabel(item)}: {localizedTimedPrompt(item, pageLang)}
-                            </p>
-                          ))}
-                        </div>
-                      )}
-                      {selectedShot.audioPlan && (
-                        <div className="space-y-1">
-                          <p className="text-xs font-medium text-slate-500">{copy.audioPlan}</p>
-                          <p className="text-xs leading-5 text-amber-100/75">{localizedAudioPlanSummary(selectedShot.audioPlan, pageLang)}</p>
-                          {audioPlanLines(selectedShot.audioPlan, pageLang).length > 0 && (
-                            <div className="space-y-1">
-                              <p className="text-[11px] font-medium text-slate-500">{copy.spokenLines}</p>
-                              {audioPlanLines(selectedShot.audioPlan, pageLang).map((line) => (
-                                <p key={line} className="text-xs leading-5 text-slate-300">{line}</p>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <section className="space-y-3 rounded-md border border-fuchsia-300/15 bg-fuchsia-300/[0.04] p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="relative inline-flex items-center gap-1.5">
-                        <p className="text-sm font-semibold text-fuchsia-100">{copy.microShots}</p>
-                        <MicroShotHelpButton
-                          copy={copy}
-                          lang={pageLang}
-                          open={microShotHelpOpen === "detail"}
-                          onToggle={() => setMicroShotHelpOpen((current) => current === "detail" ? null : "detail")}
-                        />
-                      </div>
-                      <button type="button" onClick={addDraftMicroShot} className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-fuchsia-300/20 px-2 text-xs text-fuchsia-100 hover:bg-fuchsia-300/10">
-                        <Plus className="h-3.5 w-3.5" /> {copy.addMicroShot}
-                      </button>
-                    </div>
-                    <div className="space-y-3">
-                      {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => {
-                        const expansionKey = `detail:${selectedShot.id}:${item.microShotNo}:${index}`;
-                        const expanded = expandedMicroShotKeys.has(expansionKey);
-                        return <div key={`${item.microShotNo}-${index}`} className="rounded-md border border-white/10 bg-slate-950/60">
-                          <div className="sticky top-0 z-30 flex items-center justify-between gap-2 rounded-t-md border-b border-white/10 bg-slate-950/95 p-3 shadow-[0_8px_18px_rgba(0,0,0,0.28)] backdrop-blur">
-                            <button
-                              type="button"
-                              aria-expanded={expanded}
-                              onClick={() => toggleMicroShotExpanded(expansionKey)}
-                              className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-md px-1 py-1 text-left text-xs font-semibold text-slate-200 transition hover:bg-white/[0.05]"
-                            >
-                              <span>{copy.microShot} {String(item.microShotNo).padStart(2, "0")}</span>
-                              {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-500" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" />}
-                            </button>
-                            {expanded && <div className="flex items-center gap-1">
-                              <button type="button" onClick={() => undoDraftMicroShot(index)} disabled={!microShotChanged(index)} title={copy.undoChanges} className="inline-flex h-7 items-center gap-1 rounded-md border border-white/10 px-2 text-[11px] text-slate-300 hover:bg-white/[0.06] disabled:pointer-events-none disabled:opacity-30">
-                                <Undo2 className="h-3 w-3" /> {copy.undo}
-                              </button>
-                              <button type="button" onClick={() => confirmRemoveDraftMicroShot(index)} title={pageLang === "zh" ? "删除子分镜" : "Delete micro-shot"} className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-rose-300/20 bg-rose-300/[0.04] px-2 text-[11px] text-rose-100/80 hover:bg-rose-300/[0.1]">
-                                <Trash2 className="h-3.5 w-3.5" />
-                                {pageLang === "zh" ? "删除" : "Delete"}
-                              </button>
-                            </div>}
-                          </div>
-                          {expanded && <div className="space-y-2 p-3 pt-2">
-                          <div className="grid grid-cols-[minmax(140px,0.5fr)_minmax(0,1fr)] gap-2">
-                            <label className="space-y-1">
-                              <span className="text-[11px] text-slate-500">{copy.microShotTime}</span>
-                              <input
-                                type="number"
-                                min={0}
-                                max={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
-                                step={1}
-                                value={Number(item.localTimeSeconds ?? 0)}
-                                onChange={(event) => updateDraftMicroShot(index, { localTimeSeconds: Number(event.target.value) })}
-                                title={copy.microShotTimeHint}
-                                aria-label={copy.microShotTime}
-                                className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300"
-                              />
-                            </label>
-                            <label className="space-y-1">
-                              <span className="text-[11px] text-slate-500">{copy.referenceType}</span>
-                              <select
-                                value={item.referenceType ?? "mixed"}
-                                onChange={(event) => updateDraftMicroShot(index, { referenceType: event.target.value as MicroShot["referenceType"] })}
-                                className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300"
-                              >
-                                <option value="text">text</option>
-                                <option value="image_prompt">image_prompt</option>
-                                <option value="mixed">mixed</option>
-                              </select>
-                            </label>
-                          </div>
-                          {item.referenceType !== "text" && (
-                            <div className="space-y-2 rounded-md border border-cyan-300/15 bg-cyan-300/[0.04] p-2">
-                              <div className="flex items-center justify-end gap-2">
-                                {hasMediaRevision(project, "micro_shot_image", selectedShot!.id, item.microShotNo) && (
-                                  <button type="button" onClick={() => rollbackMedia("micro_shot_image", selectedShot!.id, item.microShotNo)} disabled={loading} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-300/25 bg-amber-300/5 px-2 text-xs text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
-                                    <Undo2 className="h-3.5 w-3.5" /> {copy.rollbackMedia}
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => generateMicroShotImage(index)}
-                                  disabled={
-                                    loading ||
-                                    item.imageStatus === "running" ||
-                                    !localizedMicroShotImagePrompt(item, pageLang).trim()
-                                  }
-                                  className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-cyan-300/20 px-2 text-xs text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-50"
-                                >
-                                  {item.imageStatus === "running"
-                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    : item.imageUrl
-                                      ? <RefreshCw className="h-3.5 w-3.5" />
-                                      : <ImageIcon className="h-3.5 w-3.5" />}
-                                  {item.imageUrl ? copy.regenerateMicroShotImage : copy.generateMicroShotImage}
-                                </button>
-                              </div>
-                              {item.imageStatus === "running" && (
-                                <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>
-                              )}
-                              {item.imageStatus === "failed" && (
-                                <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>
-                              )}
-                              <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot!.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} selectingCandidateId={selectingCandidateId} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} onRecheck={recheckGenerationCandidate} />
-                              {item.imageUrl && (
-                                <button
-                                  type="button"
-                                  onClick={() => setPreviewMicroShot({
-                                    title: `${copy.microShot} ${item.microShotNo}`,
-                                    imageUrl: item.imageUrl!,
-                                    imagePrompt: localizedMicroShotImagePrompt(item, pageLang),
-                                  })}
-                                  className="block w-full overflow-hidden rounded-md border border-white/10 bg-slate-950 outline-none transition hover:border-cyan-300/45 focus-visible:ring-2 focus-visible:ring-cyan-300/60"
-                                >
-                                  <img src={previewImageSrc(item.imageUrl)} alt={`${copy.microShot} ${item.microShotNo}`} className="max-h-52 w-full object-contain" />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                          <Field label={copy.purpose}><input value={localizedMicroShotPurpose(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { purposeEn: event.target.value, purpose: event.target.value } : { purposeZh: event.target.value, purpose: event.target.value })} className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
-                          <Field label={copy.scene}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotScene(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { sceneEn: event.target.value, scene: event.target.value } : { sceneZh: event.target.value, scene: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
-                          <Field label={copy.action}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotAction(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { actionEn: event.target.value, action: event.target.value } : { actionZh: event.target.value, action: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
-                          <Field label={copy.imagePrompt}><AutoResizeTextarea minRows={2} maxRows={7} value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
-                          </div>}
-                        </div>
-                      })}
-                    </div>
-                  </section>
-                  <Field label={`${copy.duration} (${copy.segmentDurationPolicy})`} onUndo={() => undoShotField("durationSeconds")} canUndo={shotFieldChanged("durationSeconds")} undoLabel={copy.undo}>
-                    <input
-                      type="number"
-                      min={3}
-                      max={15}
-                      step={1}
-                      value={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
-                      onChange={(event) => setDraft((current) => ({ ...current, durationSeconds: Number(event.target.value) }))}
-                      className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
-                    />
-                  </Field>
-                  <Field label={copy.purpose} onUndo={() => undoShotField("purpose")} canUndo={shotFieldChanged("purpose")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={6} value={String(draft.purpose ?? "")} onChange={(event) => setDraft((current) => ({ ...current, purpose: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <Field label={copy.action} onUndo={() => undoShotField("action")} canUndo={shotFieldChanged("action")} undoLabel={copy.undo}><AutoResizeTextarea minRows={2} maxRows={6} value={String(draft.action ?? "")} onChange={(event) => setDraft((current) => ({ ...current, action: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <Field label={copy.camera} onUndo={() => undoShotField("camera")} canUndo={shotFieldChanged("camera")} undoLabel={copy.undo}><input value={String(draft.camera ?? "")} onChange={(event) => setDraft((current) => ({ ...current, camera: event.target.value }))} className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <Field label={copy.subtitle} onUndo={() => undoShotField("subtitle")} canUndo={shotFieldChanged("subtitle")} undoLabel={copy.undo}>
-                    <AutoResizeTextarea
-                      minRows={2}
-                      maxRows={4}
-                      maxLength={subtitleLimitForLang(pageLang)}
-                      value={String(draft.subtitle ?? "")}
-                      onChange={(event) => setDraft((current) => ({ ...current, subtitle: event.target.value }))}
-                      className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
-                    />
-                    <div className="flex items-center justify-end text-[11px] leading-5 text-slate-500">
-                      <span className="shrink-0">{String(draft.subtitle ?? "").length}/{subtitleLimitForLang(pageLang)}</span>
-                    </div>
-                  </Field>
-                  <Field label={copy.videoPrompt} onUndo={() => undoShotField("videoPrompt")} canUndo={shotFieldChanged("videoPrompt")} undoLabel={copy.undo}><AutoResizeTextarea minRows={3} maxRows={10} value={String(draft.videoPrompt ?? "")} onChange={(event) => setDraft((current) => ({ ...current, videoPrompt: event.target.value }))} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" /></Field>
-                  <button type="button" onClick={saveShot} disabled={loading} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-cyan-500 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60"><Save className="h-4 w-4" /> {copy.saveShot}</button>
                 </div>
               ) : <div className="py-12 text-center text-sm text-slate-500">{copy.noShot}</div>}
             </aside>
@@ -4277,21 +3989,21 @@ export default function OnePromptVideoPage() {
         )}
       </div>
 
-      {project && selectedShot && shotEditorOpen && typeof document !== "undefined" && createPortal(
-        <div className="one-prompt-video-workbench fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-3 sm:p-4" role="dialog" aria-modal="true" onClick={() => setShotEditorOpen(false)}>
+      {project && selectedSegment && segmentEditorOpen && typeof document !== "undefined" && createPortal(
+        <div className="one-prompt-video-workbench fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-3 sm:p-4" role="dialog" aria-modal="true" onClick={() => setSegmentEditorOpen(false)}>
           <div className="flex h-[calc(100dvh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-md border border-cyan-400/25 bg-slate-950 shadow-2xl shadow-cyan-950/30 sm:h-[calc(100dvh-2rem)]" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-lg font-semibold text-white">{copy.editShot} {String(selectedShot.shotNo).padStart(2, "0")}</h3>
-                  <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedShot.status, selectedShot.errorMessage, copy)}</span>
-                  <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-xs text-slate-400">{selectedShot.durationSeconds}s</span>
+                  <h3 className="text-lg font-semibold text-white">{copy.editShot} {String(selectedSegment.segmentNo).padStart(2, "0")}</h3>
+                  <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-slate-400">{shotStatusLabel(selectedSegment.status, selectedSegment.errorMessage, copy)}</span>
+                  <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-xs text-slate-400">{selectedSegment.durationSeconds}s</span>
                 </div>
-                {selectedShot.startKeyframeNo && selectedShot.endKeyframeNo && (
-                  <p className="mt-1 text-xs text-cyan-200/80">{safeBoundaryRangeLabel(selectedShot, keyframeByNo, project.durationSeconds, pageLang)}</p>
+                {selectedSegment.startKeyframeNo && selectedSegment.endKeyframeNo && (
+                  <p className="mt-1 text-xs text-cyan-200/80">{safeBoundaryRangeLabel(selectedSegment, keyframeByNo, project.durationSeconds, pageLang)}</p>
                 )}
               </div>
-              <button type="button" onClick={() => setShotEditorOpen(false)} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 text-slate-200 hover:bg-white/[0.08]">
+              <button type="button" onClick={() => setSegmentEditorOpen(false)} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 text-slate-200 hover:bg-white/[0.08]">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -4312,8 +4024,8 @@ export default function OnePromptVideoPage() {
                 <div className="space-y-3">
                   <div className="overflow-hidden rounded-md border border-white/10 bg-slate-900">
                     <div className={`relative ${aspectClass(project.aspectRatio)}`}>
-                      {selectedShot.clipUrl ? (
-                        <video src={selectedShot.clipUrl} controls playsInline preload="metadata" poster={selectedShot.imageUrl || undefined} className="h-full w-full object-contain" />
+                      {selectedSegment.clipUrl ? (
+                        <video src={selectedSegment.clipUrl} controls playsInline preload="metadata" poster={selectedSegment.imageUrl || undefined} className="h-full w-full object-contain" />
                       ) : (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-600">
                           <Clapperboard className="h-5 w-5" />
@@ -4322,8 +4034,8 @@ export default function OnePromptVideoPage() {
                       )}
                     </div>
                   </div>
-                  {selectedShot.clipUrl && (
-                    <a href={shotClipDownloadUrl(project.id, selectedShot.id)} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 text-sm font-medium text-cyan-100 hover:bg-cyan-400/15">
+                  {selectedSegment.clipUrl && (
+                    <a href={shotClipDownloadUrl(project.id, selectedSegment.id)} className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-cyan-400/30 bg-cyan-400/10 text-sm font-medium text-cyan-100 hover:bg-cyan-400/15">
                       <Download className="h-4 w-4" />
                       {copy.downloadClip}
                     </a>
@@ -4355,25 +4067,25 @@ export default function OnePromptVideoPage() {
                   )}
                   <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-3">
                     <div className="flex flex-wrap gap-1.5">
-                      {selectedShot.boundaryMode && (
+                      {selectedSegment.boundaryMode && (
                         <span className="rounded-md border border-indigo-300/20 bg-indigo-300/10 px-2 py-1 text-[11px] text-indigo-100/80">
-                          {copy.boundaryMode}: {selectedShot.boundaryMode}
+                          {copy.boundaryMode}: {selectedSegment.boundaryMode}
                         </span>
                       )}
-                      {selectedShot.outputMode && (
+                      {selectedSegment.outputMode && (
                         <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-100">
-                          {copy.outputMode}: {selectedShot.outputMode}
+                          {copy.outputMode}: {selectedSegment.outputMode}
                         </span>
                       )}
                       <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
                         {copy.segmentDurationPolicy}
                       </span>
                     </div>
-                    {Boolean(selectedShot.constraints?.length) && (
+                    {Boolean(selectedSegment.constraints?.length) && (
                       <div className="space-y-1">
                         <p className="text-xs font-medium text-slate-500">{copy.constraints}</p>
                         <div className="flex flex-wrap gap-1.5">
-                          {selectedShot.constraints?.map((constraint) => (
+                          {selectedSegment.constraints?.map((constraint) => (
                             <span key={constraint} className="rounded-md border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[11px] text-emerald-100/80">
                               {constraint}
                             </span>
@@ -4381,14 +4093,14 @@ export default function OnePromptVideoPage() {
                         </div>
                       </div>
                     )}
-                    {selectedShot.audioPlan && (
+                    {selectedSegment.audioPlan && (
                       <div className="space-y-1">
                         <p className="text-xs font-medium text-slate-500">{copy.audioPlan}</p>
-                        <p className="text-xs leading-5 text-amber-100/75">{localizedAudioPlanSummary(selectedShot.audioPlan, pageLang)}</p>
-                        {audioPlanLines(selectedShot.audioPlan, pageLang).length > 0 && (
+                        <p className="text-xs leading-5 text-amber-100/75">{localizedAudioPlanSummary(selectedSegment.audioPlan, pageLang)}</p>
+                        {audioPlanLines(selectedSegment.audioPlan, pageLang).length > 0 && (
                           <div className="space-y-1">
                             <p className="text-[11px] font-medium text-slate-500">{copy.spokenLines}</p>
-                            {audioPlanLines(selectedShot.audioPlan, pageLang).map((line) => (
+                            {audioPlanLines(selectedSegment.audioPlan, pageLang).map((line) => (
                               <p key={line} className="text-xs leading-5 text-slate-300">{line}</p>
                             ))}
                           </div>
@@ -4407,7 +4119,7 @@ export default function OnePromptVideoPage() {
                       min={3}
                       max={15}
                       step={1}
-                      value={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
+                      value={Number(draft.durationSeconds ?? selectedSegment.durationSeconds)}
                       onChange={(event) => setDraft((current) => ({ ...current, durationSeconds: Number(event.target.value) }))}
                       className="w-full rounded-md border border-white/10 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400"
                     />
@@ -4460,8 +4172,14 @@ export default function OnePromptVideoPage() {
                   </div>
                   <div className="grid gap-3 xl:grid-cols-2">
                     {((draft.microShots as MicroShot[] | undefined) ?? []).map((item, index) => {
-                      const expansionKey = `modal:${selectedShot.id}:${item.microShotNo}:${index}`;
+                      const expansionKey = `modal:${selectedSegment.id}:${item.microShotNo}:${index}`;
                       const expanded = expandedMicroShotKeys.has(expansionKey);
+                      const microTaskStatus = taskGraphStatusForTarget(
+                        project.taskGraph,
+                        "micro_shot_image",
+                        `${selectedSegment.id}:${item.microShotNo}`,
+                      );
+                      const microTaskRunning = taskGraphStatusIsWorkerActive(microTaskStatus);
                       return <div key={`${item.microShotNo}-${index}`} className={`rounded-md border border-white/10 bg-slate-950/60 ${expanded ? "xl:col-span-2" : ""}`}>
                         <div className="sticky top-0 z-30 flex items-center justify-between gap-2 rounded-t-md border-b border-white/10 bg-slate-950/95 p-3 shadow-[0_8px_18px_rgba(0,0,0,0.28)] backdrop-blur">
                           <button
@@ -4490,7 +4208,7 @@ export default function OnePromptVideoPage() {
                             <input
                               type="number"
                               min={0}
-                              max={Number(draft.durationSeconds ?? selectedShot.durationSeconds)}
+                              max={Number(draft.durationSeconds ?? selectedSegment.durationSeconds)}
                               step={1}
                               value={Number(item.localTimeSeconds ?? 0)}
                               onChange={(event) => updateDraftMicroShot(index, { localTimeSeconds: Number(event.target.value) })}
@@ -4515,18 +4233,18 @@ export default function OnePromptVideoPage() {
                         {item.referenceType !== "text" && (
                           <div className="space-y-2 rounded-md border border-cyan-300/15 bg-cyan-300/[0.04] p-2">
                             <div className="flex items-center justify-end gap-2">
-                              {hasMediaRevision(project, "micro_shot_image", selectedShot.id, item.microShotNo) && (
-                                <button type="button" onClick={() => rollbackMedia("micro_shot_image", selectedShot.id, item.microShotNo)} disabled={loading} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-300/25 bg-amber-300/5 px-2 text-xs text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
+                              {hasMediaRevision(project, "micro_shot_image", selectedSegment.id, item.microShotNo) && (
+                                <button type="button" onClick={() => rollbackMedia("micro_shot_image", selectedSegment.id, item.microShotNo)} disabled={loading} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-300/25 bg-amber-300/5 px-2 text-xs text-amber-100 hover:bg-amber-300/10 disabled:opacity-50">
                                   <Undo2 className="h-3.5 w-3.5" /> {copy.rollbackMedia}
                                 </button>
                               )}
                               <button
                                 type="button"
                                 onClick={() => generateMicroShotImage(index)}
-                                disabled={loading || item.imageStatus === "running" || !localizedMicroShotImagePrompt(item, pageLang).trim()}
+                                disabled={loading || microTaskRunning || !localizedMicroShotImagePrompt(item, pageLang).trim()}
                                 className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-cyan-300/20 px-2 text-xs text-cyan-100 hover:bg-cyan-300/10 disabled:opacity-50"
                               >
-                                {item.imageStatus === "running"
+                                {microTaskRunning
                                   ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                   : item.imageUrl
                                     ? <RefreshCw className="h-3.5 w-3.5" />
@@ -4534,9 +4252,9 @@ export default function OnePromptVideoPage() {
                                 {item.imageUrl ? copy.regenerateMicroShotImage : copy.generateMicroShotImage}
                               </button>
                             </div>
-                            {item.imageStatus === "running" && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
-                            {item.imageStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>}
-                            <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedShot.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} selectingCandidateId={selectingCandidateId} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} onRecheck={recheckGenerationCandidate} />
+                            {microTaskRunning && <p className="text-xs text-cyan-100/75">{copy.microShotImageRunning}</p>}
+                            {microTaskStatus === "failed" && <p className="text-xs text-rose-200">{item.errorMessage ? localizeWorkflowError(item.errorMessage, pageLang) : copy.microShotImageFailed}</p>}
+                            <GenerationCandidatePicker projectId={project.id} candidates={(project.generationCandidates ?? []).filter((candidate) => candidate.targetId === selectedSegment.id && candidate.kind === "micro_shot_image" && Number(candidate.metadata?.microShotNo) === item.microShotNo)} lang={pageLang} loading={loading} selectingCandidateId={selectingCandidateId} onSelect={chooseGenerationCandidate} onRetry={() => generateMicroShotImage(index)} onRecheck={recheckGenerationCandidate} />
                             {item.imageUrl && (
                               <button
                                 type="button"
@@ -4555,7 +4273,7 @@ export default function OnePromptVideoPage() {
                         <Field label={copy.purpose}><input value={localizedMicroShotPurpose(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { purposeEn: event.target.value, purpose: event.target.value } : { purposeZh: event.target.value, purpose: event.target.value })} className="w-full rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                         <Field label={copy.scene}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotScene(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { sceneEn: event.target.value, scene: event.target.value } : { sceneZh: event.target.value, scene: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                         <Field label={copy.action}><AutoResizeTextarea minRows={2} maxRows={5} value={localizedMicroShotAction(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { actionEn: event.target.value, action: event.target.value } : { actionZh: event.target.value, action: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
-                        <Field label={copy.imagePrompt}><AutoResizeTextarea minRows={2} maxRows={7} value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value, imagePrompt: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
+                        <Field label={copy.imagePrompt}><AutoResizeTextarea minRows={2} maxRows={7} value={localizedMicroShotImagePrompt(item, pageLang)} onChange={(event) => updateDraftMicroShot(index, pageLang === "en" ? { imagePromptEn: event.target.value, imagePrompt: event.target.value } : { imagePromptZh: event.target.value })} className="w-full resize-none rounded-md border border-white/10 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-fuchsia-300" /></Field>
                         </div>}
                       </div>
                     })}
@@ -4563,11 +4281,11 @@ export default function OnePromptVideoPage() {
                 </section>
 
                 <div className="sticky bottom-0 -mx-4 mt-4 flex justify-end gap-2 border-t border-white/10 bg-slate-950/95 px-4 py-3">
-                  <button type="button" onClick={() => setShotEditorOpen(false)} className="inline-flex h-10 items-center justify-center rounded-md border border-white/10 px-4 text-sm font-medium text-slate-200 hover:bg-white/[0.06]">
+                  <button type="button" onClick={() => setSegmentEditorOpen(false)} className="inline-flex h-10 items-center justify-center rounded-md border border-white/10 px-4 text-sm font-medium text-slate-200 hover:bg-white/[0.06]">
                     {copy.cancel}
                   </button>
-                  <button type="button" onClick={saveShot} disabled={loading} className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-cyan-500 px-4 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60">
-                    <Save className="h-4 w-4" /> {copy.saveShot}
+                  <button type="button" onClick={saveSegment} disabled={loading} className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-cyan-500 px-4 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60">
+                    <Save className="h-4 w-4" /> {copy.saveSegment}
                   </button>
                 </div>
               </section>
@@ -4942,7 +4660,12 @@ function GenerationCandidatePicker({ projectId, candidates, lang, loading, retry
                       aria-label={lang === "zh" ? `查看候选图 ${displayCandidateNo}` : `Preview candidate ${displayCandidateNo}`}
                       className="group relative h-full w-full cursor-zoom-in"
                     >
-                      <img src={previewImageSrc(candidate.mediaUrl)} alt={`candidate ${displayCandidateNo}`} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02] group-hover:brightness-75" />
+                      <img
+                        src={previewImageSrc(candidate.mediaUrl)}
+                        alt={`candidate ${displayCandidateNo}`}
+                        onError={(event) => retryPreviewImageDirectly(event, candidate.mediaUrl)}
+                        className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02] group-hover:brightness-75"
+                      />
                       <span className="pointer-events-none absolute inset-x-3 bottom-3 rounded-md bg-slate-950/75 px-2 py-1.5 text-center text-[10px] text-white opacity-0 backdrop-blur transition group-hover:opacity-100">
                         {lang === "zh" ? "点击放大" : "Enlarge"}
                       </span>
@@ -5371,6 +5094,30 @@ function previewImageSrc(url?: string | null): string {
   return `/api/download-external-image?url=${encodeURIComponent(value)}`;
 }
 
+function retryPreviewImageDirectly(
+  event: React.SyntheticEvent<HTMLImageElement>,
+  originalUrl?: string | null,
+): void {
+  const image = event.currentTarget;
+  const directUrl = String(originalUrl ?? "").trim();
+  if (!/^https?:\/\//i.test(directUrl)) {
+    image.dataset.previewLoadFailed = "true";
+    return;
+  }
+  const retryCount = Number(image.dataset.previewRetryCount ?? "0");
+  if (retryCount === 0) {
+    image.dataset.previewRetryCount = "1";
+    image.src = `${previewImageSrc(directUrl)}&retry=${Date.now()}`;
+    return;
+  }
+  if (retryCount === 1) {
+    image.dataset.previewRetryCount = "2";
+    image.src = directUrl;
+    return;
+  }
+  image.dataset.previewLoadFailed = "true";
+}
+
 function MicroShotHelpButton({
   copy,
   lang,
@@ -5429,6 +5176,263 @@ function MicroShotHelpButton({
   );
 }
 
+const ROUTE_TEMPLATE_OPTIONS: Record<string, string[]> = {
+  game: ["game_reversal", "game_bonus_payoff"],
+  product: ["product_problem_solution"],
+  ecommerce: ["ecommerce_offer_conversion"],
+  food: ["food_sensory_reaction"],
+  auto: ["auto_performance_hero"],
+  short_drama: ["short_drama_conflict_twist"],
+  brand: ["generic_brand_story"],
+  tutorial: ["generic_brand_story"],
+  custom: ["generic_brand_story"],
+};
+
+const ROUTE_HOOK_POLICY_OPTIONS: Record<string, {
+  hookModes: string[];
+  revealLevels: string[];
+  requiresReturnPoint: boolean;
+}> = {
+  chronological: {
+    hookModes: ["pain_point", "curiosity", "tease", "payoff_preview"],
+    revealLevels: ["none", "partial"],
+    requiresReturnPoint: false,
+  },
+  flashforward_hook: {
+    hookModes: ["payoff_preview"],
+    revealLevels: ["partial", "full"],
+    requiresReturnPoint: true,
+  },
+  result_first: {
+    hookModes: ["payoff_preview"],
+    revealLevels: ["full"],
+    requiresReturnPoint: true,
+  },
+  problem_solution: {
+    hookModes: ["pain_point"],
+    revealLevels: ["none", "partial"],
+    requiresReturnPoint: false,
+  },
+  demonstration: {
+    hookModes: ["curiosity", "tease"],
+    revealLevels: ["none", "partial"],
+    requiresReturnPoint: false,
+  },
+};
+
+function PlanningRouteReview({
+  lang,
+  project,
+  loading,
+  onSave,
+}: {
+  lang: PageLang;
+  project: VideoProject;
+  loading: boolean;
+  onSave: (draft: PlanningRouteDraft) => Promise<void>;
+}) {
+  const debug = project.planDebug?.routeClassification;
+  const contract = debug?.routeContract ?? project.planDebug?.approvedRouteContract;
+  const initial = (): PlanningRouteDraft => ({
+    videoCategory: contract?.videoCategory ?? "custom",
+    templateId: contract?.templateId ?? "generic_brand_story",
+    chronologyMode: contract?.chronologyMode ?? "chronological",
+    hookMode: contract?.hookMode ?? "curiosity",
+    hookRevealLevel: contract?.hookRevealLevel ?? "none",
+    requiresReturnPoint: contract?.requiresReturnPoint === true,
+  });
+  const [draft, setDraft] = useState<PlanningRouteDraft>(initial);
+  const [open, setOpen] = useState(true);
+  const original = useMemo(() => initial(), [
+    contract?.videoCategory,
+    contract?.templateId,
+    contract?.chronologyMode,
+    contract?.hookMode,
+    contract?.hookRevealLevel,
+    contract?.requiresReturnPoint,
+  ]);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original);
+  const templates = ROUTE_TEMPLATE_OPTIONS[draft.videoCategory] ?? ROUTE_TEMPLATE_OPTIONS.custom;
+  const hookPolicy = ROUTE_HOOK_POLICY_OPTIONS[draft.chronologyMode]
+    ?? ROUTE_HOOK_POLICY_OPTIONS.chronological;
+  const warning = debug?.fallbackInfo?.userVisibleWarning
+    ?? contract?.fallbackReason
+    ?? (contract?.fallbackUsed
+      ? lang === "zh" ? "当前路线使用了安全回退，请在确认脚本前检查。" : "This route uses the safe fallback. Review it before approval."
+      : "");
+
+  useEffect(() => {
+    setDraft(initial());
+  }, [
+    project.id,
+    contract?.videoCategory,
+    contract?.templateId,
+    contract?.chronologyMode,
+    contract?.hookMode,
+    contract?.hookRevealLevel,
+    contract?.requiresReturnPoint,
+  ]);
+
+  function updateCategory(videoCategory: string) {
+    const nextTemplates = ROUTE_TEMPLATE_OPTIONS[videoCategory] ?? ROUTE_TEMPLATE_OPTIONS.custom;
+    setDraft((current) => ({
+      ...current,
+      videoCategory,
+      templateId: nextTemplates.includes(current.templateId)
+        ? current.templateId
+        : nextTemplates[0] ?? "generic_brand_story",
+    }));
+  }
+
+  function updateChronology(chronologyMode: string) {
+    const policy = ROUTE_HOOK_POLICY_OPTIONS[chronologyMode]
+      ?? ROUTE_HOOK_POLICY_OPTIONS.chronological;
+    setDraft((current) => ({
+      ...current,
+      chronologyMode,
+      hookMode: policy.hookModes.includes(current.hookMode)
+        ? current.hookMode
+        : policy.hookModes[0] ?? "curiosity",
+      hookRevealLevel: policy.revealLevels.includes(current.hookRevealLevel)
+        ? current.hookRevealLevel
+        : policy.revealLevels[0] ?? "none",
+      requiresReturnPoint: policy.requiresReturnPoint,
+    }));
+  }
+
+  if (!contract) return null;
+  const confidenceItems = [
+    [lang === "zh" ? "品类置信度" : "Category confidence", contract.categoryConfidence],
+    [lang === "zh" ? "模板置信度" : "Template confidence", contract.templateConfidence],
+    [lang === "zh" ? "时间顺序置信度" : "Chronology confidence", contract.chronologyConfidence],
+  ] as const;
+  const fieldClass = "h-10 w-full rounded-md border border-white/10 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-violet-300/60";
+
+  return (
+    <section className="rounded-md border border-violet-300/25 bg-violet-300/[0.045] p-4">
+      <button type="button" onClick={() => setOpen((current) => !current)} className="flex w-full items-start justify-between gap-3 text-left">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold text-violet-100">
+              {lang === "zh" ? "任务分类与叙事路线" : "Task classification & narrative route"}
+            </h3>
+            <span className={`rounded px-2 py-0.5 text-[11px] ${debug?.authority === "user" ? "bg-emerald-300/15 text-emerald-100" : "bg-cyan-300/10 text-cyan-100"}`}>
+              {debug?.authority === "user"
+                ? lang === "zh" ? "用户权威" : "User authority"
+                : lang === "zh" ? "模型建议" : "Model proposal"}
+            </span>
+            {debug?.locked && <span className="rounded bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100">{lang === "zh" ? "已锁定" : "Locked"}</span>}
+          </div>
+          <p className="mt-1 text-xs leading-5 text-slate-400">
+            {lang === "zh"
+              ? "该区域决定视频品类、叙事模板、时间顺序和 Hook policy；保存人工修改后模型不能覆盖。"
+              : "This controls category, template, chronology, and Hook policy. A saved user route cannot be overwritten by the model."}
+          </p>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+      </button>
+
+      {open && (
+        <div className="mt-4 space-y-4">
+          {warning && (
+            <div className="rounded-md border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+              <p className="font-semibold">Fallback / Warning</p>
+              <p className="mt-1">{warning}</p>
+            </div>
+          )}
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <RouteSelect label={lang === "zh" ? "视频品类" : "Video category"} value={draft.videoCategory} options={Object.keys(ROUTE_TEMPLATE_OPTIONS)} onChange={updateCategory} className={fieldClass} />
+            <RouteSelect label={lang === "zh" ? "叙事模板" : "Narrative template"} value={draft.templateId} options={templates} onChange={(templateId) => setDraft((current) => ({ ...current, templateId }))} className={fieldClass} />
+            <RouteSelect label={lang === "zh" ? "时间顺序" : "Chronology"} value={draft.chronologyMode} options={Object.keys(ROUTE_HOOK_POLICY_OPTIONS)} onChange={updateChronology} className={fieldClass} />
+            <RouteSelect label={lang === "zh" ? "Hook 模式" : "Hook mode"} value={draft.hookMode} options={hookPolicy.hookModes} onChange={(hookMode) => setDraft((current) => ({ ...current, hookMode }))} className={fieldClass} />
+            <RouteSelect label={lang === "zh" ? "揭示程度" : "Reveal level"} value={draft.hookRevealLevel} options={hookPolicy.revealLevels} onChange={(hookRevealLevel) => setDraft((current) => ({ ...current, hookRevealLevel }))} className={fieldClass} />
+            <label className="space-y-1.5 text-xs text-slate-400">
+              <span>{lang === "zh" ? "需要返回较早时间点" : "Requires return point"}</span>
+              <span className="flex h-10 items-center gap-2 rounded-md border border-white/10 bg-slate-950 px-3">
+                <input type="checkbox" checked={draft.requiresReturnPoint} onChange={(event) => setDraft((current) => ({ ...current, requiresReturnPoint: event.target.checked }))} className="h-4 w-4 accent-violet-400" />
+                <span className="text-sm text-slate-200">{draft.requiresReturnPoint ? (lang === "zh" ? "是" : "Yes") : (lang === "zh" ? "否" : "No")}</span>
+              </span>
+            </label>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-3">
+            <NarrativeInfoCard label={lang === "zh" ? "品类选择理由" : "Category reason"} value={stringField(contract.categoryReason)} />
+            <NarrativeInfoCard label={lang === "zh" ? "模板选择理由" : "Template reason"} value={stringField(contract.templateReason)} />
+            <NarrativeInfoCard label={lang === "zh" ? "时间顺序理由" : "Chronology reason"} value={stringField(contract.chronologyReason)} />
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            {confidenceItems.map(([label, value]) => (
+              <div key={label} className="rounded-md border border-white/10 bg-slate-950/55 p-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400">{label}</span>
+                  <span className="font-medium text-violet-100">{typeof value === "number" ? `${Math.round(value * 100)}%` : "-"}</span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full bg-violet-400" style={{ width: `${typeof value === "number" ? Math.max(0, Math.min(100, value * 100)) : 0}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-md border border-white/10 bg-slate-950/55 p-3 text-xs text-slate-400">
+            <p className="font-medium text-slate-200">{lang === "zh" ? "Route 审计与性能" : "Route audit & performance"}</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <span>model: {debug?.modelName ?? "-"}</span>
+              <span>duration: {typeof debug?.modelDurationMs === "number" ? `${debug.modelDurationMs} ms` : "-"}</span>
+              <span>tokens: {debug?.inputTokens ?? "-"} / {debug?.outputTokens ?? "-"}</span>
+              <span>gate: {debug?.gateResult?.status ?? "-"} · repairs {debug?.repairCount ?? 0}</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-3">
+            <p className="max-w-3xl text-xs leading-5 text-slate-500">
+              {lang === "zh"
+                ? "修改生产字段会按照 Route 失效矩阵清理下游并重新运行 Planning；保存相同选择只会取得用户权威并锁定。"
+                : "Changing production fields invalidates downstream content and reruns Planning. Saving unchanged choices only takes user authority and locks the route."}
+            </p>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setDraft(original)} disabled={!dirty || loading} className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 px-3 text-xs text-slate-300 hover:bg-white/[0.06] disabled:opacity-35">
+                <Undo2 className="h-3.5 w-3.5" /> {lang === "zh" ? "撤销" : "Undo"}
+              </button>
+              <button type="button" onClick={() => onSave(draft)} disabled={loading || (!dirty && debug?.authority === "user" && debug.locked)} className="inline-flex h-9 items-center gap-2 rounded-md border border-violet-300/30 bg-violet-300/10 px-3 text-xs font-semibold text-violet-100 hover:bg-violet-300/15 disabled:opacity-35">
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                {debug?.authority === "user" && debug.locked
+                  ? lang === "zh" ? "更新并保持锁定" : "Update locked route"
+                  : lang === "zh" ? "保存并锁定" : "Save & lock"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RouteSelect({
+  label,
+  value,
+  options,
+  onChange,
+  className,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+  className: string;
+}) {
+  return (
+    <label className="space-y-1.5 text-xs text-slate-400">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)} className={className}>
+        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </label>
+  );
+}
+
 function NarrativeSkeletonReview({
   lang,
   project,
@@ -5453,7 +5457,7 @@ function NarrativeSkeletonReview({
   const beats = draft.storyBeats;
   const qualityReport = draft.storyQualityReport ?? report;
   const issues = qualityReport?.issues ?? [];
-  const shotBindings = buildShotBeatBindings(project);
+  const shotBindings = buildSegmentBeatBindings(project);
   const groupingGroups = Array.isArray(draft.shotGroupingPass?.groups) ? draft.shotGroupingPass?.groups ?? [] : [];
   const splitReasons = Array.isArray(draft.shotGroupingPass?.splitReasons) ? draft.shotGroupingPass?.splitReasons ?? [] : [];
 
@@ -5591,9 +5595,9 @@ function NarrativeSkeletonReview({
               {shotBindings.length ? (
                 <div className="mt-3 space-y-2">
                   {shotBindings.map((item) => (
-                    <div key={item.shotNo} className="rounded-md border border-white/10 bg-white/[0.03] p-2 text-xs">
+                    <div key={item.segmentNo} className="rounded-md border border-white/10 bg-white/[0.03] p-2 text-xs">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="font-medium text-cyan-100">{labels.shot} {String(item.shotNo).padStart(2, "0")}</span>
+                        <span className="font-medium text-cyan-100">{labels.shot} {String(item.segmentNo).padStart(2, "0")}</span>
                         <span className="rounded bg-black/20 px-1.5 py-0.5 text-slate-400">{item.linkedBeatIds.join(", ") || labels.noBeat}</span>
                       </div>
                       {item.storyFunction && <p className="mt-1 text-slate-400">{item.storyFunction}</p>}
@@ -5918,10 +5922,22 @@ function PlanDebugPanel({
                 <p className="mt-3 text-sm text-slate-500">{labels.empty}</p>
               )}
             </div>
-            {(projectError || project.status === "FAILED") && (
+            {(projectError || project.productionProjection?.errorCode || isProjectRecoveryState(project.status)) && (
               <div className="rounded-md border border-amber-300/25 bg-amber-300/10 p-3">
                 <p className="text-sm font-semibold text-amber-100">{labels.blockReason}</p>
-                <p className="mt-2 text-sm leading-6 text-amber-100/80">{projectError || project.status}</p>
+                <p className="mt-2 text-sm leading-6 text-amber-100/80">
+                  {project.productionProjection?.displayMessage?.[lang]
+                    || projectError
+                    || project.productionProjection?.errorMessage
+                    || project.status}
+                </p>
+                {(project.productionProjection?.errorCode || project.productionProjection?.recoveryAction) && (
+                  <p className="mt-1 text-xs leading-5 text-amber-100/60">
+                    {[project.productionProjection.errorCode, project.productionProjection.recoveryAction]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                )}
               </div>
             )}
             <div className="rounded-md border border-white/10 bg-slate-950/60 p-3">
@@ -6274,17 +6290,17 @@ function markStoryQualityManuallyEdited(report?: StoryQualityReport): StoryQuali
   };
 }
 
-function buildShotBeatBindings(project: VideoProject): Array<{ shotNo: number; linkedBeatIds: string[]; storyFunction?: string; emotionalBeat?: string }> {
+function buildSegmentBeatBindings(project: VideoProject): Array<{ segmentNo: number; linkedBeatIds: string[]; storyFunction?: string; emotionalBeat?: string }> {
   const descriptionByNo = new Map<number, Record<string, unknown>>();
   for (const item of project.planDebug?.segmentRenderDescriptions ?? []) {
     if (!isPlainRecord(item)) continue;
-    const no = Number(item.segmentNo ?? item.segment_no ?? item.shotNo ?? item.shot_no ?? item.sequence);
+    const no = Number(item.segmentNo ?? item.segment_no ?? item.segmentNo ?? item.shot_no ?? item.sequence);
     if (Number.isFinite(no)) descriptionByNo.set(no, item);
   }
-  return project.shots.map((shot) => {
-    const source = descriptionByNo.get(shot.shotNo) ?? (shot as unknown as Record<string, unknown>);
+  return (project.segments ?? []).map((segment) => {
+    const source = descriptionByNo.get(segment.segmentNo) ?? (segment as unknown as Record<string, unknown>);
     return {
-      shotNo: shot.shotNo,
+      segmentNo: segment.segmentNo,
       linkedBeatIds: readStringArray(source.linkedBeatIds ?? source.linked_beat_ids ?? source.beatIds ?? source.beat_ids),
       storyFunction: stringField(source.storyFunction ?? source.story_function),
       emotionalBeat: stringField(source.emotionalBeat ?? source.emotional_beat),
@@ -6303,7 +6319,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function buildDebugContext(
   project: VideoProject | null,
-  selectedShot?: VideoShot,
+  selectedSegment?: VideoSegment,
   selectedKeyframe?: VideoKeyframe,
 ): DebugContext {
   if (!project) return { title: "", targetIds: [] };
@@ -6316,24 +6332,24 @@ function buildDebugContext(
       targetIds: [id, `keyframe:${selectedKeyframe.keyframeNo}`, `${id}:prompt`, `${id}:image`],
     };
   }
-  if (selectedShot) {
+  if (selectedSegment) {
     const ids = [
-      `segment:${selectedShot.shotNo}`,
-      `segment:${selectedShot.shotNo}:prompt`,
-      `segment:${selectedShot.shotNo}:video`,
-      `segment:${selectedShot.shotNo}:subtitle`,
-      `segment:${selectedShot.shotNo}:micro_shots`,
-      ...(selectedShot.startKeyframeNo ? [`keyframe:${selectedShot.startKeyframeNo}`] : []),
-      ...(selectedShot.endKeyframeNo ? [`keyframe:${selectedShot.endKeyframeNo}`] : []),
-      ...((selectedShot.microShots ?? []).flatMap((item) => [
-        `segment:${selectedShot.shotNo}:micro_shot:${item.microShotNo}`,
-        `segment:${selectedShot.shotNo}:micro_shot:${item.microShotNo}:image`,
+      `segment:${selectedSegment.segmentNo}`,
+      `segment:${selectedSegment.segmentNo}:prompt`,
+      `segment:${selectedSegment.segmentNo}:video`,
+      `segment:${selectedSegment.segmentNo}:subtitle`,
+      `segment:${selectedSegment.segmentNo}:micro_shots`,
+      ...(selectedSegment.startKeyframeNo ? [`keyframe:${selectedSegment.startKeyframeNo}`] : []),
+      ...(selectedSegment.endKeyframeNo ? [`keyframe:${selectedSegment.endKeyframeNo}`] : []),
+      ...((selectedSegment.microShots ?? []).flatMap((item) => [
+        `segment:${selectedSegment.segmentNo}:micro_shot:${item.microShotNo}`,
+        `segment:${selectedSegment.segmentNo}:micro_shot:${item.microShotNo}:image`,
       ])),
     ];
     return {
-      title: `segment ${selectedShot.shotNo}`,
+      title: `segment ${selectedSegment.segmentNo}`,
       targetIds: ids,
-      segmentDescription: segmentRenderDescriptionByNo(project.planDebug, selectedShot.shotNo),
+      segmentDescription: segmentRenderDescriptionByNo(project.planDebug, selectedSegment.segmentNo),
     };
   }
   return { title: project.title, targetIds: [] };
@@ -6342,7 +6358,7 @@ function buildDebugContext(
 function segmentRenderDescriptionByNo(planDebug: PlanDebugData | undefined, segmentNo: number): Record<string, unknown> | undefined {
   for (const item of planDebug?.segmentRenderDescriptions ?? []) {
     if (!isPlainRecord(item)) continue;
-    const n = Number(item.segmentNo ?? item.segment_no ?? item.shotNo ?? item.shot_no ?? item.sequence);
+    const n = Number(item.segmentNo ?? item.segment_no ?? item.segmentNo ?? item.shot_no ?? item.sequence);
     if (n === segmentNo) return item;
   }
   return undefined;
@@ -6488,10 +6504,10 @@ function finalVideoPreviewClass(aspectRatio: AspectRatio): string {
 }
 
 function shotClipDownloadUrl(projectId: string, shotId: string): string {
-  return `/api/video-projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/download`;
+  return `/api/video-projects/${encodeURIComponent(projectId)}/segments/${encodeURIComponent(shotId)}/download`;
 }
 
-function localizedShotPrompt(shot: VideoShot, kind: "image" | "video", lang: PageLang): string {
+function localizedSegmentPrompt(shot: VideoSegment, kind: "image" | "video", lang: PageLang): string {
   if (kind === "image") {
     return promptForInterfaceLanguage({
       preferred: lang === "en" ? shot.imagePromptEn : shot.imagePromptZh,
@@ -6506,9 +6522,9 @@ function localizedShotPrompt(shot: VideoShot, kind: "image" | "video", lang: Pag
   });
 }
 
-function localizedShotPurpose(shot: VideoShot, lang: PageLang): string {
-  if (lang === "en") return shot.purposeEn || titleFromPrompt(shot.videoPromptEn || shot.videoPrompt || shot.purpose, `Shot ${shot.shotNo}`);
-  return shot.purposeZh || shot.purpose;
+function localizedSegmentPurpose(shot: VideoSegment, lang: PageLang): string {
+  if (lang === "en") return shot.purposeEn || titleFromPrompt(shot.videoPromptEn || shot.videoPrompt || shot.purpose || "", `Segment ${shot.segmentNo}`);
+  return shot.purposeZh || shot.purpose || "";
 }
 
 function localizedKeyframePurpose(keyframe: VideoKeyframe, lang: PageLang): string {
@@ -6529,9 +6545,9 @@ function titleFromPrompt(text: string, fallback: string): string {
   return source.length > 96 ? `${source.slice(0, 93)}...` : source;
 }
 
-function localizedShotNegativePrompt(shot: VideoShot, lang: PageLang): string {
+function localizedSegmentNegativePrompt(shot: VideoSegment, lang: PageLang): string {
   return localizedNegativePrompt(
-    shot.negativePrompt,
+    shot.negativePrompt ?? "",
     lang,
     shot.negativePromptZh,
     shot.negativePromptEn,
@@ -6765,7 +6781,7 @@ function assetViewShortLabel(frame: VideoKeyframe, lang: PageLang): string {
 }
 
 function safeBoundaryRangeLabel(
-  shot: Pick<VideoShot, "startKeyframeNo" | "endKeyframeNo">,
+  shot: Pick<VideoSegment, "startKeyframeNo" | "endKeyframeNo">,
   keyframeByNo: Map<number, VideoKeyframe>,
   totalSeconds: number,
   lang: PageLang,
@@ -6775,85 +6791,8 @@ function safeBoundaryRangeLabel(
   return `${safeBoundaryFrameShortLabel(start, totalSeconds, lang)} -> ${safeBoundaryFrameShortLabel(end, totalSeconds, lang)}`;
 }
 
-function plannerWorkflowProgressView(
-  progress: PlannerProgress | undefined,
-  lang: PageLang,
-  taskGraph?: ProjectTaskGraphSnapshot,
-  nowMs = Date.now(),
-): WorkflowProgressView {
-  if (!progress) {
-    return {
-      percent: taskGraph?.percent ?? 0,
-      title: lang === "en" ? "Planning job queued" : "剧本规划任务已入队",
-      detail: [
-        lang === "en" ? "Waiting for the background planner to report its first real task state." : "正在等待后台规划器上报第一个真实任务状态。",
-        taskGraphOperationalDetail(taskGraph, lang, nowMs),
-      ].filter(Boolean).join(" "),
-      tone: "running",
-    };
-  }
-  const total = Math.max(1, progress.totalSteps);
-  const completed = Math.max(0, Math.min(total, progress.completedSteps));
-  const remaining = Math.max(0, total - completed);
-  const percent = taskGraph?.percent ?? (
-    progress.status === "completed" || progress.stage === "complete"
-      ? 100
-      : Math.min(99, (completed / total) * 100)
-  );
-  const titles: Record<PlannerProgress["stage"], { zh: string; en: string }> = {
-    queued: { zh: "剧本规划任务已入队", en: "Planning job queued" },
-    reference_fact_extractor: { zh: "正在提取参考图客观事实", en: "Extracting objective reference facts" },
-    planning_architect: { zh: "正在理解创意与规划时间轴", en: "Understanding the brief and timeline" },
-    asset_prompt_contract_gate: { zh: "正在检查资产图片合同", en: "Validating asset image contracts" },
-    asset_prompt_contract_repair: { zh: "正在返修空泛的资产描述", en: "Repairing vague asset specifications" },
-    asset_visual_spec: { zh: "正在并行细化资产视觉规格", en: "Detailing asset visual specifications in parallel" },
-    storyboard_artist: { zh: "正在设计剧情节拍与广告因果", en: "Designing story beats and ad causality" },
-    story_contract_gate: { zh: "正在校验剧情合同", en: "Validating the story contract" },
-    story_contract_repair: { zh: "正在定向修复剧情合同", en: "Repairing the story contract" },
-    shot_decomposer: { zh: "正在拆解可执行视频片段", en: "Decomposing executable video segments" },
-    single_take_audit: { zh: "正在执行一镜到底审计", en: "Running single-take audit" },
-    split_repair: { zh: "正在修复高风险镜头结构", en: "Repairing high-risk shot structure" },
-    json_repair: { zh: "正在修复模型 JSON 结构", en: "Repairing model JSON structure" },
-    prompt_detailer: { zh: "正在编译图片和视频提示词", en: "Compiling image and video prompts" },
-    story_quality_gate: { zh: "正在执行剧情质量校验", en: "Running story quality validation" },
-    complete: { zh: "分镜计划已完成", en: "Storyboard plan complete" },
-    failed: { zh: "分镜计划生成失败", en: "Storyboard planning failed" },
-  };
-  const baseDetail = lang === "en" ? progress.detailEn : progress.detailZh;
-  const stepDetail = lang === "en"
-    ? `${completed}/${total} real steps complete; ${remaining} remaining.`
-    : `真实进度：已完成 ${completed}/${total} 步，剩余 ${remaining} 步。`;
-  const repairParts = [
-    progress.metrics.jsonRepairCount > 0
-      ? (lang === "en" ? `JSON repairs: ${progress.metrics.jsonRepairCount}` : `JSON 修复：${progress.metrics.jsonRepairCount} 次`)
-      : "",
-    progress.metrics.singleTakeRepairCount > 0
-      ? (lang === "en" ? `single-take repairs: ${progress.metrics.singleTakeRepairCount}` : `一镜到底修复：${progress.metrics.singleTakeRepairCount} 次`)
-      : "",
-    progress.metrics.storyContractRepairCount > 0
-      ? (lang === "en" ? `story-contract repairs: ${progress.metrics.storyContractRepairCount}` : `剧情合同修复：${progress.metrics.storyContractRepairCount} 次`)
-      : "",
-  ].filter(Boolean);
-  return {
-    percent,
-    title: titles[progress.stage]?.[lang] ?? titles.queued[lang],
-    detail: [
-      baseDetail,
-      stepDetail,
-      repairParts.join(lang === "en" ? "; " : "；"),
-      taskGraphOperationalDetail(taskGraph, lang, nowMs),
-    ].filter(Boolean).join(" "),
-    tone: progress.status === "failed" || progress.stage === "failed" ? "failed" : progress.status === "completed" ? "success" : "running",
-  };
-}
-
 function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: PageLang): WorkflowProgressView {
   const text: Record<OptimisticProgressPhase, { zh: [string, string]; en: [string, string]; tone: WorkflowProgressView["tone"] }> = {
-    creating: {
-      zh: ["\u6b63\u5728\u521b\u5efa\u9879\u76ee", "\u5df2\u63d0\u4ea4\u521b\u4f5c\u9700\u6c42\uff0c\u6b63\u5728\u51c6\u5907\u8fdb\u5165\u5267\u672c\u62c6\u89e3\u3002"],
-      en: ["Creating project", "The request is submitted and the storyboard planner is warming up."],
-      tone: "running",
-    },
     understanding: {
       zh: ["\u5927\u6a21\u578b\u6b63\u5728\u7406\u89e3\u9700\u6c42", "\u6b63\u5728\u8bc6\u522b\u4e3b\u9898\u3001\u4eba\u7269\u3001\u573a\u666f\u53c2\u8003\u3001\u8272\u8c03\u9501\u548c\u753b\u5e45\u7ea6\u675f\u3002"],
       en: ["Understanding brief", "Reading the theme, references, tone locks, and aspect ratio constraints."],
@@ -6872,6 +6811,11 @@ function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: Page
     waiting: {
       zh: ["\u7b49\u5f85\u6a21\u578b\u8fd4\u56de\u5b8c\u6574\u7ed3\u679c", "\u590d\u6742\u9700\u6c42\u53ef\u80fd\u4f1a\u591a\u7b49\u4e00\u4f1a\u513f\uff0c\u8fd4\u56de\u540e\u4f1a\u81ea\u52a8\u8fdb\u5165\u5ba1\u6838\u3002"],
       en: ["Waiting for the model result", "Complex briefs can take longer. The review stage will open automatically when it returns."],
+      tone: "running",
+    },
+    resuming: {
+      zh: ["\u6b63\u5728\u7ee7\u7eed\u5f53\u524d\u9636\u6bb5", "\u6b63\u5728\u6062\u590d\u8fd9\u4e2a\u9879\u76ee\u4e2d\u5c1a\u672a\u5b8c\u6210\u7684\u751f\u6210\u4efb\u52a1\uff0c\u4e0d\u4f1a\u521b\u5efa\u65b0\u9879\u76ee\u3002"],
+      en: ["Continuing the current stage", "Resuming unfinished generation tasks in this project. No new project is being created."],
       tone: "running",
     },
     done: {
@@ -6895,179 +6839,70 @@ function optimisticWorkflowProgressView(progress: OptimisticProgress, lang: Page
   return { percent: Math.max(0, Math.min(100, Math.round(progress.percent * 10) / 10)), title, detail, tone: item.tone };
 }
 
-function projectWorkflowProgressView(
-  project: VideoProject,
-  progress: ReturnType<typeof projectProgress>,
+function taskGraphWorkflowProgressView(
+  graph: ProjectTaskGraphSnapshot,
   lang: PageLang,
-  status: ProjectStatus = project.status,
-  phase?: {
-    assetTotal: number;
-    generatedAssets: number;
-    approvedAssets: number;
-    assetsApproved: boolean;
-    boundaryTotal: number;
-    generatedBoundaryImages: number;
-  },
-  nowMs = Date.now(),
+  nowMs: number,
+  productionState?: VideoProject["productionState"],
 ): WorkflowProgressView {
-  const operationalDetail = taskGraphOperationalDetail(project.taskGraph, lang, nowMs);
-  if (isManualStopProject(project)) {
-    return lang === "en"
-      ? { percent: progress.percent, title: "Generation stopped", detail: "You stopped this generation. Adjust the brief and generate again when ready.", tone: "idle" }
-      : { percent: progress.percent, title: "\u751f\u6210\u5df2\u505c\u6b62", detail: "\u4f60\u5df2\u624b\u52a8\u505c\u6b62\u672c\u6b21\u751f\u6210\uff0c\u53ef\u4ee5\u8c03\u6574\u5185\u5bb9\u540e\u91cd\u65b0\u751f\u6210\u3002", tone: "idle" };
-  }
-  if (project.productionState?.workerUnavailable) {
-    const queuedSeconds = Math.max(15, Math.round(project.productionState.oldestQueuedAgeMs / 1000));
-    return lang === "en"
-      ? {
-          percent: project.taskGraph?.percent ?? progress.percent,
-          title: "Task worker is unavailable",
-          detail: `${project.productionState.queuedCount} production task(s) have waited ${queuedSeconds}s without being claimed. Start or restore the video production worker; no model request has been sent yet.`,
-          tone: "failed",
-        }
-      : {
-          percent: project.taskGraph?.percent ?? progress.percent,
-          title: "任务处理器未运行",
-          detail: `${project.productionState.queuedCount} 个生产任务已等待 ${queuedSeconds} 秒但尚未被领取。请启动或恢复视频生产 Worker；当前还没有向模型提交请求。`,
-          tone: "failed",
-        };
-  }
-  if (project.humanWorkflowState?.blocking) {
-    const state = project.humanWorkflowState.state;
-    const detail = state === "waiting_candidate_selection"
-      ? (lang === "en"
-          ? "Choose one generated candidate for the current image. Selecting a candidate does not confirm the asset library."
-          : "请先为当前图片采纳一张候选图。采纳候选只确定这张图，不等于确认整个资产库。")
-      : state === "waiting_asset_confirmation"
-        ? (lang === "en"
-            ? "Candidate images have been selected. Confirm the asset library separately before dependent frames continue."
-            : "候选图已经采纳完成，请单独确认资产库后再继续生成依赖画面。")
-        : (lang === "en"
-            ? "Review and confirm the ready boundary keyframes before internal micro-shot review."
-            : "请审核并确认已就绪的边界关键帧，再进入内部子分镜审核。");
+  const node = graph.nodes.find((item) => item.id === graph.currentNode);
+  const label = node ? (lang === "en" ? node.labelEn : node.labelZh) : "";
+  const action = graph.allowedActions[0];
+  const percent = graph.progress.percent;
+  const operationalDetail = taskGraphOperationalDetail(graph, lang, nowMs);
+  if (productionState?.workerUnavailable) {
     return {
-      percent: project.taskGraph?.percent ?? progress.percent,
-      title: lang === "en"
-        ? project.humanWorkflowState.titleEn || "Waiting for confirmation"
-        : project.humanWorkflowState.titleZh || "等待人工确认",
-      detail: [detail, operationalDetail].filter(Boolean).join(" "),
+      percent,
+      title: lang === "en" ? "Waiting for a compatible Worker" : "等待兼容的 Worker",
+      detail: lang === "en"
+        ? `The current node is queued and has not been claimed. ${operationalDetail}`
+        : `当前节点已入队但尚未被领取。${operationalDetail}`,
+      tone: "failed",
+    };
+  }
+  if (action === "EXECUTE_RECOVERY_ACTION") {
+    return {
+      percent,
+      title: lang === "en" ? `Recovery required: ${label}` : `需要执行恢复动作：${label}`,
+      detail: [
+        graph.recoveryAction
+          ? (lang === "en" ? `Recovery action: ${graph.recoveryAction}.` : `恢复动作：${graph.recoveryAction}。`)
+          : "",
+        operationalDetail,
+      ].filter(Boolean).join(" "),
+      tone: "failed",
+    };
+  }
+  if (action === "APPROVE_CURRENT_NODE") {
+    return {
+      percent,
+      title: lang === "en" ? `Waiting for approval: ${label}` : `等待确认：${label}`,
+      detail: operationalDetail,
       tone: "idle",
     };
   }
-  if (
-    phase
-    && phase.assetTotal > 0
-    && !phase.assetsApproved
-    && (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW")
-  ) {
-    const assetProgress = Math.min(1, phase.generatedAssets / phase.assetTotal);
-    const approvalProgress = Math.min(1, phase.approvedAssets / phase.assetTotal);
-    const percent = Math.round(20 + assetProgress * 10 + approvalProgress * 10);
-    const waitingForApproval = status === "IMAGE_REVIEW";
-    return lang === "en"
-      ? {
-          percent,
-          title: waitingForApproval ? "Asset library awaiting review" : "Generating asset library",
-          detail: [`${phase.generatedAssets}/${phase.assetTotal} asset references generated; ${phase.approvedAssets}/${phase.assetTotal} approved. ${phase.generatedBoundaryImages}/${phase.boundaryTotal} dependency-ready boundary keyframes have already generated in parallel.`, operationalDetail].filter(Boolean).join(" "),
-          tone: waitingForApproval ? "idle" : "running",
-        }
-      : {
-          percent,
-          title: waitingForApproval ? "资产库待审核" : "正在生成资产库",
-          detail: [`${phase.generatedAssets}/${phase.assetTotal} 张资产参考图已生成，${phase.approvedAssets}/${phase.assetTotal} 张已确认；已有 ${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张依赖满足的边界关键帧并行完成。人物侧面和背面图仍需先确认对应正面图。`, operationalDetail].filter(Boolean).join(" "),
-          tone: waitingForApproval ? "idle" : "running",
-        };
+  if (action === "RESUME_CURRENT_NODE") {
+    return {
+      percent,
+      title: lang === "en" ? `Ready to resume: ${label}` : `可恢复当前节点：${label}`,
+      detail: operationalDetail,
+      tone: "idle",
+    };
   }
-  if (
-    phase
-    && phase.assetsApproved
-    && phase.boundaryTotal > 0
-    && (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW")
-  ) {
-    const boundaryProgress = Math.min(1, phase.generatedBoundaryImages / phase.boundaryTotal);
-    const allBoundaryImagesReady = phase.generatedBoundaryImages === phase.boundaryTotal;
-    const percent = Math.round(40 + boundaryProgress * 10);
-    return lang === "en"
-      ? {
-          percent,
-          title: allBoundaryImagesReady ? "Boundary keyframes awaiting review" : "Generating boundary keyframes",
-          detail: [allBoundaryImagesReady
-            ? `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes are ready. Approve them before internal micro-shot review.`
-            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} boundary keyframes generated. Internal micro-shot review is not available yet.`, operationalDetail].filter(Boolean).join(" "),
-          tone: allBoundaryImagesReady ? "idle" : "running",
-        }
-      : {
-          percent,
-          title: allBoundaryImagesReady ? "边界关键帧待审核" : "正在生成边界关键帧",
-          detail: [allBoundaryImagesReady
-            ? `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已就绪，全部确认后才能进入内部子分镜审核。`
-            : `${phase.generatedBoundaryImages}/${phase.boundaryTotal} 张边界关键帧已生成，当前尚不能进入内部子分镜审核。`, operationalDetail].filter(Boolean).join(" "),
-          tone: allBoundaryImagesReady ? "idle" : "running",
-        };
+  if (!graph.currentNode && graph.progress.total > 0 && graph.progress.completed === graph.progress.total) {
+    return {
+      percent: 100,
+      title: lang === "en" ? "Workflow complete" : "工作流已完成",
+      detail: operationalDetail,
+      tone: "success",
+    };
   }
-  const zh: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
-    DRAFT: ["\u7b49\u5f85\u5f00\u59cb", "\u586b\u5199\u4e00\u53e5\u8bdd\u9700\u6c42\u540e\u5373\u53ef\u751f\u6210\u5206\u955c\u8ba1\u5212\u3002", "idle"],
-    PLANNING: ["\u6b63\u5728\u751f\u6210\u5206\u955c\u8ba1\u5212", "\u5927\u6a21\u578b\u6b63\u5728\u62c6\u89e3\u5267\u672c\u3001\u5173\u952e\u5e27\u548c\u7247\u6bb5\u63d0\u793a\u8bcd\u3002", "running"],
-    PLAN_REVIEW: ["\u5206\u955c\u8ba1\u5212\u5f85\u5ba1\u6838", `${project.shots.length} \u4e2a\u955c\u5934\u5df2\u5c31\u7eea\uff0c\u8bf7\u5148\u786e\u8ba4\u811a\u672c\u4e0e\u5173\u952e\u5e27\u89c4\u5212\u3002`, "idle"],
-    IMAGE_GENERATING: ["\u6b63\u5728\u751f\u6210\u8fb9\u754c\u53c2\u8003\u5e27", `${progress.images}/${progress.imageTotal} \u5f20\u5173\u952e\u5e27\u56fe\u7247\u5df2\u5b8c\u6210\u3002`, "running"],
-    IMAGE_REVIEW: ["\u5173\u952e\u5e27\u5f85\u5ba1\u6838", `${progress.images}/${progress.imageTotal} \u5f20\u5173\u952e\u5e27\u56fe\u7247\u5df2\u5b8c\u6210\uff0c\u8bf7\u786e\u8ba4\u540e\u8fdb\u5165\u5185\u90e8\u5b50\u5206\u955c\u5ba1\u6838\u3002`, "idle"],
-    MICRO_SHOT_REVIEW: ["\u5185\u90e8\u5b50\u5206\u955c\u5f85\u5ba1\u6838", "\u8bf7\u786e\u8ba4\u6bcf\u4e2a\u7247\u6bb5\u5185\u90e8\u5b50\u5206\u955c\u7684\u6587\u5b57\u548c\u53c2\u8003\u56fe\uff0c\u5b8c\u6210\u540e\u518d\u751f\u6210\u89c6\u9891\u7247\u6bb5\u3002", "idle"],
-    CLIP_GENERATING: ["\u6b63\u5728\u751f\u6210\u5206\u955c\u89c6\u9891\u7247\u6bb5", `${progress.clips}/${progress.clipTotal} \u6bb5\u89c6\u9891\u7247\u6bb5\u5df2\u5b8c\u6210\u3002`, "running"],
-    CLIP_REVIEW: ["\u7247\u6bb5\u5f85\u5ba1\u6838", `${progress.clips}/${progress.clipTotal} \u6bb5\u89c6\u9891\u7247\u6bb5\u5df2\u5b8c\u6210\uff0c\u8bf7\u786e\u8ba4\u540e\u5408\u6210\u6210\u7247\u3002`, "idle"],
-    COMPOSING: ["\u6b63\u5728\u5408\u6210\u6700\u7ec8\u6210\u7247", "\u6b63\u5728\u62fc\u63a5\u6240\u6709\u5206\u955c\u7247\u6bb5\u5e76\u5904\u7406\u8f6c\u573a\u4e0e\u58f0\u97f3\u3002", "running"],
-    FINAL_REVIEW: ["\u6700\u7ec8\u6210\u7247\u5f85\u786e\u8ba4", "\u6210\u7247\u5df2\u751f\u6210\uff0c\u8bf7\u9884\u89c8\u786e\u8ba4\u3002", "idle"],
-    DONE: ["\u6210\u7247\u5df2\u5b8c\u6210", "\u8fd9\u4e2a\u9879\u76ee\u5df2\u7ecf\u5b8c\u6210\uff0c\u53ef\u4ee5\u4e0b\u8f7d\u6216\u7ee7\u7eed\u65b0\u5efa\u9879\u76ee\u3002", "success"],
-    FAILED: ["\u4efb\u52a1\u5931\u8d25", "\u8bf7\u67e5\u770b\u9519\u8bef\u4fe1\u606f\uff0c\u4fee\u6539\u540e\u91cd\u65b0\u53d1\u8d77\u5bf9\u5e94\u6b65\u9aa4\u3002", "failed"],
+  return {
+    percent,
+    title: lang === "en" ? `Waiting for Worker: ${label}` : `等待 Worker：${label}`,
+    detail: operationalDetail,
+    tone: "running",
   };
-  const en: Record<ProjectStatus, [string, string, WorkflowProgressView["tone"]]> = {
-    DRAFT: ["Ready to start", "Enter a one-line brief to generate the storyboard plan.", "idle"],
-    PLANNING: ["Planning storyboard", "The model is splitting the script, keyframes, and segment prompts.", "running"],
-    PLAN_REVIEW: ["Storyboard awaiting review", `${project.shots.length} shots are ready. Review the script and keyframe plan first.`, "idle"],
-    IMAGE_GENERATING: ["Generating boundary reference frames", `${progress.images}/${progress.imageTotal} keyframe images are ready.`, "running"],
-    IMAGE_REVIEW: ["Keyframes awaiting review", `${progress.images}/${progress.imageTotal} keyframe images are ready. Approve them to review internal micro-shots.`, "idle"],
-    MICRO_SHOT_REVIEW: ["Internal micro-shots awaiting review", "Review the internal micro-shot text and generated reference images before generating video clips.", "idle"],
-    CLIP_GENERATING: ["Generating video clips", `${progress.clips}/${progress.clipTotal} clips are ready.`, "running"],
-    CLIP_REVIEW: ["Clips awaiting review", `${progress.clips}/${progress.clipTotal} clips are ready. Approve them to compose the final video.`, "idle"],
-    COMPOSING: ["Composing final video", "Joining all clips and applying transitions and audio.", "running"],
-    FINAL_REVIEW: ["Final video awaiting review", "The final video is ready for preview.", "idle"],
-    DONE: ["Final video complete", "This project is complete and ready to download.", "success"],
-    FAILED: ["Task failed", "Check the error message, then retry the relevant step.", "failed"],
-  };
-  const [title, detail, tone] = lang === "en" ? en[status] : zh[status];
-  return { percent: progress.percent, title, detail: [detail, operationalDetail].filter(Boolean).join(" "), tone };
-}
-
-function projectProgress(project: VideoProject, status: ProjectStatus = project.status): { images: number; clips: number; imageTotal: number; clipTotal: number; percent: number } {
-  const imageTotal = project.keyframes?.length || project.shots.length;
-  const clipTotal = project.segments?.length || project.shots.length;
-  const safeImageTotal = Math.max(1, imageTotal);
-  const safeClipTotal = Math.max(1, clipTotal);
-  const images = project.keyframes?.length
-    ? project.keyframes.filter((keyframe) => Boolean(keyframe.imageUrl)).length
-    : project.shots.filter((shot) => Boolean(shot.imageUrl)).length;
-  const reviewableVideoTargetIds = new Set(
-    (project.generationCandidates ?? [])
-      .filter((candidate) =>
-        candidate.kind === "segment_video"
-        && Boolean(candidate.mediaUrl)
-        && candidate.status !== "failed"
-        && candidate.status !== "quality_failed"
-      )
-      .map((candidate) => candidate.targetId),
-  );
-  const clips = project.segments?.length
-    ? project.segments.filter((segment) =>
-        Boolean(segment.clipUrl)
-        || segment.status === "CLIP_READY"
-        || segment.status === "CLIP_APPROVED"
-        || reviewableVideoTargetIds.has(segment.id)
-      ).length
-    : project.shots.filter((shot) => Boolean(shot.clipUrl) || shot.status === "CLIP_READY" || shot.status === "CLIP_APPROVED").length;
-  const fallbackTotal = imageTotal + clipTotal;
-  const fallbackCompleted = images + clips;
-  const percent = project.taskGraph?.percent
-    ?? (status === "DONE" ? 100 : fallbackTotal > 0 ? Math.round((fallbackCompleted / fallbackTotal) * 100) : 0);
-  return { images, clips, imageTotal, clipTotal, percent };
 }
 
 function taskGraphOperationalDetail(
@@ -7164,36 +6999,32 @@ function shortTaskId(taskId: string): string {
   return taskId.length <= 14 ? taskId : `${taskId.slice(0, 6)}…${taskId.slice(-6)}`;
 }
 
-function effectiveReviewStatus(status: ProjectStatus, keyframesApproved: boolean): ProjectStatus {
-  if (status === "IMAGE_REVIEW" && keyframesApproved) return "MICRO_SHOT_REVIEW";
-  return status;
-}
-
-function workflowStageForProject(
-  status: ProjectStatus,
-  effectiveStatus: ProjectStatus | null,
-  assetTotal: number,
-  assetsApproved: boolean,
-): WorkflowStageKey | null {
-  if (effectiveStatus === "FINAL_REVIEW" || effectiveStatus === "DONE") return "FINAL_REVIEW";
-  if (effectiveStatus === "CLIP_REVIEW" || effectiveStatus === "CLIP_GENERATING" || effectiveStatus === "COMPOSING") return "CLIP_REVIEW";
-  if (effectiveStatus === "MICRO_SHOT_REVIEW") return "MICRO_SHOT_REVIEW";
-  if (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW") {
-    return assetTotal > 0 && !assetsApproved ? "ASSET_LIBRARY_REVIEW" : "IMAGE_REVIEW";
-  }
-  if (effectiveStatus === "PLAN_REVIEW") return "PLAN_REVIEW";
+function workflowStageForTaskGraph(graph?: ProjectTaskGraphSnapshot): WorkflowStageKey | null {
+  if (!graph) return null;
+  const nodeId = graph.currentNode;
+  if (!nodeId) return graph.progress.total > 0 ? "FINAL_REVIEW" : null;
+  if (nodeId === "planning" || nodeId === "review:plan") return "PLAN_REVIEW";
+  if (nodeId.startsWith("asset-image:") || nodeId === "review:assets") return "ASSET_LIBRARY_REVIEW";
+  if (nodeId.startsWith("boundary-image:") || nodeId === "review:boundaries") return "IMAGE_REVIEW";
+  if (nodeId.startsWith("micro-image:") || nodeId === "review:micro-shots") return "MICRO_SHOT_REVIEW";
+  if (nodeId.startsWith("segment-video:") || nodeId === "review:clips" || nodeId === "composition") return "CLIP_REVIEW";
+  if (nodeId === "review:final") return "FINAL_REVIEW";
   return null;
 }
 
-function projectViewForStatus(status: ProjectStatus): ProjectView {
-  if (status === "FINAL_REVIEW" || status === "DONE") return "final";
-  if (status === "CLIP_REVIEW" || status === "CLIP_GENERATING" || status === "COMPOSING" || status === "MICRO_SHOT_REVIEW") return "clips";
+function projectViewForTaskGraph(graph?: ProjectTaskGraphSnapshot): ProjectView {
+  const stage = workflowStageForTaskGraph(graph);
+  if (stage === "FINAL_REVIEW") return "final";
+  if (stage === "MICRO_SHOT_REVIEW" || stage === "CLIP_REVIEW") return "clips";
   return "assets";
 }
 
-function rollbackTargetsForStatus(status: ProjectStatus, assetsApproved: boolean): RollbackTarget[] {
+function rollbackTargetsForTaskGraph(graph?: ProjectTaskGraphSnapshot): RollbackTarget[] {
   const targets: RollbackTarget[] = [];
-  const stageOrder = rollbackStageOrder(status, assetsApproved);
+  const stage = workflowStageForTaskGraph(graph);
+  const stageOrder = stage
+    ? STAGES.findIndex((item) => item.key === stage) + 1
+    : 0;
   if (stageOrder > 1) targets.push("PLAN_REVIEW");
   if (stageOrder > 2) targets.push("ASSET_LIBRARY_REVIEW");
   if (stageOrder > 3) targets.push("IMAGE_REVIEW");
@@ -7209,60 +7040,51 @@ function toRollbackTarget(stage: WorkflowStageKey): RollbackTarget | null {
   return null;
 }
 
-function rollbackStageOrder(status: ProjectStatus, assetsApproved: boolean): number {
-  if (status === "PLAN_REVIEW") return 1;
-  if (status === "IMAGE_GENERATING" || status === "IMAGE_REVIEW") return assetsApproved ? 3 : 2;
-  if (status === "MICRO_SHOT_REVIEW") return 4;
-  if (status === "CLIP_GENERATING" || status === "CLIP_REVIEW") return 5;
-  if (status === "COMPOSING" || status === "FINAL_REVIEW") return 6;
-  if (status === "DONE" || status === "FAILED") return 7;
-  return 0;
+function taskGraphNodeCompleted(graph: ProjectTaskGraphSnapshot | undefined, nodeId: string): boolean {
+  return graph?.nodes.find((node) => node.id === nodeId)?.status === "completed";
 }
 
-function hasRunningMicroShotImage(project: VideoProject): boolean {
-  return project.shots.some((shot) => shot.microShots?.some((item) => {
-    const required = item.referenceType === "image_prompt" || item.referenceType === "mixed";
-    if (!required || item.imageUrl || item.imageStatus === "failed") return false;
-    return item.imageStatus === "running" || item.imageStatus === "pending" || !item.imageStatus || item.imageStatus === "idle";
-  }));
+function taskGraphStatusForTarget(
+  graph: ProjectTaskGraphSnapshot | undefined,
+  type: ProjectTaskGraphSnapshot["nodes"][number]["type"],
+  targetId: string,
+): ProjectTaskStatus | undefined {
+  return graph?.nodes.find((node) => node.active && node.type === type && node.targetId === targetId)?.status;
 }
 
-function hasRunningGenerationCandidate(project: VideoProject): boolean {
-  const activeStatuses = new Set(["pending", "running", "review_ready", "evaluating", "quality_retry"]);
-  return (project.generationCandidates ?? []).some((candidate) =>
-    activeStatuses.has(candidate.status)
-    && (Boolean(candidate.mediaUrl) || candidate.status === "pending" || candidate.status === "running")
-  );
+function taskGraphStatusIsWorkerActive(status?: ProjectTaskStatus | "idle"): boolean {
+  return Boolean(status && [
+    "waiting_capacity",
+    "reserved",
+    "upstream_accepted",
+    "running",
+    "quality_checking",
+    "retrying",
+  ].includes(status));
 }
 
-function hasPendingProductionWork(project: VideoProject): boolean {
-  if (project.productionState?.hasPendingJobs) return true;
-  return (project.productionJobs ?? []).some((job) =>
-    job.status === "queued" || job.status === "running"
-  );
+function taskGraphIsWorkerActive(graph?: ProjectTaskGraphSnapshot): boolean {
+  return taskGraphStatusIsWorkerActive(graph?.status);
 }
 
 function microShotImageProgress(project: VideoProject): { required: number; ready: number; running: number; failed: number; missing: number } {
-  const items = project.shots.flatMap((shot) =>
-    (shot.microShots ?? [])
-      .filter((item) => item.referenceType === "image_prompt" || item.referenceType === "mixed")
-      .map((item) => {
-        const artifactId = `segment:${shot.shotNo}:micro_shot:${item.microShotNo}:image`;
-        const selectedCandidate = (project.generationCandidates ?? []).find((candidate) =>
-          candidate.artifactId === artifactId && candidate.selected && Boolean(candidate.mediaUrl)
-        );
-        return { item, ready: Boolean(item.imageUrl || selectedCandidate?.mediaUrl) };
-      })
-  );
-  const ready = items.filter((entry) => entry.ready).length;
-  const running = items.filter((entry) => !entry.ready && entry.item.imageStatus === "running" && Boolean(entry.item.imageTaskId)).length;
-  const failed = items.filter((entry) => !entry.ready && entry.item.imageStatus === "failed").length;
+  const nodes = (project.taskGraph?.nodes ?? []).filter((node) => node.active && node.type === "micro_shot_image");
+  const ready = nodes.filter((node) => node.status === "completed").length;
+  const running = nodes.filter((node) => [
+    "waiting_capacity",
+    "reserved",
+    "upstream_accepted",
+    "running",
+    "quality_checking",
+    "retrying",
+  ].includes(node.status)).length;
+  const failed = nodes.filter((node) => node.status === "failed").length;
   return {
-    required: items.length,
+    required: nodes.length,
     ready,
     running,
     failed,
-    missing: items.length - ready - running - failed,
+    missing: nodes.length - ready - running - failed,
   };
 }
 
@@ -7295,7 +7117,17 @@ async function fetchJson(path: string, copy: Copy, init?: RequestInit): Promise<
       json = { ok: false, error: text.slice(0, 240) || copy.nonJsonServer };
     }
     ok = res.ok && json.ok;
-    if (!ok) throw new Error(json.error || copy.requestFailed(res.status));
+    if (!ok) {
+      throw new WorkflowApiError(
+        json.displayMessage?.zh || json.displayMessage?.en || json.error || copy.requestFailed(res.status),
+        json.errorCode || `HTTP_${res.status}`,
+        res.status,
+        json.category,
+        json.retryable,
+        json.recoveryAction,
+        json.displayMessage,
+      );
+    }
     return json;
   } catch (error) {
     errorType ??= error instanceof Error ? error.name : "unknown";
@@ -7341,7 +7173,8 @@ function normalizedApiRoute(path: string): string {
   return path
     .split("?")[0]
     .replace(/^\/api\/video-projects\/[^/]+/, "/api/video-projects/:projectId")
-    .replace(/\/shots\/[^/]+/, "/shots/:shotId")
+    .replace(/\/segments\/[^/]+/, "/segments/:segmentId")
+    .replace(/\/keyframes\/[^/]+/, "/keyframes/:keyframeId")
     .replace(/\/generation-candidates\/[^/]+/, "/generation-candidates/:candidateId")
     .replace(/\/(transition-references|generated-bridges)\/[^/]+/, "/$1/:artifactId");
 }

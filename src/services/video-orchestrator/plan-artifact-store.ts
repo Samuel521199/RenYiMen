@@ -1,19 +1,14 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { assertCanonicalPlanContract } from "./canonical-plan-contract";
 
 type JsonRecord = Record<string, unknown>;
+export const ARTIFACT_MIGRATION_MARKER = "__migration__:artifact_tables_v2";
+export const ARTIFACT_EXECUTION_SNAPSHOT = "__snapshot__:execution_plan_v1";
 
-export function artifactTableDualWriteEnabled(): boolean {
-  return process.env.ONE_PROMPT_ARTIFACT_TABLES_DUAL_WRITE?.trim().toLowerCase() === "true";
-}
-
-export function artifactTableReadEnabled(): boolean {
-  return process.env.ONE_PROMPT_ARTIFACT_TABLES_READ?.trim().toLowerCase() === "true";
-}
-
-export async function mirrorPlanArtifactsToTables(projectId: string, planValue: Prisma.JsonValue | JsonRecord, options?: { force?: boolean }): Promise<void> {
-  if (!options?.force && !artifactTableDualWriteEnabled()) return;
-  const plan = record(planValue);
+async function writeArtifactPlanTables(projectId: string, planValue: unknown): Promise<void> {
+  const plan = assertCanonicalPlanContract(planValue);
   const keyframes = await prisma.videoKeyframe.findMany({ where: { projectId }, select: { keyframeNo: true, imageUrl: true, status: true, locked: true } });
   const keyframeByNo = new Map(keyframes.map((item) => [item.keyframeNo, item]));
   const metadata = record(plan.artifactMetadata ?? plan.artifact_metadata);
@@ -123,52 +118,172 @@ export async function mirrorPlanArtifactsToTables(projectId: string, planValue: 
   });
 }
 
-export async function hydratePlanArtifactsFromTables(projectId: string, planValue: Prisma.JsonValue): Promise<Prisma.JsonValue> {
-  if (!artifactTableReadEnabled()) return planValue;
-  const [views, selections, prompts, reports, transitions, metadata, audio] = await Promise.all([
-    prisma.videoAnchorReferenceView.findMany({ where: { projectId }, orderBy: [{ artifactId: "asc" }, { revision: "desc" }] }),
-    prisma.videoReferenceSelectionOutput.findMany({ where: { projectId }, orderBy: [{ targetArtifactId: "asc" }, { revision: "desc" }] }),
-    prisma.videoPromptCompilation.findMany({ where: { projectId }, orderBy: [{ targetArtifactId: "asc" }, { revision: "desc" }] }),
-    prisma.videoGenerationQualityReport.findMany({ where: { projectId }, orderBy: [{ assetId: "asc" }, { revision: "desc" }] }),
-    prisma.videoTransitionReference.findMany({ where: { projectId }, orderBy: [{ artifactId: "asc" }, { revision: "desc" }] }),
-    prisma.videoArtifactMetadata.findMany({ where: { projectId }, orderBy: [{ artifactId: "asc" }, { revision: "desc" }] }),
-    prisma.videoAudioAsset.findMany({ where: { projectId, kind: "mix_config", active: true }, orderBy: { revision: "desc" }, take: 1 }),
-  ]);
-  const plan = { ...record(planValue) };
-  if (views.length) plan.consistencyReferences = latestPayloads(views, (item) => item.artifactId);
-  if (selections.length) plan.referenceSelectionOutputs = latestPayloads(selections, (item) => item.targetArtifactId);
-  if (prompts.length) plan.promptDebugArtifacts = Object.fromEntries(latestRows(prompts, (item) => item.targetArtifactId).map((item) => [item.targetArtifactId, item.payload]));
-  if (reports.length) plan.generationQualityReports = latestPayloads(reports, (item) => `${item.assetId}:${item.reportKey}`);
-  if (transitions.length) plan.transitionReferenceArtifacts = latestPayloads(transitions, (item) => item.artifactId);
-  if (metadata.length) plan.artifactMetadata = Object.fromEntries(latestRows(metadata, (item) => item.artifactId).map((item) => [item.artifactId, item.payload]));
-  if (audio[0]?.payload) plan.audioBible = audio[0].payload;
-  return JSON.parse(JSON.stringify(plan)) as Prisma.JsonValue;
+export class ArtifactAuthorityError extends Error {
+  constructor(
+    public readonly errorCode:
+      | "ARTIFACT_AUTHORITY_NOT_READY"
+      | "ARTIFACT_MIGRATION_QUARANTINED",
+    public readonly recoveryAction:
+      | "MIGRATE_ARTIFACT_TABLES"
+      | "REPAIR_PLAN_FIELDS",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ArtifactAuthorityError";
+  }
 }
 
-export async function comparePlanJsonAndArtifactTables(projectId: string, planValue: Prisma.JsonValue): Promise<{ matched: boolean; differences: string[] }> {
-  const plan = record(planValue);
-  const counts = {
-    anchorImages: records(plan.consistencyReferences ?? plan.consistency_references).length,
-    referenceViews: records(plan.consistencyReferences ?? plan.consistency_references).length,
-    selections: records(plan.referenceSelectionOutputs ?? plan.reference_selection_outputs).length,
-    prompts: Object.keys(record(plan.promptDebugArtifacts ?? plan.prompt_debug_artifacts)).length,
-    reports: records(plan.generationQualityReports ?? plan.generation_quality_reports).length,
-    transitions: records(plan.transitionReferenceArtifacts ?? plan.transition_reference_artifacts).length,
-    metadata: Object.keys(record(plan.artifactMetadata ?? plan.artifact_metadata)).length,
-    audio: Object.keys(record(plan.audioBible ?? plan.audio_bible)).length ? 1 : 0,
-  };
-  const tableCounts = {
-    anchorImages: await prisma.videoConsistencyAnchorImage.groupBy({ by: ["artifactId"], where: { projectId } }).then((items) => items.length),
-    referenceViews: await prisma.videoAnchorReferenceView.groupBy({ by: ["artifactId"], where: { projectId } }).then((items) => items.length),
-    selections: await prisma.videoReferenceSelectionOutput.groupBy({ by: ["targetArtifactId"], where: { projectId } }).then((items) => items.length),
-    prompts: await prisma.videoPromptCompilation.groupBy({ by: ["targetArtifactId"], where: { projectId } }).then((items) => items.length),
-    reports: await prisma.videoGenerationQualityReport.groupBy({ by: ["assetId", "reportKey"], where: { projectId } }).then((items) => items.length),
-    transitions: await prisma.videoTransitionReference.groupBy({ by: ["artifactId"], where: { projectId } }).then((items) => items.length),
-    metadata: await prisma.videoArtifactMetadata.groupBy({ by: ["artifactId"], where: { projectId } }).then((items) => items.length),
-    audio: await prisma.videoAudioAsset.count({ where: { projectId, kind: "mix_config" } }).then((value) => value ? 1 : 0),
-  };
-  const differences = Object.entries(counts).flatMap(([key, value]) => tableCounts[key as keyof typeof tableCounts] === value ? [] : [`${key}: planJson=${value}, tables=${tableCounts[key as keyof typeof tableCounts]}`]);
-  return { matched: differences.length === 0, differences };
+export async function commitArtifactPlan(
+  projectId: string,
+  planValue: unknown,
+): Promise<Prisma.JsonValue> {
+  const plan = assertCanonicalPlanContract(planValue);
+  await writeArtifactPlanTables(projectId, plan);
+  const snapshot = await writeExecutionSnapshot(projectId, plan, "runtime");
+  await prisma.videoProject.update({
+    where: { id: projectId },
+    data: { planJson: snapshot as Prisma.InputJsonValue },
+  });
+  return snapshot;
+}
+
+export async function readArtifactPlan(
+  projectId: string,
+  options?: { allowMissing?: boolean },
+): Promise<Prisma.JsonValue | null> {
+  const marker = await prisma.videoArtifactMetadata.findUnique({
+    where: {
+      projectId_artifactId_revision: {
+        projectId,
+        artifactId: ARTIFACT_MIGRATION_MARKER,
+        revision: 1,
+      },
+    },
+  });
+  if (marker?.status === "quarantined") {
+    throw new ArtifactAuthorityError(
+      "ARTIFACT_MIGRATION_QUARANTINED",
+      "REPAIR_PLAN_FIELDS",
+      `Project ${projectId} is quarantined because its artifact migration is incomplete.`,
+    );
+  }
+  const snapshot = await prisma.videoArtifactMetadata.findUnique({
+    where: {
+      projectId_artifactId_revision: {
+        projectId,
+        artifactId: ARTIFACT_EXECUTION_SNAPSHOT,
+        revision: 1,
+      },
+    },
+  });
+  if (!snapshot || marker?.status !== "completed") {
+    if (options?.allowMissing) return null;
+    throw new ArtifactAuthorityError(
+      "ARTIFACT_AUTHORITY_NOT_READY",
+      "MIGRATE_ARTIFACT_TABLES",
+      `Project ${projectId} has no completed artifact-table authority marker.`,
+    );
+  }
+  const payload = record(snapshot.payload);
+  const plan = record(payload.plan);
+  const expectedHash = text(payload.contentHash);
+  const actualHash = artifactContentHash(plan);
+  if (!expectedHash || expectedHash !== actualHash) {
+    throw new ArtifactAuthorityError(
+      "ARTIFACT_MIGRATION_QUARANTINED",
+      "REPAIR_PLAN_FIELDS",
+      `Project ${projectId} has an invalid artifact execution snapshot hash.`,
+    );
+  }
+  const expectedCounts = record(record(marker.payload).tableCounts);
+  const actualCounts = await artifactTableCounts(projectId);
+  if (
+    !Object.keys(expectedCounts).length
+    || stableJson(expectedCounts) !== stableJson(actualCounts)
+  ) {
+    throw new ArtifactAuthorityError(
+      "ARTIFACT_MIGRATION_QUARANTINED",
+      "REPAIR_PLAN_FIELDS",
+      `Project ${projectId} has incomplete artifact tables; expected=${stableJson(expectedCounts)}, actual=${stableJson(actualCounts)}.`,
+    );
+  }
+  return json(plan) as Prisma.JsonValue;
+}
+
+async function writeExecutionSnapshot(
+  projectId: string,
+  planValue: unknown,
+  source: "runtime" | "planJson_migration",
+): Promise<Prisma.JsonValue> {
+  const plan = json(assertCanonicalPlanContract(planValue));
+  const contentHash = artifactContentHash(plan);
+  const tableCounts = await artifactTableCounts(projectId);
+  const snapshotPayload = json({
+    schemaVersion: 1,
+    contentHash,
+    source,
+    plan,
+    tableCounts,
+    writtenAt: new Date().toISOString(),
+  });
+  await prisma.$transaction([
+    prisma.videoArtifactMetadata.upsert({
+      where: {
+        projectId_artifactId_revision: {
+          projectId,
+          artifactId: ARTIFACT_EXECUTION_SNAPSHOT,
+          revision: 1,
+        },
+      },
+      create: {
+        projectId,
+        artifactId: ARTIFACT_EXECUTION_SNAPSHOT,
+        artifactType: "execution_plan_snapshot",
+        producedByStage: "artifact_authority",
+        revision: 1,
+        status: "completed",
+        payload: snapshotPayload,
+      },
+      update: { status: "completed", payload: snapshotPayload },
+    }),
+    prisma.videoArtifactMetadata.upsert({
+      where: {
+        projectId_artifactId_revision: {
+          projectId,
+          artifactId: ARTIFACT_MIGRATION_MARKER,
+          revision: 1,
+        },
+      },
+      create: {
+        projectId,
+        artifactId: ARTIFACT_MIGRATION_MARKER,
+        artifactType: "migration_marker",
+        producedByStage: "artifact_authority",
+        revision: 1,
+        status: "completed",
+        payload: json({
+          source,
+          sourceHash: contentHash,
+          authorityHash: contentHash,
+          tableCounts,
+          authority: "artifact_tables",
+          completedAt: new Date().toISOString(),
+        }),
+      },
+      update: {
+        status: "completed",
+        payload: json({
+          source,
+          sourceHash: contentHash,
+          authorityHash: contentHash,
+          tableCounts,
+          authority: "artifact_tables",
+          completedAt: new Date().toISOString(),
+        }),
+      },
+    }),
+  ]);
+  return json(plan) as Prisma.JsonValue;
 }
 
 function latestPayloads<T extends { payload: unknown }>(rows: T[], key: (row: T) => string): Prisma.JsonValue[] {
@@ -187,3 +302,54 @@ function positiveInteger(value: unknown): number | undefined { const number = in
 function optionalNumber(value: unknown): number | undefined { const number = Number(value); return Number.isFinite(number) ? number : undefined; }
 function json(value: unknown): Prisma.InputJsonValue { return JSON.parse(JSON.stringify(value ?? {})) as Prisma.InputJsonValue; }
 function jsonArray(value: unknown): Prisma.InputJsonValue { return json(Array.isArray(value) ? value : []); }
+function artifactContentHash(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+async function artifactTableCounts(projectId: string): Promise<JsonRecord> {
+  const [
+    consistencyAnchorImages,
+    anchorReferenceViews,
+    referenceSelections,
+    promptCompilations,
+    qualityReports,
+    audioAssets,
+    transitionReferences,
+    artifactMetadata,
+  ] = await Promise.all([
+    prisma.videoConsistencyAnchorImage.count({ where: { projectId } }),
+    prisma.videoAnchorReferenceView.count({ where: { projectId } }),
+    prisma.videoReferenceSelectionOutput.count({ where: { projectId } }),
+    prisma.videoPromptCompilation.count({ where: { projectId } }),
+    prisma.videoGenerationQualityReport.count({ where: { projectId } }),
+    prisma.videoAudioAsset.count({ where: { projectId } }),
+    prisma.videoTransitionReference.count({ where: { projectId } }),
+    prisma.videoArtifactMetadata.count({
+      where: {
+        projectId,
+        artifactId: {
+          notIn: [ARTIFACT_MIGRATION_MARKER, ARTIFACT_EXECUTION_SNAPSHOT],
+        },
+      },
+    }),
+  ]);
+  return {
+    consistencyAnchorImages,
+    anchorReferenceViews,
+    referenceSelections,
+    promptCompilations,
+    qualityReports,
+    audioAssets,
+    transitionReferences,
+    artifactMetadata,
+  };
+}
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value != null && typeof value === "object") {
+    const valueRecord = value as JsonRecord;
+    return `{${Object.keys(valueRecord).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJson(valueRecord[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}

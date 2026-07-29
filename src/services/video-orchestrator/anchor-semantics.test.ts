@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assessAssetVisualSpecEligibility,
   anchorReferenceUsagePolicy,
   hasPhysicalSceneEvidence,
   isReferenceImageEligibleAnchor,
@@ -45,6 +46,50 @@ test("abstract color mood is downgraded from location to palette_mood", () => {
   assert.equal(normalized.referenceStrength, "soft");
   assert.equal(isReferenceImageEligibleAnchor(normalized), false);
   assert.equal(isVisibleEvidenceAnchor(normalized), false);
+});
+
+test("pure rendering style is made non-billable before visual-spec detailing", () => {
+  const decision = assessAssetVisualSpecEligibility(anchor({
+    id: "anchor_style_guofeng",
+    type: "style",
+    displayNameZh: "国风风格",
+    descriptionZh: "传统国风插画、工笔线条与水墨配色",
+    needsReferenceImage: true,
+    referenceStrength: "hard",
+    assetImageContract: undefined,
+  }));
+  assert.equal(decision.eligible, false);
+  assert.equal(decision.reason, "rendering_style_only");
+  assert.equal(decision.anchor.needsReferenceImage, false);
+  assert.equal(decision.anchor.referenceStrength, "soft");
+});
+
+test("colorful abstract background is downgraded before it can enter the paid queue", () => {
+  const decision = assessAssetVisualSpecEligibility(anchor({
+    id: "anchor_bg",
+    type: "location",
+    displayNameZh: "彩色背景",
+    descriptionZh: "高饱和渐变色块与模糊光斑，不包含实体空间",
+    needsReferenceImage: true,
+    assetImageContract: undefined,
+  }));
+  assert.equal(decision.eligible, false);
+  assert.equal(decision.reason, "palette_or_mood_only");
+  assert.equal(decision.anchor.type, "palette_mood");
+  assert.equal(decision.anchor.needsReferenceImage, false);
+});
+
+test("visible identity assets remain eligible for visual-spec detailing", () => {
+  const decision = assessAssetVisualSpecEligibility(anchor({
+    id: "hero",
+    type: "person",
+    displayNameEn: "Hero",
+    descriptionEn: "The recurring hero character.",
+    needsReferenceImage: true,
+    assetImageContract: undefined,
+  }));
+  assert.equal(decision.eligible, true);
+  assert.equal(decision.reason, "eligible_visible_asset");
 });
 
 test("a physical scene with stable geometry remains a scene-layout anchor", () => {

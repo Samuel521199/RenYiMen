@@ -1,6 +1,5 @@
 import { logOnePromptVideo } from "./logger";
 import type { ReferenceOrientation, SelectableReferenceCandidate } from "./reference-selector";
-import { onePromptRolloutEnabled } from "./rollout-flags";
 import {
   readProductionCircuit,
   recordProductionCircuitFailure,
@@ -244,7 +243,6 @@ export async function enrichReferenceCandidatesWithVision(params: {
 }
 
 function referenceVisionEvaluationEnabled(): boolean {
-  if (!onePromptRolloutEnabled("ONE_PROMPT_REFERENCE_SELECTOR_V2")) return false;
   if (process.env.ONE_PROMPT_REFERENCE_VISION_EVAL?.trim().toLowerCase() === "false") return false;
   return Boolean(process.env.DASHSCOPE_API_KEY || process.env.BAILIAN_API_KEY || process.env.ALIYUN_API_KEY);
 }

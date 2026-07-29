@@ -1,0 +1,265 @@
+{
+  "generatedAt": "2026-07-28T18:19:48.767Z",
+  "liveModel": true,
+  "report": {
+    "sampleId": "tongits-king-route-v1",
+    "runCount": 20,
+    "expectedRoute": {
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological"
+    },
+    "categoryConsistencyRate": 1,
+    "templateConsistencyRate": 1,
+    "chronologyConsistencyRate": 1,
+    "p50ApiWaitDurationMs": 6177,
+    "p95ApiWaitDurationMs": 8001,
+    "maximumOutputBytes": 1177,
+    "normalRepairCallCount": 0,
+    "checkpointRecoveryModelCallCount": 0,
+    "thresholds": {
+      "categoryConsistencyRate": 0.95,
+      "templateConsistencyRate": 0.9,
+      "chronologyConsistencyRate": 0.95,
+      "p50ApiWaitDurationMs": 8000,
+      "p95ApiWaitDurationMs": 15000,
+      "maximumOutputBytes": 2048,
+      "normalRepairCallCount": 0,
+      "checkpointRecoveryModelCallCount": 0
+    },
+    "passed": true
+  },
+  "runs": [
+    {
+      "runNo": 1,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 8703,
+      "outputBytes": 1177,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 2,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6306,
+      "outputBytes": 955,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 3,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6073,
+      "outputBytes": 931,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 4,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6185,
+      "outputBytes": 918,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 5,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6034,
+      "outputBytes": 925,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 6,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6305,
+      "outputBytes": 958,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 7,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6295,
+      "outputBytes": 968,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 8,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6388,
+      "outputBytes": 964,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 9,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 8001,
+      "outputBytes": 1142,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 10,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6177,
+      "outputBytes": 972,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 11,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6365,
+      "outputBytes": 958,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 12,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6269,
+      "outputBytes": 965,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 13,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6051,
+      "outputBytes": 964,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 14,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6388,
+      "outputBytes": 931,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 15,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6039,
+      "outputBytes": 931,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 16,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 5943,
+      "outputBytes": 956,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 17,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6113,
+      "outputBytes": 964,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 18,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6097,
+      "outputBytes": 964,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 19,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6082,
+      "outputBytes": 930,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 20,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 6138,
+      "outputBytes": 908,
+      "repairCallCount": 0,
+      "modelCallCount": 1,
+      "checkpointReused": false
+    },
+    {
+      "runNo": 21,
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological",
+      "apiWaitDurationMs": 0,
+      "outputBytes": 0,
+      "repairCallCount": 0,
+      "modelCallCount": 0,
+      "checkpointReused": true
+    }
+  ]
+}

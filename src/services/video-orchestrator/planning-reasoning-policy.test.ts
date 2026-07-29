@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { jsonStageReasoningPolicy } from "./three-stage-planner";
+import {
+  jsonStageReasoningPolicy,
+  shouldStreamJsonStage,
+} from "./three-stage-planner";
 
 const root = process.cwd();
 
@@ -52,4 +55,13 @@ test("stream telemetry separates transport, reasoning, and answer latency", asyn
   assert.match(planner, /firstAnswerChunkMs/);
   assert.match(planner, /reasoning_content/);
   assert.match(planner, /firstChunkMs:\s*firstAnswerChunkMs/);
+});
+
+test("reference fact extraction and every JSON syntax repair use non-streaming responses", () => {
+  assert.equal(shouldStreamJsonStage("reference_fact_extractor", true), false);
+  assert.equal(shouldStreamJsonStage("json_repair_reference_fact_extractor", true), false);
+  assert.equal(shouldStreamJsonStage("json_repair_shot_decomposer_s3", true), false);
+  assert.equal(shouldStreamJsonStage("json_repair_planning_architect", true), false);
+  assert.equal(shouldStreamJsonStage("planning_architect", true), true);
+  assert.equal(shouldStreamJsonStage("planning_architect", false), false);
 });

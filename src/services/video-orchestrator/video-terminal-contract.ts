@@ -38,14 +38,6 @@ export interface CompiledHappyHorsePrompt {
 export type Wan27PromptInput = HappyHorsePromptInput;
 export type CompiledWan27Prompt = CompiledHappyHorsePrompt;
 
-export interface LegacyVideoPromptContractInput {
-  terminalState: string;
-  motionPath: string;
-  preserveRequirements: string[];
-  narrativeBoundary: string;
-  shotIntent: string;
-}
-
 const HAPPYHORSE_PROMPT_BUDGET = 4200;
 
 export function resolveEndFrameRequirementLevel(value: unknown): EndFrameRequirementLevel {
@@ -111,37 +103,6 @@ export function videoPromptContractFromUnknown(value: unknown): VideoPromptContr
     ),
     narrativeBoundary: stringValue(contractSource.narrativeBoundary ?? contractSource.narrative_boundary),
     shotIntent: stringValue(contractSource.shotIntent ?? contractSource.shot_intent),
-  };
-}
-
-/**
- * Compatibility only for plans created before video-prompt-contract-v1.
- * It wraps complete existing contract fields without selecting, summarizing,
- * deduplicating, or truncating their meaning.
- */
-export function buildLegacyVideoPromptContract(input: LegacyVideoPromptContractInput): VideoPromptContract {
-  return {
-    version: "video-prompt-contract-v1",
-    terminalRequirements: [{
-      requirementId: "legacy.complete_terminal_state",
-      priority: "hard",
-      observableFact: input.terminalState,
-      acceptanceCriteria: "The final stable frames visibly satisfy the complete approved terminal state.",
-      evidenceRefs: [{
-        type: "approved_end_frame",
-        id: "legacy.approved_end_frame",
-      }],
-      source: "approved_end_frame",
-      sources: ["approved_end_frame"],
-    }],
-    motionSteps: input.motionPath ? [input.motionPath] : [],
-    preserveRequirements: input.preserveRequirements,
-    forbiddenOutcomes: [
-      "No cut, dissolve, teleportation, scene replacement, pasted still, or inserted freeze-frame.",
-      "No subtitles, captions, watermarks, timecodes, random letters, lyrics, or unrequested UI.",
-    ],
-    narrativeBoundary: input.narrativeBoundary,
-    shotIntent: input.shotIntent,
   };
 }
 

@@ -12,6 +12,7 @@ import type {
   GenerationQualityReport,
   NarrativeEvent,
   OnePromptVideoPlan,
+  PlanValidationIssue,
   PlanVideoProjectInput,
   PromptDebugArtifact,
   ReferenceSelectionOutput,
@@ -31,7 +32,6 @@ import type {
   VideoPlanningManifest,
   VideoSceneContract,
   VideoPlanSegment,
-  VideoPlanShot,
   VideoPromptDetailPlan,
   VideoStyleBible,
   VideoStoryBeat,
@@ -43,7 +43,95 @@ import type {
   VideoShotGroupingPass,
   VideoTimelineBlueprintSegment,
 } from "./types";
+import {
+  defaultCategoryForTemplate,
+  deterministicTemplateForCategory,
+  resolveCategoryTemplateMapping,
+} from "./planning-route-mapping";
+import { resolveChronologyHookPolicy } from "./planning-chronology-policy";
+import { buildPlanningRouteInput } from "./planning-route-input-contract";
+import {
+  PLANNING_ROUTE_MODEL_CALL_POLICY,
+  PlanningRouteModelCallError,
+  buildPlanningRouteChatRequest,
+  buildPlanningRouteUserPrompt,
+  createOpenAiCompatiblePlanningRouteTransport,
+  runPlanningRouteModelCall,
+} from "./planning-route-model-call";
+import {
+  ROUTE_CLASSIFICATION_STAGE_CONTRACT_VERSION,
+  createManualLockedRouteClassificationCheckpoint,
+  createModelRouteClassificationCheckpoint,
+  decideRouteCheckpointReuse,
+  routeReferenceFactFingerprint,
+  routeUserInputFingerprint,
+  type RouteClassificationCheckpoint,
+} from "./planning-route-checkpoint";
+import {
+  comparePlanningRouteContracts,
+} from "./planning-route-invalidation";
+import {
+  createPlanningRouteLogRecord,
+  type PlanningRouteLogEvent,
+} from "./planning-route-telemetry";
+import {
+  assertRouteContractIsSoleAuthority,
+  decidePlanningRouteRollout,
+} from "./planning-route-rollout";
+import {
+  PLANNING_ARCHITECT_ROUTE_LOCK_RULES,
+  applyApprovedRouteToPlanningArchitectOutput,
+  approvedRouteContractForPlanningArchitect,
+  mirrorApprovedRouteToCreativeStrategy,
+  mirrorApprovedRouteToFinalPlan,
+  PlanningArchitectRouteConflictError,
+  type ApprovedPlanningRouteContract,
+} from "./planning-route-planning-architect";
 import { createVideoPlan } from "./planner";
+import {
+  advanceStructuredFailureState,
+  formatStructuredContractIssues,
+  shouldStopStructuredFailureRetry,
+  structuredContractIssueFingerprint,
+  structuredStageJsonSchema,
+  validateStructuredStageValue,
+  type StructuredContractIssue,
+  type StructuredFailureState,
+  type StructuredStageContract,
+} from "./structured-stage-contract";
+import {
+  segmentCameraMotionTypes,
+  segmentShotDecomposerContract,
+  segmentShotDecomposerExample,
+  type SegmentShotDecomposerOutput,
+} from "./segment-shot-decomposer-contract";
+import {
+  localizeChineseDisplayFields,
+  prepareEnglishOnlyModelRequestBody,
+} from "./local-translation";
+import { JsonStageStreamAssembler } from "./json-stage-stream-assembler";
+import {
+  repairJsonDeterministically,
+  validateJsonRepairSemanticPreservation,
+} from "./deterministic-json-repair";
+import {
+  referenceFactContract,
+  referenceFactsPromptExampleJson,
+} from "./reference-fact-contract";
+import {
+  buildJsonSyntaxRepairUserPrompt,
+  JSON_SYNTAX_REPAIR_SYSTEM_PROMPT,
+  jsonSyntaxRepairModel,
+} from "./json-syntax-repair-contract";
+import {
+  isStructuredOutputSyntaxError,
+  StructuredOutputSyntaxError,
+} from "./structured-output-error";
+import {
+  jsonParseErrorDiagnostic,
+  structuredContentDiagnostic,
+  structuredContentDiff,
+} from "./structured-output-diagnostics";
 import {
   deriveCanonicalBoundaryContracts,
   validateBoundaryContracts,
@@ -57,12 +145,18 @@ import {
   type AssetImageContractIssue,
 } from "./asset-image-contract";
 import {
+  assessAssetVisualSpecEligibility,
   isReferenceImageEligibleAnchor,
   isVisibleEvidenceAnchor,
   normalizeAnchorSemantics,
 } from "./anchor-semantics";
+import {
+  adjudicateConsistencyAnchorCandidates,
+  type AnchorAdmissionResult,
+} from "./anchor-admission";
+import { normalizePlayingCardContract } from "./playing-card-contract";
 import { errorForLog, logOnePromptVideo } from "./logger";
-import { assertPlanValidForGeneration } from "./plan-validator";
+import { assertPlanValidForGeneration, validateOnePromptVideoPlan } from "./plan-validator";
 import { repairMotionfulEndpointContracts } from "./frame-contract";
 import { auditSingleTakePlan, type SingleTakeAuditResult } from "./single-take-audit";
 import { deriveCameraGraphFromStoryboardBrief } from "./camera-graph";
@@ -87,9 +181,23 @@ import {
   requiredStoryFunctionsForTemplate,
   validatePlanningNarrativeContract,
   validateStoryboardStoryContract,
+  type PlanningNarrativeContractIssue,
   type PlanningNarrativeContractResult,
   type StoryContractGateResult,
 } from "./story-contract-gate";
+import {
+  applyCreativeStrategyPatches,
+  applyEventAuthorityToCreativeStrategy,
+  applyEventStoryFunctionPatches,
+  creativeStrategyBindingFingerprint,
+  deterministicLegacyOrderFallback,
+  materializeNarrativeEventStoryFunctions,
+  planningContractIssueFingerprint,
+  shouldEscalatePlanningContractRepair,
+  type CreativeStrategyPatch,
+  type EventStoryFunctionPatch,
+  type PlanningContractRepairAttempt,
+} from "./planning-narrative-authority";
 import {
   acquireProviderCapacity,
   releaseProviderLeaseByToken,
@@ -124,6 +232,7 @@ const MAX_SINGLE_TAKE_REVISIONS = 3;
 const MAX_STORY_QUALITY_REWRITES = 2;
 const MAX_JSON_REPAIR_INPUT_CHARS = 60000;
 const DEFAULT_JSON_STAGE_TIMEOUT_MS = 180000;
+const REFERENCE_FACT_STAGE_MAX_ATTEMPTS = 2;
 const referenceFactCache = new Map<string, Promise<unknown>>();
 
 const STRUCTURED_REPAIR_EXECUTION_RULES = `
@@ -247,18 +356,6 @@ const STORY_TEMPLATE_DEFINITIONS: Record<VideoCreativeTemplateId, {
   },
 };
 
-const JSON_REPAIR_SYSTEM_PROMPT = `You are a strict JSON repair tool.
-
-Return only valid JSON. No markdown, explanations, comments, or extra text.
-
-Your job:
-- Fix syntax errors in the provided JSON-like text.
-- Preserve all semantic content, keys, arrays, objects, strings, numbers, and booleans as much as possible.
-- Do not invent new story content.
-- Do not translate values.
-- If a value is truncated or impossible to recover, close the nearest valid object/array conservatively.
-- Output one complete JSON object.`;
-
 const STORY_QUALITY_REWRITE_SYSTEM_PROMPT = `You are Story Quality Rewrite Planner for a controllable AI video pipeline.
 
 Return only valid JSON. No markdown, explanations, comments, or extra text.
@@ -325,10 +422,10 @@ Return only valid JSON. No markdown, explanations, or comments.
 
 Your only job in stage 1:
 - Understand the user's video task.
-- First choose video_category, template_id, and chronology_mode. Then construct the causal narrative_events. Only after the event chain exists, derive creative_strategy hook, conflict, turning point, payoff, and CTA from those events. Creative prose must summarize bound events and must never invent a second story.
-- Route the task to exactly one initial template_id: game_reversal, game_bonus_payoff, product_problem_solution, ecommerce_offer_conversion, food_sensory_reaction, auto_performance_hero, short_drama_conflict_twist, or generic_brand_story.
+- Accept approved_route_contract as immutable. Do not choose video_category, template_id, chronology_mode, or Hook policy.
+- Construct causal narrative_events from the approved route. Only after the event chain exists, derive creative_strategy hook, conflict, turning point, payoff, and CTA from those events. Creative prose must summarize bound events and must never invent a second story.
 - Do not use game-only semantics such as bonus, jackpot, opponent shock, cards, coins, leaderboard, or win streak unless video_category is game.
-- If category is uncertain, choose generic_brand_story and write fallback_reason_zh.
+- If approved_route_contract conflicts with immutable input, return route_contract_error. Never select another template or private fallback.
 - First decompose the task into narrative_events before deciding the segment timeline.
 - Bind every creative function to narrative_events through hook_event_ids, conflict_event_ids, turning_point_event_ids, payoff_event_ids, and cta_event_ids.
 - Default chronology_mode to chronological. In chronological mode, the hook may establish a pain point, curiosity gap, or partial tease, but it must not fully reveal the turning point, payoff, reward, solution, victory, or final product state.
@@ -374,7 +471,8 @@ Hard rules:
 - For a person anchor, asset_image_contract must request exactly one character, one requested view, centered and clearly visible on a plain white or light-neutral studio background. It must explicitly forbid scenery, decorative backgrounds, text, titles, logos, UI, frames, collages, and duplicate people.
 - Reference images may contain a finished poster or advertisement. Extract the anchor's stable identity only; never copy the reference image's background, typography, logo placement, framing, or full composition into a person asset prompt.
 - Scene/location anchors may describe the environment. Brand-visual anchors may describe approved logos or typography. Do not leak those elements into person, prop, or product asset prompts unless they are an intrinsic part of that asset.
-- Every narrative_event must include event_id, dramatic_goal, participants, location_id, initial_state, action, resulting_state, required_anchor_ids, previous_event_ids, and must_become_separate_segment.
+- Every narrative_event must include event_id, story_functions, dramatic_goal, participants, location_id, initial_state, action, resulting_state, required_anchor_ids, previous_event_ids, and must_become_separate_segment.
+- story_functions is the authoritative source for hook, conflict, turning_point, payoff, and CTA event bindings. Assign only responsibilities visibly supported by the event. Adjacent functions may share one event.
 - previous_event_ids must only reference earlier narrative_events.
 - required_anchor_ids must exist in consistency_manifest. If you discover a needed anchor, add it to consistency_manifest before referencing it.
 - Every candidate_timeline segment and every planning_manifest.timeline_blueprint segment must include source_event_ids.
@@ -386,7 +484,7 @@ Hard rules:
 - In chronological mode keep hook, conflict, turning_point, payoff, and CTA in nondecreasing event order whenever those functions apply. Adjacent functions may bind the same observable event when one action legitimately carries both roles (for example, one decisive card play can be both conflict and turning_point). Reject only actual reversal. Strategy event bindings, narrative_events, and timeline source_event_ids must describe one identical causal chain. The dedicated chronological hook rules still forbid hook/turning-point overlap and a full payoff reveal.
 - Emit the top-level sections in the dependency order shown below: classification, consistency_manifest, narrative_events, creative_strategy, narrative_micro_rules, anchor_state_timeline, audio_bible, candidate_timeline, planning_manifest.
 - classification is the single source of truth for video_type, video_category, template_id, template_reason_zh, chronology_mode, and fallback_reason_zh. Do not duplicate those fields inside creative_strategy.
-- Finish the anchor registry and causal narrative_events before emitting creative_strategy. Every creative_strategy event ID must reference an event already emitted above.
+- Finish the anchor registry and causal narrative_events before emitting creative_strategy. Every creative_strategy event ID must reference an event already emitted above. The application deterministically derives those event IDs from narrative_events.story_functions; any compatibility event ID fields you emit must exactly match that derivation.
 
 Return this JSON shape:
 {
@@ -464,6 +562,7 @@ Return this JSON shape:
   "narrative_events": [
     {
       "event_id": "event_1",
+      "story_functions": ["hook", "conflict"],
       "dramatic_goal": "",
       "participants": [],
       "location_id": "",
@@ -672,7 +771,7 @@ Return only valid JSON. No markdown, explanations, or comments.
 
 Rules:
 - Preserve narrative_events, planning_manifest.timeline_blueprint, candidate_timeline, anchors, durations, segment numbers, and source_event_ids exactly.
-- Return one complete creative_strategy object.
+- Return only whitelisted JSON patches. Never return a complete creative_strategy object.
 - Creative prose must summarize only its bound event_ids.
 - Default chronological stories must keep hook, conflict, turning point, payoff, and CTA in nondecreasing event order. Adjacent functions may share one observable event; do not invent a second event merely to make their IDs different. Reject only actual reversal. Hook/turning-point overlap and a full chronological hook reveal remain forbidden.
 - In chronological mode, hook_event_ids and turning_point_event_ids must not overlap, and hook_reveal_level cannot be full.
@@ -682,7 +781,43 @@ Rules:
 
 Return:
 {
-  "creative_strategy": {}
+  "patches": [
+    {
+      "op": "replace",
+      "path": "/conflict_event_ids",
+      "value": ["event_1"]
+    }
+  ]
+}`;
+
+const PLANNING_EVENT_ROLE_REPLAN_SYSTEM_PROMPT = `You repair only narrative_event story responsibilities.
+
+Return only valid JSON. No markdown, explanations, or comments.
+
+Rules:
+- narrative_events are the factual source of truth. Preserve event_id, order, dramatic_goal, participants, location_id, initial_state, action, resulting_state, anchors, and previous_event_ids exactly.
+- timeline_blueprint is immutable. Never add, delete, reorder, split, or merge an event or segment.
+- Reclassify only story_functions so the derived hook, conflict, turning_point, payoff, and CTA bindings follow the declared chronology.
+- Adjacent story functions may share one observable event.
+- Do not force a role onto an event whose visible action and result cannot support it.
+- creative_strategy_patches may update only the prose or hook/chronology fields made stale by the role correction.
+- Use only event_id values supplied in narrative_events.
+
+Return:
+{
+  "event_story_function_patches": [
+    {
+      "event_id": "event_1",
+      "story_functions": ["conflict"]
+    }
+  ],
+  "creative_strategy_patches": [
+    {
+      "op": "replace",
+      "path": "/conflict_zh",
+      "value": ""
+    }
+  ]
 }`;
 
 const STORYBOARD_ARTIST_SYSTEM_PROMPT = `You are Storyboard Artist for a controllable AI video pipeline.
@@ -921,19 +1056,24 @@ const PLANNING_ARCHITECT_LITE_SYSTEM_PROMPT = `You are Planning Architect Lite f
 Return only valid JSON. No markdown, explanations, or comments.
 
 Your only responsibilities:
-- Classify the video and select exactly one supported template.
-- Build chronological, causally linked narrative_events before deriving creative_strategy.
-- Discover a compact consistency anchor registry containing stable identity facts only.
+- Accept approved_route_contract as immutable routing authority.
+- Build causally linked narrative_events consistent with approved_route_contract.chronologyMode before deriving creative_strategy.
+- Propose a compact set of consistency anchor candidates containing stable identity facts only. The system, not you, makes the final admission decision.
 - Allocate an executable 3-15 second segment timeline whose durations sum exactly to duration_seconds.
 - Output narrative_micro_rules, anchor_state_timeline, audio_bible, and planning_manifest.
 
 Do not output asset_image_contract, image_prompt_zh, image_prompt_en, narrative keyframes, storyboard beats, camera graphs, micro-shots, or generation prompts. Asset visual specifications are produced later by independent per-anchor workers.
 
 Hard rules:
+- Do not decide video_category, template_id, chronology_mode, hook_mode, hook_reveal_level, or requires_return_point. Mirror them from approved_route_contract.
+- If approved_route_contract conflicts with immutable input, return route_contract_error; never change the route or silently choose another template.
 - Every narrative_event has event_id, dramatic_goal, participants, location_id, initial_state, action, resulting_state, required_anchor_ids, previous_event_ids, and must_become_separate_segment.
 - previous_event_ids reference only earlier events. Every required_anchor_id exists in consistency_manifest.
-- Every anchor has id, type, display names, stable descriptions, visual_lock, must_stay_consistent, needs_reference_image, reference_strength, applies_to, and user_editable.
+- Every candidate anchor has id, type, display names, stable descriptions, visual_lock, must_stay_consistent, needs_reference_image, reference_strength, applies_to, user_editable, candidate_category, source_evidence, used_by_event_ids, lock_dimensions, suggested_as_anchor, and candidate_reason.
 - Anchor descriptions contain stable visible identity only, never event-specific composition or action.
+- One-off decorations such as leaves, petals, particles, smoke, mist, bokeh, light flares, and ordinary background accents are event-local elements by default. Do not suggest them as consistency anchors unless the user explicitly requires exact continuity.
+- Suggest an anchor only when it is reused across events, explicitly required by the user/reference facts, is a core person/product/brand/task object, is a persistent physical scene/layout, or has exact text/markings/geometry whose fidelity determines success.
+- source_evidence must identify why the candidate exists and cite relevant event_ids. used_by_event_ids is a model estimate only; deterministic code recomputes it from narrative_events.
 - Every timeline segment contains segment_no, start/end/duration, source_event_ids, required_anchor_ids, duration_reason_zh, minimum_executable_seconds, preferred_duration_seconds, maximum_useful_seconds, and timing_budget.
 - timing_budget setup/action/result sums exactly to the segment duration. All segment durations sum exactly to duration_seconds.
 - A segment is one continuous take. Space changes, time jumps, camera resets, teleports, or discontinuous object states require a real segment boundary.
@@ -960,6 +1100,16 @@ Return:
       "reference_strength": "hard | medium | soft",
       "description_zh": "",
       "description_en": "",
+      "candidate_category": "core_subject | brand | scene | prop | decoration | style | custom",
+      "source_evidence": [{
+        "source": "user_requirement | reference_fact | narrative_event | planner",
+        "text": "",
+        "event_ids": ["event_1"]
+      }],
+      "used_by_event_ids": ["event_1"],
+      "lock_dimensions": ["identity", "shape", "color", "markings", "text", "structure", "geometry", "space_layout"],
+      "suggested_as_anchor": true,
+      "candidate_reason": "",
       "visual_lock": {
         "shape": "",
         "material": "",
@@ -1154,6 +1304,8 @@ Rules:
 - Location and space-layout assets separately define foreground, midground, far background, and at least two directional or measurable spatial relationships.
 - Brand-visual assets preserve required logo geometry and exact approved lettering when supplied; forbid unauthorized extra copy instead of forbidding all text.
 - Preserve intrinsic markings such as card ranks, suits, labels, or camera layouts when they are part of the locked identity.
+- For a playing-card asset, also output playing_cards as the single canonical source for card count and identities, left/right order, face orientation, overlap mode/percentage, camera angle, background, and allowed intrinsic markings. Never repeat a different card identity or overlap rule in another field.
+- Playing-card field authority is resolved as user_edit > user_requirement > reference_fact > asset_contract > category_default. Category defaults fill missing fields only and never override supplied facts.
 
 Return:
 {
@@ -1194,7 +1346,26 @@ Return:
       "material_details": [],
       "intrinsic_details": [],
       "forbidden_elements": [],
-      "acceptance_criteria": []
+      "acceptance_criteria": [],
+      "playing_cards": {
+        "cards": [
+          { "rank": "A", "suit": "spades", "position": "left" },
+          { "rank": "K", "suit": "hearts", "position": "right" }
+        ],
+        "face": "face_up",
+        "overlap": { "mode": "none", "percentage": 0 },
+        "camera_angle": "top_down_orthographic",
+        "background": "plain white or light neutral studio background",
+        "allowed_markings": ["rank indices", "suit symbols"],
+        "field_authority": {
+          "cards": "asset_contract",
+          "face": "asset_contract",
+          "overlap": "asset_contract",
+          "cameraAngle": "asset_contract",
+          "background": "asset_contract",
+          "allowedMarkings": "asset_contract"
+        }
+      }
     }
   }
 }`;
@@ -1219,9 +1390,10 @@ const REFERENCE_FACT_EXTRACTOR_SYSTEM_PROMPT = `You are a reference-image fact e
 Return only valid JSON. Do not invent a story, action sequence, conflict, outcome, motivation, or CTA.
 For each image, extract only directly visible facts: people, products, objects, scene, spatial layout, readable text, brand marks, colors, lighting, and style.
 If uncertain, use an empty value and lower confidence. Never convert the image into a storyboard.
+people, products, objects, spatial_layout, readable_text, brand_marks, colors, and global_consistency_facts must each be JSON arrays of plain strings. Never place nested objects inside these arrays.
 
 Return:
-{"reference_facts":[{"image_index":1,"people":[],"products":[],"objects":[],"scene":"","spatial_layout":[],"readable_text":[],"brand_marks":[],"colors":[],"lighting":"","style":"","confidence":0.0}],"global_consistency_facts":[]}`;
+${referenceFactsPromptExampleJson}`;
 
 const SHOT_DECOMPOSER_SYSTEM_PROMPT = `You are Shot Decomposer for a controllable AI video pipeline.
 
@@ -1428,362 +1600,20 @@ Return this JSON shape:
 
 const SHOT_DECOMPOSER_SEGMENT_SYSTEM_PROMPT = `You are Segment Shot Decomposer for a controllable AI video pipeline.
 
-Return only valid JSON. No markdown, explanations, or comments.
+Return only valid JSON matching the canonical example appended below. No markdown, explanations, or comments.
 
 Your job:
-- Decompose only the target segment specified by target_segment_no.
-- Use planning_manifest_summary, target_timeline_segment, storyboard_context, and consistency anchors as the source of truth.
-- Do not rewrite story, segment timing, segment count, camera graph, anchor identity, product identity, or style rules.
-- Write this segment as one continuous unbroken camera take from keyframe N to keyframe N+1.
-- Do not describe internal cuts, dissolves, fades, montage edits, shot switches, or scene transitions inside the segment.
-- The start and end keyframes must be reachable moments in the same scene and camera setup family.
-- Include concise bilingual fields for user-visible text.
-- Set end_frame_requirement_level using hard_exact, hard_semantic, soft_directional, or editorial. Use hard_exact only when near-exact terminal composition is indispensable; otherwise prefer hard_semantic.
-- Return a complete video_prompt_contract within the same limits as the global shot decomposer: 1-3 unique terminal requirements, 1-3 unique motion steps, at most 5 preserve requirements, at most 5 forbidden outcomes, and at least one hard terminal requirement. The downstream compiler validates and serializes this contract without rewriting it, so resolve duplication and compression here.
-- For every terminal requirement, choose 1-5 evidence_refs only from allowed_terminal_evidence. Each reference contains type, id, and quote; quote may be an empty string when no short verbatim evidence is available. Do not output source or sources because application code compiles provenance from the verified evidence type.
-- Treat yourself as a structured contract compiler, not a creative writer. Use only these camera_motion.type values: static, pan, tilt, dolly_in, dolly_out, truck_left, truck_right, pedestal_up, pedestal_down, orbit, zoom_in, zoom_out, handheld_follow, crane.
-- final_transition_plan is deliberately absent from your executable input. Never invent or describe segment-to-segment editing in motion_contract, motion_steps, camera, subject_motion, micro_shots, timed_prompts, or video prompts.
-- Subtitles are editorial overlay copy. Do not ask generated images/videos to render text.
-- Use target_story_beats and target_shot_group to preserve story causality.
-- The target segment must include linked_beat_ids, story_function, emotional_beat, cause, effect, information_unit, key_evidence_ids, depends_on_beat_ids, evidence_from_beat_ids, and resolves_conflict_beat_id. Preserve the validated causal graph; never invent or replace IDs.
-- If the target segment contains a complex action, state action_continuity with motivation_or_preparation, execution, and result_or_reaction.
-- If story_function is payoff or turning_point, include reaction_beat and power_shift.
-- Before returning, perform this mandatory self-check against your own draft:
-  1. The start and end frames are reachable without a cut, teleport, scene swap, or abrupt layout change.
-  2. continuous_time is true and requires_cut is false only when the described camera, subject, and prop paths are physically executable.
-  3. motion_checkpoints and micro_shots are intermediate states of the same take, never hidden edit points.
-  4. If any check fails, simplify the action and camera path first. Only return requires_cut=true when simplification still cannot make the segment executable.
-- Keep the response limited to the target segment. Do not repeat global title, logline, style bible, camera graph, or unrelated segments.
+- Decompose only target_segment_no from the supplied planning contracts.
+- Preserve story causality, timing, camera graph, identities, products, style, anchors, evidence IDs, and boundary facts.
+- Write one physically executable, continuous camera take between keyframes N and N+1. Do not add cuts, fades, montage, scene swaps, teleports, or hidden edit points.
+- Keep bilingual display fields concise. Subtitles are editorial overlays, never text rendered into generated imagery.
+- Use only allowed_terminal_evidence. Return 1-3 unique terminal requirements, 1-3 unique motion_steps, at most 5 preserve_requirements, and at most 5 forbidden_outcomes.
+- camera_motion.type must be one of: ${segmentCameraMotionTypes.join(", ")}.
+- Simplify action and camera paths before setting requires_cut=true.
+- Return only this segment's render description, keyframes N/N+1, and segment object.
 
-Return this JSON shape, containing only the target segment, its render description, and keyframes N/N+1:
-{
-  "shot_decomposer_plan": {
-    "segment_render_descriptions": [
-      {
-        "segment_no": 1,
-        "end_frame_requirement_level": "hard_semantic",
-        "video_prompt_contract": {
-          "version": "video-prompt-contract-v1",
-          "terminal_requirements": [
-            {
-              "requirement_id": "terminal.primary_result",
-              "priority": "hard",
-              "observable_fact": "",
-              "acceptance_criteria": "",
-              "evidence_refs": [
-                {
-                  "type": "approved_end_frame",
-                  "id": "keyframe:2",
-                  "quote": ""
-                }
-              ]
-            }
-          ],
-          "motion_steps": [
-            "The character raises the playing cards into view",
-            "The playing cards move from the character's right hand to the center of the table",
-            "The camera pushes in to hold on the visible win result"
-          ],
-          "preserve_requirements": [],
-          "forbidden_outcomes": [],
-          "narrative_boundary": "",
-          "shot_intent": ""
-        },
-        "visible_anchor_ids": [],
-        "start_frame_contract": {},
-        "end_frame_contract": {},
-        "motion_contract": {
-          "version": "continuous-motion-contract-v1",
-          "subject_actions": [
-            {"subject": "", "action": ""}
-          ],
-          "camera_motion": {
-            "type": "static | pan | tilt | dolly_in | dolly_out | truck_left | truck_right | pedestal_up | pedestal_down | orbit | zoom_in | zoom_out | handheld_follow | crane",
-            "start": "",
-            "end": ""
-          },
-          "prop_paths": [
-            "The playing cards move from the character's right hand to the center of the table"
-          ],
-          "continuous_time": true
-        },
-        "single_take_contract": {
-          "continuous_time": true,
-          "requires_cut": false,
-          "risk_level": "low",
-          "camera_path": "",
-          "subject_path": "",
-          "prop_paths": []
-        },
-        "motion_checkpoints": [],
-        "requires_cut": false,
-        "risk_level": "low | medium | high",
-        "timeline_change_request": null,
-        "recommended_split": [],
-        "warnings": []
-      }
-    ],
-    "keyframes": [
-      {
-        "keyframe_no": 1,
-        "frame_id": "kf_01",
-        "frame_role": "segment_start | segment_end | video_start | video_end | shared_boundary",
-        "time_seconds": 0,
-        "purpose_zh": "",
-        "purpose_en": "",
-        "scene": "",
-        "character_state": "",
-        "product_state": "",
-        "frame_design": {},
-        "uses_consistency_anchors": [],
-        "negative_prompt": {}
-      }
-    ],
-    "segments": [
-      {
-        "segment_no": 1,
-        "start_keyframe_no": 1,
-        "end_keyframe_no": 2,
-        "start_time_seconds": 0,
-        "end_time_seconds": 5,
-        "duration_seconds": 5,
-        "boundary_mode": "continuous",
-        "purpose_zh": "",
-        "purpose_en": "",
-        "motion": "",
-        "camera": "",
-        "subject_motion": "",
-        "environment_motion": "",
-        "subtitle": "",
-        "audio_plan": {
-          "mode": "ambient",
-          "strategy": "native_ambience",
-          "needs_voiceover": false,
-          "needs_dialogue": false,
-          "language": "",
-          "speaker": "",
-          "voice_style": "",
-          "lines_zh": [],
-          "lines_en": [],
-          "exact_text_required": false,
-          "preserve_native_audio": true,
-          "sound_effects": [],
-          "background_music": {
-            "source": "post",
-            "style": "",
-            "mood": "",
-            "intensity": ""
-          },
-          "rationale": ""
-        },
-        "output_mode": "mixed",
-        "linked_beat_ids": ["beat_1"],
-        "story_function": "hook | setup | conflict | escalation | turning_point | proof | payoff | reaction | cta | cliffhanger | ending | transition | custom",
-        "emotional_beat_zh": "",
-        "cause": "",
-        "effect": "",
-        "information_unit": "",
-        "key_evidence_ids": [],
-        "depends_on_beat_ids": [],
-        "evidence_from_beat_ids": [],
-        "resolves_conflict_beat_id": "",
-        "action_continuity": {
-          "motivation_or_preparation": "",
-          "execution": "",
-          "result_or_reaction": ""
-        },
-        "reaction_beat": "",
-        "power_shift": "",
-        "constraints": [],
-        "timed_prompts": [],
-        "micro_shots": [],
-        "uses_consistency_anchors": [],
-        "negative_prompt": ""
-      }
-    ]
-  }
-}`;
-
-const SEGMENT_SHOT_DECOMPOSER_JSON_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  required: ["shot_decomposer_plan"],
-  properties: {
-    shot_decomposer_plan: {
-      type: "object",
-      additionalProperties: false,
-      required: ["segment_render_descriptions", "keyframes", "segments"],
-      properties: {
-        segment_render_descriptions: {
-          type: "array",
-          minItems: 1,
-          maxItems: 1,
-          items: {
-            type: "object",
-            additionalProperties: true,
-            required: [
-              "segment_no",
-              "end_frame_requirement_level",
-              "video_prompt_contract",
-              "start_frame_contract",
-              "end_frame_contract",
-              "motion_contract",
-              "single_take_contract",
-              "motion_checkpoints",
-              "requires_cut",
-              "risk_level",
-            ],
-            properties: {
-              segment_no: { type: "integer", minimum: 1 },
-              end_frame_requirement_level: {
-                type: "string",
-                enum: ["hard_exact", "hard_semantic", "soft_directional", "editorial"],
-              },
-              video_prompt_contract: {
-                type: "object",
-                additionalProperties: false,
-                required: [
-                  "version",
-                  "terminal_requirements",
-                  "motion_steps",
-                  "preserve_requirements",
-                  "forbidden_outcomes",
-                  "narrative_boundary",
-                  "shot_intent",
-                ],
-                properties: {
-                  version: { const: "video-prompt-contract-v1" },
-                  terminal_requirements: {
-                    type: "array",
-                    minItems: 1,
-                    maxItems: 3,
-                    items: {
-                      type: "object",
-                      additionalProperties: false,
-                      required: [
-                        "requirement_id",
-                        "priority",
-                        "observable_fact",
-                        "acceptance_criteria",
-                        "evidence_refs",
-                      ],
-                      properties: {
-                        requirement_id: { type: "string", minLength: 1 },
-                        priority: { type: "string", enum: ["hard", "soft"] },
-                        observable_fact: { type: "string", minLength: 1 },
-                        acceptance_criteria: { type: "string", minLength: 1 },
-                        evidence_refs: {
-                          type: "array",
-                          minItems: 1,
-                          maxItems: 5,
-                          items: {
-                            type: "object",
-                            additionalProperties: false,
-                            required: ["type", "id", "quote"],
-                            properties: {
-                              type: {
-                                type: "string",
-                                enum: [
-                                  "user_input",
-                                  "story_contract",
-                                  "approved_end_frame",
-                                  "planner_artifact",
-                                ],
-                              },
-                              id: { type: "string", minLength: 1 },
-                              quote: { type: "string" },
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                  motion_steps: {
-                    type: "array",
-                    minItems: 1,
-                    maxItems: 3,
-                    items: { type: "string", minLength: 1 },
-                  },
-                  preserve_requirements: {
-                    type: "array",
-                    maxItems: 5,
-                    items: { type: "string", minLength: 1 },
-                  },
-                  forbidden_outcomes: {
-                    type: "array",
-                    maxItems: 5,
-                    items: { type: "string", minLength: 1 },
-                  },
-                  narrative_boundary: { type: "string" },
-                  shot_intent: { type: "string" },
-                },
-              },
-              start_frame_contract: { type: "object" },
-              end_frame_contract: { type: "object" },
-              motion_contract: {
-                type: "object",
-                additionalProperties: false,
-                required: ["version", "subject_actions", "camera_motion", "prop_paths", "continuous_time"],
-                properties: {
-                  version: { const: "continuous-motion-contract-v1" },
-                  subject_actions: {
-                    type: "array",
-                    minItems: 1,
-                    items: {
-                      type: "object",
-                      additionalProperties: false,
-                      required: ["subject", "action"],
-                      properties: {
-                        subject: { type: "string", minLength: 1 },
-                        action: { type: "string", minLength: 1 },
-                      },
-                    },
-                  },
-                  camera_motion: {
-                    type: "object",
-                    additionalProperties: false,
-                    required: ["type", "start", "end"],
-                    properties: {
-                      type: {
-                        type: "string",
-                        enum: [
-                          "static",
-                          "pan",
-                          "tilt",
-                          "dolly_in",
-                          "dolly_out",
-                          "truck_left",
-                          "truck_right",
-                          "pedestal_up",
-                          "pedestal_down",
-                          "orbit",
-                          "zoom_in",
-                          "zoom_out",
-                          "handheld_follow",
-                          "crane",
-                        ],
-                      },
-                      start: { type: "string" },
-                      end: { type: "string" },
-                    },
-                  },
-                  prop_paths: { type: "array", items: { type: "string" } },
-                  continuous_time: { const: true },
-                },
-              },
-              single_take_contract: { type: "object" },
-              motion_checkpoints: { type: "array" },
-              requires_cut: { type: "boolean" },
-              risk_level: { type: "string", enum: ["low", "medium", "high"] },
-            },
-          },
-        },
-        keyframes: { type: "array", minItems: 2, maxItems: 2, items: { type: "object" } },
-        segments: { type: "array", minItems: 1, maxItems: 1, items: { type: "object" } },
-      },
-    },
-  },
-};
+Canonical contract example:
+${JSON.stringify(segmentShotDecomposerExample, null, 2)}`;
 
 const PROMPT_DETAILER_SEGMENT_SYSTEM_PROMPT = `You are Segment Prompt Detailer for a controllable AI video pipeline.
 
@@ -1975,23 +1805,48 @@ type JsonStageContentResult = {
   durationMs: number;
   content: string;
   rawSummary: unknown;
+  streamChunkMode: "non_stream" | "none" | "delta" | "cumulative" | "mixed";
   errorMessage?: string;
 };
 
-export type PlanningDecompositionMode = "legacy" | "split_shadow" | "split";
+export type PlanningDecompositionMode = "split";
+
+export type PlannerCheckpointStage =
+  | "reference_analysis"
+  | "route_classification"
+  | "story_architect"
+  | "asset_contract"
+  | "storyboard_artist"
+  | "story_validation"
+  | "shot_decomposition"
+  | "prompt_compilation";
 
 export interface AliyunStoryboardPlannerCheckpoint {
-  version: 11;
+  version: 14;
+  checkpointVersion: 14;
+  plannerMode: "split";
   inputFingerprint: string;
+  inputSnapshot: Record<string, unknown>;
+  completedStages: PlannerCheckpointStage[];
+  stageOutputs: Partial<Record<PlannerCheckpointStage, unknown>>;
+  contractVersions: Record<PlannerCheckpointStage, string>;
+  referenceFingerprint: string;
+  migrationAudit?: {
+    fromVersion: number;
+    toVersion: 14;
+    preservedStages: PlannerCheckpointStage[];
+    invalidatedStages: PlannerCheckpointStage[];
+    reasons: string[];
+    migratedAt: string;
+  };
   referenceFactsRaw?: unknown;
   referenceFactsFingerprint?: string;
+  routeClassification?: RouteClassificationCheckpoint;
+  approvedRouteContract?: ApprovedPlanningRouteContract;
   planningDecompositionMode?: PlanningDecompositionMode;
   planningCoreRaw?: unknown;
   assetVisualSpecsByAnchorId?: Record<string, unknown>;
   assetVisualSpecFingerprints?: Record<string, string>;
-  shadowSplitPlanningRaw?: unknown;
-  shadowSplitComparison?: Record<string, unknown>;
-  splitPlanningFallbackReason?: string;
   planningRaw?: unknown;
   assetPromptRepairRaw?: unknown;
   storyboardArtistPlan?: Record<string, unknown>;
@@ -2000,8 +1855,26 @@ export interface AliyunStoryboardPlannerCheckpoint {
   shotDecomposerSegmentPlans?: Record<string, Record<string, unknown>>;
   approvedShotDecomposerSegmentPlans?: Record<string, Record<string, unknown>>;
   promptDetailSegmentPlans?: Record<string, VideoPromptDetailPlan>;
+  finalPromptRepairAttempts?: number;
   timelineReplanAttempts?: number;
   timelineChangeHistory?: TimelineChangeRequest[];
+  planningContractRepairState?: {
+    status: "repairing" | "event_replan_required" | "passed";
+    authority: "event" | "legacy_migrated";
+    attempts: PlanningContractRepairAttempt[];
+    currentIssues: PlanningNarrativeContractIssue[];
+    lastCandidateRaw?: unknown;
+    updatedAt: string;
+  };
+  resumeFromStage?: AliyunStoryboardProgressStage;
+  lastFailure?: {
+    fingerprint: string;
+    stage: string;
+    code: string;
+    count: number;
+    invalidatedAt: string;
+  };
+  structuredFailures?: Record<string, StructuredFailureState>;
   updatedAt: string;
 }
 
@@ -2014,6 +1887,29 @@ export interface TimelineChangeRequest {
   issueCodes: string[];
   reasons: string[];
   requestedChanges: unknown[];
+}
+
+function structuredFailureCheckpointKey(
+  stage: string,
+  segment: number,
+  schemaVersion: string,
+): string {
+  return `${stage}:segment=${segment}:schema=${schemaVersion}`;
+}
+
+function contractIssuesFromStageError(error: unknown): StructuredContractIssue[] {
+  const messages = error instanceof StoryboardStageError && error.validationErrors?.length
+    ? error.validationErrors
+    : [error instanceof Error ? error.message : String(error)];
+  return messages.map((rawMessage) => {
+    const separator = rawMessage.indexOf(": ");
+    return {
+      path: separator > 0 ? rawMessage.slice(0, separator) : "$",
+      code: error instanceof StoryboardStageError ? error.code : "contract_validation_error",
+      kind: "shape",
+      message: separator > 0 ? rawMessage.slice(separator + 2) : rawMessage,
+    };
+  });
 }
 
 export class TimelineReplanRequiredError extends Error {
@@ -2096,8 +1992,28 @@ const plannerProgressStorage = new AsyncLocalStorage<{
   schedulingContext?: Omit<ProviderSchedulingContext, "targetId">;
 }>();
 
-const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 11 as const;
-const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-28-evidence-motion-contract-v1";
+const STORYBOARD_PLANNER_CHECKPOINT_VERSION = 14 as const;
+const STORYBOARD_PLANNER_CONTRACT_REVISION = "2026-07-29-approved-route-contract-v1";
+const PLANNER_CHECKPOINT_STAGE_ORDER: readonly PlannerCheckpointStage[] = [
+  "reference_analysis",
+  "route_classification",
+  "story_architect",
+  "asset_contract",
+  "storyboard_artist",
+  "story_validation",
+  "shot_decomposition",
+  "prompt_compilation",
+];
+const PLANNER_CHECKPOINT_CONTRACT_VERSIONS: Record<PlannerCheckpointStage, string> = {
+  reference_analysis: "reference-facts-v1",
+  route_classification: ROUTE_CLASSIFICATION_STAGE_CONTRACT_VERSION,
+  story_architect: "story-architect-v3-approved-route",
+  asset_contract: "asset-contract-v2",
+  storyboard_artist: "storyboard-artist-v2",
+  story_validation: "story-validation-v2",
+  shot_decomposition: "shot-decomposition-v2",
+  prompt_compilation: "canonical-execution-contract-v2",
+};
 
 export async function createAliyunStoryboardPlan(
   input: PlanVideoProjectInput,
@@ -2113,21 +2029,70 @@ export async function createAliyunStoryboardPlan(
   );
 }
 
+export function applyManualPlanningRouteClassification(params: {
+  checkpoint: AliyunStoryboardPlannerCheckpoint;
+  input: PlanVideoProjectInput;
+  referenceFactsRaw: unknown;
+  routeContract: ApprovedPlanningRouteContract;
+  editorName?: string;
+  now?: string;
+}): AliyunStoryboardPlannerCheckpoint {
+  const previousRouteContract =
+    params.checkpoint.routeClassification?.routeContract
+    ?? params.checkpoint.approvedRouteContract;
+  const routeChanges = comparePlanningRouteContracts(
+    previousRouteContract,
+    params.routeContract,
+  );
+  const routeInput = buildPlanningRouteInputForArchitect(
+    params.input,
+    params.referenceFactsRaw,
+  );
+  params.checkpoint.routeClassification =
+    createManualLockedRouteClassificationCheckpoint({
+      routeContract: params.routeContract,
+      userInputFingerprint: routeUserInputFingerprint({
+        userCreative: params.input.userPrompt,
+        explicitRouteConstraints: routeInput.userConstraints,
+      }),
+      referenceFactFingerprint: routeReferenceFactFingerprint(
+        routeInput.referenceFacts,
+      ),
+      editorModelName: params.editorName,
+      previous: params.checkpoint.routeClassification,
+      now: params.now,
+    });
+  params.checkpoint.approvedRouteContract =
+    params.checkpoint.routeClassification.routeContract;
+  if (routeChanges.invalidateProductionContent) {
+    invalidatePlanningContentAfterRoute(params.checkpoint);
+  }
+  synchronizeCheckpointV14Fields(params.checkpoint);
+  params.checkpoint.updatedAt =
+    params.now ?? params.checkpoint.routeClassification.updatedAt;
+  return params.checkpoint;
+}
+
 async function buildSplitPlanningRaw(params: {
   input: PlanVideoProjectInput;
   modelName: string;
   referenceFactsRaw: unknown;
+  approvedRouteContract: ApprovedPlanningRouteContract;
   fallback: OnePromptVideoPlan;
   checkpoint: AliyunStoryboardPlannerCheckpoint;
   onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
 }): Promise<Record<string, unknown>> {
   let planningCoreRaw = params.checkpoint.planningCoreRaw;
   if (planningCoreRaw === undefined) {
-    planningCoreRaw = await callJsonStage({
+    planningCoreRaw = await executeStructuredStage({
       stage: "planning_architect_lite",
       modelName: params.modelName,
-      systemPrompt: PLANNING_ARCHITECT_LITE_SYSTEM_PROMPT,
-      userContent: buildPlanningArchitectContent(params.input, params.referenceFactsRaw),
+      systemPrompt: `${PLANNING_ARCHITECT_LITE_SYSTEM_PROMPT}${PLANNING_ARCHITECT_ROUTE_LOCK_RULES}`,
+      userContent: buildPlanningArchitectContent(
+        params.input,
+        params.referenceFactsRaw,
+        params.approvedRouteContract,
+      ),
       temperature: 0.25,
     });
   } else {
@@ -2135,19 +2100,56 @@ async function buildSplitPlanningRaw(params: {
       inputFingerprint: params.checkpoint.inputFingerprint,
     });
   }
+  planningCoreRaw = applyApprovedRouteToPlanningArchitectOutput(
+    planningCoreRaw,
+    params.approvedRouteContract,
+  );
   planningCoreRaw = await ensurePlanningDurationContract({
     input: params.input,
     modelName: params.modelName,
     planningRaw: planningCoreRaw,
   });
-  params.checkpoint.planningCoreRaw = planningCoreRaw;
-  await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
-
   let manifest = normalizePlanningManifest(
     planningCoreRaw,
     params.input,
     params.fallback,
   );
+  const anchorCandidates = anchorCandidatesForAdmission(
+    planningCoreRaw,
+    manifest.consistencyManifest.anchors,
+  );
+  const admission = adjudicateConsistencyAnchorCandidates({
+    anchors: anchorCandidates,
+    narrativeEvents: narrativeEventsForAnchorAdmission(
+      planningCoreRaw,
+      manifest.consistencyManifest.anchors,
+    ),
+    userPrompt: params.input.userPrompt,
+  });
+  await logOnePromptVideo("aliyun.storyboard.anchor_admission.completed", {
+    candidateCount: anchorCandidates.length,
+    approvedCount: admission.approvedAnchors.length,
+    eventLocalCount: admission.eventLocalElements.length,
+    discardedCount: admission.discardedAnchorIds.length,
+    decisions: admission.decisions.map((decision) => ({
+      anchorId: decision.anchorId,
+      status: decision.status,
+      rule: decision.rule,
+      score: decision.score,
+      actualReuseCount: decision.usedByEventIds.length,
+    })),
+  });
+  planningCoreRaw = applyAnchorAdmissionToPlanningRaw(planningCoreRaw, anchorCandidates, admission);
+  params.checkpoint.planningCoreRaw = planningCoreRaw;
+  await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+
+  manifest = normalizePlanningManifest(
+    planningCoreRaw,
+    params.input,
+    params.fallback,
+  );
+  manifest.consistencyManifest.eventLocalElements = admission.eventLocalElements;
+  manifest.consistencyManifest.admissionDecisions = admission.decisions;
   manifest = await detailPlanningAssetVisualSpecs({
     input: params.input,
     modelName: params.modelName,
@@ -2172,30 +2174,131 @@ async function buildSplitPlanningRaw(params: {
   );
 }
 
-function comparePlanningDecompositionOutputs(
-  authoritativeRaw: unknown,
-  splitRaw: unknown,
-  input: PlanVideoProjectInput,
-  fallback: OnePromptVideoPlan,
+const ANCHOR_REFERENCE_ARRAY_KEYS = new Set([
+  "required_anchor_ids",
+  "requiredAnchorIds",
+  "declared_anchor_ids",
+  "declaredAnchorIds",
+  "derived_anchor_ids",
+  "derivedAnchorIds",
+  "effective_required_anchor_ids",
+  "effectiveRequiredAnchorIds",
+  "visible_anchor_ids",
+  "visibleAnchorIds",
+  "uses_consistency_anchors",
+  "usesConsistencyAnchors",
+]);
+
+function narrativeEventsForAnchorAdmission(
+  planningRaw: unknown,
+  anchors: VideoConsistencyAnchor[],
+): NarrativeEvent[] {
+  const envelope = isRecord(planningRaw) ? planningRaw : {};
+  const root = isRecord(envelope.planning_manifest)
+    ? envelope.planning_manifest
+    : isRecord(envelope.planningManifest)
+      ? envelope.planningManifest
+      : {};
+  const source = readLoose(envelope, "narrativeEvents", "narrative_events")
+    ?? readLoose(root, "narrativeEvents", "narrative_events")
+    ?? [];
+  return normalizeNarrativeEvents(source, {
+    warnings: [],
+    anchorIds: new Set(anchors.map((anchor) => anchor.id)),
+  });
+}
+
+function anchorCandidatesForAdmission(
+  planningRaw: unknown,
+  fallbackAnchors: VideoConsistencyAnchor[],
+): VideoConsistencyAnchor[] {
+  const envelope = isRecord(planningRaw) ? planningRaw : {};
+  const topManifest = isRecord(envelope.consistency_manifest)
+    ? envelope.consistency_manifest
+    : isRecord(envelope.consistencyManifest)
+      ? envelope.consistencyManifest
+      : {};
+  const planningManifest = isRecord(envelope.planning_manifest)
+    ? envelope.planning_manifest
+    : isRecord(envelope.planningManifest)
+      ? envelope.planningManifest
+      : {};
+  const nestedManifest = isRecord(planningManifest.consistency_manifest)
+    ? planningManifest.consistency_manifest
+    : isRecord(planningManifest.consistencyManifest)
+      ? planningManifest.consistencyManifest
+      : {};
+  const storedCandidates = topManifest.anchor_candidates
+    ?? topManifest.anchorCandidates
+    ?? nestedManifest.anchor_candidates
+    ?? nestedManifest.anchorCandidates;
+  const normalized = normalizeAnchors(storedCandidates);
+  return normalized.length ? normalized : fallbackAnchors;
+}
+
+function scrubRejectedAnchorReferences(value: unknown, rejectedIds: Set<string>): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => {
+        if (!isRecord(item)) return true;
+        const anchorId = stringOr(item.anchorId ?? item.anchor_id, "");
+        return !anchorId || !rejectedIds.has(anchorId);
+      })
+      .map((item) => scrubRejectedAnchorReferences(item, rejectedIds));
+  }
+  if (!isRecord(value)) return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (ANCHOR_REFERENCE_ARRAY_KEYS.has(key) && Array.isArray(item)) {
+      result[key] = item.filter((anchorId) => typeof anchorId !== "string" || !rejectedIds.has(anchorId));
+      continue;
+    }
+    result[key] = scrubRejectedAnchorReferences(item, rejectedIds);
+  }
+  return result;
+}
+
+function applyAnchorAdmissionToPlanningRaw(
+  planningRaw: unknown,
+  candidates: VideoConsistencyAnchor[],
+  admission: AnchorAdmissionResult,
 ): Record<string, unknown> {
-  const authoritative = normalizePlanningManifest(authoritativeRaw, input, fallback);
-  const split = normalizePlanningManifest(splitRaw, input, fallback);
+  const rejectedIds = new Set(admission.decisions
+    .filter((decision) => decision.status !== "approved")
+    .map((decision) => decision.anchorId));
+  const scrubbed = scrubRejectedAnchorReferences(
+    assemblePlanningAssetSpecs(planningRaw, admission.approvedAnchors),
+    rejectedIds,
+  );
+  const envelope = isRecord(scrubbed) ? scrubbed : {};
+  const topManifest = isRecord(envelope.consistency_manifest)
+    ? envelope.consistency_manifest
+    : {};
+  const planningManifest = isRecord(envelope.planning_manifest)
+    ? envelope.planning_manifest
+    : {};
+  const nestedManifest = isRecord(planningManifest.consistency_manifest)
+    ? planningManifest.consistency_manifest
+    : {};
   return {
-    version: "planning-decomposition-shadow-v1",
-    authoritativeSegmentCount: authoritative.timelineBlueprint.segmentCount,
-    splitSegmentCount: split.timelineBlueprint.segmentCount,
-    authoritativeAnchorCount: authoritative.consistencyManifest.anchors.length,
-    splitAnchorCount: split.consistencyManifest.anchors.length,
-    authoritativeAssetIssueCount: validatePlanningAssetImageContracts(
-      authoritative.consistencyManifest.anchors,
-    ).length,
-    splitAssetIssueCount: validatePlanningAssetImageContracts(
-      split.consistencyManifest.anchors,
-    ).length,
-    segmentCountMatches:
-      authoritative.timelineBlueprint.segmentCount === split.timelineBlueprint.segmentCount,
-    totalDurationMatches:
-      authoritative.timelineBlueprint.totalDurationSeconds === split.timelineBlueprint.totalDurationSeconds,
+    ...envelope,
+    consistency_manifest: {
+      ...topManifest,
+      anchors: admission.approvedAnchors,
+      anchor_candidates: candidates,
+      event_local_elements: admission.eventLocalElements,
+      admission_decisions: admission.decisions,
+    },
+    planning_manifest: {
+      ...planningManifest,
+      consistency_manifest: {
+        ...nestedManifest,
+        anchors: admission.approvedAnchors,
+        anchor_candidates: candidates,
+        event_local_elements: admission.eventLocalElements,
+        admission_decisions: admission.decisions,
+      },
+    },
   };
 }
 
@@ -2209,25 +2312,15 @@ async function createAliyunStoryboardPlanInternal(
   const referenceFactModel = model("ALIYUN_STORYBOARD_REFERENCE_FACT_MODEL", "qwen-vl-plus");
   const checkpoint = normalizeAliyunStoryboardPlannerCheckpoint(options.checkpoint, input);
   const onCheckpoint = serializePlannerCheckpointWriter(options.onCheckpoint);
-  const decompositionMode = planningDecompositionMode();
-  if (
-    checkpoint.planningDecompositionMode
-    && checkpoint.planningDecompositionMode !== decompositionMode
-  ) {
-    checkpoint.planningRaw = undefined;
-    checkpoint.planningCoreRaw = undefined;
-    checkpoint.assetPromptRepairRaw = undefined;
-    checkpoint.assetVisualSpecsByAnchorId = {};
-    checkpoint.assetVisualSpecFingerprints = {};
-    checkpoint.shadowSplitPlanningRaw = undefined;
-    checkpoint.shadowSplitComparison = undefined;
-    checkpoint.splitPlanningFallbackReason = undefined;
-    checkpoint.storyboardArtistPlan = undefined;
-    checkpoint.shotDecomposerSegmentPlans = {};
-    checkpoint.approvedShotDecomposerSegmentPlans = {};
-    checkpoint.promptDetailSegmentPlans = {};
-  }
-  checkpoint.planningDecompositionMode = decompositionMode;
+  checkpoint.planningDecompositionMode = "split";
+  await logOnePromptVideo("aliyun.storyboard.checkpoint.resume_plan", {
+    checkpointVersion: checkpoint.checkpointVersion,
+    plannerMode: checkpoint.plannerMode,
+    preservedStages: checkpoint.migrationAudit?.preservedStages ?? [],
+    invalidatedStages: checkpoint.migrationAudit?.invalidatedStages ?? [],
+    invalidationReasons: checkpoint.migrationAudit?.reasons ?? [],
+    referenceFingerprint: checkpoint.referenceFingerprint,
+  });
 
   await logOnePromptVideo("aliyun.storyboard.three_stage.start", {
     promptLength: input.userPrompt.length,
@@ -2237,27 +2330,374 @@ async function createAliyunStoryboardPlanInternal(
   });
 
   try {
+    const resumeValidation = revalidatePlannerCheckpointForResume({
+      checkpoint,
+      input,
+      fallback,
+    });
+    if (resumeValidation.invalidated) {
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      await logOnePromptVideo("aliyun.storyboard.checkpoint.invalidated_on_resume", {
+        resumeFromStage: checkpoint.resumeFromStage,
+        issueCount: resumeValidation.issues.length,
+        issues: resumeValidation.issues.slice(0, 20),
+        lastFailure: checkpoint.lastFailure,
+      }, "warn");
+    }
     const referenceFactsFingerprint = referenceImageUrls.length
       ? createHash("sha256").update(JSON.stringify(referenceImageUrls)).digest("hex")
       : "";
     let referenceFactsRaw: unknown = {};
     if (referenceImageUrls.length) {
-      await reportPlannerProgress({
+      const reusableReferenceFacts = checkpoint.referenceFactsFingerprint === referenceFactsFingerprint
+        && checkpoint.referenceFactsRaw !== undefined;
+      if (!reusableReferenceFacts) await reportPlannerProgress({
         stage: "reference_fact_extractor",
         completedSteps: 0,
         totalSteps: 5,
         detailZh: "正在提取参考图中的客观人物、产品、场景和布局事实。",
         detailEn: "Extracting objective people, product, scene, and layout facts from the references.",
       });
-      referenceFactsRaw = checkpoint.referenceFactsFingerprint === referenceFactsFingerprint
-        && checkpoint.referenceFactsRaw !== undefined
-        ? checkpoint.referenceFactsRaw
-        : await extractReferenceFacts(referenceFactModel, referenceImageUrls, referenceFactsFingerprint);
-      checkpoint.referenceFactsRaw = referenceFactsRaw;
-      checkpoint.referenceFactsFingerprint = referenceFactsFingerprint;
-      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      if (reusableReferenceFacts) {
+        referenceFactsRaw = checkpoint.referenceFactsRaw;
+        await logOnePromptVideo("aliyun.storyboard.reference_facts.checkpoint_reused", {
+          inputFingerprint: checkpoint.inputFingerprint,
+          referenceFactsFingerprint,
+        });
+        if (clearPlannerCheckpointFailureAfterStageSuccess(
+          checkpoint,
+          "reference_fact_extractor",
+        )) {
+          await savePlannerCheckpoint(checkpoint, onCheckpoint);
+        }
+      } else {
+        referenceFactsRaw = await runStoryboardStageWithRetry({
+          stage: "reference_fact_extractor",
+          maxAttempts: REFERENCE_FACT_STAGE_MAX_ATTEMPTS,
+          baseDelayMs: 250,
+          run: () => extractReferenceFacts(
+            referenceFactModel,
+            referenceImageUrls,
+            referenceFactsFingerprint,
+          ),
+          onRetry: async ({ attempt, nextAttempt, error }) => {
+            await logOnePromptVideo(
+              "aliyun.storyboard.reference_fact_extractor.stage_retry",
+              {
+                attempt,
+                nextAttempt,
+                retryScope: "current_stage_only",
+                errorClassification: isStructuredOutputSyntaxError(error)
+                  ? error.classification
+                  : "transient_stage_error",
+                ...errorForLog(error),
+              },
+              "warn",
+            );
+            await reportPlannerProgress({
+              stage: "reference_fact_extractor",
+              detailZh: `参考图事实结构化输出未通过，正在仅重试当前阶段（${nextAttempt}/${REFERENCE_FACT_STAGE_MAX_ATTEMPTS}）。`,
+              detailEn: `Reference fact structured output failed. Retrying only this stage (${nextAttempt}/${REFERENCE_FACT_STAGE_MAX_ATTEMPTS}).`,
+            });
+          },
+        });
+        checkpoint.referenceFactsRaw = referenceFactsRaw;
+        checkpoint.referenceFactsFingerprint = referenceFactsFingerprint;
+        clearPlannerCheckpointFailureAfterStageSuccess(
+          checkpoint,
+          "reference_fact_extractor",
+        );
+        await savePlannerCheckpoint(checkpoint, onCheckpoint);
+        await logOnePromptVideo(
+          "aliyun.storyboard.reference_fact_extractor.checkpoint_saved",
+          {
+            referenceFactsFingerprint,
+            nextStage: "planning_architect",
+          },
+        );
+      }
     }
-    await reportPlannerProgress({
+    const routeInput = buildPlanningRouteInputForArchitect(input, referenceFactsRaw);
+    const currentRouteUserInputFingerprint = routeUserInputFingerprint({
+      userCreative: input.userPrompt,
+      explicitRouteConstraints: routeInput.userConstraints,
+    });
+    const currentRouteReferenceFactFingerprint = routeReferenceFactFingerprint(
+      routeInput.referenceFacts,
+    );
+    const routeReuse = decideRouteCheckpointReuse({
+      checkpoint: checkpoint.routeClassification,
+      userInputFingerprint: currentRouteUserInputFingerprint,
+      referenceFactFingerprint: currentRouteReferenceFactFingerprint,
+    });
+    const routeTaskId = randomUUID();
+    const routeStageStartedAtMs = Date.now();
+    const routeProjectId = options.schedulingContext?.projectId ?? "unscoped";
+    const compactRouteInputCharacterCount = JSON.stringify(routeInput).length;
+    const initialRouteRequestCharacterCount = JSON.stringify(
+      buildPlanningRouteChatRequest(buildPlanningRouteUserPrompt(routeInput)),
+    ).length;
+    const writeRouteLog = async (
+      event: PlanningRouteLogEvent,
+      params: Omit<Parameters<typeof createPlanningRouteLogRecord>[0], "projectId" | "routeTaskId" | "model">,
+    ) => logOnePromptVideo(event, createPlanningRouteLogRecord({
+      projectId: routeProjectId,
+      routeTaskId,
+      model: PLANNING_ROUTE_MODEL_CALL_POLICY.model,
+      ...params,
+    }));
+    await writeRouteLog("planning.route.prepare", {
+      route: checkpoint.routeClassification?.routeContract,
+      routeDurationMs: Date.now() - routeStageStartedAtMs,
+      inputCharacterCount: routeReuse.reuse ? 0 : initialRouteRequestCharacterCount,
+      checkpointReused: routeReuse.reuse,
+      gateResult: checkpoint.routeClassification?.gateResult.status ?? null,
+      repairCount: 0,
+      fallback: Boolean(checkpoint.routeClassification?.fallbackInfo),
+      extra: {
+        reuseDecision: routeReuse.reason,
+        referenceFactCount: routeInput.hasReferenceImage ? 1 : 0,
+        compactRouteInputCharacterCount,
+      },
+    });
+    const previousRouteContract =
+      checkpoint.routeClassification?.routeContract
+      ?? checkpoint.approvedRouteContract;
+    let approvedRouteContract = routeReuse.reuse
+      ? checkpoint.routeClassification?.routeContract
+      : undefined;
+    if (!approvedRouteContract) {
+      checkpoint.routeClassification = undefined;
+      checkpoint.approvedRouteContract = undefined;
+      await reportPlannerProgress({
+        stage: "planning_architect",
+        detailZh: "正在确定视频品类、叙事模板、时间顺序和 Hook 路线。",
+        detailEn: "Selecting the approved video category, narrative template, chronology, and Hook route.",
+      });
+      await writeRouteLog("planning.route.model.start", {
+        routeDurationMs: Date.now() - routeStageStartedAtMs,
+        inputCharacterCount: initialRouteRequestCharacterCount,
+        checkpointReused: false,
+        extra: { attempt: 1, hardTimeoutMs: PLANNING_ROUTE_MODEL_CALL_POLICY.hardTimeoutMs },
+      });
+      let routeResult: Awaited<ReturnType<typeof runPlanningRouteModelCall>>;
+      try {
+        routeResult = await runPlanningRouteModelCall({
+          input: routeInput,
+          transport: createOpenAiCompatiblePlanningRouteTransport({
+            endpoint: `${compatibleBaseUrl()}/chat/completions`,
+            apiKey: requireDashScopeApiKey(),
+          }),
+        });
+      } catch (error) {
+        await writeRouteLog("planning.route.model.complete", {
+          apiWaitDurationMs: error instanceof PlanningRouteModelCallError
+            ? error.apiWaitDurationMs
+            : 0,
+          routeDurationMs: Date.now() - routeStageStartedAtMs,
+          inputCharacterCount: error instanceof PlanningRouteModelCallError
+            ? error.inputCharacterCount
+            : initialRouteRequestCharacterCount,
+          responseCharacterCount: error instanceof PlanningRouteModelCallError
+            ? error.responseCharacterCount
+            : 0,
+          checkpointReused: false,
+          extra: { status: "failed", ...errorForLog(error) },
+        });
+        await writeRouteLog("planning.route.complete", {
+          apiWaitDurationMs: error instanceof PlanningRouteModelCallError
+            ? error.apiWaitDurationMs
+            : 0,
+          routeDurationMs: Date.now() - routeStageStartedAtMs,
+          inputCharacterCount: error instanceof PlanningRouteModelCallError
+            ? error.inputCharacterCount
+            : initialRouteRequestCharacterCount,
+          responseCharacterCount: error instanceof PlanningRouteModelCallError
+            ? error.responseCharacterCount
+            : 0,
+          checkpointReused: false,
+          extra: { status: "failed", ...errorForLog(error) },
+        });
+        throw error;
+      }
+      const routeResultLog = {
+        route: routeResult.value,
+        apiWaitDurationMs: routeResult.apiWaitDurationMs,
+        routeDurationMs: Date.now() - routeStageStartedAtMs,
+        inputTokens: routeResult.inputTokens,
+        outputTokens: routeResult.outputTokens,
+        inputCharacterCount: routeResult.inputCharacterCount,
+        responseCharacterCount: routeResult.responseCharacterCount,
+        gateResult: routeResult.gateStatus,
+        repairCount: routeResult.repairCallCount,
+        fallback: routeResult.gateStatus === "fallback",
+        checkpointReused: false,
+      };
+      await writeRouteLog("planning.route.model.complete", {
+        ...routeResultLog,
+        extra: {
+          status: "completed",
+          attemptCount: routeResult.attemptCount,
+          fullApiWaitDurationMs: routeResult.apiWaitDurationMs,
+        },
+      });
+      let parseSucceeded = false;
+      try {
+        JSON.parse(routeResult.rawContent);
+        parseSucceeded = true;
+      } catch {
+        parseSucceeded = false;
+      }
+      await writeRouteLog("planning.route.parse", {
+        ...routeResultLog,
+        extra: { parseSucceeded },
+      });
+      await writeRouteLog("planning.route.gate", {
+        ...routeResultLog,
+        extra: {
+          issueCodes: routeResult.gateIssues.map((item) => item.code),
+          repairCodes: routeResult.gateRepairs.map((item) => item.ruleCode ?? item.action),
+        },
+      });
+      if (routeResult.gateRepairs.length) {
+        await writeRouteLog("planning.route.deterministic_repair", {
+          ...routeResultLog,
+          extra: {
+            deterministicRepairCount: routeResult.gateRepairs.length,
+            repairCodes: routeResult.gateRepairs.map((item) => item.ruleCode ?? item.action),
+          },
+        });
+      }
+      if (routeResult.repairCallCount > 0) {
+        await writeRouteLog("planning.route.model_repair", {
+          ...routeResultLog,
+          extra: {
+            repairTrigger: routeResult.repairTrigger,
+            repairFailureReasons: routeResult.repairFailureReasons,
+          },
+        });
+      }
+      if (routeResult.gateStatus === "fallback") {
+        await writeRouteLog("planning.route.fallback", {
+          ...routeResultLog,
+          extra: {
+            fallbackReason: routeResult.value.fallbackReason ?? null,
+            shouldBlockPlanning: routeResult.fallbackInfo?.shouldBlockPlanning ?? false,
+          },
+        });
+      }
+      if (routeResult.fallbackInfo?.shouldBlockPlanning) {
+        await writeRouteLog("planning.route.complete", {
+          ...routeResultLog,
+          routeDurationMs: Date.now() - routeStageStartedAtMs,
+          extra: {
+            status: "blocked",
+            blockingReason: routeResult.fallbackInfo.blockingReason ?? null,
+          },
+        });
+        throw new PlanningArchitectRouteConflictError({
+          code: "PLANNING_ARCHITECT_ROUTE_INPUT_CONFLICT",
+          message: routeResult.fallbackInfo.blockingReason
+            ?? "Approved Route Contract cannot continue because the request is unsupported",
+          conflictingInputFields: ["userPrompt"],
+        });
+      }
+      approvedRouteContract = routeResult.value as ApprovedPlanningRouteContract;
+      const routeChanges = comparePlanningRouteContracts(
+        previousRouteContract,
+        approvedRouteContract,
+      );
+      if (routeChanges.invalidateProductionContent) {
+        invalidatePlanningContentAfterRoute(checkpoint);
+      }
+      checkpoint.approvedRouteContract = approvedRouteContract;
+      checkpoint.routeClassification = createModelRouteClassificationCheckpoint({
+        routeContract: approvedRouteContract,
+        userInputFingerprint: currentRouteUserInputFingerprint,
+        referenceFactFingerprint: currentRouteReferenceFactFingerprint,
+        modelName: PLANNING_ROUTE_MODEL_CALL_POLICY.model,
+        modelDurationMs: routeResult.durationMs,
+        inputTokens: routeResult.inputTokens,
+        outputTokens: routeResult.outputTokens,
+        gateStatus: routeResult.gateStatus,
+        gateIssues: routeResult.gateIssues,
+        gateRepairs: routeResult.gateRepairs,
+        repairCount: routeResult.repairCallCount,
+        fallbackInfo: routeResult.fallbackInfo,
+      });
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      await logOnePromptVideo("aliyun.storyboard.route_contract.approved", {
+        videoCategory: approvedRouteContract.videoCategory,
+        templateId: approvedRouteContract.templateId,
+        chronologyMode: approvedRouteContract.chronologyMode,
+        hookMode: approvedRouteContract.hookMode,
+        hookRevealLevel: approvedRouteContract.hookRevealLevel,
+        fallbackUsed: approvedRouteContract.fallbackUsed,
+        gateStatus: routeResult.gateStatus,
+        repairTrigger: routeResult.repairTrigger,
+        attemptCount: routeResult.attemptCount,
+        modelDurationMs: routeResult.durationMs,
+        inputTokens: routeResult.inputTokens,
+        outputTokens: routeResult.outputTokens,
+        changedFields: routeChanges.changedFields,
+        invalidationBoundary: routeChanges.checkpointBoundary,
+        invalidationScopes: routeChanges.semanticScopes,
+      });
+      await writeRouteLog("planning.route.complete", {
+        ...routeResultLog,
+        route: approvedRouteContract,
+        routeDurationMs: Date.now() - routeStageStartedAtMs,
+        extra: {
+          status: "completed",
+          changedFields: routeChanges.changedFields,
+          invalidationBoundary: routeChanges.checkpointBoundary,
+        },
+      });
+    } else {
+      checkpoint.approvedRouteContract = approvedRouteContract;
+      await writeRouteLog("planning.route.checkpoint.reused", {
+        route: approvedRouteContract,
+        routeDurationMs: Date.now() - routeStageStartedAtMs,
+        inputTokens: 0,
+        outputTokens: 0,
+        inputCharacterCount: 0,
+        responseCharacterCount: 0,
+        gateResult: checkpoint.routeClassification?.gateResult.status ?? null,
+        repairCount: 0,
+        fallback: Boolean(checkpoint.routeClassification?.fallbackInfo),
+        checkpointReused: true,
+        extra: { reuseReason: routeReuse.reason },
+      });
+      await logOnePromptVideo("aliyun.storyboard.route_contract.checkpoint_reused", {
+        videoCategory: approvedRouteContract.videoCategory,
+        templateId: approvedRouteContract.templateId,
+        chronologyMode: approvedRouteContract.chronologyMode,
+        reuseReason: routeReuse.reason,
+        locked: checkpoint.routeClassification?.locked ?? false,
+      });
+      await writeRouteLog("planning.route.complete", {
+        route: approvedRouteContract,
+        routeDurationMs: Date.now() - routeStageStartedAtMs,
+        inputTokens: 0,
+        outputTokens: 0,
+        inputCharacterCount: 0,
+        responseCharacterCount: 0,
+        gateResult: checkpoint.routeClassification?.gateResult.status ?? null,
+        repairCount: 0,
+        fallback: Boolean(checkpoint.routeClassification?.fallbackInfo),
+        checkpointReused: true,
+        extra: { status: "completed", reuseReason: routeReuse.reason },
+      });
+    }
+    assertRouteContractIsSoleAuthority({
+      rolloutDecision: decidePlanningRouteRollout({
+        stage: "percent_100",
+        projectId: routeProjectId,
+      }),
+      approvedRouteContractPresent: Boolean(approvedRouteContract),
+      planningArchitectClassificationEnabled: false,
+    });
+    if (checkpoint.planningRaw === undefined) await reportPlannerProgress({
       stage: "planning_architect",
       completedSteps: referenceImageUrls.length ? 1 : 0,
       totalSteps: referenceImageUrls.length ? 5 : 4,
@@ -2267,7 +2707,6 @@ async function createAliyunStoryboardPlanInternal(
     let planningRaw = checkpoint.planningRaw;
     if (planningRaw === undefined) {
       const planningPromptStartedAtMs = Date.now();
-      const planningUserContent = buildPlanningArchitectContent(input, referenceFactsRaw);
       await logOnePromptVideo("production.step.completed", {
         moduleNameZh: "故事架构与一致性资产规划",
         stepNameZh: "编写故事架构和一致性资产规划提示词",
@@ -2276,42 +2715,15 @@ async function createAliyunStoryboardPlanInternal(
         model: textModel,
         resultZh: "已写入创意、参考事实、广告目标、时长和资产约束",
       });
-      if (decompositionMode === "split") {
-        try {
-          planningRaw = await buildSplitPlanningRaw({
-            input,
-            modelName: textModel,
-            referenceFactsRaw,
-            fallback,
-            checkpoint,
-            onCheckpoint,
-          });
-          checkpoint.splitPlanningFallbackReason = undefined;
-        } catch (error) {
-          if (!splitPlanningLegacyFallbackEnabled()) throw error;
-          checkpoint.splitPlanningFallbackReason = error instanceof Error
-            ? error.message
-            : String(error);
-          await logOnePromptVideo("aliyun.storyboard.planning_decomposition.fallback_legacy", {
-            error: errorForLog(error),
-          }, "warn");
-          planningRaw = await callJsonStage({
-            stage: "planning_architect",
-            modelName: textModel,
-            systemPrompt: PLANNING_ARCHITECT_SYSTEM_PROMPT,
-            userContent: planningUserContent,
-            temperature: 0.25,
-          });
-        }
-      } else {
-        planningRaw = await callJsonStage({
-          stage: "planning_architect",
-          modelName: textModel,
-          systemPrompt: PLANNING_ARCHITECT_SYSTEM_PROMPT,
-          userContent: planningUserContent,
-          temperature: 0.25,
-        });
-      }
+      planningRaw = await buildSplitPlanningRaw({
+        input,
+        modelName: textModel,
+        referenceFactsRaw,
+        approvedRouteContract,
+        fallback,
+        checkpoint,
+        onCheckpoint,
+      });
     }
     if (checkpoint.planningRaw !== undefined) {
       await logOnePromptVideo("aliyun.storyboard.planning_architect.checkpoint_reused", {
@@ -2323,7 +2735,15 @@ async function createAliyunStoryboardPlanInternal(
       modelName: textModel,
       planningRaw,
     });
+    planningRaw = applyApprovedRouteToPlanningArchitectOutput(
+      planningRaw,
+      approvedRouteContract,
+    );
     checkpoint.planningRaw = planningRaw;
+    clearPlannerCheckpointFailureAfterStageSuccess(checkpoint, [
+      "planning_architect",
+      "planning_duration_repair",
+    ]);
     await savePlannerCheckpoint(checkpoint, onCheckpoint);
     let planningManifest = materializePlanningAssetImagePrompts(
       normalizePlanningManifest(planningRaw, input, fallback),
@@ -2387,7 +2807,7 @@ async function createAliyunStoryboardPlanInternal(
         attempt: 1,
         resultZh: `把 ${assetContractIssues.length} 个问题写入返修要求`,
       });
-      const assetPromptRepairRaw = await callJsonStage({
+      const assetPromptRepairRaw = await executeStructuredStage({
         stage: "asset_prompt_contract_repair",
         modelName: textModel,
         systemPrompt: `${ASSET_IMAGE_CONTRACT_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
@@ -2428,7 +2848,12 @@ async function createAliyunStoryboardPlanInternal(
       if (assetContractIssues.length) {
         throw new StoryboardStageError(
           `剧本拆解未生成可执行的资产图片合同：${formatAssetContractIssues(assetContractIssues)}`,
-          { code: "contract_validation_error", retryable: true },
+          {
+            code: "contract_validation_error",
+            retryable: false,
+            stage: "asset_prompt_contract_repair",
+            validationErrors: assetContractIssues.map((issue) => `${issue.anchorId}.${issue.field}: ${issue.message}`),
+          },
         );
       }
     }
@@ -2438,39 +2863,13 @@ async function createAliyunStoryboardPlanInternal(
       planningManifest.consistencyManifest.anchors,
     );
     checkpoint.planningRaw = planningRaw;
+    clearPlannerCheckpointFailureAfterStageSuccess(checkpoint, [
+      "asset_prompt_contract_gate",
+      "asset_prompt_contract_repair",
+    ]);
     await savePlannerCheckpoint(checkpoint, onCheckpoint);
-    if (
-      decompositionMode === "split_shadow"
-      && checkpoint.shadowSplitPlanningRaw === undefined
-    ) {
-      try {
-        const shadowSplitPlanningRaw = await buildSplitPlanningRaw({
-          input,
-          modelName: textModel,
-          referenceFactsRaw,
-          fallback,
-          checkpoint,
-          onCheckpoint,
-        });
-        checkpoint.shadowSplitPlanningRaw = shadowSplitPlanningRaw;
-        checkpoint.shadowSplitComparison = comparePlanningDecompositionOutputs(
-          planningRaw,
-          shadowSplitPlanningRaw,
-          input,
-          fallback,
-        );
-        await savePlannerCheckpoint(checkpoint, onCheckpoint);
-        await logOnePromptVideo("aliyun.storyboard.planning_decomposition.shadow_complete", {
-          comparison: checkpoint.shadowSplitComparison,
-        });
-      } catch (error) {
-        await logOnePromptVideo("aliyun.storyboard.planning_decomposition.shadow_failed", {
-          error: errorForLog(error),
-        }, "warn");
-      }
-    }
     const totalSegments = planningManifest.timelineBlueprint.segments.length;
-    const segmentPipelineEnabled = shotDecomposerMode() === "segment" && totalSegments > 1;
+    const segmentPipelineEnabled = totalSegments > 1;
     const referenceStepOffset = referenceImageUrls.length ? 1 : 0;
     const totalPlanningSteps = (segmentPipelineEnabled ? totalSegments * 2 : totalSegments) + 6 + referenceStepOffset;
     await reportPlannerProgress({
@@ -2487,12 +2886,21 @@ async function createAliyunStoryboardPlanInternal(
       planningManifest,
       [],
     );
-    const planningNarrativeEvents = normalizeNarrativeEvents(
+    let planningNarrativeEvents = normalizeNarrativeEvents(
       planningStoryDesignBase.narrative_events,
       {
         warnings: [],
         anchorIds: new Set(planningManifest.consistencyManifest.anchors.map((anchor) => anchor.id)),
       },
+    );
+    const narrativeAuthority = materializeNarrativeEventStoryFunctions(
+      planningNarrativeEvents,
+      planningCreativeStrategy,
+    );
+    planningNarrativeEvents = narrativeAuthority.events;
+    planningCreativeStrategy = applyEventAuthorityToCreativeStrategy(
+      planningCreativeStrategy,
+      planningNarrativeEvents,
     );
     const planningNarrativeContract = await ensurePlanningNarrativeContract({
       input,
@@ -2500,14 +2908,23 @@ async function createAliyunStoryboardPlanInternal(
       planningManifest,
       creativeStrategy: planningCreativeStrategy,
       narrativeEvents: planningNarrativeEvents,
+      authority: narrativeAuthority.authority,
+      checkpoint,
+      onCheckpoint,
     });
-    if (planningNarrativeContract.repairCount > 0) {
-      planningCreativeStrategy = planningNarrativeContract.creativeStrategy;
-      planningRaw = replacePlanningCreativeStrategy(planningRaw, planningCreativeStrategy);
-      checkpoint.planningRaw = planningRaw;
-      await savePlannerCheckpoint(checkpoint, onCheckpoint);
-      planningStoryDesignBase = storyDesignStageContext(planningRaw);
-    }
+    planningCreativeStrategy = mirrorApprovedRouteToCreativeStrategy(
+      planningNarrativeContract.creativeStrategy,
+      approvedRouteContract,
+    );
+    planningNarrativeEvents = planningNarrativeContract.narrativeEvents;
+    planningRaw = replacePlanningNarrativeAuthority(
+      planningRaw,
+      planningCreativeStrategy,
+      planningNarrativeEvents,
+    );
+    checkpoint.planningRaw = planningRaw;
+    await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    planningStoryDesignBase = storyDesignStageContext(planningRaw);
     const planningTemplateId = planningCreativeStrategy.templateId ?? "generic_brand_story";
     const planningStoryDesignContext: Record<string, unknown> = {
       ...planningStoryDesignBase,
@@ -2521,7 +2938,7 @@ async function createAliyunStoryboardPlanInternal(
 
     let storyboardArtistPlan = checkpoint.storyboardArtistPlan;
     if (!storyboardArtistPlan) {
-      const storyboardArtistRaw = await callJsonStage({
+      const storyboardArtistRaw = await executeStructuredStage({
         stage: "storyboard_artist",
         modelName: textModel,
         systemPrompt: STORYBOARD_ARTIST_SYSTEM_PROMPT,
@@ -2557,38 +2974,82 @@ async function createAliyunStoryboardPlanInternal(
       storyboardArtistPlan,
     });
     const storyContractStartedAt = Date.now();
-    const storyContractResult = await ensureStoryboardStoryContract({
-      input,
-      modelName: textModel,
-      planningManifest,
-      planningStoryDesignContext,
-      planningTemplateId,
-      storyboardArtistPlan,
-    });
-    storyboardArtistPlan = storyContractResult.storyboardArtistPlan;
+    let storyContractResult: Awaited<ReturnType<typeof ensureStoryboardStoryContract>>;
+    const reusableStoryGates = Boolean(
+      checkpoint.storyboardArtistPlan
+      && checkpoint.storyContractReport?.passed
+      && checkpoint.storySemanticReview,
+    );
+    if (reusableStoryGates) {
+      storyContractResult = {
+        storyboardArtistPlan,
+        report: checkpoint.storyContractReport!,
+        repairCount: 0,
+      };
+    } else {
+      storyContractResult = await ensureStoryboardStoryContract({
+        input,
+        modelName: textModel,
+        planningManifest,
+        planningStoryDesignContext,
+        planningTemplateId,
+        storyboardArtistPlan,
+      });
+      storyboardArtistPlan = storyContractResult.storyboardArtistPlan;
+    }
     const storyContractRepairDurationMs = Date.now() - storyContractStartedAt;
-    const semanticStoryResult = await ensureStoryboardSemanticQuality({
-      input,
-      modelName: model("ALIYUN_STORY_CRITIC_MODEL", textModel),
-      repairModelName: textModel,
-      planningManifest,
-      planningStoryDesignContext,
-      planningTemplateId,
-      storyboardArtistPlan,
-      referenceFacts: referenceFactsRaw,
-    });
-    storyboardArtistPlan = semanticStoryResult.storyboardArtistPlan;
-    const assetContractResolution = resolveAssetContract({
-      planningManifest,
-      narrativeEvents: planningNarrativeEvents,
-      storyboardArtistPlan,
-      referenceFacts: referenceFactsRaw,
-    });
-    storyboardArtistPlan = assetContractResolution.storyboardArtistPlan;
-    checkpoint.storyboardArtistPlan = storyboardArtistPlan;
-    checkpoint.storyContractReport = storyContractResult.report;
-    checkpoint.storySemanticReview = semanticStoryResult.review;
-    await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    let semanticStoryResult: Awaited<ReturnType<typeof ensureStoryboardSemanticQuality>>;
+    if (reusableStoryGates) {
+      semanticStoryResult = {
+        storyboardArtistPlan,
+        review: checkpoint.storySemanticReview!,
+        repairCount: 0,
+      };
+      await logOnePromptVideo("aliyun.storyboard.story_gates.checkpoint_reused", {
+        inputFingerprint: checkpoint.inputFingerprint,
+        storyContractPassed: checkpoint.storyContractReport?.passed,
+        semanticReviewPassed: checkpoint.storySemanticReview?.passed,
+      });
+    } else {
+      semanticStoryResult = await ensureStoryboardSemanticQuality({
+        input,
+        modelName: model("ALIYUN_STORY_CRITIC_MODEL", textModel),
+        repairModelName: textModel,
+        planningManifest,
+        planningStoryDesignContext,
+        planningTemplateId,
+        storyboardArtistPlan,
+        referenceFacts: referenceFactsRaw,
+      });
+      storyboardArtistPlan = semanticStoryResult.storyboardArtistPlan;
+      const assetContractResolution = resolveAssetContract({
+        planningManifest,
+        narrativeEvents: planningNarrativeEvents,
+        storyboardArtistPlan,
+        referenceFacts: referenceFactsRaw,
+      });
+      storyboardArtistPlan = assetContractResolution.storyboardArtistPlan;
+      checkpoint.storyboardArtistPlan = storyboardArtistPlan;
+      checkpoint.storyContractReport = storyContractResult.report;
+      checkpoint.storySemanticReview = semanticStoryResult.review;
+      clearPlannerCheckpointFailureAfterStageSuccess(checkpoint, [
+        "storyboard_artist",
+        "story_contract_gate",
+        "story_contract_repair",
+        "story_semantic_critic",
+        "story_semantic_repair",
+      ]);
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    }
+    if (clearPlannerCheckpointFailureAfterStageSuccess(checkpoint, [
+      "storyboard_artist",
+      "story_contract_gate",
+      "story_contract_repair",
+      "story_semantic_critic",
+      "story_semantic_repair",
+    ])) {
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    }
     await reportPlannerProgress({
       stage: "story_contract_gate",
       completedSteps: 2 + referenceStepOffset,
@@ -2687,13 +3148,7 @@ async function createAliyunStoryboardPlanInternal(
       const bounds = segmentCountBounds(input.durationSeconds);
       const timelineRepairPlan = buildModelRepairPlan({
         targetStage: "timeline_replan",
-        issues: error.request.issueCodes.map((code, index) => ({
-          code,
-          path: `planning_manifest.timeline_blueprint.segments[segment_no>=${error.request.firstAffectedSegmentNo}]`,
-          message: error.request.reasons[index] ?? code,
-          repairHint: "Split the affected event range at a real discontinuity boundary and recompute only the affected suffix timing.",
-          segmentNo: error.request.affectedSegmentNos[index] ?? error.request.firstAffectedSegmentNo,
-        })),
+        issues: timelineChangeRequestRepairIssues(error.request),
         scope: { kind: "segments", segmentNos: error.request.affectedSegmentNos },
         preserveRules: [
           `Preserve every segment before ${error.request.firstAffectedSegmentNo} exactly.`,
@@ -2706,7 +3161,7 @@ async function createAliyunStoryboardPlanInternal(
         maxAttempts: 2,
         baseDelayMs: 0,
         run: async () => {
-          const timelineReplanRaw = await callJsonStage({
+          const timelineReplanRaw = await executeStructuredStage({
             stage: `timeline_replan_r${replanAttempts + 1}`,
             modelName: textModel,
             systemPrompt: contractValidationFeedback
@@ -2800,7 +3255,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
 
     let promptDetailPlan = shotPipelineResult.promptDetailPlan;
     if (!promptDetailPlan) {
-      const promptDetailRaw = await callJsonStage({
+      const promptDetailRaw = await executeStructuredStage({
         stage: "prompt_detailer",
         modelName: textModel,
         systemPrompt: PROMPT_DETAILER_SYSTEM_PROMPT,
@@ -2855,6 +3310,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
     plan = applyStoryQualityGateForRollout(plan, storyRolloutConfig);
     const finalStoryDecision = decideStoryRewrite(plan.storyQualityReport);
     plan = finalizeStoryQualityRollout(plan, storyRolloutConfig, 0, finalStoryDecision);
+    plan = mirrorApprovedRouteToFinalPlan(plan, approvedRouteContract);
     await logOnePromptVideo("production.step.completed", {
       moduleNameZh: "脚本拆解",
       stepNameZh: "程序执行剧情质量和结构质检",
@@ -2901,7 +3357,53 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
         changes: deterministicEndpointChanges,
       });
     }
-    const validationIssues = assertPlanValidForGeneration(plan, { stage: "planning" });
+    const validationIssues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+    const finalPromptRepairSegmentNos = locallyRepairableFinalPromptSegmentNos(validationIssues);
+    const finalPromptRepairAttempts = checkpoint.finalPromptRepairAttempts ?? 0;
+    const validationErrors = validationIssues.filter((issue) => issue.severity === "error");
+    if (
+      finalPromptRepairSegmentNos.length
+      && validationErrors.every((issue) =>
+        LOCALLY_REPAIRABLE_FINAL_PROMPT_CODES.has(issue.code)
+        && /^segment:\d+$/.test(issue.artifactId ?? ""))
+      && finalPromptRepairAttempts < 2
+    ) {
+      checkpoint.finalPromptRepairAttempts = finalPromptRepairAttempts + 1;
+      for (const segmentNo of finalPromptRepairSegmentNos) {
+        delete checkpoint.promptDetailSegmentPlans?.[String(segmentNo)];
+        if (finalPromptRepairAttempts > 0) {
+          delete checkpoint.approvedShotDecomposerSegmentPlans?.[String(segmentNo)];
+          delete checkpoint.shotDecomposerSegmentPlans?.[String(segmentNo)];
+        }
+      }
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+      await logOnePromptVideo("aliyun.storyboard.final_prompt_validation.local_repair", {
+        attempt: checkpoint.finalPromptRepairAttempts,
+        segmentNos: finalPromptRepairSegmentNos,
+        invalidatedStages: finalPromptRepairAttempts > 0
+          ? ["shot_decomposer", "single_take_audit", "prompt_detailer"]
+          : ["prompt_detailer"],
+        issues: validationErrors,
+      }, "warn");
+      await reportPlannerProgress({
+        stage: "prompt_detailer",
+        completedSteps: Math.max(0, totalPlanningSteps - 2),
+        totalSteps: totalPlanningSteps,
+        completedSegments: Math.max(0, totalSegments - finalPromptRepairSegmentNos.length),
+        totalSegments,
+        detailZh: `最终校验发现片段 ${finalPromptRepairSegmentNos.join("、")} 的提示词包含正向切镜指令，正在仅返修对应片段。`,
+        detailEn: `Final validation found positive cut instructions in segment(s) ${finalPromptRepairSegmentNos.join(", ")}. Only those segments are being repaired.`,
+      });
+      return createAliyunStoryboardPlanInternal(input, {
+        ...options,
+        checkpoint,
+      });
+    }
+    assertPlanValidForGeneration(plan, { stage: "planning" });
+    if (checkpoint.finalPromptRepairAttempts) {
+      checkpoint.finalPromptRepairAttempts = 0;
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    }
 
     await logOnePromptVideo("aliyun.storyboard.three_stage.parsed", {
       title: plan.title,
@@ -2936,30 +3438,50 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
       detailZh: "剧本、分镜、提示词和质量校验均已完成。",
       detailEn: "Script, shots, prompts, and quality validation are complete.",
     });
+    if (clearPlannerCheckpointFailureAfterStageSuccess(checkpoint, "complete")) {
+      await savePlannerCheckpoint(checkpoint, onCheckpoint);
+    }
     return plan;
   } catch (error) {
+    const failedStage = checkpointFailureStage(error);
+    invalidatePlannerCheckpointAfterFailure(checkpoint, failedStage, error);
+    await savePlannerCheckpoint(checkpoint, onCheckpoint).catch((checkpointError) =>
+      logOnePromptVideo("aliyun.storyboard.checkpoint.failure_invalidation_save_failed", {
+        failedStage,
+        originalError: errorForLog(error),
+        checkpointError: errorForLog(checkpointError),
+      }, "error"));
+    await logOnePromptVideo("aliyun.storyboard.checkpoint.invalidated_after_failure", {
+      failedStage,
+      resumeFromStage: checkpoint.resumeFromStage,
+      lastFailure: checkpoint.lastFailure,
+    }, "warn");
     await logOnePromptVideo("aliyun.storyboard.three_stage.error", errorForLog(error), "error");
     throw error;
   }
 }
 
-async function callJsonStage(params: {
+async function executeStructuredStage<T = unknown>(params: {
   stage: string;
   modelName: string;
   systemPrompt: string;
   userContent: ChatContent;
   temperature: number;
   maxTokens?: number;
-  jsonSchema?: {
-    name: string;
-    schema: Record<string, unknown>;
-  };
-}): Promise<unknown> {
+  contract?: StructuredStageContract<T>;
+  signal?: AbortSignal;
+}): Promise<T> {
   const startedAt = new Date();
   const startedAtMs = startedAt.getTime();
   const moduleNameZh = plannerModuleNameZh(params.stage);
   const promptBuildStartedAtMs = Date.now();
   const reasoningPolicy = jsonStageReasoningPolicy(params.stage);
+  const generatedJsonSchema = params.contract
+    ? structuredStageJsonSchema(params.contract)
+    : undefined;
+  const generatedJsonSchemaFingerprint = generatedJsonSchema
+    ? createHash("sha256").update(JSON.stringify(generatedJsonSchema)).digest("hex")
+    : undefined;
   const attachedRepairPlan = extractAttachedRepairPlan(params.userContent);
   if (attachedRepairPlan) {
     await logOnePromptVideo("automatic_repair.plan.created", {
@@ -3000,9 +3522,12 @@ async function callJsonStage(params: {
     enableThinking: reasoningPolicy.enableThinking,
       thinkingBudget: reasoningPolicy.thinkingBudget,
       maxTokens: params.maxTokens,
-      responseFormat: params.jsonSchema
-        ? "json_object_plus_local_strict_schema"
+      responseFormat: params.contract
+        ? "json_object_plus_local_zod_contract"
         : "json_object",
+      contractName: params.contract?.name,
+      schemaVersion: params.contract?.version,
+      generatedJsonSchemaFingerprint,
     });
   let observationRecorded = false;
   try {
@@ -3013,7 +3538,7 @@ async function callJsonStage(params: {
       model: params.modelName,
     });
     const modelRequestStartedAtMs = Date.now();
-    const result = await fetchJsonStageContent(params.stage, body);
+    const result = await fetchJsonStageContent(params.stage, body, params.signal);
     const completedAt = new Date();
     await logOnePromptVideo("production.step.completed", {
       moduleNameZh,
@@ -3028,6 +3553,7 @@ async function callJsonStage(params: {
       ok: result.ok,
       durationMs: completedAt.getTime() - startedAtMs,
       rawSummary: result.rawSummary,
+      streamChunkMode: result.streamChunkMode,
     }, result.ok ? "info" : "error");
     await reportPlannerStageMetric({
       stage: params.stage,
@@ -3069,45 +3595,165 @@ async function callJsonStage(params: {
         stepNameZh: "程序解析并检查大模型返回的 JSON",
         executionMethod: "program",
         durationMs: Date.now() - parseStartedAtMs,
-        resultZh: "JSON 不合格，打回 JSON 修复模型",
+        resultZh: "JSON 不合格，先执行程序机械修复",
       }, "warn");
       await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_parse.failed`, {
         error: errorForLog(parseError),
-        contentLength: content.length,
-        contentPreview: content.slice(0, 1200),
+        originalOutput: structuredContentDiagnostic(content),
+        firstParseError: jsonParseErrorDiagnostic(parseError, content),
+        schemaVersion: params.contract?.version,
+        schemaFingerprint: generatedJsonSchemaFingerprint,
+        streamChunkMode: result.streamChunkMode,
       }, "warn");
       if (params.stage.startsWith("json_repair")) throw parseError;
-      parsed = await repairJsonStageContent({
-        stage: params.stage,
-        modelName: model("ALIYUN_STORYBOARD_MODEL", params.modelName),
-        content,
-        parseError,
-      });
+      const deterministicStartedAtMs = Date.now();
+      const deterministicRepair = repairJsonDeterministically(content);
+      let deterministicAccepted = false;
+      if (deterministicRepair.status === "repaired") {
+        let contractStatus: "not_configured" | "valid" | "repairable" = "not_configured";
+        let contractIssues: StructuredContractIssue[] = [];
+        if (params.contract) {
+          const contractResult = validateStructuredStageValue(
+            params.contract,
+            deterministicRepair.value,
+          );
+          if (contractResult.status === "fatal") throw contractResult.error;
+          contractStatus = contractResult.status;
+          if (contractResult.status === "valid") {
+            parsed = contractResult.value;
+            deterministicAccepted = true;
+          } else {
+            contractIssues = contractResult.issues;
+          }
+        } else {
+          parsed = deterministicRepair.value;
+          deterministicAccepted = true;
+        }
+        await logOnePromptVideo(
+          `aliyun.storyboard.${params.stage}.json_deterministic_repair.completed`,
+          {
+            accepted: deterministicAccepted,
+            durationMs: Date.now() - deterministicStartedAtMs,
+            contractStatus,
+            contractName: params.contract?.name,
+            schemaVersion: params.contract?.version,
+            contractIssues,
+            originalSemanticFingerprint:
+              deterministicRepair.originalSemanticFingerprint,
+            repairedSemanticFingerprint:
+              deterministicRepair.repairedSemanticFingerprint,
+            repairedContentLength: deterministicRepair.repairedText.length,
+            repairedContentSha256: createHash("sha256")
+              .update(deterministicRepair.repairedText)
+              .digest("hex"),
+            originalOutput: structuredContentDiagnostic(content),
+            repairedOutput: structuredContentDiagnostic(
+              deterministicRepair.repairedText,
+            ),
+            contentDiff: structuredContentDiff(
+              content,
+              deterministicRepair.repairedText,
+            ),
+            schemaFingerprint: generatedJsonSchemaFingerprint,
+            streamChunkMode: result.streamChunkMode,
+          },
+          deterministicAccepted ? "info" : "warn",
+        );
+      } else {
+        await logOnePromptVideo(
+          `aliyun.storyboard.${params.stage}.json_deterministic_repair.failed`,
+          {
+            durationMs: Date.now() - deterministicStartedAtMs,
+            reason: deterministicRepair.reason,
+            error: errorForLog(deterministicRepair.error),
+            repairedContentLength:
+              deterministicRepair.repairedText?.length,
+            originalOutput: structuredContentDiagnostic(content),
+            repairedOutput: deterministicRepair.repairedText === undefined
+              ? undefined
+              : structuredContentDiagnostic(deterministicRepair.repairedText),
+            contentDiff: deterministicRepair.repairedText === undefined
+              ? undefined
+              : structuredContentDiff(content, deterministicRepair.repairedText),
+            schemaVersion: params.contract?.version,
+            schemaFingerprint: generatedJsonSchemaFingerprint,
+            streamChunkMode: result.streamChunkMode,
+          },
+          "warn",
+        );
+      }
+      if (!deterministicAccepted) {
+        try {
+          parsed = await repairJsonStageContent({
+            stage: params.stage,
+            modelName: jsonSyntaxRepairModel(),
+            content,
+            schemaVersion: params.contract?.version,
+            schemaFingerprint: generatedJsonSchemaFingerprint,
+            sourceStreamChunkMode: result.streamChunkMode,
+            signal: params.signal,
+          });
+        } catch (repairError) {
+          if (repairError instanceof StoryboardStageError) throw repairError;
+          throw new StructuredOutputSyntaxError(
+            params.stage,
+            `Structured output for ${params.stage} remained invalid after local and model JSON syntax repair.`,
+            { cause: repairError },
+          );
+        }
+      }
     }
-    if (params.jsonSchema) {
+    if (params.contract) {
       const schemaStartedAtMs = Date.now();
-      const schemaErrors = validateLocalJsonSchema(parsed, params.jsonSchema.schema);
+      const contractResult = validateStructuredStageValue(params.contract, parsed);
+      const contractIssues = contractResult.status === "repairable"
+        ? contractResult.issues
+        : [];
       await logOnePromptVideo("production.step.completed", {
         moduleNameZh,
-        stepNameZh: "程序按严格 JSON Schema 校验字段、类型和枚举",
+        stepNameZh: "程序按 Zod 合同校验字段、类型和语义约束",
         executionMethod: "deterministic_program",
         durationMs: Date.now() - schemaStartedAtMs,
-        resultZh: schemaErrors.length
-          ? `Schema 不合格，发现 ${schemaErrors.length} 个问题`
-          : "Schema 校验通过",
-      }, schemaErrors.length ? "warn" : "info");
-      if (schemaErrors.length) {
+        resultZh: contractResult.status === "valid"
+          ? "合同校验通过"
+          : contractResult.status === "repairable"
+            ? `合同不合格，发现 ${contractIssues.length} 个问题`
+            : "合同归一化失败",
+      }, contractResult.status === "valid" ? "info" : "warn");
+      if (contractResult.status === "fatal") throw contractResult.error;
+      if (contractResult.status === "repairable") {
+        const validationErrors = contractIssues.map((issue) => `${issue.path}: ${issue.message}`);
         throw new StoryboardStageError(
-          `Strict JSON Schema validation failed: ${schemaErrors.slice(0, 8).join("; ")}`,
+          `Structured stage contract validation failed: ${formatStructuredContractIssues(contractIssues.slice(0, 8))}`,
           {
             code: "contract_validation_error",
             retryable: true,
-            validationErrors: schemaErrors,
+            validationErrors,
+            stage: params.stage,
           },
         );
       }
+      parsed = contractResult.value;
     }
-    return parsed;
+    throwIfBatchCancelled(params.stage, params.signal);
+    const localized = await localizeChineseDisplayFields(parsed);
+    throwIfBatchCancelled(params.stage, params.signal);
+    if (localized.metrics.translatedTexts || localized.metrics.cacheHits) {
+      await logOnePromptVideo("local_translation.model_output.localized", {
+        stage: params.stage,
+        source: "en",
+        target: "zh",
+        ...localized.metrics,
+      });
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "本地语言边界",
+        stepNameZh: "把大模型英文结果翻译为中文展示字段",
+        executionMethod: "local_translation",
+        durationMs: localized.metrics.durationMs,
+        resultZh: `翻译 ${localized.metrics.translatedTexts} 条，缓存命中 ${localized.metrics.cacheHits} 条`,
+      });
+    }
+    return localized.value as T;
   } catch (error) {
     if (!observationRecorded) {
       const completedAt = new Date();
@@ -3140,18 +3786,71 @@ function plannerModuleNameZh(stage: string): string {
   return "脚本与分镜规划";
 }
 
-async function fetchJsonStage(stage: string, body: Record<string, unknown>): Promise<Response> {
+function batchCancelledStageError(stage: string, signal: AbortSignal): StoryboardStageError {
+  return new StoryboardStageError(
+    `Storyboard stage ${stage} was cancelled because another task in the same batch failed.`,
+    {
+      code: "batch_cancelled",
+      retryable: false,
+      stage,
+      cause: signal.reason,
+    },
+  );
+}
+
+function throwIfBatchCancelled(stage: string, signal?: AbortSignal): void {
+  if (signal?.aborted) throw batchCancelledStageError(stage, signal);
+}
+
+function forwardAbortSignal(
+  parent: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (!parent) return () => undefined;
+  const onAbort = () => controller.abort(parent.reason);
+  if (parent.aborted) {
+    onAbort();
+    return () => undefined;
+  }
+  parent.addEventListener("abort", onAbort, { once: true });
+  return () => parent.removeEventListener("abort", onAbort);
+}
+
+async function fetchJsonStage(
+  stage: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Response> {
   const timeoutMs = jsonStageTimeoutMs();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const detachParentAbort = forwardAbortSignal(signal, controller);
   try {
+    throwIfBatchCancelled(stage, signal);
+    const prepared = await prepareEnglishOnlyModelRequestBody(body);
+    throwIfBatchCancelled(stage, signal);
+    if (prepared.metrics.translatedTexts || prepared.metrics.cacheHits) {
+      await logOnePromptVideo("local_translation.model_input.english_only", {
+        stage,
+        source: "zh",
+        target: "en",
+        ...prepared.metrics,
+      });
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "本地语言边界",
+        stepNameZh: "把非英文输入翻译为英文后再交给大模型",
+        executionMethod: "local_translation",
+        durationMs: prepared.metrics.durationMs,
+        resultZh: `翻译 ${prepared.metrics.translatedTexts} 条，缓存命中 ${prepared.metrics.cacheHits} 条`,
+      });
+    }
     const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${requireDashScopeApiKey()}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(prepared.body),
       signal: controller.signal,
     });
     const schedulingContext = plannerProgressStorage.getStore()?.schedulingContext;
@@ -3165,10 +3864,18 @@ async function fetchJsonStage(stage: string, body: Record<string, unknown>): Pro
           },
           operation,
           waitTimeoutMs: jsonStageTimeoutMs(),
+          signal: controller.signal,
         })
       : operation());
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
+      if (signal?.aborted) {
+        await logOnePromptVideo(`aliyun.storyboard.${stage}.cancelled`, {
+          model: body.model,
+          reason: "batch_peer_failed",
+        }, "warn");
+        throw batchCancelledStageError(stage, signal);
+      }
       await logOnePromptVideo(`aliyun.storyboard.${stage}.timeout`, {
         timeoutMs,
         model: body.model,
@@ -3181,13 +3888,18 @@ async function fetchJsonStage(stage: string, body: Record<string, unknown>): Pro
     throw error;
   } finally {
     clearTimeout(timeout);
+    detachParentAbort();
   }
 }
 
-async function fetchJsonStageContent(stage: string, body: Record<string, unknown>): Promise<JsonStageContentResult> {
-  if (jsonStageStreamingEnabled()) return fetchJsonStageContentStream(stage, body);
+async function fetchJsonStageContent(
+  stage: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<JsonStageContentResult> {
+  if (shouldStreamJsonStage(stage)) return fetchJsonStageContentStream(stage, body, signal);
   const startedAt = Date.now();
-  const res = await fetchJsonStage(stage, body);
+  const res = await fetchJsonStage(stage, body, signal);
   const raw = await safeJson(res);
   return {
     httpStatus: res.status,
@@ -3195,16 +3907,22 @@ async function fetchJsonStageContent(stage: string, body: Record<string, unknown
     durationMs: Date.now() - startedAt,
     content: res.ok ? extractChatContent(raw) : "",
     rawSummary: summarizeRaw(raw),
+    streamChunkMode: "non_stream",
     errorMessage: extractError(raw),
   };
 }
 
-async function fetchJsonStageContentStream(stage: string, body: Record<string, unknown>): Promise<JsonStageContentResult> {
+async function fetchJsonStageContentStream(
+  stage: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<JsonStageContentResult> {
   const startedAt = Date.now();
   const firstChunkTimeoutMs = jsonStageTimeoutMs();
   const idleTimeoutMs = jsonStageStreamIdleTimeoutMs();
   const maxStreamMs = jsonStageStreamMaxTimeoutMs(stage);
   const controller = new AbortController();
+  const detachParentAbort = forwardAbortSignal(signal, controller);
   let abortReason = "first_chunk_timeout";
   let idleTimeout: ReturnType<typeof setTimeout> | undefined;
   const maxTimeout = setTimeout(() => {
@@ -3220,6 +3938,24 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
   let capacityLease: ProviderLeaseGrant | undefined;
 
   try {
+    throwIfBatchCancelled(stage, signal);
+    const prepared = await prepareEnglishOnlyModelRequestBody(body);
+    throwIfBatchCancelled(stage, signal);
+    if (prepared.metrics.translatedTexts || prepared.metrics.cacheHits) {
+      await logOnePromptVideo("local_translation.model_input.english_only", {
+        stage,
+        source: "zh",
+        target: "en",
+        ...prepared.metrics,
+      });
+      await logOnePromptVideo("production.step.completed", {
+        moduleNameZh: "本地语言边界",
+        stepNameZh: "把非英文输入翻译为英文后再交给大模型",
+        executionMethod: "local_translation",
+        durationMs: prepared.metrics.durationMs,
+        resultZh: `翻译 ${prepared.metrics.translatedTexts} 条，缓存命中 ${prepared.metrics.cacheHits} 条`,
+      });
+    }
     const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
@@ -3227,7 +3963,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         Authorization: `Bearer ${requireDashScopeApiKey()}`,
       },
       body: JSON.stringify({
-        ...body,
+        ...prepared.body,
         stream: true,
         stream_options: { include_usage: true },
       }),
@@ -3243,6 +3979,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
             targetId: `planning-stream:${stage}:${randomUUID()}`,
           },
           waitTimeoutMs: maxStreamMs,
+          signal: controller.signal,
       });
     }
     const res = await operation();
@@ -3256,6 +3993,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         durationMs: Date.now() - startedAt,
         content: "",
         rawSummary: summarizeRaw(raw),
+        streamChunkMode: "none",
         errorMessage: extractError(raw),
       };
     }
@@ -3263,7 +4001,7 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    const contentParts: string[] = [];
+    const contentAssembler = new JsonStageStreamAssembler();
     let buffer = "";
     let chunkCount = 0;
     let reasoningChunkCount = 0;
@@ -3293,7 +4031,8 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
       }
       if (isRecord(raw) && raw.usage) usage = raw.usage;
       const choices = isRecord(raw) && Array.isArray(raw.choices) ? raw.choices : [];
-      for (const choice of choices) {
+      for (let choiceIndex = 0; choiceIndex < choices.length; choiceIndex += 1) {
+        const choice = choices[choiceIndex];
         if (!isRecord(choice)) continue;
         if (choice.finish_reason) finishReason = choice.finish_reason;
         const delta = isRecord(choice.delta) ? choice.delta : undefined;
@@ -3310,13 +4049,18 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
             firstReasoningChunkMs = Date.now() - startedAt;
           }
         }
-        const piece = typeof delta?.content === "string"
+        const deltaContent = typeof delta?.content === "string"
           ? delta.content
-          : typeof message?.content === "string"
-            ? message.content
-            : "";
+          : undefined;
+        const messageContent = typeof message?.content === "string"
+          ? message.content
+          : undefined;
+        const piece = contentAssembler.append({
+          choiceIndex: typeof choice.index === "number" ? choice.index : choiceIndex,
+          deltaContent,
+          messageContent,
+        });
         if (piece) {
-          contentParts.push(piece);
           chunkCount += 1;
           if (firstAnswerChunkMs === undefined) firstAnswerChunkMs = Date.now() - startedAt;
         }
@@ -3344,7 +4088,8 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
     if (idleTimeout) clearTimeout(idleTimeout);
     clearTimeout(maxTimeout);
 
-    const content = contentParts.join("").trim();
+    const content = contentAssembler.content().trim();
+    const streamAssembly = contentAssembler.metrics();
     return {
       httpStatus: res.status,
       ok: true,
@@ -3365,12 +4110,21 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
         firstChunkMs: firstAnswerChunkMs,
         finishReason,
         usage,
+        streamAssembly,
       },
+      streamChunkMode: streamAssembly.contentMode,
     };
   } catch (error) {
     if (idleTimeout) clearTimeout(idleTimeout);
     clearTimeout(maxTimeout);
     if (error instanceof Error && error.name === "AbortError") {
+      if (signal?.aborted) {
+        await logOnePromptVideo(`aliyun.storyboard.${stage}.cancelled`, {
+          model: body.model,
+          reason: "batch_peer_failed",
+        }, "warn");
+        throw batchCancelledStageError(stage, signal);
+      }
       await logOnePromptVideo(`aliyun.storyboard.${stage}.stream_timeout`, {
         model: body.model,
         abortReason,
@@ -3390,79 +4144,11 @@ async function fetchJsonStageContentStream(stage: string, body: Record<string, u
     }
     throw error;
   } finally {
+    detachParentAbort();
     if (capacityLease) {
       await releaseProviderLeaseByToken(capacityLease.leaseToken, "completed").catch(() => undefined);
     }
   }
-}
-
-export function validateLocalJsonSchema(
-  value: unknown,
-  schemaValue: unknown,
-  path = "$",
-): string[] {
-  if (!isRecord(schemaValue)) return [`${path}: schema node is not an object`];
-  const schema = schemaValue;
-  const errors: string[] = [];
-  const expectedType = typeof schema.type === "string" ? schema.type : "";
-  const actualType = Array.isArray(value)
-    ? "array"
-    : value === null
-      ? "null"
-      : Number.isInteger(value)
-        ? "integer"
-        : typeof value === "number"
-          ? "number"
-          : typeof value;
-
-  if (expectedType && actualType !== expectedType) {
-    return [`${path}: expected ${expectedType}, received ${actualType}`];
-  }
-  if ("const" in schema && value !== schema.const) {
-    errors.push(`${path}: expected constant ${JSON.stringify(schema.const)}`);
-  }
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-    errors.push(`${path}: value is outside the allowed enum`);
-  }
-  if (typeof value === "string" && typeof schema.minLength === "number" && value.length < schema.minLength) {
-    errors.push(`${path}: string is shorter than ${schema.minLength}`);
-  }
-  if (typeof value === "number" && typeof schema.minimum === "number" && value < schema.minimum) {
-    errors.push(`${path}: number is below ${schema.minimum}`);
-  }
-  if (Array.isArray(value)) {
-    if (typeof schema.minItems === "number" && value.length < schema.minItems) {
-      errors.push(`${path}: expected at least ${schema.minItems} items`);
-    }
-    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) {
-      errors.push(`${path}: expected at most ${schema.maxItems} items`);
-    }
-    if (schema.items !== undefined) {
-      value.forEach((item, index) => {
-        errors.push(...validateLocalJsonSchema(item, schema.items, `${path}[${index}]`));
-      });
-    }
-  }
-  if (isRecord(value)) {
-    const properties = isRecord(schema.properties) ? schema.properties : {};
-    const required = Array.isArray(schema.required)
-      ? schema.required.filter((item): item is string => typeof item === "string")
-      : [];
-    for (const key of required) {
-      if (!(key in value)) errors.push(`${path}.${key}: required field is missing`);
-    }
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(value)) {
-        if (!(key in properties)) errors.push(`${path}.${key}: additional property is not allowed`);
-      }
-    }
-    for (const [key, childSchema] of Object.entries(properties)) {
-      if (key in value) {
-        errors.push(...validateLocalJsonSchema(value[key], childSchema, `${path}.${key}`));
-      }
-    }
-  }
-  return errors;
 }
 
 function extractAttachedRepairPlan(content: ChatContent): ModelRepairPlan | undefined {
@@ -3480,46 +4166,38 @@ async function repairJsonStageContent(params: {
   stage: string;
   modelName: string;
   content: string;
-  parseError: unknown;
+  schemaVersion?: string;
+  schemaFingerprint?: string;
+  sourceStreamChunkMode: JsonStageContentResult["streamChunkMode"];
+  signal?: AbortSignal;
 }): Promise<unknown> {
   const startedAt = new Date();
   const startedAtMs = startedAt.getTime();
-  const repairPlan = buildModelRepairPlan({
-    targetStage: `json_repair_${params.stage}`,
-    issues: [{
-      code: "INVALID_JSON_STRUCTURE",
-      path: "$",
-      message: JSON.stringify(errorForLog(params.parseError)),
-      repairHint: "Repair JSON syntax and structure only; preserve the original semantic values and requested response envelope.",
-    }],
-    scope: { kind: "json" },
-    preserveRules: [
-      "Preserve semantic content, identifiers, values, ordering, and the requested response envelope.",
-      "Only JSON syntax and structural closure may change.",
-    ],
-  });
-  const repairContent = JSON.stringify({
-    stage: params.stage,
-    parse_error: errorForLog(params.parseError),
-    json_like_text: params.content.slice(0, MAX_JSON_REPAIR_INPUT_CHARS),
-    repair_plan: repairPlan,
-  });
+  const repairContent = buildJsonSyntaxRepairUserPrompt(
+    params.content,
+    MAX_JSON_REPAIR_INPUT_CHARS,
+  );
   const body = {
     model: params.modelName,
     messages: [
-      { role: "system", content: `${JSON_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}` },
+      { role: "system", content: JSON_SYNTAX_REPAIR_SYSTEM_PROMPT },
       { role: "user", content: repairContent },
     ],
     temperature: 0,
+    enable_thinking: false,
     response_format: { type: "json_object" },
   };
-  await logOnePromptVideo("automatic_repair.plan.created", {
-    stage: `json_repair_${params.stage}`,
-    repairPlan,
-  });
   await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_repair.request`, {
     model: params.modelName,
     contentLength: params.content.length,
+    originalOutput: structuredContentDiagnostic(params.content),
+    repairInput: structuredContentDiagnostic(repairContent),
+    schemaVersion: params.schemaVersion,
+    schemaFingerprint: params.schemaFingerprint,
+    sourceStreamChunkMode: params.sourceStreamChunkMode,
+    repairScope: "json_syntax_only",
+    temperature: 0,
+    enableThinking: false,
   }, "warn");
   await reportPlannerProgress({
     stage: "json_repair",
@@ -3529,7 +4207,7 @@ async function repairJsonStageContent(params: {
   });
   let result: JsonStageContentResult;
   try {
-    result = await fetchJsonStageContent(`json_repair_${params.stage}`, body);
+    result = await fetchJsonStageContent(`json_repair_${params.stage}`, body, params.signal);
   } catch (error) {
     const completedAt = new Date();
     await reportPlannerStageMetric({
@@ -3560,6 +4238,12 @@ async function repairJsonStageContent(params: {
     ok: result.ok,
     durationMs: repairDurationMs,
     rawSummary: result.rawSummary,
+    repairOutput: structuredContentDiagnostic(result.content),
+    contentDiff: structuredContentDiff(params.content, result.content),
+    schemaVersion: params.schemaVersion,
+    schemaFingerprint: params.schemaFingerprint,
+    sourceStreamChunkMode: params.sourceStreamChunkMode,
+    repairStreamChunkMode: result.streamChunkMode,
   }, result.ok ? "info" : "error");
   await reportPlannerProgress({
     stage: "json_repair",
@@ -3570,14 +4254,152 @@ async function repairJsonStageContent(params: {
   if (!result.ok) throw new Error(result.errorMessage || `Aliyun storyboard ${params.stage} JSON repair failed HTTP ${result.httpStatus}`);
   const repairedContent = result.content;
   if (!repairedContent) throw new Error(`Aliyun storyboard ${params.stage} JSON repair returned empty content`);
-  const repaired = parseJsonObject(repairedContent);
+  let repaired: unknown;
+  try {
+    repaired = parseJsonObject(repairedContent);
+  } catch (repairParseError) {
+    await logOnePromptVideo(
+      `aliyun.storyboard.${params.stage}.json_repair.parse_failed`,
+      {
+        repairedOutput: structuredContentDiagnostic(repairedContent),
+        repairParseError: jsonParseErrorDiagnostic(
+          repairParseError,
+          repairedContent,
+        ),
+        originalOutput: structuredContentDiagnostic(params.content),
+        contentDiff: structuredContentDiff(params.content, repairedContent),
+        schemaVersion: params.schemaVersion,
+        schemaFingerprint: params.schemaFingerprint,
+        sourceStreamChunkMode: params.sourceStreamChunkMode,
+        repairStreamChunkMode: result.streamChunkMode,
+      },
+      "error",
+    );
+    throw repairParseError;
+  }
+  if (
+    isRecord(repaired)
+    && Object.prototype.hasOwnProperty.call(repaired, "repair_execution")
+  ) {
+    throw new Error(
+      `Aliyun storyboard ${params.stage} JSON syntax repair illegally returned repair_execution`,
+    );
+  }
+  const semanticValidation = validateJsonRepairSemanticPreservation(
+    params.content,
+    repairedContent,
+  );
+  if (!semanticValidation.valid) {
+    await logOnePromptVideo(
+      `aliyun.storyboard.${params.stage}.json_repair.semantic_validation_failed`,
+      {
+        originalOutput: structuredContentDiagnostic(params.content),
+        repairedOutput: structuredContentDiagnostic(repairedContent),
+        contentDiff: structuredContentDiff(params.content, repairedContent),
+        semanticValidation,
+        schemaVersion: params.schemaVersion,
+        schemaFingerprint: params.schemaFingerprint,
+        sourceStreamChunkMode: params.sourceStreamChunkMode,
+        repairStreamChunkMode: result.streamChunkMode,
+      },
+      "error",
+    );
+    throw new Error(
+      `Aliyun storyboard ${params.stage} JSON syntax repair changed semantic content: ${semanticValidation.message}`,
+    );
+  }
   await logOnePromptVideo(`aliyun.storyboard.${params.stage}.json_repair.success`, {
     repairedContentLength: repairedContent.length,
+    model: params.modelName,
+    contentDiff: structuredContentDiff(params.content, repairedContent),
+    schemaVersion: params.schemaVersion,
+    schemaFingerprint: params.schemaFingerprint,
+    sourceStreamChunkMode: params.sourceStreamChunkMode,
+    repairStreamChunkMode: result.streamChunkMode,
+    originalSemanticFingerprint:
+      semanticValidation.originalSemanticFingerprint,
+    repairedSemanticFingerprint:
+      semanticValidation.repairedSemanticFingerprint,
   });
   return repaired;
 }
 
-function buildPlanningArchitectContent(input: PlanVideoProjectInput, referenceFacts: unknown): ChatContent {
+function compactReferenceFactsForPlanningRoute(referenceFactsRaw: unknown): {
+  subjectTypes: Array<"person" | "game_ui" | "product" | "food" | "vehicle" | "scene" | "brand_mark" | "other">;
+  categorySignals: Array<"game" | "product" | "food" | "auto" | "ecommerce" | "brand" | "tutorial" | "unknown">;
+  containsUi: boolean;
+  containsBrandElements: boolean;
+  containsPeople: boolean;
+  hasExplicitAdCategorySignals: boolean;
+} {
+  const root = isRecord(referenceFactsRaw) ? referenceFactsRaw : {};
+  const facts = arrayOfRecords(root.reference_facts);
+  const subjectTypes = new Set<"person" | "game_ui" | "product" | "food" | "vehicle" | "scene" | "brand_mark" | "other">();
+  const categorySignals = new Set<"game" | "product" | "food" | "auto" | "ecommerce" | "brand" | "tutorial" | "unknown">();
+  const searchable = facts.map((fact) => [
+    ...(normalizeStringArray(fact.people) ?? []),
+    ...(normalizeStringArray(fact.products) ?? []),
+    ...(normalizeStringArray(fact.objects) ?? []),
+    ...(normalizeStringArray(fact.readable_text) ?? []),
+    ...(normalizeStringArray(fact.brand_marks) ?? []),
+    stringOr(fact.scene, ""),
+  ].join(" ")).join(" ").toLowerCase();
+  const containsPeople = facts.some((fact) => Array.isArray(fact.people) && fact.people.length > 0);
+  const containsProducts = facts.some((fact) => Array.isArray(fact.products) && fact.products.length > 0);
+  const containsBrandElements = facts.some((fact) => Array.isArray(fact.brand_marks) && fact.brand_marks.length > 0);
+  const containsUi = /\bui|interface|hud|score|button|menu\b|界面|按钮|分数|排行榜/.test(searchable);
+  if (containsPeople) subjectTypes.add("person");
+  if (containsProducts) subjectTypes.add("product");
+  if (containsBrandElements) subjectTypes.add("brand_mark");
+  if (facts.some((fact) => stringOr(fact.scene, "").trim())) subjectTypes.add("scene");
+  if (/\bgame|gameplay|jackpot|bonus|leaderboard\b|游戏|关卡|爆奖|奖励/.test(searchable)) {
+    categorySignals.add("game");
+    subjectTypes.add("game_ui");
+  }
+  if (containsProducts || /\bproduct\b|产品|商品/.test(searchable)) categorySignals.add("product");
+  if (containsBrandElements || /\bbrand\b|品牌/.test(searchable)) categorySignals.add("brand");
+  if (/\bfood|dish|meal|restaurant\b|食品|食物|菜品|餐厅/.test(searchable)) {
+    categorySignals.add("food");
+    subjectTypes.add("food");
+  }
+  if (/\bcar|vehicle|automotive\b|汽车|车辆/.test(searchable)) {
+    categorySignals.add("auto");
+    subjectTypes.add("vehicle");
+  }
+  if (/\bshop|shopping|checkout|buy now|offer\b|电商|购物|下单|优惠/.test(searchable)) {
+    categorySignals.add("ecommerce");
+  }
+  if (!subjectTypes.size && facts.length) subjectTypes.add("other");
+  return {
+    subjectTypes: [...subjectTypes],
+    categorySignals: categorySignals.size ? [...categorySignals] : [],
+    containsUi,
+    containsBrandElements,
+    containsPeople,
+    hasExplicitAdCategorySignals: categorySignals.size > 0,
+  };
+}
+
+function buildPlanningRouteInputForArchitect(
+  input: PlanVideoProjectInput,
+  referenceFactsRaw: unknown,
+): ReturnType<typeof buildPlanningRouteInput> {
+  return buildPlanningRouteInput({
+    userCreative: input.userPrompt,
+    durationSeconds: input.durationSeconds,
+    aspectRatio: input.aspectRatio,
+    stylePreset: input.stylePreset ?? null,
+    hasReferenceImage: input.referenceImageUrls.length > 0,
+    referenceFacts: compactReferenceFactsForPlanningRoute(referenceFactsRaw),
+    userConstraints: [],
+  });
+}
+
+function buildPlanningArchitectContent(
+  input: PlanVideoProjectInput,
+  referenceFacts: unknown,
+  approvedRouteContract: ApprovedPlanningRouteContract,
+): ChatContent {
   const bounds = segmentCountBounds(input.durationSeconds);
   return JSON.stringify({
     user_idea: input.userPrompt,
@@ -3589,6 +4411,7 @@ function buildPlanningArchitectContent(input: PlanVideoProjectInput, referenceFa
     segment_duration_min_seconds: MIN_SEGMENT_SECONDS,
     segment_duration_max_seconds: MAX_SEGMENT_SECONDS,
     reference_facts: referenceFacts,
+    approved_route_contract: approvedRouteContractForPlanningArchitect(approvedRouteContract),
     reference_usage_rule: "Reference facts constrain identity, product, scene, and style only. They are not a story or timeline.",
   });
 }
@@ -3756,7 +4579,7 @@ async function ensurePlanningDurationContract(params: {
         "Only candidate_timeline and planning_manifest.timeline_blueprint timing fields may change.",
       ],
     });
-    const repairRaw = await callJsonStage({
+    const repairRaw = await executeStructuredStage({
       stage: `planning_duration_repair_r${revision + 1}`,
       modelName: params.modelName,
       systemPrompt: `${PLANNING_DURATION_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
@@ -3811,7 +4634,7 @@ async function extractReferenceFacts(
 ): Promise<unknown> {
   const existing = referenceFactCache.get(fingerprint);
   if (existing) return existing;
-  const pending = callJsonStage({
+  const pending = executeStructuredStage({
     stage: "reference_fact_extractor",
     modelName,
     systemPrompt: REFERENCE_FACT_EXTRACTOR_SYSTEM_PROMPT,
@@ -3826,6 +4649,7 @@ async function extractReferenceFacts(
       ...referenceImageUrls.map((url) => ({ type: "image_url" as const, image_url: { url } })),
     ],
     temperature: 0.05,
+    contract: referenceFactContract,
   });
   referenceFactCache.set(fingerprint, pending);
   if (referenceFactCache.size > 100) {
@@ -3846,73 +4670,268 @@ async function ensurePlanningNarrativeContract(params: {
   planningManifest: VideoPlanningManifest;
   creativeStrategy: VideoCreativeStrategy;
   narrativeEvents: NarrativeEvent[];
+  authority: "event" | "legacy_migrated";
+  checkpoint: AliyunStoryboardPlannerCheckpoint;
+  onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
 }): Promise<{
   creativeStrategy: VideoCreativeStrategy;
+  narrativeEvents: NarrativeEvent[];
   report: PlanningNarrativeContractResult;
   repairCount: number;
 }> {
   const maxRepairs = storyContractRepairMax();
-  let current = params.creativeStrategy;
+  let authority = params.authority;
+  let currentEvents = params.narrativeEvents;
+  let current = authority === "event"
+    ? applyEventAuthorityToCreativeStrategy(params.creativeStrategy, currentEvents)
+    : params.creativeStrategy;
   let report = validatePlanningNarrativeContract({
     creativeStrategy: current,
-    narrativeEvents: params.narrativeEvents,
+    narrativeEvents: currentEvents,
     timelineSegments: params.planningManifest.timelineBlueprint.segments,
   });
-  for (let repairCount = 0; !report.passed && repairCount < maxRepairs; repairCount += 1) {
+  const attempts = [...(params.checkpoint.planningContractRepairState?.attempts ?? [])].slice(-8);
+  let previousAttempt = attempts.at(-1);
+  let repairCount = 0;
+  const maxStageVisits = maxRepairs + 1;
+  for (; !report.passed && repairCount < maxStageVisits; repairCount += 1) {
+    const issuesBefore = report.issues;
+    const issueCountBefore = report.issues.length;
+    const issueFingerprint = planningContractIssueFingerprint(report);
+    const bindingFingerprintBefore = creativeStrategyBindingFingerprint(current);
+    const shouldEscalate = shouldEscalatePlanningContractRepair(previousAttempt, report, current);
+    let mode: PlanningContractRepairAttempt["mode"] = "binding_patch";
+    let changedPaths: string[] = [];
+    let candidateRaw: unknown;
+
+    if (authority === "legacy_migrated" && shouldEscalate && previousAttempt?.mode === "binding_patch") {
+      const fallback = deterministicLegacyOrderFallback(current, currentEvents, report.issues);
+      if (fallback) {
+        mode = "deterministic_fallback";
+        current = fallback.strategy;
+        changedPaths = fallback.changedPaths;
+      }
+    }
+    if (mode !== "deterministic_fallback" && (authority === "event" || shouldEscalate)) {
+      mode = "event_role_replan";
+    }
+
     await reportPlannerProgress({
       stage: "planning_contract_repair",
       attempt: repairCount + 1,
-      detailZh: `创意策略与事件时间线存在 ${report.issues.length} 项不一致，正在定向修复事件绑定与钩子揭示范围。`,
-      detailEn: `Creative strategy has ${report.issues.length} event-contract issue(s). Repairing bindings and hook reveal scope.`,
+      detailZh: mode === "event_role_replan"
+        ? `事件职责与时间线存在 ${report.issues.length} 项不一致，正在局部重规划 narrative_event.story_functions。`
+        : `创意策略与事件时间线存在 ${report.issues.length} 项不一致，正在以白名单 Patch 修复事件绑定。`,
+      detailEn: mode === "event_role_replan"
+        ? `Narrative event responsibilities have ${report.issues.length} contract issue(s). Replanning event roles only.`
+        : `Creative strategy has ${report.issues.length} event-contract issue(s). Applying a whitelisted binding patch.`,
     });
-    const repairPlan = buildModelRepairPlan({
-      targetStage: "planning_contract_repair",
-      issues: report.issues,
-      scope: { kind: "document" },
-      preserveRules: [
-        "Modify only creative_strategy.",
-        "Preserve narrative_events and planning_manifest.timeline_blueprint exactly.",
-      ],
-    });
-    const repairedRaw = await callJsonStage({
-      stage: `planning_contract_repair_${repairCount + 1}`,
-      modelName: params.modelName,
-      systemPrompt: `${PLANNING_NARRATIVE_CONTRACT_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
-      userContent: JSON.stringify({
-        user_idea: params.input.userPrompt,
-        current_creative_strategy: current,
-        narrative_events: params.narrativeEvents,
-        timeline_blueprint: params.planningManifest.timelineBlueprint,
-        contract_issues: report.issues,
-        repair_plan: repairPlan,
-      }),
-      temperature: 0.1,
-    });
-    const envelope = isRecord(repairedRaw) ? repairedRaw : {};
-    current = normalizeCreativeStrategy(
-      readLoose(envelope, "creativeStrategy", "creative_strategy") ?? repairedRaw,
-      params.planningManifest,
-      [],
-    );
+    if (mode !== "deterministic_fallback") {
+      const repairPlan = mode === "event_role_replan"
+        ? buildModelRepairPlan({
+            targetStage: "planning_event_role_replan",
+            issues: report.issues,
+            scope: { kind: "document" },
+            preserveRules: [
+              "Modify only narrative_events.story_functions and directly stale creative strategy prose.",
+              "Preserve every event fact, event order, timeline segment, duration, anchor, and source_event_id.",
+            ],
+          })
+        : buildModelRepairPlan({
+            targetStage: "planning_contract_repair",
+            issues: report.issues,
+            scope: { kind: "document" },
+            preserveRules: [
+              "Modify only whitelisted creative_strategy fields.",
+              "Preserve narrative_events and planning_manifest.timeline_blueprint exactly.",
+            ],
+          });
+      candidateRaw = await executeStructuredStage({
+        stage: mode === "event_role_replan"
+          ? `planning_event_role_replan_${repairCount + 1}`
+          : `planning_contract_repair_${repairCount + 1}`,
+        modelName: params.modelName,
+        systemPrompt: `${
+          mode === "event_role_replan"
+            ? PLANNING_EVENT_ROLE_REPLAN_SYSTEM_PROMPT
+            : PLANNING_NARRATIVE_CONTRACT_REPAIR_SYSTEM_PROMPT
+        }${STRUCTURED_REPAIR_EXECUTION_RULES}`,
+        userContent: JSON.stringify({
+          user_idea: params.input.userPrompt,
+          current_creative_strategy: current,
+          narrative_events: currentEvents,
+          timeline_blueprint: params.planningManifest.timelineBlueprint,
+          contract_issues: report.issues,
+          previous_attempts: attempts.slice(-2),
+          repair_plan: repairPlan,
+        }),
+        temperature: mode === "event_role_replan" ? 0.08 : 0.05,
+      });
+      const envelope = isRecord(candidateRaw) ? candidateRaw : {};
+      if (mode === "event_role_replan") {
+        const eventPatchResult = applyEventStoryFunctionPatches({
+          events: currentEvents,
+          patches: normalizeEventStoryFunctionPatches(
+            readLoose(envelope, "eventStoryFunctionPatches", "event_story_function_patches"),
+          ),
+        });
+        currentEvents = eventPatchResult.events;
+        changedPaths.push(...eventPatchResult.changedEventIds.map((eventId) => `/narrative_events/${eventId}/story_functions`));
+        current = applyEventAuthorityToCreativeStrategy(current, currentEvents);
+        const prosePatchResult = applyCreativeStrategyPatches({
+          strategy: current,
+          patches: normalizeCreativeStrategyPatches(
+            readLoose(envelope, "creativeStrategyPatches", "creative_strategy_patches"),
+          ),
+          validEventIds: currentEvents.map((event) => event.eventId),
+        });
+        current = applyEventAuthorityToCreativeStrategy(prosePatchResult.strategy, currentEvents);
+        changedPaths.push(...prosePatchResult.changedPaths);
+        authority = "event";
+      } else {
+        const patchResult = applyCreativeStrategyPatches({
+          strategy: current,
+          patches: normalizeCreativeStrategyPatches(envelope.patches),
+          validEventIds: currentEvents.map((event) => event.eventId),
+        });
+        current = patchResult.strategy;
+        changedPaths.push(...patchResult.changedPaths);
+        currentEvents = materializeNarrativeEventStoryFunctions(
+          currentEvents.map((event) => ({ ...event, storyFunctions: [] })),
+          current,
+        ).events;
+      }
+    } else {
+      currentEvents = materializeNarrativeEventStoryFunctions(
+        currentEvents.map((event) => ({ ...event, storyFunctions: [] })),
+        current,
+      ).events;
+    }
+
     report = validatePlanningNarrativeContract({
       creativeStrategy: current,
-      narrativeEvents: params.narrativeEvents,
+      narrativeEvents: currentEvents,
       timelineSegments: params.planningManifest.timelineBlueprint.segments,
     });
+    const attempt: PlanningContractRepairAttempt = {
+      attempt: repairCount + 1,
+      mode,
+      issueFingerprint,
+      bindingFingerprintBefore,
+      bindingFingerprintAfter: creativeStrategyBindingFingerprint(current),
+      issueCountBefore,
+      issueCountAfter: report.issues.length,
+      changedPaths: uniqueStrings(changedPaths),
+      issues: issuesBefore,
+      createdAt: new Date().toISOString(),
+    };
+    attempts.push(attempt);
+    previousAttempt = attempt;
+    params.checkpoint.planningContractRepairState = {
+      status: report.passed ? "passed" : "repairing",
+      authority,
+      attempts: attempts.slice(-8),
+      currentIssues: report.issues,
+      lastCandidateRaw: candidateRaw,
+      updatedAt: new Date().toISOString(),
+    };
+    params.checkpoint.planningRaw = replacePlanningNarrativeAuthority(
+      params.checkpoint.planningRaw,
+      current,
+      currentEvents,
+    );
+    params.checkpoint.resumeFromStage = report.passed
+      ? undefined
+      : "planning_contract_repair";
+    if (report.passed) {
+      clearPlannerCheckpointFailureAfterStageSuccess(
+        params.checkpoint,
+        "planning_contract_repair",
+      );
+    }
+    await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
     await logOnePromptVideo("aliyun.storyboard.planning_contract.repair", {
       attempt: repairCount + 1,
+      mode,
       passed: report.passed,
+      issueFingerprint,
+      bindingFingerprintBefore,
+      bindingFingerprintAfter: attempt.bindingFingerprintAfter,
+      changedPaths: attempt.changedPaths,
       remainingIssues: report.issues,
     }, report.passed ? "info" : "warn");
-    if (report.passed) return { creativeStrategy: current, report, repairCount: repairCount + 1 };
+    if (report.passed) {
+      return {
+        creativeStrategy: current,
+        narrativeEvents: currentEvents,
+        report,
+        repairCount: repairCount + 1,
+      };
+    }
   }
   if (!report.passed) {
-    throw new Error(`Planning narrative contract validation failed: ${report.issues
-      .slice(0, 8)
-      .map((item) => `${item.code}@${item.path}`)
-      .join(", ")}`);
+    params.checkpoint.planningContractRepairState = {
+      status: "event_replan_required",
+      authority,
+      attempts: attempts.slice(-8),
+      currentIssues: report.issues,
+      lastCandidateRaw: params.checkpoint.planningContractRepairState?.lastCandidateRaw,
+      updatedAt: new Date().toISOString(),
+    };
+    params.checkpoint.resumeFromStage = "planning_contract_repair";
+    await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+    throw new StoryboardStageError(
+      `Planning narrative contract validation failed: ${report.issues
+        .slice(0, 8)
+        .map((item) => `${item.code}@${item.path}`)
+        .join(", ")}`,
+      {
+        code: "contract_validation_error",
+        retryable: false,
+        stage: "planning_contract_repair",
+        validationErrors: report.issues.map((item) => `${item.code}@${item.path}: ${item.repairHint}`),
+      },
+    );
   }
-  return { creativeStrategy: current, report, repairCount: 0 };
+  params.checkpoint.planningContractRepairState = {
+    status: "passed",
+    authority,
+    attempts: attempts.slice(-8),
+    currentIssues: [],
+    updatedAt: new Date().toISOString(),
+  };
+  params.checkpoint.resumeFromStage = undefined;
+  if (clearPlannerCheckpointFailureAfterStageSuccess(
+    params.checkpoint,
+    "planning_contract_repair",
+  )) {
+    await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+  }
+  return {
+    creativeStrategy: current,
+    narrativeEvents: currentEvents,
+    report,
+    repairCount: 0,
+  };
+}
+
+function normalizeCreativeStrategyPatches(value: unknown): CreativeStrategyPatch[] {
+  return arrayOfRecords(value).flatMap((item) => {
+    const path = stringOr(item.path, "");
+    if (item.op !== "replace" || !path) return [];
+    return [{ op: "replace", path, value: item.value }];
+  });
+}
+
+function normalizeEventStoryFunctionPatches(value: unknown): EventStoryFunctionPatch[] {
+  return arrayOfRecords(value).flatMap((item) => {
+    const eventId = stringOr(item.eventId ?? item.event_id, "");
+    if (!eventId) return [];
+    return [{
+      eventId,
+      storyFunctions: normalizeStoryFunctionArray(item.storyFunctions ?? item.story_functions),
+    }];
+  });
 }
 
 function replacePlanningCreativeStrategy(
@@ -3930,6 +4949,29 @@ function replacePlanningCreativeStrategy(
   };
   delete envelope.creativeStrategy;
   envelope.creative_strategy = creativeStrategy;
+  return envelope;
+}
+
+function replacePlanningNarrativeAuthority(
+  planningRaw: unknown,
+  creativeStrategy: VideoCreativeStrategy,
+  narrativeEvents: NarrativeEvent[],
+): Record<string, unknown> {
+  const envelope = replacePlanningCreativeStrategy(planningRaw, creativeStrategy);
+  delete envelope.narrativeEvents;
+  envelope.narrative_events = narrativeEvents.map((event) => ({
+    event_id: event.eventId,
+    story_functions: event.storyFunctions ?? [],
+    dramatic_goal: event.dramaticGoal,
+    participants: event.participants,
+    location_id: event.locationId,
+    initial_state: event.initialState,
+    action: event.action,
+    resulting_state: event.resultingState,
+    required_anchor_ids: event.requiredAnchorIds,
+    previous_event_ids: event.previousEventIds,
+    must_become_separate_segment: event.mustBecomeSeparateSegment,
+  }));
   return envelope;
 }
 
@@ -4052,6 +5094,7 @@ export function invalidateCheckpointAfterTimelineReplan(
   checkpoint.storyboardArtistPlan = undefined;
   checkpoint.storyContractReport = undefined;
   checkpoint.storySemanticReview = undefined;
+  checkpoint.planningContractRepairState = undefined;
   checkpoint.shotDecomposerSegmentPlans = keepPrefix(checkpoint.shotDecomposerSegmentPlans);
   checkpoint.approvedShotDecomposerSegmentPlans = keepPrefix(checkpoint.approvedShotDecomposerSegmentPlans);
   checkpoint.promptDetailSegmentPlans = keepPrefix(checkpoint.promptDetailSegmentPlans);
@@ -4112,7 +5155,7 @@ async function ensureStoryboardStoryContract(params: {
         "Preserve planning, camera graph, transition plan, segment timing, and all valid story content.",
       ],
     });
-    const repairedRaw = await callJsonStage({
+    const repairedRaw = await executeStructuredStage({
       stage: `story_contract_repair_${repairCount + 1}`,
       modelName: params.modelName,
       systemPrompt: `${STORY_CONTRACT_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
@@ -4262,7 +5305,7 @@ async function ensureStoryboardSemanticQuality(params: {
           "Preserve the planning manifest, timeline, camera graph, transitions, anchors, and valid causal links.",
         ],
       });
-      const repairedRaw = await callJsonStage({
+      const repairedRaw = await executeStructuredStage({
         stage: `story_semantic_repair_${repairCount + 1}`,
         modelName: params.repairModelName,
         systemPrompt: `${STORY_SEMANTIC_REPAIR_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
@@ -4407,7 +5450,7 @@ async function reviewStoryboardSemantics(params: {
   const creativeStrategy = isRecord(params.planningStoryDesignContext.creative_strategy)
     ? params.planningStoryDesignContext.creative_strategy
     : {};
-  const raw = await callJsonStage({
+  const raw = await executeStructuredStage({
     stage: params.repairAttempts > 0
       ? `story_semantic_critic_after_repair_${params.repairAttempts}`
       : "story_semantic_critic",
@@ -4551,10 +5594,6 @@ async function createShotDecomposerPlan(params: {
   baseCompletedSteps: number;
   totalPlanningSteps: number;
 }): Promise<ShotDecomposerPipelineResult> {
-  if (shotDecomposerMode() === "whole") {
-    return { shotDecomposerPlan: await callWholeShotDecomposerPlan(params) };
-  }
-
   const timelineSegments = params.planningManifest.timelineBlueprint.segments;
 
   const concurrency = shotDecomposerConcurrency();
@@ -4576,6 +5615,56 @@ async function createShotDecomposerPlan(params: {
     let plan = params.checkpoint.shotDecomposerSegmentPlans?.[checkpointKey];
     if (!plan) {
       let contractValidationFeedback = "";
+      const structuredFailureKey = structuredFailureCheckpointKey(
+        stage,
+        segment.segmentNo,
+        segmentShotDecomposerContract.version,
+      );
+      const handleStructuredContractFailure = async (error: unknown): Promise<never> => {
+        const feedback = storyboardContractValidationFeedback(error);
+        if (!feedback) throw error;
+        contractValidationFeedback = feedback;
+        const identity = structuredContractIssueFingerprint(
+          {
+            stage,
+            segment: segment.segmentNo,
+            schemaVersion: segmentShotDecomposerContract.version,
+          },
+          contractIssuesFromStageError(error),
+        );
+        const state = advanceStructuredFailureState(
+          params.checkpoint.structuredFailures?.[structuredFailureKey],
+          identity,
+        );
+        params.checkpoint.structuredFailures = {
+          ...(params.checkpoint.structuredFailures ?? {}),
+          [structuredFailureKey]: state,
+        };
+        await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+        if (shouldStopStructuredFailureRetry(state)) {
+          await logOnePromptVideo("aliyun.storyboard.structured_contract.retry_stopped", {
+            stage,
+            segmentNo: segment.segmentNo,
+            schemaVersion: state.schemaVersion,
+            issueFingerprint: state.issueFingerprint,
+            unchangedCount: state.count,
+            disposition: "contract_repair_required",
+          }, "error");
+          throw new StoryboardStageError(
+            `Structured contract failure was unchanged twice for ${stage}, segment ${segment.segmentNo}, schema ${state.schemaVersion}. Automatic retry stopped; contract repair or manual review is required.`,
+            {
+              code: "contract_validation_error",
+              retryable: false,
+              validationErrors: error instanceof StoryboardStageError
+                ? error.validationErrors
+                : [feedback],
+              stage,
+              cause: error,
+            },
+          );
+        }
+        throw error;
+      };
       plan = await runStoryboardStageWithRetry({
         stage,
         maxAttempts: shotDecomposerRetryAttempts(),
@@ -4602,9 +5691,9 @@ async function createShotDecomposerPlan(params: {
                 ],
               })
             : undefined;
-          let raw: unknown;
+          let raw: SegmentShotDecomposerOutput;
           try {
-            raw = await callJsonStage({
+            raw = await executeStructuredStage({
               stage,
               modelName: params.modelName,
               systemPrompt: contractValidationFeedback
@@ -4623,15 +5712,10 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
                 })
                 : baseContent,
               temperature: 0.1,
-              jsonSchema: {
-                name: "segment_shot_decomposer_contract",
-                schema: SEGMENT_SHOT_DECOMPOSER_JSON_SCHEMA,
-              },
+              contract: segmentShotDecomposerContract,
             });
           } catch (error) {
-            const schemaFeedback = storyboardContractValidationFeedback(error);
-            if (schemaFeedback) contractValidationFeedback = schemaFeedback;
-            throw error;
+            return handleStructuredContractFailure(error);
           }
           const candidatePlan = unwrapPlanRoot(raw, "shot_decomposer_plan");
           try {
@@ -4645,14 +5729,19 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
             );
           } catch (error) {
             contractValidationFeedback = error instanceof Error ? error.message : String(error);
-            throw new StoryboardStageError(
+            return handleStructuredContractFailure(new StoryboardStageError(
               `Segment ${segment.segmentNo} video prompt contract is invalid: ${contractValidationFeedback}`,
               {
                 code: "contract_validation_error",
                 retryable: true,
+                validationErrors: [contractValidationFeedback],
+                stage,
                 cause: error,
               },
-            );
+            ));
+          }
+          if (params.checkpoint.structuredFailures?.[structuredFailureKey]) {
+            delete params.checkpoint.structuredFailures[structuredFailureKey];
           }
           return candidatePlan;
         },
@@ -4749,7 +5838,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
 
     let promptDetailPlan = params.checkpoint.promptDetailSegmentPlans?.[checkpointKey];
     if (!promptDetailPlan) {
-      const promptDetailRaw = await callJsonStage({
+      const promptDetailRaw = await executeStructuredStage({
         stage: `prompt_detailer_s${segment.segmentNo}`,
         modelName: params.modelName,
         systemPrompt: PROMPT_DETAILER_SEGMENT_SYSTEM_PROMPT,
@@ -4815,6 +5904,13 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
     keyframeCount: arrayOfRecords(merged.keyframes).length,
     renderDescriptionCount: arrayOfRecords(merged.segment_render_descriptions ?? merged.segmentRenderDescriptions).length,
   });
+  if (clearPlannerCheckpointFailureAfterStageSuccess(params.checkpoint, [
+    "shot_decomposer",
+    "single_take_audit",
+    "prompt_detailer",
+  ])) {
+    await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+  }
   return {
     shotDecomposerPlan: merged,
     promptDetailPlan: mergedPromptDetailPlan,
@@ -4869,45 +5965,6 @@ function assertShotPlanVideoPromptContract(
     });
   }
   validateVideoPromptContract(contract);
-}
-
-async function callWholeShotDecomposerPlan(params: {
-  input: PlanVideoProjectInput;
-  modelName: string;
-  planningManifest: VideoPlanningManifest;
-  storyboardArtistPlan: Record<string, unknown>;
-  storyDesignContext: Record<string, unknown>;
-}): Promise<Record<string, unknown>> {
-  const shotDecomposerRaw = await callJsonStage({
-    stage: "shot_decomposer",
-    modelName: params.modelName,
-    systemPrompt: SHOT_DECOMPOSER_SYSTEM_PROMPT,
-    userContent: JSON.stringify({
-      user_idea: params.input.userPrompt,
-      aspect_ratio: params.input.aspectRatio,
-      duration_seconds: params.input.durationSeconds,
-      planning_manifest: params.planningManifest,
-      story_design_context: params.storyDesignContext,
-      storyboard_artist_plan: storyboardWithoutFinalTransitions(params.storyboardArtistPlan),
-      allowed_terminal_evidence: params.planningManifest.timelineBlueprint.segments.flatMap((segment) =>
-        buildTerminalEvidenceCatalog({ ...params, segment })),
-      edit_boundary_policy: {
-        owner: "final_compositor",
-        executable_by_video_model: false,
-      },
-      confirmed_anchor_images: [],
-    }),
-    temperature: 0.1,
-  });
-  const plan = unwrapPlanRoot(shotDecomposerRaw, "shot_decomposer_plan");
-  for (const segment of params.planningManifest.timelineBlueprint.segments) {
-    assertShotPlanVideoPromptContract(
-      plan,
-      segment.segmentNo,
-      buildTerminalEvidenceCatalog({ ...params, segment }),
-    );
-  }
-  return plan;
 }
 
 type TerminalEvidenceCatalogItem = {
@@ -5312,7 +6369,7 @@ async function rewriteStoryPlanUntilQualityPass(params: {
         `Rewrite only ${decision.stage} and fields explicitly downstream from that stage.`,
       ],
     });
-    const rewriteRaw = await callJsonStage({
+    const rewriteRaw = await executeStructuredStage({
       stage: `story_quality_rewrite_${attempt + 1}_${decision.stage}`,
       modelName: params.modelName,
       systemPrompt: `${STORY_QUALITY_REWRITE_SYSTEM_PROMPT}${STRUCTURED_REPAIR_EXECUTION_RULES}`,
@@ -5768,7 +6825,7 @@ async function repairShotDecomposerPlanUntilSingleTake(params: {
         "Modify only target segments and their matching segment_render_descriptions and boundary contracts.",
       ],
     });
-    const repairRaw = await callJsonStage({
+    const repairRaw = await executeStructuredStage({
       stage: params.expectedSegmentNos?.length === 1
         ? `split_repair_s${params.expectedSegmentNos[0]}_r${revision + 1}`
         : `split_repair_${revision + 1}`,
@@ -5992,11 +7049,42 @@ function auditNeedsTimelineReplan(
   }
   return arrayOfRecords(
     shotDecomposerPlan.segmentRenderDescriptions ?? shotDecomposerPlan.segment_render_descriptions,
-  ).some((description) =>
-    description.timelineChangeRequest !== undefined
-    || description.timeline_change_request !== undefined
-    || description.recommendedSplit !== undefined
-    || description.recommended_split !== undefined);
+  ).some((description) => [
+    description.timelineChangeRequest,
+    description.timeline_change_request,
+    description.recommendedSplit,
+    description.recommended_split,
+  ].some(hasMeaningfulTimelineChangeDirective));
+}
+
+export function hasMeaningfulTimelineChangeDirective(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.some(hasMeaningfulTimelineChangeDirective);
+  if (isRecord(value)) {
+    return Object.values(value).some(hasMeaningfulTimelineChangeDirective);
+  }
+  return false;
+}
+
+const LOCALLY_REPAIRABLE_FINAL_PROMPT_CODES = new Set([
+  "INTERNAL_CUT_LANGUAGE",
+  "BOUNDARY_TRANSITION_LEAKED_INTO_SEGMENT",
+  "MOTION_CHECKPOINT_CONTAINS_CUT",
+]);
+
+export function locallyRepairableFinalPromptSegmentNos(
+  issues: PlanValidationIssue[],
+): number[] {
+  return [...new Set(issues.flatMap((issue) => {
+    if (
+      issue.severity !== "error"
+      || !LOCALLY_REPAIRABLE_FINAL_PROMPT_CODES.has(issue.code)
+    ) return [];
+    const match = /^segment:(\d+)$/.exec(issue.artifactId ?? "");
+    return match ? [Number(match[1])] : [];
+  }))].sort((left, right) => left - right);
 }
 
 export function createTimelineChangeRequest(
@@ -6026,12 +7114,16 @@ export function createTimelineChangeRequest(
       description.recommendedSplit ?? description.recommended_split,
     ].filter((value) => value !== undefined && value !== null);
   });
-  const issueCodes = uniqueStrings(
+  let issueCodes = uniqueStrings(
     timelineIssues.map((issue) => issue.code),
   );
-  const reasons = uniqueStrings(
+  let reasons = uniqueStrings(
     timelineIssues.map((issue) => issue.reason),
   );
+  if (!issueCodes.length && requestedChanges.length) {
+    issueCodes = ["TIMELINE_SPLIT_DIRECTIVE"];
+    reasons = ["single_take_repair_exhausted_with_explicit_split_directive"];
+  }
   const firstAffectedSegmentNo = Math.max(1, Math.min(...(targets.length ? targets : [1])));
   const requestSeed = JSON.stringify({
     affectedSegmentNos: targets,
@@ -6069,6 +7161,29 @@ function combineTimelineChangeRequests(requests: TimelineChangeRequest[]): Timel
     reasons,
     requestedChanges,
   };
+}
+
+export function timelineChangeRequestRepairIssues(request: TimelineChangeRequest): Array<{
+  code: string;
+  path: string;
+  message: string;
+  repairHint: string;
+  segmentNo: number;
+}> {
+  const codes = request.issueCodes.length
+    ? request.issueCodes
+    : ["TIMELINE_SPLIT_DIRECTIVE"];
+  return codes.map((code, index) => ({
+    code,
+    path: `planning_manifest.timeline_blueprint.segments[segment_no>=${request.firstAffectedSegmentNo}]`,
+    message: request.reasons[index]
+      ?? request.reasons[0]
+      ?? `Segment ${request.firstAffectedSegmentNo} requires an explicit timeline split.`,
+    repairHint: "Split the affected event range at a real discontinuity boundary and recompute only the affected suffix timing.",
+    segmentNo: request.affectedSegmentNos[index]
+      ?? request.affectedSegmentNos[0]
+      ?? request.firstAffectedSegmentNo,
+  }));
 }
 
 export function mergeTargetedShotDecomposerRepair(
@@ -6227,7 +7342,7 @@ function buildThreeStagePlan(params: {
       characterState: stringOr(sourceFrame.characterState ?? sourceFrame.character_state, fallbackFrame.characterState),
       productState: stringOr(sourceFrame.productState ?? sourceFrame.product_state, fallbackFrame.productState),
       frameDesign: isRecord(sourceFrame.frameDesign) ? sourceFrame.frameDesign as VideoPlanKeyframe["frameDesign"] : isRecord(sourceFrame.frame_design) ? sourceFrame.frame_design as VideoPlanKeyframe["frameDesign"] : fallbackFrame.frameDesign,
-      imagePrompt: stringOr(detail?.imagePromptZh ?? sourceFrame.imagePromptZh ?? sourceFrame.image_prompt_zh ?? sourceFrame.imagePrompt ?? sourceFrame.image_prompt, fallbackFrame.imagePrompt),
+      imagePrompt: stringOr(detail?.imagePromptEn ?? sourceFrame.imagePromptEn ?? sourceFrame.image_prompt_en ?? sourceFrame.imagePrompt ?? sourceFrame.image_prompt, fallbackFrame.imagePromptEn ?? fallbackFrame.imagePrompt),
       imagePromptZh: stringOr(detail?.imagePromptZh ?? sourceFrame.imagePromptZh ?? sourceFrame.image_prompt_zh, fallbackFrame.imagePromptZh ?? fallbackFrame.imagePrompt),
       imagePromptEn: stringOr(detail?.imagePromptEn ?? sourceFrame.imagePromptEn ?? sourceFrame.image_prompt_en, fallbackFrame.imagePromptEn ?? fallbackFrame.imagePrompt),
       negativePromptGroups: isRecord(sourceFrame.negativePrompt ?? sourceFrame.negative_prompt) ? sourceFrame.negativePrompt as VideoPlanKeyframe["negativePromptGroups"] : fallbackFrame.negativePromptGroups,
@@ -6301,7 +7416,7 @@ function buildThreeStagePlan(params: {
       camera: stringOr(sourceSegment.camera ?? sourceSegment.camera_movement, fallbackSegment.camera),
       subjectMotion: stringOr(sourceSegment.subjectMotion ?? sourceSegment.subject_motion, fallbackSegment.subjectMotion),
       environmentMotion: stringOr(sourceSegment.environmentMotion ?? sourceSegment.environment_motion, fallbackSegment.environmentMotion),
-      videoPrompt: videoPromptZh,
+      videoPrompt: videoPromptEn,
       videoPromptZh,
       videoPromptEn,
       subtitle: stringOr(sourceSegment.subtitle, fallbackSegment.subtitle),
@@ -6323,7 +7438,6 @@ function buildThreeStagePlan(params: {
   });
 
   const consistencyReferences = anchorsToConsistencyReferences(params.planningManifest, styleBible);
-  const shots = segmentsToCompatShots(keyframes, segments);
   const plan: OnePromptVideoPlan = {
     title: stringOr(source.title, params.fallback.title),
     logline: stringOr(source.logline, params.fallback.logline),
@@ -6358,12 +7472,10 @@ function buildThreeStagePlan(params: {
     artifactMetadata: extras.artifactMetadata,
     generationQualityReports: extras.generationQualityReports,
     plannerWarnings: uniqueStrings(storyWarnings),
-    storyboardPlan: source,
     promptDetailPlan: promptDetails,
     consistencyReferences,
     keyframes,
     segments,
-    shots,
   };
   plan.boundaryContracts = deriveCanonicalBoundaryContracts(plan);
   validateBoundaryContracts(plan, plan.boundaryContracts);
@@ -6587,21 +7699,29 @@ function normalizeCreativeStrategy(value: unknown, manifest: VideoPlanningManife
   const storyStrategy = manifest.storyStrategy ?? {};
   const route = routeCreativeTemplate(raw, manifest, warnings);
   const definition = STORY_TEMPLATE_DEFINITIONS[route.templateId];
+  const rawReturnToEventId = stringOr(raw.returnToEventId ?? raw.return_to_event_id, "");
+  const chronologyPolicy = resolveChronologyHookPolicy({
+    chronologyMode: normalizeChronologyMode(raw.chronologyMode ?? raw.chronology_mode),
+    hookMode: normalizeHookMode(raw.hookMode ?? raw.hook_mode),
+    hookRevealLevel: normalizeHookRevealLevel(raw.hookRevealLevel ?? raw.hook_reveal_level),
+    requiresReturnPoint: Boolean(rawReturnToEventId),
+  });
+  for (const issue of chronologyPolicy.issues) warnings.push(`${issue.code}: ${issue.message}`);
   return {
     videoType: normalizeCreativeVideoType(raw.videoType ?? raw.video_type ?? projectIntent.videoType),
     videoCategory: route.videoCategory,
     templateId: route.templateId,
     templateReason: stringOr(raw.templateReason ?? raw.template_reason, ""),
     templateReasonZh: stringOr(raw.templateReasonZh ?? raw.template_reason_zh, definition.templateReasonZh),
-    chronologyMode: normalizeChronologyMode(raw.chronologyMode ?? raw.chronology_mode),
-    hookMode: normalizeHookMode(raw.hookMode ?? raw.hook_mode),
-    hookRevealLevel: normalizeHookRevealLevel(raw.hookRevealLevel ?? raw.hook_reveal_level),
+    chronologyMode: chronologyPolicy.chronologyMode,
+    hookMode: chronologyPolicy.hookMode,
+    hookRevealLevel: chronologyPolicy.hookRevealLevel,
     hookEventIds: normalizeStringArray(raw.hookEventIds ?? raw.hook_event_ids) ?? [],
     conflictEventIds: normalizeStringArray(raw.conflictEventIds ?? raw.conflict_event_ids) ?? [],
     turningPointEventIds: normalizeStringArray(raw.turningPointEventIds ?? raw.turning_point_event_ids) ?? [],
     payoffEventIds: normalizeStringArray(raw.payoffEventIds ?? raw.payoff_event_ids) ?? [],
     ctaEventIds: normalizeStringArray(raw.ctaEventIds ?? raw.cta_event_ids) ?? [],
-    returnToEventId: stringOr(raw.returnToEventId ?? raw.return_to_event_id, ""),
+    returnToEventId: chronologyPolicy.requiresReturnPoint ? rawReturnToEventId : "",
     conversionGoal: stringOr(raw.conversionGoal ?? raw.conversion_goal, ""),
     conversionGoalZh: stringOr(raw.conversionGoalZh ?? raw.conversion_goal_zh, definition.conversionGoalZh),
     fallbackReason: stringOr(raw.fallbackReason ?? raw.fallback_reason, ""),
@@ -6662,12 +7782,6 @@ function routeCreativeTemplate(
   warnings: string[],
 ): { videoCategory: VideoCreativeCategory; templateId: VideoCreativeTemplateId; fallbackReasonZh?: string } {
   const requestedTemplate = normalizeCreativeTemplateId(raw.templateId ?? raw.template_id);
-  if (requestedTemplate) {
-    return {
-      videoCategory: STORY_TEMPLATE_DEFINITIONS[requestedTemplate].videoCategory,
-      templateId: requestedTemplate,
-    };
-  }
   const rawCategory = normalizeCreativeCategory(raw.videoCategory ?? raw.video_category);
   const videoType = normalizeCreativeVideoType(raw.videoType ?? raw.video_type ?? manifest.projectIntent?.videoType);
   const text = [
@@ -6692,15 +7806,37 @@ function routeCreativeTemplate(
     manifest.storyStrategy?.narrativeArcEn,
     ...(manifest.projectIntent?.successCriteria ?? []),
   ].filter(Boolean).join(" ").toLowerCase();
-  const category = rawCategory ?? categoryFromVideoType(videoType) ?? classifyVideoCategoryFromText(text);
+  const explicitCategory = rawCategory ?? categoryFromVideoType(videoType);
+  const category = explicitCategory
+    ?? (requestedTemplate ? defaultCategoryForTemplate(requestedTemplate) : classifyVideoCategoryFromText(text));
+  if (requestedTemplate) {
+    const resolved = resolveCategoryTemplateMapping({
+      videoCategory: category,
+      templateId: requestedTemplate,
+      semanticText: text,
+    });
+    if (resolved.fallbackUsed) {
+      const fallbackReasonZh = `分类与模板组合不合法，已按 ${category} 的确定性规则回退到 ${resolved.templateId}。`;
+      for (const issue of resolved.issues) warnings.push(`${issue.code}: ${issue.message}`);
+      return {
+        videoCategory: resolved.videoCategory,
+        templateId: resolved.templateId,
+        fallbackReasonZh,
+      };
+    }
+    return {
+      videoCategory: resolved.videoCategory,
+      templateId: resolved.templateId,
+    };
+  }
   const templateId = templateForCategory(category, text);
   if (templateId === "generic_brand_story" && !rawCategory && !videoType) {
     const fallbackReasonZh = "视频类型无法稳定判断，使用通用品牌故事模板，避免误套游戏、餐饮或电商语义。";
     warnings.push(`storyDesign template fallback: ${fallbackReasonZh}`);
-    return { videoCategory: "brand", templateId, fallbackReasonZh };
+    return { videoCategory: category, templateId, fallbackReasonZh };
   }
   return {
-    videoCategory: STORY_TEMPLATE_DEFINITIONS[templateId].videoCategory,
+    videoCategory: category,
     templateId,
     fallbackReasonZh: templateId === "generic_brand_story" ? "未匹配到垂直行业模板，使用通用品牌故事模板。" : undefined,
   };
@@ -7319,6 +8455,7 @@ function normalizeNarrativeEvents(
     }
     return {
       eventId,
+      storyFunctions: normalizeStoryFunctionArray(item.storyFunctions ?? item.story_functions),
       dramaticGoal: stringOr(item.dramaticGoal ?? item.dramatic_goal, ""),
       participants: normalizeStringArray(item.participants) ?? [],
       locationId: safeId(item.locationId ?? item.location_id, ""),
@@ -8043,10 +9180,50 @@ async function detailPlanningAssetVisualSpecs(params: {
   checkpoint: AliyunStoryboardPlannerCheckpoint;
   onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void;
 }): Promise<VideoPlanningManifest> {
-  const targets = params.planningManifest.consistencyManifest.anchors.filter(
-    (anchor) => anchor.needsReferenceImage,
+  const eligibility = params.planningManifest.consistencyManifest.anchors.map(
+    assessAssetVisualSpecEligibility,
   );
-  if (!targets.length) return params.planningManifest;
+  const preflightManifest: VideoPlanningManifest = {
+    ...params.planningManifest,
+    consistencyManifest: {
+      ...params.planningManifest.consistencyManifest,
+      anchors: eligibility.map((item) => item.anchor),
+    },
+  };
+  const targets = eligibility.filter((item) => item.eligible).map((item) => item.anchor);
+  const skipped = eligibility.filter((item) => !item.eligible);
+  if (skipped.length) {
+    const skippedIds = new Set(skipped.map((item) => item.anchor.id));
+    params.checkpoint.assetVisualSpecsByAnchorId = Object.fromEntries(
+      Object.entries(params.checkpoint.assetVisualSpecsByAnchorId ?? {})
+        .filter(([anchorId]) => !skippedIds.has(anchorId)),
+    );
+    params.checkpoint.assetVisualSpecFingerprints = Object.fromEntries(
+      Object.entries(params.checkpoint.assetVisualSpecFingerprints ?? {})
+        .filter(([anchorId]) => !skippedIds.has(anchorId)),
+    );
+    await logOnePromptVideo("aliyun.storyboard.asset_visual_spec.skipped_ineligible", {
+      skippedCount: skipped.length,
+      billableCallCountAvoided: skipped.length,
+      anchors: skipped.map((item) => ({
+        anchorId: item.anchor.id,
+        type: item.anchor.type,
+        semanticRole: item.anchor.semanticRole,
+        needsReferenceImage: item.anchor.needsReferenceImage,
+        reason: item.reason,
+      })),
+    });
+    await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+  }
+  if (!targets.length) {
+    if (clearPlannerCheckpointFailureAfterStageSuccess(
+      params.checkpoint,
+      "asset_visual_spec",
+    )) {
+      await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+    }
+    return preflightManifest;
+  }
 
   await reportPlannerProgress({
     stage: "asset_visual_spec",
@@ -8056,13 +9233,33 @@ async function detailPlanningAssetVisualSpecs(params: {
     detailEn: `Detailing executable visual specifications for ${targets.length} consistency assets in parallel.`,
   });
   let completed = 0;
-  const detailed = await mapWithConcurrency(
-    targets,
-    assetVisualSpecConcurrency(),
-    async (anchor) => {
+  const batchController = new AbortController();
+  const activeAnchorIds = new Set<string>();
+  let batchFailure: { anchorId: string; error: unknown; cancelRequestedFor: string[] } | undefined;
+  let detailed: VideoConsistencyAnchor[];
+  try {
+    detailed = await mapWithConcurrency(
+      targets,
+      assetVisualSpecConcurrency(),
+      async (anchor) => {
+        activeAnchorIds.add(anchor.id);
+        try {
+      throwIfBatchCancelled(`asset_visual_spec_${anchor.id}`, batchController.signal);
+      const callGate = assessAssetVisualSpecEligibility(anchor);
+      if (!callGate.eligible) {
+        await logOnePromptVideo("aliyun.storyboard.asset_visual_spec.skipped_at_call_gate", {
+          anchorId: callGate.anchor.id,
+          type: callGate.anchor.type,
+          semanticRole: callGate.anchor.semanticRole,
+          needsReferenceImage: callGate.anchor.needsReferenceImage,
+          reason: callGate.reason,
+          billableCallCountAvoided: 1,
+        });
+        return callGate.anchor;
+      }
       const fingerprint = assetVisualSpecFingerprint(
-        anchor,
-        params.planningManifest,
+        callGate.anchor,
+        preflightManifest,
         params.input,
       );
       const cachedRaw = params.checkpoint.assetVisualSpecFingerprints?.[anchor.id] === fingerprint
@@ -8092,6 +9289,7 @@ async function detailPlanningAssetVisualSpecs(params: {
         stage: `asset_visual_spec_${anchor.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
         maxAttempts: assetVisualSpecMaxAttempts(),
         baseDelayMs: 0,
+        signal: batchController.signal,
         run: async () => {
           const repairPlan = validationFeedback.length
             ? buildModelRepairPlan({
@@ -8104,7 +9302,7 @@ async function detailPlanningAssetVisualSpecs(params: {
                 ],
               })
             : undefined;
-          const result = await callJsonStage({
+          const result = await executeStructuredStage({
             stage: `asset_visual_spec_${anchor.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
             modelName: params.modelName,
             systemPrompt: validationFeedback.length
@@ -8123,6 +9321,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
             }),
             temperature: 0.15,
             maxTokens: 1400,
+            signal: batchController.signal,
           });
           const candidate = normalizeDetailedAssetAnchor(anchor, result);
           validationFeedback = [
@@ -8145,6 +9344,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
           return candidate;
         },
       });
+      throwIfBatchCancelled(`asset_visual_spec_${anchor.id}`, batchController.signal);
       params.checkpoint.assetVisualSpecsByAnchorId = {
         ...(params.checkpoint.assetVisualSpecsByAnchorId ?? {}),
         [anchor.id]: raw as unknown as Record<string, unknown>,
@@ -8154,6 +9354,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
         [anchor.id]: fingerprint,
       };
       await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+      throwIfBatchCancelled(`asset_visual_spec_${anchor.id}`, batchController.signal);
       completed += 1;
       await reportPlannerProgress({
         stage: "asset_visual_spec",
@@ -8163,13 +9364,51 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
         detailEn: `The visual specification for ${anchor.displayNameEn || anchor.id} passed deterministic validation.`,
       });
       return raw;
-    },
-  );
+        } catch (error) {
+          if (!batchController.signal.aborted) {
+            const cancelRequestedFor = [...activeAnchorIds]
+              .filter((anchorId) => anchorId !== anchor.id);
+            batchFailure = { anchorId: anchor.id, error, cancelRequestedFor };
+            batchController.abort(new DOMException(
+              `Asset visual specification ${anchor.id} failed; cancel peer requests.`,
+              "AbortError",
+            ));
+            await logOnePromptVideo("aliyun.storyboard.asset_visual_spec.batch_cancel_requested", {
+              failedAnchorId: anchor.id,
+              cancelRequestedFor,
+              error: errorForLog(error),
+            }, "warn");
+          }
+          throw error;
+        } finally {
+          activeAnchorIds.delete(anchor.id);
+        }
+      },
+    );
+  } catch (error) {
+    const rootFailure = batchFailure;
+    if (rootFailure) {
+      await logOnePromptVideo("aliyun.storyboard.asset_visual_spec.batch_cancel_settled", {
+        failedAnchorId: rootFailure.anchorId,
+        cancelRequestedFor: rootFailure.cancelRequestedFor,
+        activeAnchorCountAfterSettlement: activeAnchorIds.size,
+      }, "warn");
+      throw rootFailure.error;
+    }
+    throw error;
+  }
   const detailedById = new Map(detailed.map((anchor) => [anchor.id, anchor]));
+  if (clearPlannerCheckpointFailureAfterStageSuccess(
+    params.checkpoint,
+    "asset_visual_spec",
+  )) {
+    await savePlannerCheckpoint(params.checkpoint, params.onCheckpoint);
+  }
   return {
-    ...params.planningManifest,
+    ...preflightManifest,
     consistencyManifest: {
-      anchors: params.planningManifest.consistencyManifest.anchors.map(
+      ...preflightManifest.consistencyManifest,
+      anchors: preflightManifest.consistencyManifest.anchors.map(
         (anchor) => detailedById.get(anchor.id) ?? anchor,
       ),
     },
@@ -8301,6 +9540,31 @@ function normalizeAnchors(value: unknown): VideoConsistencyAnchor[] {
       imagePromptZh: stringOr(item.imagePromptZh ?? item.image_prompt_zh, ""),
       imagePromptEn: stringOr(item.imagePromptEn ?? item.image_prompt_en, ""),
       assetImageContract: normalizeAssetImageContract(item.assetImageContract ?? item.asset_image_contract),
+      sourceEvidence: arrayOfRecords(item.sourceEvidence ?? item.source_evidence).flatMap((evidence) => {
+        const sourceValue = stringOr(evidence.source, "planner");
+        const source = sourceValue === "user_requirement"
+          || sourceValue === "reference_fact"
+          || sourceValue === "narrative_event"
+          ? sourceValue
+          : "planner";
+        const text = stringOr(evidence.text, "");
+        if (!text) return [];
+        return [{
+          source,
+          text,
+          eventIds: normalizeStringArray(evidence.eventIds ?? evidence.event_ids) ?? [],
+        }];
+      }),
+      candidateCategory: normalizeAnchorCandidateCategory(item.candidateCategory ?? item.candidate_category),
+      suggestedAsAnchor: booleanOr(item.suggestedAsAnchor ?? item.suggested_as_anchor, true),
+      candidateReason: stringOr(item.candidateReason ?? item.candidate_reason ?? item.reason, ""),
+      usedByEventIds: normalizeStringArray(item.usedByEventIds ?? item.used_by_event_ids) ?? [],
+      reuseCount: Math.max(0, numberFrom(item.reuseCount ?? item.reuse_count)),
+      lockDimensions: normalizeStringArray(item.lockDimensions ?? item.lock_dimensions) ?? [],
+      admissionReason: stringOr(item.admissionReason ?? item.admission_reason, ""),
+      admissionRule: stringOr(item.admissionRule ?? item.admission_rule, ""),
+      admissionScore: numberFrom(item.admissionScore ?? item.admission_score),
+      status: normalizeAnchorAdmissionStatus(item.status),
     })];
   }).slice(0, 12);
 }
@@ -8364,6 +9628,7 @@ function normalizeAssetImageContract(value: unknown): VideoConsistencyAnchor["as
     intrinsicDetails: normalizeStringArray(value.intrinsicDetails ?? value.intrinsic_details),
     forbiddenElements: normalizeStringArray(value.forbiddenElements ?? value.forbidden_elements),
     acceptanceCriteria: normalizeStringArray(value.acceptanceCriteria ?? value.acceptance_criteria),
+    playingCards: normalizePlayingCardContract(value.playingCards ?? value.playing_cards),
   };
   return contract;
 }
@@ -8495,7 +9760,7 @@ function normalizeMicroShotsForSegment(params: {
       cameraZh,
       cameraEn,
       referenceType: normalizeReferenceType(item.referenceType ?? item.reference_type) ?? (imagePromptZh || imagePromptEn ? "mixed" : "text"),
-      imagePrompt: imagePromptZh || imagePromptEn,
+      imagePrompt: imagePromptEn,
       imagePromptZh,
       imagePromptEn,
       declaredAnchorIds,
@@ -8503,7 +9768,7 @@ function normalizeMicroShotsForSegment(params: {
       effectiveRequiredAnchorIds: anchors,
       excludedAnchors: [],
       usesConsistencyAnchors: anchors,
-      prompt: stringOr(item.prompt, promptZh || promptEn),
+      prompt: promptEn || stringOr(item.prompt, ""),
       promptZh,
       promptEn,
     }];
@@ -8600,57 +9865,6 @@ function consistencyReferenceKindForAnchor(anchor: VideoConsistencyAnchor): NonN
   return "custom";
 }
 
-function segmentsToCompatShots(keyframes: VideoPlanKeyframe[], segments: VideoPlanSegment[]): VideoPlanShot[] {
-  return segments.map((segment) => {
-    const start = keyframes[segment.startKeyframeNo - 1];
-    return {
-      shotNo: segment.segmentNo,
-      durationSeconds: segment.durationSeconds,
-      boundaryMode: segment.boundaryMode,
-      purpose: segment.purpose,
-      purposeZh: segment.purposeZh,
-      purposeEn: segment.purposeEn,
-      camera: segment.camera,
-      action: segment.motion,
-      imagePrompt: start?.imagePrompt ?? "",
-      imagePromptZh: start?.imagePromptZh ?? start?.imagePrompt ?? "",
-      imagePromptEn: start?.imagePromptEn ?? start?.imagePrompt ?? "",
-      videoPrompt: segment.videoPrompt,
-      videoPromptZh: segment.videoPromptZh,
-      videoPromptEn: segment.videoPromptEn,
-      outputMode: segment.outputMode,
-      linkedBeatIds: segment.linkedBeatIds,
-      storyFunction: segment.storyFunction,
-      emotionalBeat: segment.emotionalBeat,
-      emotionalBeatZh: segment.emotionalBeatZh,
-      emotionalBeatEn: segment.emotionalBeatEn,
-      cause: segment.cause,
-      effect: segment.effect,
-      informationUnit: segment.informationUnit,
-      keyEvidenceIds: segment.keyEvidenceIds,
-      dependsOnBeatIds: segment.dependsOnBeatIds,
-      evidenceFromBeatIds: segment.evidenceFromBeatIds,
-      resolvesConflictBeatId: segment.resolvesConflictBeatId,
-      actionContinuity: segment.actionContinuity,
-      reactionBeat: segment.reactionBeat,
-      powerShift: segment.powerShift,
-      declaredAnchorIds: segment.declaredAnchorIds,
-      derivedAnchorIds: segment.derivedAnchorIds,
-      effectiveRequiredAnchorIds: segment.effectiveRequiredAnchorIds,
-      excludedAnchors: segment.excludedAnchors,
-      constraints: segment.constraints,
-      timedPrompts: segment.timedPrompts,
-      microShots: segment.microShots,
-      audioPlan: segment.audioPlan,
-      subtitle: segment.subtitle,
-      negativePrompt: segment.negativePrompt,
-      negativePromptZh: segment.negativePromptZh,
-      negativePromptEn: segment.negativePromptEn,
-      usesConsistencyAnchors: segment.usesConsistencyAnchors,
-    };
-  });
-}
-
 function anchorsForBoundary(manifest: VideoPlanningManifest, keyframeNo: number): string[] {
   const ids = new Set<string>();
   for (const segment of manifest.timelineBlueprint.segments) {
@@ -8706,6 +9920,15 @@ function jsonStageTimeoutMs(): number {
 
 function jsonStageStreamingEnabled(): boolean {
   return process.env.ONE_PROMPT_VIDEO_JSON_STAGE_STREAM?.trim().toLowerCase() !== "false";
+}
+
+export function shouldStreamJsonStage(
+  stage: string,
+  streamingEnabled = jsonStageStreamingEnabled(),
+): boolean {
+  if (!streamingEnabled) return false;
+  if (stage.startsWith("json_repair_")) return false;
+  return stage !== "reference_fact_extractor";
 }
 
 type JsonStageReasoningPolicy = {
@@ -8775,15 +9998,6 @@ function shotDecomposerRetryBaseDelayMs(): number {
   return Math.min(30000, Math.round(raw));
 }
 
-function shotDecomposerMode(): "segment" | "whole" {
-  return process.env.ONE_PROMPT_VIDEO_SHOT_DECOMPOSER_MODE?.trim().toLowerCase() === "whole" ? "whole" : "segment";
-}
-
-export function planningDecompositionMode(): PlanningDecompositionMode {
-  const raw = process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION?.trim().toLowerCase();
-  return raw === "legacy" || raw === "split_shadow" ? raw : "split";
-}
-
 function assetVisualSpecConcurrency(): number {
   const raw = Number(process.env.ONE_PROMPT_VIDEO_ASSET_VISUAL_SPEC_CONCURRENCY);
   if (!Number.isFinite(raw) || raw <= 0) return 5;
@@ -8794,10 +10008,6 @@ function assetVisualSpecMaxAttempts(): number {
   const raw = Number(process.env.ONE_PROMPT_VIDEO_ASSET_VISUAL_SPEC_MAX_ATTEMPTS);
   if (!Number.isFinite(raw) || raw <= 0) return 2;
   return Math.max(1, Math.min(3, Math.round(raw)));
-}
-
-function splitPlanningLegacyFallbackEnabled(): boolean {
-  return process.env.ONE_PROMPT_VIDEO_SPLIT_PLANNING_FALLBACK_LEGACY?.trim().toLowerCase() !== "false";
 }
 
 function shotDecomposerConcurrency(): number {
@@ -8812,16 +10022,795 @@ function singleTakeMaxRevisions(targetedSegmentRepair: boolean): number {
   return targetedSegmentRepair ? 2 : MAX_SINGLE_TAKE_REVISIONS;
 }
 
-function plannerInputFingerprint(input: PlanVideoProjectInput): string {
-  return createHash("sha256").update(JSON.stringify({
-    plannerContractRevision: STORYBOARD_PLANNER_CONTRACT_REVISION,
+function plannerInputSnapshot(input: PlanVideoProjectInput): Record<string, unknown> {
+  return {
     userPrompt: input.userPrompt,
     aspectRatio: input.aspectRatio,
     durationSeconds: input.durationSeconds,
     shotCount: input.shotCount ?? null,
     stylePreset: input.stylePreset ?? "",
     referenceImageUrls: input.referenceImageUrls,
+  };
+}
+
+function plannerInputFingerprint(input: PlanVideoProjectInput): string {
+  return createHash("sha256")
+    .update(JSON.stringify(plannerInputSnapshot(input)))
+    .digest("hex");
+}
+
+function legacyPlannerInputFingerprint(input: PlanVideoProjectInput): string {
+  return createHash("sha256").update(JSON.stringify({
+    plannerContractRevision: STORYBOARD_PLANNER_CONTRACT_REVISION,
+    ...plannerInputSnapshot(input),
   })).digest("hex");
+}
+
+function checkpointFailureStage(error: unknown): AliyunStoryboardProgressStage | "final_validation" {
+  if (error instanceof PlanningArchitectRouteConflictError) return "planning_architect";
+  if (isStructuredOutputSyntaxError(error)) {
+    return error.stage as AliyunStoryboardProgressStage;
+  }
+  if (error instanceof StoryboardStageError && error.stage) {
+    return error.stage as AliyunStoryboardProgressStage;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/资产图片合同|asset.*contract/i.test(message)) return "asset_prompt_contract_repair";
+  if (/Strict JSON Schema|shot_decomposer|segment_render_descriptions|motion_contract|video_prompt_contract/i.test(message)) {
+    return "shot_decomposer";
+  }
+  if (/timeline_replan|single.take|single_take/i.test(message)) return "single_take_audit";
+  if (/切镜措辞|positive cut|prompt detail/i.test(message)) return "prompt_detailer";
+  return "final_validation";
+}
+
+function checkpointFailureFingerprint(
+  stage: string,
+  error: unknown,
+): { fingerprint: string; code: string } {
+  const code = error instanceof StoryboardStageError
+    ? error.code
+    : isStructuredOutputSyntaxError(error)
+      ? error.code
+    : error instanceof Error
+      ? error.name || "Error"
+      : "UnknownError";
+  const details = error instanceof StoryboardStageError && error.validationErrors?.length
+    ? [...error.validationErrors].sort()
+    : isStructuredOutputSyntaxError(error)
+      ? [error.message, error.stage, error.classification]
+    : [error instanceof Error ? error.message : String(error)];
+  return {
+    code,
+    fingerprint: createHash("sha256")
+      .update(JSON.stringify({ stage, code, details }))
+      .digest("hex"),
+  };
+}
+
+function clearCheckpointAfterPlanning(checkpoint: AliyunStoryboardPlannerCheckpoint): void {
+  checkpoint.assetPromptRepairRaw = undefined;
+  checkpoint.assetVisualSpecsByAnchorId = {};
+  checkpoint.assetVisualSpecFingerprints = {};
+  checkpoint.storyboardArtistPlan = undefined;
+  checkpoint.storyContractReport = undefined;
+  checkpoint.storySemanticReview = undefined;
+  checkpoint.shotDecomposerSegmentPlans = {};
+  checkpoint.approvedShotDecomposerSegmentPlans = {};
+  checkpoint.promptDetailSegmentPlans = {};
+  checkpoint.finalPromptRepairAttempts = 0;
+  checkpoint.timelineReplanAttempts = 0;
+  checkpoint.timelineChangeHistory = [];
+}
+
+function invalidatePlanningContentAfterRoute(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+): void {
+  checkpoint.planningCoreRaw = undefined;
+  checkpoint.planningRaw = undefined;
+  checkpoint.planningContractRepairState = undefined;
+  clearCheckpointAfterPlanning(checkpoint);
+  checkpoint.resumeFromStage = "planning_architect";
+}
+
+function failedSegmentNosFromError(error: unknown): number[] {
+  const message = error instanceof Error ? error.message : String(error);
+  const segmentNos = new Set<number>();
+  for (const pattern of [
+    /segment(?:_no)?[:\s=#-]*(\d+)/gi,
+    /(?:镜头|片段)\s*(\d+)/g,
+  ]) {
+    for (const match of message.matchAll(pattern)) {
+      const segmentNo = Number(match[1]);
+      if (Number.isInteger(segmentNo) && segmentNo > 0) segmentNos.add(segmentNo);
+    }
+  }
+  return [...segmentNos].sort((left, right) => left - right);
+}
+
+export function invalidatePlannerCheckpointAfterFailure(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+  failedStage: AliyunStoryboardProgressStage | "final_validation",
+  error: unknown,
+): AliyunStoryboardPlannerCheckpoint {
+  const stage = String(failedStage);
+  const fingerprint = checkpointFailureFingerprint(stage, error);
+  const sameFailure = checkpoint.lastFailure?.fingerprint === fingerprint.fingerprint;
+
+  if (stage === "reference_fact_extractor") {
+    checkpoint.referenceFactsRaw = undefined;
+    checkpoint.referenceFactsFingerprint = undefined;
+    checkpoint.planningCoreRaw = undefined;
+    checkpoint.planningRaw = undefined;
+    checkpoint.planningContractRepairState = undefined;
+    clearCheckpointAfterPlanning(checkpoint);
+    checkpoint.resumeFromStage = "reference_fact_extractor";
+  } else if (
+    stage === "planning_architect"
+    || stage === "planning_duration_repair"
+  ) {
+    checkpoint.planningRaw = undefined;
+    checkpoint.planningCoreRaw = undefined;
+    checkpoint.planningContractRepairState = undefined;
+    clearCheckpointAfterPlanning(checkpoint);
+    checkpoint.resumeFromStage = "planning_architect";
+  } else if (stage === "planning_contract_repair") {
+    // The planning candidate, reference facts, and generated asset specs are
+    // valid repair inputs. Preserve them and resume at the narrow contract
+    // repair boundary instead of paying for Planning Architect again.
+    checkpoint.storyboardArtistPlan = undefined;
+    checkpoint.storyContractReport = undefined;
+    checkpoint.storySemanticReview = undefined;
+    checkpoint.shotDecomposerSegmentPlans = {};
+    checkpoint.approvedShotDecomposerSegmentPlans = {};
+    checkpoint.promptDetailSegmentPlans = {};
+    checkpoint.finalPromptRepairAttempts = 0;
+    checkpoint.timelineReplanAttempts = 0;
+    checkpoint.timelineChangeHistory = [];
+    checkpoint.resumeFromStage = "planning_contract_repair";
+  } else if (
+    stage === "asset_prompt_contract_gate"
+    || stage === "asset_prompt_contract_repair"
+    || stage === "asset_visual_spec"
+  ) {
+    // Keep the expensive planning candidate as repair input, but never reuse the
+    // failed repair or any downstream output derived from it.
+    clearCheckpointAfterPlanning(checkpoint);
+    checkpoint.resumeFromStage = "asset_prompt_contract_repair";
+  } else if (
+    stage === "storyboard_artist"
+    || stage === "story_contract_gate"
+    || stage === "story_contract_repair"
+    || stage === "story_semantic_critic"
+    || stage === "story_semantic_repair"
+  ) {
+    checkpoint.storyboardArtistPlan = undefined;
+    checkpoint.storyContractReport = undefined;
+    checkpoint.storySemanticReview = undefined;
+    checkpoint.shotDecomposerSegmentPlans = {};
+    checkpoint.approvedShotDecomposerSegmentPlans = {};
+    checkpoint.promptDetailSegmentPlans = {};
+    checkpoint.finalPromptRepairAttempts = 0;
+    checkpoint.timelineReplanAttempts = 0;
+    checkpoint.timelineChangeHistory = [];
+    checkpoint.resumeFromStage = "storyboard_artist";
+  } else if (stage === "prompt_detailer") {
+    checkpoint.promptDetailSegmentPlans = {};
+    checkpoint.finalPromptRepairAttempts = 0;
+    checkpoint.resumeFromStage = "prompt_detailer";
+  } else if (stage === "final_validation") {
+    const failedSegmentNos = failedSegmentNosFromError(error);
+    for (const segmentNo of failedSegmentNos) {
+      const key = String(segmentNo);
+      delete checkpoint.shotDecomposerSegmentPlans?.[key];
+      delete checkpoint.approvedShotDecomposerSegmentPlans?.[key];
+      delete checkpoint.promptDetailSegmentPlans?.[key];
+    }
+    checkpoint.finalPromptRepairAttempts = 0;
+    checkpoint.resumeFromStage = "shot_decomposer";
+  } else {
+    checkpoint.shotDecomposerSegmentPlans = {};
+    checkpoint.approvedShotDecomposerSegmentPlans = {};
+    checkpoint.promptDetailSegmentPlans = {};
+    checkpoint.finalPromptRepairAttempts = 0;
+    checkpoint.timelineReplanAttempts = 0;
+    checkpoint.timelineChangeHistory = [];
+    checkpoint.resumeFromStage = "shot_decomposer";
+  }
+
+  const invalidatedAt = new Date().toISOString();
+  checkpoint.lastFailure = {
+    ...fingerprint,
+    stage,
+    count: sameFailure ? (checkpoint.lastFailure?.count ?? 1) + 1 : 1,
+    invalidatedAt,
+  };
+  checkpoint.updatedAt = invalidatedAt;
+  return checkpoint;
+}
+
+export function clearPlannerCheckpointFailureAfterStageSuccess(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+  succeededStages: string | readonly string[],
+): boolean {
+  if (!checkpoint.lastFailure) return false;
+  const stages = Array.isArray(succeededStages)
+    ? succeededStages
+    : [succeededStages];
+  const completedAllStages = stages.includes("complete");
+  if (
+    !completedAllStages
+    && !stages.some((stage) =>
+      checkpoint.lastFailure?.stage === stage
+      || checkpoint.lastFailure?.stage.startsWith(`${stage}_`)
+    )
+  ) {
+    return false;
+  }
+
+  const failedStage = checkpoint.lastFailure.stage;
+  checkpoint.lastFailure = undefined;
+  if (
+    completedAllStages
+    || checkpoint.resumeFromStage === failedStage
+    || stages.includes(String(checkpoint.resumeFromStage ?? ""))
+  ) {
+    checkpoint.resumeFromStage = undefined;
+  }
+  checkpoint.updatedAt = new Date().toISOString();
+  return true;
+}
+
+function revalidatePlannerCheckpointForResume(params: {
+  checkpoint: AliyunStoryboardPlannerCheckpoint;
+  input: PlanVideoProjectInput;
+  fallback: OnePromptVideoPlan;
+}): { invalidated: boolean; issues: string[] } {
+  const issues: string[] = [];
+  let invalidated = false;
+
+  if (params.checkpoint.planningRaw !== undefined) {
+    const manifest = materializePlanningAssetImagePrompts(
+      normalizePlanningManifest(params.checkpoint.planningRaw, params.input, params.fallback),
+    );
+    const assetIssues = [
+      ...validatePlanningAssetImageContracts(manifest.consistencyManifest.anchors),
+      ...validatePlanningAssetExecutionPrompts(manifest.consistencyManifest.anchors),
+    ];
+    if (assetIssues.length) {
+      issues.push(...assetIssues.map((issue) => `${issue.anchorId}.${issue.field}: ${issue.message}`));
+      invalidatePlannerCheckpointAfterFailure(
+        params.checkpoint,
+        "asset_prompt_contract_repair",
+        new StoryboardStageError("Cached asset contract failed resume validation", {
+          code: "contract_validation_error",
+          retryable: false,
+          stage: "asset_prompt_contract_repair",
+          validationErrors: issues,
+        }),
+      );
+      invalidated = true;
+    }
+  }
+
+  for (const [segmentKey, plan] of Object.entries(params.checkpoint.shotDecomposerSegmentPlans ?? {})) {
+    const segmentNo = Number(segmentKey);
+    try {
+      assertShotPlanVideoPromptContract(plan, segmentNo);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      issues.push(`segment ${segmentNo}: ${message}`);
+      delete params.checkpoint.shotDecomposerSegmentPlans?.[segmentKey];
+      delete params.checkpoint.approvedShotDecomposerSegmentPlans?.[segmentKey];
+      delete params.checkpoint.promptDetailSegmentPlans?.[segmentKey];
+      params.checkpoint.resumeFromStage = "shot_decomposer";
+      invalidated = true;
+    }
+  }
+
+  for (const [segmentKey, plan] of Object.entries(params.checkpoint.approvedShotDecomposerSegmentPlans ?? {})) {
+    const segmentNo = Number(segmentKey);
+    try {
+      assertShotPlanVideoPromptContract(plan, segmentNo);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      issues.push(`approved segment ${segmentNo}: ${message}`);
+      delete params.checkpoint.approvedShotDecomposerSegmentPlans?.[segmentKey];
+      delete params.checkpoint.promptDetailSegmentPlans?.[segmentKey];
+      params.checkpoint.resumeFromStage = "shot_decomposer";
+      invalidated = true;
+    }
+  }
+
+  if (invalidated) params.checkpoint.updatedAt = new Date().toISOString();
+  return { invalidated, issues };
+}
+
+export function migrateCheckpointV12ToV13(
+  checkpoint: Record<string, unknown>,
+): Record<string, unknown> {
+  const migrated = structuredClone(checkpoint);
+  const stageOutputs = checkpointStageOutputs(migrated);
+  return {
+    ...migrated,
+    version: 13,
+    checkpointVersion: 13,
+    plannerMode: checkpointPlannerMode(migrated),
+    completedStages: inferCompletedCheckpointStages(migrated),
+    stageOutputs,
+    referenceFingerprint: checkpointReferenceFingerprint(migrated),
+  };
+}
+
+export function migrateCheckpointV13ToV14(
+  checkpoint: Record<string, unknown>,
+): Record<string, unknown> {
+  const migrated = structuredClone(checkpoint);
+  hydrateLegacyCheckpointFields(migrated);
+  const completedStages = inferCompletedCheckpointStages(migrated);
+  const existingContracts = isRecord(migrated.contractVersions)
+    ? migrated.contractVersions
+    : {};
+  const contractVersions = Object.fromEntries(
+    PLANNER_CHECKPOINT_STAGE_ORDER.map((stage) => [
+      stage,
+      typeof existingContracts[stage] === "string"
+        ? existingContracts[stage]
+        : PLANNER_CHECKPOINT_CONTRACT_VERSIONS[stage],
+    ]),
+  );
+  return {
+    ...migrated,
+    version: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
+    checkpointVersion: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
+    plannerMode: checkpointPlannerMode(migrated),
+    completedStages,
+    stageOutputs: checkpointStageOutputs(migrated),
+    contractVersions,
+    referenceFingerprint: checkpointReferenceFingerprint(migrated),
+  };
+}
+
+function migrateCheckpointEnvelopeToV14(
+  rawEnvelope: Record<string, unknown>,
+  input: PlanVideoProjectInput,
+): Record<string, unknown> {
+  const declaredVersions = [
+    numberFrom(rawEnvelope.checkpointVersion),
+    numberFrom(rawEnvelope.version),
+  ].filter((version) => version > 0);
+  const fromVersion = declaredVersions.length
+    ? Math.min(...declaredVersions)
+    : 0;
+  let migrated = structuredClone(rawEnvelope);
+  if (fromVersion === 12) {
+    migrated = migrateCheckpointV12ToV13(migrated);
+    migrated = migrateCheckpointV13ToV14(migrated);
+  } else if (fromVersion === 13) {
+    migrated = migrateCheckpointV13ToV14(migrated);
+  } else if (
+    fromVersion === 14
+    && hasV14CheckpointEnvelope(migrated)
+  ) {
+    hydrateLegacyCheckpointFields(migrated);
+  } else {
+    // Pre-envelope v14 and unknown historical versions are migrated by
+    // inspecting concrete outputs. No stage is discarded solely because a
+    // version number changed.
+    migrated = migrateCheckpointV13ToV14({
+      ...migrated,
+      version: 13,
+      checkpointVersion: 13,
+    });
+  }
+
+  const originalSnapshot = isRecord(migrated.inputSnapshot)
+    ? migrated.inputSnapshot
+    : undefined;
+  const nextSnapshot = plannerInputSnapshot(input);
+  const nextFingerprint = plannerInputFingerprint(input);
+  const nextReferenceFingerprint = plannerReferenceFingerprint(input);
+  const priorCompleted = inferCompletedCheckpointStages(migrated);
+  const reasons: string[] = [];
+  let firstInvalidStage: PlannerCheckpointStage | undefined;
+
+  const historicalMode = checkpointPlannerMode(migrated);
+  if (historicalMode !== "split" && priorCompleted.length) {
+    firstInvalidStage = earlierCheckpointStage(
+      firstInvalidStage,
+      "story_architect",
+    );
+    reasons.push(`planner_mode:${historicalMode}->split`);
+  }
+
+  const priorReferenceFingerprint = checkpointReferenceFingerprint(migrated);
+  if (
+    priorReferenceFingerprint
+    && priorReferenceFingerprint !== nextReferenceFingerprint
+  ) {
+    firstInvalidStage = earlierCheckpointStage(
+      firstInvalidStage,
+      "reference_analysis",
+    );
+    reasons.push("reference_input_changed");
+  }
+
+  if (originalSnapshot) {
+    if (!jsonValuesEqual(
+      originalSnapshot.referenceImageUrls,
+      nextSnapshot.referenceImageUrls,
+    )) {
+      firstInvalidStage = earlierCheckpointStage(
+        firstInvalidStage,
+        "reference_analysis",
+      );
+      if (!reasons.includes("reference_input_changed")) {
+        reasons.push("reference_input_changed");
+      }
+    }
+    const userCreativeChanged = !jsonValuesEqual(
+      originalSnapshot.userPrompt,
+      nextSnapshot.userPrompt,
+    );
+    if (userCreativeChanged) {
+      firstInvalidStage = earlierCheckpointStage(
+        firstInvalidStage,
+        isRouteClassificationCheckpoint(migrated.routeClassification)
+          && migrated.routeClassification.status === "manual_locked"
+          && migrated.routeClassification.locked
+          ? "story_architect"
+          : "route_classification",
+      );
+      reasons.push(
+        isRouteClassificationCheckpoint(migrated.routeClassification)
+          && migrated.routeClassification.status === "manual_locked"
+          && migrated.routeClassification.locked
+          ? "user_creative_changed_route_manual_locked"
+          : "user_creative_changed",
+      );
+    }
+    const storyInputChanged = [
+      "aspectRatio",
+      "durationSeconds",
+      "shotCount",
+      "stylePreset",
+    ].some((key) => !jsonValuesEqual(originalSnapshot[key], nextSnapshot[key]));
+    if (storyInputChanged) {
+      firstInvalidStage = earlierCheckpointStage(
+        firstInvalidStage,
+        "story_architect",
+      );
+      reasons.push("story_input_changed");
+    }
+  } else if (
+    priorCompleted.length
+    && typeof migrated.inputFingerprint === "string"
+    && migrated.inputFingerprint !== nextFingerprint
+    && migrated.inputFingerprint !== legacyPlannerInputFingerprint(input)
+  ) {
+    firstInvalidStage = earlierCheckpointStage(
+      firstInvalidStage,
+      "story_architect",
+    );
+    reasons.push("legacy_input_fingerprint_changed");
+  }
+
+  const storedContracts = isRecord(migrated.contractVersions)
+    ? migrated.contractVersions
+    : {};
+  for (const stage of priorCompleted) {
+    const stored = typeof storedContracts[stage] === "string"
+      ? storedContracts[stage]
+      : "";
+    const current = PLANNER_CHECKPOINT_CONTRACT_VERSIONS[stage];
+    if (stored && stored !== current) {
+      firstInvalidStage = earlierCheckpointStage(firstInvalidStage, stage);
+      reasons.push(`contract_version:${stage}:${stored}->${current}`);
+    }
+  }
+
+  const invalidatedStages = firstInvalidStage
+    ? invalidateCheckpointFromStage(migrated, firstInvalidStage)
+    : [];
+  const completedStages = inferCompletedCheckpointStages(migrated);
+  const preservedStages = priorCompleted.filter((stage) =>
+    completedStages.includes(stage)
+  );
+  const previousAudit = isRecord(migrated.migrationAudit)
+    ? migrated.migrationAudit
+    : undefined;
+  const auditUnchanged = previousAudit?.fromVersion === fromVersion
+    && previousAudit?.toVersion === STORYBOARD_PLANNER_CHECKPOINT_VERSION
+    && jsonValuesEqual(previousAudit?.preservedStages, preservedStages)
+    && jsonValuesEqual(previousAudit?.invalidatedStages, invalidatedStages)
+    && jsonValuesEqual(previousAudit?.reasons, reasons);
+  const migratedAt = auditUnchanged
+    && typeof previousAudit?.migratedAt === "string"
+    ? previousAudit.migratedAt
+    : new Date().toISOString();
+  migrated.version = STORYBOARD_PLANNER_CHECKPOINT_VERSION;
+  migrated.checkpointVersion = STORYBOARD_PLANNER_CHECKPOINT_VERSION;
+  migrated.plannerMode = "split";
+  migrated.planningDecompositionMode = "split";
+  migrated.inputFingerprint = nextFingerprint;
+  migrated.inputSnapshot = nextSnapshot;
+  migrated.completedStages = completedStages;
+  migrated.stageOutputs = checkpointStageOutputs(migrated);
+  migrated.contractVersions = { ...PLANNER_CHECKPOINT_CONTRACT_VERSIONS };
+  migrated.referenceFingerprint = nextReferenceFingerprint;
+  migrated.referenceFactsFingerprint = nextReferenceFingerprint;
+  migrated.migrationAudit = {
+    fromVersion,
+    toVersion: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
+    preservedStages,
+    invalidatedStages,
+    reasons,
+    migratedAt,
+  };
+  migrated.updatedAt = typeof migrated.updatedAt === "string"
+    ? migrated.updatedAt
+    : migratedAt;
+  return migrated;
+}
+
+function hasV14CheckpointEnvelope(checkpoint: Record<string, unknown>): boolean {
+  return checkpoint.checkpointVersion === STORYBOARD_PLANNER_CHECKPOINT_VERSION
+    && checkpoint.plannerMode === "split"
+    && Array.isArray(checkpoint.completedStages)
+    && isRecord(checkpoint.stageOutputs)
+    && isRecord(checkpoint.contractVersions)
+    && typeof checkpoint.referenceFingerprint === "string";
+}
+
+function checkpointPlannerMode(checkpoint: Record<string, unknown>): string {
+  if (
+    typeof checkpoint.planningDecompositionMode === "string"
+    && checkpoint.planningDecompositionMode !== "split"
+  ) return checkpoint.planningDecompositionMode;
+  if (typeof checkpoint.plannerMode === "string") return checkpoint.plannerMode;
+  if (typeof checkpoint.planningDecompositionMode === "string") {
+    return checkpoint.planningDecompositionMode;
+  }
+  return "split";
+}
+
+function checkpointReferenceFingerprint(
+  checkpoint: Record<string, unknown>,
+): string {
+  if (typeof checkpoint.referenceFingerprint === "string") {
+    return checkpoint.referenceFingerprint;
+  }
+  return typeof checkpoint.referenceFactsFingerprint === "string"
+    ? checkpoint.referenceFactsFingerprint
+    : "";
+}
+
+function plannerReferenceFingerprint(input: PlanVideoProjectInput): string {
+  return input.referenceImageUrls?.length
+    ? createHash("sha256")
+      .update(JSON.stringify(input.referenceImageUrls))
+      .digest("hex")
+    : "";
+}
+
+function inferCompletedCheckpointStages(
+  checkpoint: Record<string, unknown>,
+): PlannerCheckpointStage[] {
+  const completed = new Set<PlannerCheckpointStage>();
+  if (checkpoint.referenceFactsRaw !== undefined) completed.add("reference_analysis");
+  if (isRouteClassificationCheckpoint(checkpoint.routeClassification)) {
+    completed.add("route_classification");
+  }
+  if (checkpoint.planningCoreRaw !== undefined) completed.add("story_architect");
+  if (
+    checkpoint.planningRaw !== undefined
+    || hasRecordEntries(checkpoint.assetVisualSpecsByAnchorId)
+  ) completed.add("asset_contract");
+  if (isRecord(checkpoint.storyboardArtistPlan)) completed.add("storyboard_artist");
+  if (
+    isRecord(checkpoint.storyContractReport)
+    || isRecord(checkpoint.storySemanticReview)
+  ) completed.add("story_validation");
+  if (
+    hasRecordEntries(checkpoint.shotDecomposerSegmentPlans)
+    || hasRecordEntries(checkpoint.approvedShotDecomposerSegmentPlans)
+  ) completed.add("shot_decomposition");
+  if (hasRecordEntries(checkpoint.promptDetailSegmentPlans)) {
+    completed.add("prompt_compilation");
+  }
+  return PLANNER_CHECKPOINT_STAGE_ORDER.filter((stage) => completed.has(stage));
+}
+
+function checkpointStageOutputs(
+  checkpoint: Record<string, unknown>,
+): Partial<Record<PlannerCheckpointStage, unknown>> {
+  const outputs: Partial<Record<PlannerCheckpointStage, unknown>> = {};
+  if (checkpoint.referenceFactsRaw !== undefined) {
+    outputs.reference_analysis = checkpoint.referenceFactsRaw;
+  }
+  if (isRouteClassificationCheckpoint(checkpoint.routeClassification)) {
+    outputs.route_classification = checkpoint.routeClassification;
+  }
+  if (checkpoint.planningCoreRaw !== undefined) {
+    outputs.story_architect = checkpoint.planningCoreRaw;
+  }
+  if (
+    checkpoint.planningRaw !== undefined
+    || hasRecordEntries(checkpoint.assetVisualSpecsByAnchorId)
+  ) {
+    outputs.asset_contract = {
+      planningRaw: checkpoint.planningRaw,
+      assetVisualSpecsByAnchorId: checkpoint.assetVisualSpecsByAnchorId,
+      assetVisualSpecFingerprints: checkpoint.assetVisualSpecFingerprints,
+      assetPromptRepairRaw: checkpoint.assetPromptRepairRaw,
+    };
+  }
+  if (checkpoint.storyboardArtistPlan !== undefined) {
+    outputs.storyboard_artist = checkpoint.storyboardArtistPlan;
+  }
+  if (
+    checkpoint.storyContractReport !== undefined
+    || checkpoint.storySemanticReview !== undefined
+  ) {
+    outputs.story_validation = {
+      storyContractReport: checkpoint.storyContractReport,
+      storySemanticReview: checkpoint.storySemanticReview,
+    };
+  }
+  if (
+    hasRecordEntries(checkpoint.shotDecomposerSegmentPlans)
+    || hasRecordEntries(checkpoint.approvedShotDecomposerSegmentPlans)
+  ) {
+    outputs.shot_decomposition = {
+      shotDecomposerSegmentPlans: checkpoint.shotDecomposerSegmentPlans,
+      approvedShotDecomposerSegmentPlans:
+        checkpoint.approvedShotDecomposerSegmentPlans,
+    };
+  }
+  if (hasRecordEntries(checkpoint.promptDetailSegmentPlans)) {
+    outputs.prompt_compilation = checkpoint.promptDetailSegmentPlans;
+  }
+  return outputs;
+}
+
+function hydrateLegacyCheckpointFields(checkpoint: Record<string, unknown>): void {
+  if (!isRecord(checkpoint.stageOutputs)) return;
+  if (
+    checkpoint.referenceFactsRaw === undefined
+    && checkpoint.stageOutputs.reference_analysis !== undefined
+  ) checkpoint.referenceFactsRaw = checkpoint.stageOutputs.reference_analysis;
+  if (
+    checkpoint.routeClassification === undefined
+    && isRouteClassificationCheckpoint(checkpoint.stageOutputs.route_classification)
+  ) checkpoint.routeClassification = checkpoint.stageOutputs.route_classification;
+  if (
+    checkpoint.planningCoreRaw === undefined
+    && checkpoint.stageOutputs.story_architect !== undefined
+  ) checkpoint.planningCoreRaw = checkpoint.stageOutputs.story_architect;
+  if (isRecord(checkpoint.stageOutputs.asset_contract)) {
+    checkpoint.planningRaw ??= checkpoint.stageOutputs.asset_contract.planningRaw;
+    checkpoint.assetVisualSpecsByAnchorId ??=
+      checkpoint.stageOutputs.asset_contract.assetVisualSpecsByAnchorId;
+    checkpoint.assetVisualSpecFingerprints ??=
+      checkpoint.stageOutputs.asset_contract.assetVisualSpecFingerprints;
+    checkpoint.assetPromptRepairRaw ??=
+      checkpoint.stageOutputs.asset_contract.assetPromptRepairRaw;
+  }
+  if (
+    checkpoint.storyboardArtistPlan === undefined
+    && isRecord(checkpoint.stageOutputs.storyboard_artist)
+  ) checkpoint.storyboardArtistPlan = checkpoint.stageOutputs.storyboard_artist;
+  if (isRecord(checkpoint.stageOutputs.story_validation)) {
+    checkpoint.storyContractReport ??=
+      checkpoint.stageOutputs.story_validation.storyContractReport;
+    checkpoint.storySemanticReview ??=
+      checkpoint.stageOutputs.story_validation.storySemanticReview;
+  }
+  if (isRecord(checkpoint.stageOutputs.shot_decomposition)) {
+    checkpoint.shotDecomposerSegmentPlans ??=
+      checkpoint.stageOutputs.shot_decomposition.shotDecomposerSegmentPlans;
+    checkpoint.approvedShotDecomposerSegmentPlans ??=
+      checkpoint.stageOutputs.shot_decomposition.approvedShotDecomposerSegmentPlans;
+  }
+  if (
+    checkpoint.promptDetailSegmentPlans === undefined
+    && isRecord(checkpoint.stageOutputs.prompt_compilation)
+  ) {
+    checkpoint.promptDetailSegmentPlans =
+      checkpoint.stageOutputs.prompt_compilation;
+  }
+}
+
+function invalidateCheckpointFromStage(
+  checkpoint: Record<string, unknown>,
+  firstStage: PlannerCheckpointStage,
+): PlannerCheckpointStage[] {
+  const start = PLANNER_CHECKPOINT_STAGE_ORDER.indexOf(firstStage);
+  const invalidated = PLANNER_CHECKPOINT_STAGE_ORDER
+    .slice(start)
+    .filter((stage) =>
+      !(firstStage === "reference_analysis" && stage === "route_classification"));
+  if (invalidated.includes("reference_analysis")) {
+    checkpoint.referenceFactsRaw = undefined;
+    checkpoint.referenceFactsFingerprint = undefined;
+  }
+  if (invalidated.includes("route_classification")) {
+    checkpoint.routeClassification = undefined;
+    checkpoint.approvedRouteContract = undefined;
+  }
+  if (invalidated.includes("story_architect")) {
+    checkpoint.planningCoreRaw = undefined;
+    checkpoint.planningContractRepairState = undefined;
+  }
+  if (invalidated.includes("asset_contract")) {
+    checkpoint.planningRaw = undefined;
+    checkpoint.assetPromptRepairRaw = undefined;
+    checkpoint.assetVisualSpecsByAnchorId = {};
+    checkpoint.assetVisualSpecFingerprints = {};
+  }
+  if (invalidated.includes("storyboard_artist")) {
+    checkpoint.storyboardArtistPlan = undefined;
+  }
+  if (invalidated.includes("story_validation")) {
+    checkpoint.storyContractReport = undefined;
+    checkpoint.storySemanticReview = undefined;
+  }
+  if (invalidated.includes("shot_decomposition")) {
+    checkpoint.shotDecomposerSegmentPlans = {};
+    checkpoint.approvedShotDecomposerSegmentPlans = {};
+    checkpoint.timelineReplanAttempts = 0;
+    checkpoint.timelineChangeHistory = [];
+  }
+  if (invalidated.includes("prompt_compilation")) {
+    checkpoint.promptDetailSegmentPlans = {};
+    checkpoint.finalPromptRepairAttempts = 0;
+  }
+  checkpoint.resumeFromStage = checkpointResumeStage(firstStage);
+  return [...invalidated];
+}
+
+function checkpointResumeStage(
+  stage: PlannerCheckpointStage,
+): AliyunStoryboardProgressStage {
+  if (stage === "reference_analysis") return "reference_fact_extractor";
+  if (stage === "route_classification") return "planning_architect";
+  if (stage === "story_architect") return "planning_architect";
+  if (stage === "asset_contract") return "asset_prompt_contract_repair";
+  if (stage === "storyboard_artist" || stage === "story_validation") {
+    return "storyboard_artist";
+  }
+  if (stage === "shot_decomposition") return "shot_decomposer";
+  return "prompt_detailer";
+}
+
+function earlierCheckpointStage(
+  current: PlannerCheckpointStage | undefined,
+  candidate: PlannerCheckpointStage,
+): PlannerCheckpointStage {
+  if (!current) return candidate;
+  return PLANNER_CHECKPOINT_STAGE_ORDER.indexOf(candidate)
+    < PLANNER_CHECKPOINT_STAGE_ORDER.indexOf(current)
+    ? candidate
+    : current;
+}
+
+function hasRecordEntries(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function isRouteClassificationCheckpoint(
+  value: unknown,
+): value is RouteClassificationCheckpoint {
+  return isRecord(value)
+    && value.stage === "route_classification"
+    && value.checkpointVersion === 1
+    && value.stageContractVersion === ROUTE_CLASSIFICATION_STAGE_CONTRACT_VERSION
+    && isRecord(value.routeContract)
+    && value.routeContract.version === "planning-route-v1";
+}
+
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export function normalizeAliyunStoryboardPlannerCheckpoint(
@@ -8829,21 +10818,15 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
   input: PlanVideoProjectInput,
 ): AliyunStoryboardPlannerCheckpoint {
   const fingerprint = plannerInputFingerprint(input);
-  const envelope = isRecord(value) && isRecord(value.plannerCheckpoint)
+  const inputSnapshot = plannerInputSnapshot(input);
+  const referenceFactsFingerprint = plannerReferenceFingerprint(input);
+  const rawEnvelope = isRecord(value) && isRecord(value.plannerCheckpoint)
     ? value.plannerCheckpoint
     : isRecord(value)
       ? value
       : {};
-  if (envelope.version !== STORYBOARD_PLANNER_CHECKPOINT_VERSION || envelope.inputFingerprint !== fingerprint) {
-    return {
-      version: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
-      inputFingerprint: fingerprint,
-      shotDecomposerSegmentPlans: {},
-      approvedShotDecomposerSegmentPlans: {},
-      promptDetailSegmentPlans: {},
-      updatedAt: new Date().toISOString(),
-    };
-  }
+  const envelope = migrateCheckpointEnvelopeToV14(rawEnvelope, input);
+  const migrateLegacyPlanningOutput = false;
   const segmentPlans = isRecord(envelope.shotDecomposerSegmentPlans)
     ? Object.fromEntries(Object.entries(envelope.shotDecomposerSegmentPlans).filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])))
     : {};
@@ -8868,41 +10851,130 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
           .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
       )
     : {};
-  const checkpointMode = envelope.planningDecompositionMode === "legacy"
-    || envelope.planningDecompositionMode === "split_shadow"
-    || envelope.planningDecompositionMode === "split"
-    ? envelope.planningDecompositionMode
-    : undefined;
+  const structuredFailures = isRecord(envelope.structuredFailures)
+    ? Object.fromEntries(
+        Object.entries(envelope.structuredFailures).flatMap(([key, value]) => {
+          if (
+            !isRecord(value)
+            || typeof value.stage !== "string"
+            || typeof value.schemaVersion !== "string"
+            || typeof value.issueFingerprint !== "string"
+          ) return [];
+          return [[key, {
+            stage: value.stage,
+            segment: Number.isInteger(value.segment) ? numberFrom(value.segment) : undefined,
+            schemaVersion: value.schemaVersion,
+            issueFingerprint: value.issueFingerprint,
+            count: Math.max(1, numberFrom(value.count)),
+            lastSeenAt: typeof value.lastSeenAt === "string"
+              ? value.lastSeenAt
+              : new Date().toISOString(),
+          } satisfies StructuredFailureState]];
+        }),
+      )
+    : {};
+  const normalizedContractVersions = isRecord(envelope.contractVersions)
+    ? envelope.contractVersions
+    : {};
   return {
     version: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
+    checkpointVersion: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
+    plannerMode: "split",
     inputFingerprint: fingerprint,
+    inputSnapshot,
+    completedStages: Array.isArray(envelope.completedStages)
+      ? envelope.completedStages.filter(
+          (stage): stage is PlannerCheckpointStage =>
+            typeof stage === "string"
+            && PLANNER_CHECKPOINT_STAGE_ORDER.includes(
+              stage as PlannerCheckpointStage,
+            ),
+        )
+      : inferCompletedCheckpointStages(envelope),
+    stageOutputs: isRecord(envelope.stageOutputs)
+      ? envelope.stageOutputs as Partial<Record<PlannerCheckpointStage, unknown>>
+      : checkpointStageOutputs(envelope),
+    contractVersions: Object.keys(normalizedContractVersions).length
+      ? Object.fromEntries(
+          PLANNER_CHECKPOINT_STAGE_ORDER.map((stage) => [
+            stage,
+            typeof normalizedContractVersions[stage] === "string"
+              ? normalizedContractVersions[stage]
+              : PLANNER_CHECKPOINT_CONTRACT_VERSIONS[stage],
+          ]),
+        ) as Record<PlannerCheckpointStage, string>
+      : { ...PLANNER_CHECKPOINT_CONTRACT_VERSIONS },
+    referenceFingerprint: typeof envelope.referenceFingerprint === "string"
+      ? envelope.referenceFingerprint
+      : referenceFactsFingerprint,
+    migrationAudit: isRecord(envelope.migrationAudit)
+      ? {
+          fromVersion: numberFrom(envelope.migrationAudit.fromVersion),
+          toVersion: STORYBOARD_PLANNER_CHECKPOINT_VERSION,
+          preservedStages: Array.isArray(envelope.migrationAudit.preservedStages)
+            ? envelope.migrationAudit.preservedStages.filter(
+                (stage): stage is PlannerCheckpointStage =>
+                  typeof stage === "string"
+                  && PLANNER_CHECKPOINT_STAGE_ORDER.includes(
+                    stage as PlannerCheckpointStage,
+                  ),
+              )
+            : [],
+          invalidatedStages: Array.isArray(envelope.migrationAudit.invalidatedStages)
+            ? envelope.migrationAudit.invalidatedStages.filter(
+                (stage): stage is PlannerCheckpointStage =>
+                  typeof stage === "string"
+                  && PLANNER_CHECKPOINT_STAGE_ORDER.includes(
+                    stage as PlannerCheckpointStage,
+                  ),
+              )
+            : [],
+          reasons: Array.isArray(envelope.migrationAudit.reasons)
+            ? envelope.migrationAudit.reasons.filter(
+                (reason): reason is string => typeof reason === "string",
+              )
+            : [],
+          migratedAt: typeof envelope.migrationAudit.migratedAt === "string"
+            ? envelope.migrationAudit.migratedAt
+            : new Date().toISOString(),
+        }
+      : undefined,
     referenceFactsRaw: envelope.referenceFactsRaw,
     referenceFactsFingerprint: typeof envelope.referenceFactsFingerprint === "string" ? envelope.referenceFactsFingerprint : undefined,
-    planningDecompositionMode: checkpointMode,
-    planningCoreRaw: envelope.planningCoreRaw,
-    assetVisualSpecsByAnchorId,
-    assetVisualSpecFingerprints,
-    shadowSplitPlanningRaw: envelope.shadowSplitPlanningRaw,
-    shadowSplitComparison: isRecord(envelope.shadowSplitComparison)
-      ? envelope.shadowSplitComparison
+    routeClassification: isRouteClassificationCheckpoint(envelope.routeClassification)
+      ? envelope.routeClassification
       : undefined,
-    splitPlanningFallbackReason: typeof envelope.splitPlanningFallbackReason === "string"
-      ? envelope.splitPlanningFallbackReason
+    approvedRouteContract: isRouteClassificationCheckpoint(envelope.routeClassification)
+      ? envelope.routeClassification.routeContract
+      : isRecord(envelope.approvedRouteContract)
+      && envelope.approvedRouteContract.version === "planning-route-v1"
+      ? envelope.approvedRouteContract as ApprovedPlanningRouteContract
       : undefined,
-    planningRaw: envelope.planningRaw,
-    assetPromptRepairRaw: envelope.assetPromptRepairRaw,
-    storyboardArtistPlan: isRecord(envelope.storyboardArtistPlan) ? envelope.storyboardArtistPlan : undefined,
-    storyContractReport: isRecord(envelope.storyContractReport)
+    planningDecompositionMode: "split",
+    planningCoreRaw: migrateLegacyPlanningOutput ? undefined : envelope.planningCoreRaw,
+    assetVisualSpecsByAnchorId: migrateLegacyPlanningOutput ? {} : assetVisualSpecsByAnchorId,
+    assetVisualSpecFingerprints: migrateLegacyPlanningOutput ? {} : assetVisualSpecFingerprints,
+    planningRaw: migrateLegacyPlanningOutput ? undefined : envelope.planningRaw,
+    assetPromptRepairRaw: migrateLegacyPlanningOutput ? undefined : envelope.assetPromptRepairRaw,
+    storyboardArtistPlan: !migrateLegacyPlanningOutput && isRecord(envelope.storyboardArtistPlan)
+      ? envelope.storyboardArtistPlan
+      : undefined,
+    storyContractReport: !migrateLegacyPlanningOutput && isRecord(envelope.storyContractReport)
       ? envelope.storyContractReport as unknown as StoryContractGateResult
       : undefined,
-    storySemanticReview: isRecord(envelope.storySemanticReview)
+    storySemanticReview: !migrateLegacyPlanningOutput && isRecord(envelope.storySemanticReview)
       ? envelope.storySemanticReview as unknown as VideoStorySemanticReview
       : undefined,
-    shotDecomposerSegmentPlans: segmentPlans,
-    approvedShotDecomposerSegmentPlans: approvedSegmentPlans,
-    promptDetailSegmentPlans,
-    timelineReplanAttempts: Math.max(0, numberFrom(envelope.timelineReplanAttempts)),
-    timelineChangeHistory: Array.isArray(envelope.timelineChangeHistory)
+    shotDecomposerSegmentPlans: migrateLegacyPlanningOutput ? {} : segmentPlans,
+    approvedShotDecomposerSegmentPlans: migrateLegacyPlanningOutput ? {} : approvedSegmentPlans,
+    promptDetailSegmentPlans: migrateLegacyPlanningOutput ? {} : promptDetailSegmentPlans,
+    finalPromptRepairAttempts: migrateLegacyPlanningOutput
+      ? 0
+      : Math.max(0, numberFrom(envelope.finalPromptRepairAttempts)),
+    timelineReplanAttempts: migrateLegacyPlanningOutput
+      ? 0
+      : Math.max(0, numberFrom(envelope.timelineReplanAttempts)),
+    timelineChangeHistory: !migrateLegacyPlanningOutput && Array.isArray(envelope.timelineChangeHistory)
       ? envelope.timelineChangeHistory.filter(
         (item): item is TimelineChangeRequest =>
           isRecord(item)
@@ -8911,6 +10983,56 @@ export function normalizeAliyunStoryboardPlannerCheckpoint(
           && item.changeType === "split_segment",
       ).slice(-10)
       : [],
+    planningContractRepairState: !migrateLegacyPlanningOutput
+      && isRecord(envelope.planningContractRepairState)
+      && (
+        envelope.planningContractRepairState.status === "repairing"
+        || envelope.planningContractRepairState.status === "event_replan_required"
+        || envelope.planningContractRepairState.status === "passed"
+      )
+      ? {
+          status: envelope.planningContractRepairState.status,
+          authority: envelope.planningContractRepairState.authority === "event"
+            ? "event"
+            : "legacy_migrated",
+          attempts: Array.isArray(envelope.planningContractRepairState.attempts)
+            ? envelope.planningContractRepairState.attempts
+              .filter((item): item is PlanningContractRepairAttempt => isRecord(item)
+                && Number.isInteger(item.attempt)
+                && typeof item.issueFingerprint === "string"
+                && typeof item.bindingFingerprintBefore === "string")
+              .slice(-8)
+            : [],
+          currentIssues: Array.isArray(envelope.planningContractRepairState.currentIssues)
+            ? envelope.planningContractRepairState.currentIssues
+              .filter((item): item is PlanningNarrativeContractIssue => isRecord(item)
+                && typeof item.code === "string"
+                && typeof item.path === "string")
+            : [],
+          lastCandidateRaw: envelope.planningContractRepairState.lastCandidateRaw,
+          updatedAt: typeof envelope.planningContractRepairState.updatedAt === "string"
+            ? envelope.planningContractRepairState.updatedAt
+            : new Date().toISOString(),
+        }
+      : undefined,
+    resumeFromStage: typeof envelope.resumeFromStage === "string"
+      ? envelope.resumeFromStage as AliyunStoryboardProgressStage
+      : undefined,
+    lastFailure: isRecord(envelope.lastFailure)
+      && typeof envelope.lastFailure.fingerprint === "string"
+      && typeof envelope.lastFailure.stage === "string"
+      && typeof envelope.lastFailure.code === "string"
+      ? {
+          fingerprint: envelope.lastFailure.fingerprint,
+          stage: envelope.lastFailure.stage,
+          code: envelope.lastFailure.code,
+          count: Math.max(1, numberFrom(envelope.lastFailure.count)),
+          invalidatedAt: typeof envelope.lastFailure.invalidatedAt === "string"
+            ? envelope.lastFailure.invalidatedAt
+            : new Date().toISOString(),
+        }
+      : undefined,
+    structuredFailures,
     updatedAt: typeof envelope.updatedAt === "string" ? envelope.updatedAt : new Date().toISOString(),
   };
 }
@@ -8920,8 +11042,24 @@ async function savePlannerCheckpoint(
   onCheckpoint?: (checkpoint: AliyunStoryboardPlannerCheckpoint) => Promise<void> | void,
 ): Promise<void> {
   if (!onCheckpoint) return;
+  synchronizeCheckpointV14Fields(checkpoint);
   checkpoint.updatedAt = new Date().toISOString();
   await onCheckpoint(structuredClone(checkpoint));
+}
+
+function synchronizeCheckpointV14Fields(
+  checkpoint: AliyunStoryboardPlannerCheckpoint,
+): void {
+  const record = checkpoint as unknown as Record<string, unknown>;
+  checkpoint.version = STORYBOARD_PLANNER_CHECKPOINT_VERSION;
+  checkpoint.checkpointVersion = STORYBOARD_PLANNER_CHECKPOINT_VERSION;
+  checkpoint.plannerMode = "split";
+  checkpoint.planningDecompositionMode = "split";
+  checkpoint.completedStages = inferCompletedCheckpointStages(record);
+  checkpoint.stageOutputs = checkpointStageOutputs(record);
+  checkpoint.contractVersions = { ...PLANNER_CHECKPOINT_CONTRACT_VERSIONS };
+  checkpoint.referenceFingerprint =
+    checkpoint.referenceFactsFingerprint || checkpoint.referenceFingerprint || "";
 }
 
 function serializePlannerCheckpointWriter(
@@ -8963,21 +11101,7 @@ function extractChatContent(raw: unknown): string {
 }
 
 function parseJsonObject(text: string): unknown {
-  let trimmed = text.trim();
-  const fence = String.fromCharCode(96, 96, 96);
-  if (trimmed.startsWith(fence)) {
-    trimmed = trimmed.slice(fence.length).trimStart();
-    if (/^[a-zA-Z]+/.test(trimmed)) trimmed = trimmed.replace(/^[a-zA-Z]+/, "").trimStart();
-    if (trimmed.endsWith(fence)) trimmed = trimmed.slice(0, -fence.length).trimEnd();
-    trimmed = trimmed.trim();
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("三阶段剧本拆解未返回合法 JSON");
-  }
+  return JSON.parse(text.trim());
 }
 
 function extractError(raw: unknown): string | undefined {
@@ -9015,12 +11139,12 @@ function enforceSingleTakeVideoPrompt(prompt: string, lang: "zh" | "en"): string
   const text = prompt.trim();
   const lower = text.toLowerCase();
   if (lang === "en") {
-    const directive = "Single continuous unbroken take: no internal cuts, jump cuts, fades, dissolves, crossfades, montage edits, ghost overlays, scene swaps, teleportation, or hard visual transitions inside this clip. Keep the same scene, camera axis family, lighting direction, color grade, subject identity, product identity, and prop layout from first frame to last frame.";
+    const directive = "Single continuous unbroken take. Keep one uninterrupted visible action path in the same scene, preserving the camera axis family, lighting direction, color grade, subject identity, product identity, and prop layout from first frame to last frame.";
     return lower.includes("single continuous") || lower.includes("unbroken take")
       ? text
       : `${directive} ${text}`;
   }
-  const directive = "单段一镜到底连续镜头：段内禁止切镜、跳切、淡入淡出、叠化、交叉溶解、蒙太奇、幽灵重影、场景替换、人物/产品瞬移或硬转场；从首帧到尾帧保持同一场景、机位轴线、光线方向、色调、人物身份、产品身份和道具布局连续。";
+  const directive = "单段一镜到底连续镜头：在同一场景内完成一条不中断的可见动作路径，从首帧到尾帧保持机位轴线、光线方向、色调、人物身份、产品身份和道具布局连续。";
   return text.includes("一镜到底") || text.includes("连续镜头")
     ? text
     : `${directive}${text}`;
@@ -9236,6 +11360,33 @@ function normalizeAnchorType(value: unknown): VideoConsistencyAnchor["type"] | u
   return undefined;
 }
 
+function normalizeAnchorCandidateCategory(
+  value: unknown,
+): VideoConsistencyAnchor["candidateCategory"] {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "core_subject"
+    || normalized === "brand"
+    || normalized === "scene"
+    || normalized === "prop"
+    || normalized === "decoration"
+    || normalized === "style"
+    || normalized === "custom"
+    ? normalized
+    : undefined;
+}
+
+function normalizeAnchorAdmissionStatus(
+  value: unknown,
+): VideoConsistencyAnchor["status"] {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "candidate"
+    || normalized === "approved"
+    || normalized === "event_local"
+    || normalized === "discarded"
+    ? normalized
+    : undefined;
+}
+
 function normalizeReferenceStrength(value: unknown): VideoConsistencyAnchor["referenceStrength"] {
   if (value === "hard" || value === "medium" || value === "soft") return value;
   return "hard";
@@ -9372,15 +11523,7 @@ function classifyVideoCategoryFromText(text: string): VideoCreativeCategory {
 }
 
 function templateForCategory(category: VideoCreativeCategory, text: string): VideoCreativeTemplateId {
-  if (category === "game") {
-    return /(bonus|jackpot|金币|倍率|奖励|爆奖|bonus|reward|multiplier)/i.test(text) ? "game_bonus_payoff" : "game_reversal";
-  }
-  if (category === "product") return "product_problem_solution";
-  if (category === "ecommerce") return "ecommerce_offer_conversion";
-  if (category === "food") return "food_sensory_reaction";
-  if (category === "auto") return "auto_performance_hero";
-  if (category === "short_drama") return "short_drama_conflict_twist";
-  return "generic_brand_story";
+  return deterministicTemplateForCategory(category, text);
 }
 
 function normalizeStoryRewriteStage(value: unknown): VideoStoryQualityReport["rewriteFromStage"] {

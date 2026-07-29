@@ -30,6 +30,13 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    if (process.env.NEXT_PUBLIC_ONE_PROMPT_MIGRATION_FROZEN === "true") {
+      return NextResponse.json({
+        ok: false,
+        error: "一句话成片正在进行架构迁移，当前已暂停新建任务。",
+        errorCode: "ONE_PROMPT_MIGRATION_FROZEN",
+      }, { status: 503 });
+    }
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ ok: false, error: "未登录" }, { status: 401 });

@@ -72,7 +72,9 @@ export function deriveCanonicalBoundaryContracts(
         linkedBeatIds,
         requiredAnchorIds,
         approvedAssetReferenceIds: [],
-        storyState: keyframe.purpose,
+        // Boundary contracts are executable provider input. Localized purpose
+        // copy belongs to the UI projection and must never enter this contract.
+        storyState: keyframe.purposeEn?.trim() || keyframe.purpose,
         scene: keyframe.scene,
         cameraId,
         characterState: keyframe.characterState,

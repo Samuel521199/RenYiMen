@@ -51,6 +51,15 @@ test("running-time estimates never inflate the completed-work numerator", () => 
   assert.equal(graph.percent, 20);
 });
 
+test("explicit checkpoint progress contributes to displayed DAG progress without marking work complete", () => {
+  const graph = computeProjectTaskGraphSnapshot([
+    node("planning", "running", 100, [], { progressRatio: 0.75 }),
+  ], { nowMs: 60_000 });
+  assert.equal(graph.completedWeight, 0);
+  assert.equal(graph.completedTaskCount, 0);
+  assert.equal(graph.percent, 75);
+});
+
 test("cancelled and inactive work remains auditable without inflating the denominator", () => {
   const graph = computeProjectTaskGraphSnapshot([
     node("done", "completed", 50),

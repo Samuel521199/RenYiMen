@@ -78,6 +78,22 @@ test("normalized consistency anchors using id are accepted", () => {
   assert.ok(!errorCodes(plan).includes("MISSING_ANCHOR_REFERENCE"));
 });
 
+test("downstream review reports an approved anchor with no actual usage", () => {
+  const plan = validPlan();
+  plan.consistencyManifest = {
+    anchors: [
+      { id: "person_1", type: "person", referenceStrength: "hard", status: "approved" },
+      { id: "unused_leaf", type: "prop", status: "approved", displayNameZh: "绿叶装饰" },
+    ],
+  };
+  const issues = validateOnePromptVideoPlan(plan, { stage: "planning" });
+  assert.ok(issues.some((issue) =>
+    issue.code === "APPROVED_ANCHOR_UNUSED_DOWNSTREAM"
+    && issue.artifactId === "anchor:unused_leaf"
+    && issue.severity === "warning"
+  ));
+});
+
 test("planning rejects abstract palette mood promoted to a scene-layout anchor", () => {
   const plan = validPlan();
   plan.consistencyManifest = {

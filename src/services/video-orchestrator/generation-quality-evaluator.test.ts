@@ -1026,6 +1026,67 @@ test("image prompt compiler exposes when critical units do not fit the hard prov
   assert.ok(report.omittedCriticalUnits > 0);
 });
 
+test("image prompt compiler does not protect generic core prose or negative boilerplate", () => {
+  const prompt = [
+    Array.from(
+      { length: 120 },
+      (_, index) => `Scene description variation ${index + 1} uses a pleasant atmosphere and balanced lighting.`,
+    ).join("\n"),
+    Array.from(
+      { length: 120 },
+      (_, index) => `Avoid: generic artifact variation ${index + 1}, blur, noise, and low quality.`,
+    ).join("\n"),
+  ].join("\n\n");
+  const report = fitAliyunImagePromptWithReport(prompt);
+  assert.equal(report.exceededSoftBudget, true);
+  assert.equal(report.omittedCriticalUnits, 0);
+  assert.ok(report.omittedUnits > 0);
+  assert.ok(report.prompt.length <= ONE_PROMPT_IMAGE_PROMPT_COMPACTION_THRESHOLD_CHARS);
+  assert.doesNotMatch(report.prompt, /CRITICAL GENERATION CONTRACT/);
+});
+
+test("repair packet headings do not promote adjacent history prose to protected facts", () => {
+  const prompt = [
+    "FULL IMAGE REGENERATION — DO NOT COPY THE FAILED BASELINE",
+    ...Array.from(
+      { length: 120 },
+      (_, index) => `Prior attempt history entry ${index + 1} records generic process metadata and descriptive commentary.`,
+    ),
+    "MANDATORY RETRY CORRECTION: remove the duplicate character.",
+  ].join("\n");
+  const report = fitAliyunImagePromptWithReport(prompt);
+  assert.equal(report.exceededSoftBudget, true);
+  assert.equal(report.omittedCriticalUnits, 0);
+  assert.ok(report.omittedUnits > 0);
+  assert.match(report.prompt, /MANDATORY RETRY CORRECTION/);
+  assert.doesNotMatch(report.prompt, /history entry 120/);
+});
+
+test("image prompt compiler still protects exact identity, markings, spatial facts, and repair instructions", () => {
+  const protectedFacts = [
+    "The exact visible subject count is 1.",
+    "Preserve character identity for hero_bull.",
+    "The brand name must remain TONGITS KING.",
+    "The two intrinsic card markings are A♠ and K♥.",
+    "The table must remain left of the doorway as a required spatial relationship.",
+    "USER REQUIREMENT: keep the approved red jacket.",
+    "MANDATORY RETRY CORRECTION: remove the duplicate character.",
+  ];
+  const prompt = [
+    Array.from(
+      { length: 180 },
+      (_, index) => `Decorative beautiful atmosphere variation ${index + 1}.`,
+    ).join("\n"),
+    ...protectedFacts,
+  ].join("\n\n");
+  const report = fitAliyunImagePromptWithReport(prompt);
+  assert.ok(report.prompt.startsWith("CRITICAL GENERATION CONTRACT"));
+  for (const fact of protectedFacts) {
+    assert.match(report.prompt, new RegExp(fact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  }
+  assert.equal(report.omittedCriticalUnits, 0);
+});
+
 test("model prompt compaction validation requires every fact id and protected literal", () => {
   const facts = [
     {
@@ -1100,6 +1161,7 @@ test("reference notes compile to a bounded role protocol instead of copying pros
   assert.match(protocol, /dimensionality/);
   assert.ok(protocol.length < 240);
   assert.doesNotMatch(protocol, /Verbose explanation/);
+  assert.doesNotMatch(protocol, /required_literals=(?:HARD|IDENTITY|RENDERING|STYLE)/);
 });
 
 test("negative prompt compaction keeps complete constraints instead of slicing a sentence", () => {
@@ -1123,7 +1185,9 @@ test("image generation prompt maps every uploaded reference to a narrow role", (
   assert.match(prepared, /MULTI-IMAGE INPUT MAP/);
   assert.match(prepared, /INPUT IMAGE 1[\s\S]*role=identity_only/);
   assert.match(prepared, /INPUT IMAGE 2[\s\S]*role=scene_layout/);
-  assert.match(prepared, /never merge unrelated subjects, text, UI, products, or backgrounds/i);
+  assert.doesNotMatch(prepared, /GLOBAL EXCLUSIONS/i);
+  assert.doesNotMatch(prepared, /never merge unrelated subjects, text, UI, products, or backgrounds/i);
+  assert.doesNotMatch(prepared, /Never copy or merge anything outside that role/i);
   assert.ok(prepared.length <= 5000);
 });
 
@@ -1278,7 +1342,9 @@ test("isolated asset compilation uses one target anchor and rejects global-ancho
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /resolveImageTargetDependencyScope/);
   assert.match(source, /requiredAnchorIds: targetIsVisible && targetAnchorId \? \[targetAnchorId\] : \[\]/);
-  assert.match(source, /Project-level anchors are downstream consumers and must not appear in this asset/);
+  assert.match(source, /output_scope: isolated_asset/);
+  assert.match(source, /Render only the target named by this isolated-asset contract/);
+  assert.match(source, /forbidden_anchors:/);
   assert.match(source, /生成前检测到全局锚点污染/);
   assert.match(source, /STYLE-ONLY reference for isolated asset/);
 });
@@ -1364,7 +1430,7 @@ test("a technical failure can requeue the same preserved candidate without paid 
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   const retry = source.slice(
     source.indexOf("export async function retryGenerationCandidateQuality"),
-    source.indexOf("async function syncImageTasks"),
+    source.indexOf("export async function analyzeSegmentVideoCandidate"),
   );
   assert.match(retry, /status: "quality_retry"/);
   assert.match(retry, /qualityTechnicalAttempts: 0/);
@@ -1436,26 +1502,21 @@ test("resume waits for explicit boundary approval before regenerating dirty down
   );
 });
 
-test("sync immediately schedules recoverable candidate failures without a user click", () => {
+test("durable target jobs immediately observe recoverable candidate failures", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   assert.match(source, /anchorImageMisclassifiedAsStage2b/);
   assert.match(source, /status: VideoProjectStatus\.IMAGE_GENERATING, errorMessage: null/);
   assert.match(source, /unverifiedEvaluatorConflict/);
   assert.match(source, /retryBudgetExhausted/);
   assert.match(source, /经编译器确认的提示合同冲突/);
-  assert.match(source, /syncGenerationCandidates\(project\);[\s\S]{0,400}project = await requireVideoProject\(userId, projectId\);[\s\S]{0,200}syncImageTasks\(project\)/);
+  assert.match(source, /continueSubmittedTargetJob[\s\S]*runVideoProjectReconcileWorker/);
+  assert.doesNotMatch(source, /async function syncImageTasks/);
 });
 
-test("legacy image quality reports upgrade in place before another paid generation", () => {
+test("legacy image quality report upgrader is removed from production", () => {
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
-  assert.match(source, /async function upgradeLegacyImageQualityReports/);
-  assert.match(source, /existing\.policyVersion === QUALITY_POLICY_VERSION/);
-  assert.match(source, /await upgradeLegacyImageQualityReports\(project\)/);
+  assert.doesNotMatch(source, /upgradeLegacyImageQualityReports/);
   assert.match(source, /buildAuthoritativeVisualContract/);
-  assert.match(source, /previousQualityReport: previous\?\.report/);
-  assert.match(source, /normalizeImageQualityResponse\(existing, evaluationParams\)/);
-  assert.doesNotMatch(source, /existing\.originalPassed === false[\s\S]{0,240}passed: false/);
-  assert.doesNotMatch(source, /wasIncorrectlyPromoted[\s\S]{0,240}evaluateGeneratedImageQuality/);
 });
 
 test("deterministic evidence policy owns image decisions and stale recovery cannot submit after readiness", () => {
@@ -1481,7 +1542,7 @@ test("manual boundary candidate acceptance immediately continues the next frame"
   const source = readFileSync(path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"), "utf8");
   const selection = source.slice(
     source.indexOf("export async function selectGenerationCandidate"),
-    source.indexOf("async function syncImageTasks"),
+    source.indexOf("export async function retryGenerationCandidateQuality"),
   );
   assert.match(selection, /missingBoundaryFrames/);
   assert.match(selection, /status: VideoProjectStatus\.IMAGE_GENERATING/);

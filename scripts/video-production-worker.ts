@@ -1,9 +1,13 @@
+import { pumpVideoProductionJobs } from "../src/services/video-orchestrator/project-service";
 import {
-  pumpGlobalProviderQueue,
-  pumpVideoProductionJobs,
-} from "../src/services/video-orchestrator/project-service";
-import type { VideoProductionJobKind } from "../src/services/video-orchestrator/production-job-queue";
+  SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
+  type VideoProductionJobKind,
+} from "../src/services/video-orchestrator/production-job-queue";
 import { prisma } from "../src/lib/prisma";
+import {
+  heartbeatVideoProductionWorker,
+  resolveVideoProductionRuntimeVersion,
+} from "../src/services/video-orchestrator/production-worker-runtime";
 
 const workerId = process.env.VIDEO_PRODUCTION_WORKER_ID?.trim()
   || `video-production-${process.pid}`;
@@ -12,13 +16,7 @@ const errorDelayMs = boundedInt("VIDEO_PRODUCTION_WORKER_ERROR_MS", 3_000, 500, 
 const batchSize = boundedInt("VIDEO_PRODUCTION_WORKER_BATCH_SIZE", 20, 1, 100);
 const kinds = productionJobKinds(process.env.VIDEO_PRODUCTION_WORKER_KINDS);
 const runOnce = process.env.VIDEO_PRODUCTION_WORKER_ONCE === "1";
-const discoveryIntervalMs = boundedInt(
-  "VIDEO_PRODUCTION_RECONCILE_DISCOVERY_MS",
-  5_000,
-  1_000,
-  60_000,
-);
-const discoversOrphanedWork = !kinds || kinds.includes("project_reconcile");
+const runtimeVersion = resolveVideoProductionRuntimeVersion();
 
 async function main(): Promise<void> {
   let stopping = false;
@@ -30,28 +28,45 @@ async function main(): Promise<void> {
     idleDelayMs,
     batchSize,
     kinds: kinds ?? "all",
-    discoversOrphanedWork,
-    discoveryIntervalMs,
+    runtimeVersion,
+  });
+  await heartbeatVideoProductionWorker({
+    workerId,
+    runtimeVersion,
+    supportedKinds: kinds,
+    supportedPayloadVersions: SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
+    processId: process.pid,
   });
 
-  let lastDiscoveryAt = 0;
   while (!stopping) {
     try {
-      if (
-        discoversOrphanedWork
-        && Date.now() - lastDiscoveryAt >= discoveryIntervalMs
-      ) {
-        const discovery = await pumpGlobalProviderQueue();
-        lastDiscoveryAt = Date.now();
-        if (discovery.syncedCount || discovery.failedCount) {
-          console.info("[video-production-worker] reconcile discovery", discovery);
-        }
-      }
-      const result = await pumpVideoProductionJobs({ workerId, maxJobs: batchSize, kinds });
+      const result = await pumpVideoProductionJobs({
+        workerId,
+        runtimeVersion,
+        maxJobs: batchSize,
+        kinds,
+      });
+      await heartbeatVideoProductionWorker({
+        workerId,
+        runtimeVersion,
+        supportedKinds: kinds,
+        supportedPayloadVersions: SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
+        processId: process.pid,
+        claimed: result.claimedCount > 0,
+        meaningfulProgress: result.meaningfulProgressCount > 0,
+      });
       if (runOnce) break;
       if (result.claimedCount === 0) await delay(idleDelayMs);
     } catch (error) {
       console.error("[video-production-worker] pump failed", error);
+      await heartbeatVideoProductionWorker({
+        workerId,
+        runtimeVersion,
+        supportedKinds: kinds,
+        supportedPayloadVersions: SUPPORTED_VIDEO_PRODUCTION_PAYLOAD_VERSIONS,
+        processId: process.pid,
+        error,
+      }).catch(() => undefined);
       await delay(errorDelayMs);
     }
   }
@@ -79,11 +94,11 @@ function boundedInt(name: string, fallback: number, min: number, max: number): n
 function productionJobKinds(raw: string | undefined): VideoProductionJobKind[] | undefined {
   const valid = new Set<VideoProductionJobKind>([
     "planning",
-    "project_reconcile",
     "image_prepare_submit",
     "image_quality",
     "micro_shot_prepare_submit",
     "clip_prepare_submit",
+    "compose",
   ]);
   const parsed = (raw ?? "")
     .split(",")

@@ -46,6 +46,20 @@ export interface ProjectTaskGraphNode {
 export interface ProjectTaskGraphSnapshot {
   version: "project-task-graph-v1";
   generatedAt: string;
+  currentNode: string | null;
+  status: ProjectTaskStatus | "idle";
+  progress: {
+    percent: number;
+    completed: number;
+    total: number;
+  };
+  allowedActions: Array<
+    | "WAIT_FOR_WORKER"
+    | "APPROVE_CURRENT_NODE"
+    | "RESUME_CURRENT_NODE"
+    | "EXECUTE_RECOVERY_ACTION"
+  >;
+  recoveryAction: string | null;
   nodes: ProjectTaskGraphNode[];
   completedWeight: number;
   totalWeight: number;
@@ -169,8 +183,13 @@ export function computeProjectTaskGraphSnapshot(
     (sum, node) => sum + (node.status === "completed" ? node.weight : 0),
     0,
   );
+  const progressedWeight = activeRequired.reduce((sum, node) => {
+    if (node.status === "completed") return sum + node.weight;
+    if (node.progressRatio == null) return sum;
+    return sum + node.weight * Math.max(0, Math.min(1, node.progressRatio));
+  }, 0);
   const percent = totalWeight > 0
-    ? Math.max(0, Math.min(100, Math.round((completedWeight / totalWeight) * 1000) / 10))
+    ? Math.max(0, Math.min(100, Math.round((progressedWeight / totalWeight) * 1000) / 10))
     : 0;
   const incomplete = activeRequired.filter((node) => node.status !== "completed");
   const directlyRunnable = incomplete.filter((node) =>
@@ -184,6 +203,18 @@ export function computeProjectTaskGraphSnapshot(
     .slice(0, 3);
   const path = criticalPath(nodes, nowMs);
   const manualBlocker = incomplete.find((node) => node.status === "awaiting_review");
+  const currentNode = blockers[0] ?? null;
+  const failedNode = blockers.find((node) => node.status === "failed");
+  const recoveryAction = failedNode ? "RETRY_CURRENT_NODE" : null;
+  const allowedActions: ProjectTaskGraphSnapshot["allowedActions"] = currentNode
+    ? currentNode.status === "awaiting_review"
+      ? ["APPROVE_CURRENT_NODE"]
+      : currentNode.status === "failed"
+        ? ["EXECUTE_RECOVERY_ACTION"]
+        : currentNode.status === "blocked"
+          ? ["RESUME_CURRENT_NODE"]
+          : ["WAIT_FOR_WORKER"]
+    : [];
   const samples = Math.max(0, options.durationSampleCount ?? 0);
   const confidence = samples >= 8 ? "high" : samples >= 3 ? "medium" : "low";
   const rangeMultiplier = confidence === "high"
@@ -195,6 +226,15 @@ export function computeProjectTaskGraphSnapshot(
   return {
     version: "project-task-graph-v1",
     generatedAt: new Date(nowMs).toISOString(),
+    currentNode: currentNode?.id ?? null,
+    status: currentNode?.status ?? "idle",
+    progress: {
+      percent,
+      completed: activeRequired.filter((node) => node.status === "completed").length,
+      total: activeRequired.length,
+    },
+    allowedActions,
+    recoveryAction,
     nodes,
     completedWeight: Math.round(completedWeight),
     totalWeight: Math.round(totalWeight),

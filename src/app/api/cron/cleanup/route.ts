@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { expireAllStalePending } from "@/lib/stale-pending-cleanup";
-import { pumpGlobalProviderQueue } from "@/services/video-orchestrator/project-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,18 +45,15 @@ export async function GET(req: NextRequest) {
   }
 
   const cleaned = await expireAllStalePending();
-  const providerQueue = await pumpGlobalProviderQueue();
 
   console.info("[cron/cleanup] 定时清理完成", {
     cleaned,
-    providerQueue,
     ts: new Date().toISOString(),
   });
 
   return NextResponse.json({
     ok: true,
     cleaned,
-    providerQueue,
     ts: new Date().toISOString(),
   });
 }

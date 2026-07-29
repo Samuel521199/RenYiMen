@@ -81,7 +81,8 @@ test("quality UI supports manual override, explicit status, retry and candidate 
   assert.match(picker, /人工采用这张原图/);
   assert.match(pageSource, /已采用这张原图；还有/);
   assert.match(pageSource, /res\.project\.status === "CLIP_GENERATING"/);
-  assert.match(pageSource, /hasRunningGenerationCandidate\(item\)/);
+  assert.match(pageSource, /hasActiveProductionJob\(item\)/);
+  assert.doesNotMatch(pageSource, /function hasRunningGenerationCandidate/);
   assert.match(pageSource, /syncingProjectIdsRef\.current\.has\(projectId\)/);
   assert.match(pageSource, /syncingProjectIdsRef\.current\.delete\(projectId\)/);
   assert.match(pageSource, /正在采用候选并保存，请稍候/);
@@ -142,7 +143,8 @@ test("approving boundary frames opens micro-shot review without waiting for upst
   assert.ok(approve.indexOf("VideoProjectStatus.MICRO_SHOT_REVIEW") < approve.indexOf("queueRequiredMicroShotImageTasks"));
   assert.match(service, /kind: "micro_shot_prepare_submit"/);
   assert.match(service, /project\.status === VideoProjectStatus\.MICRO_SHOT_REVIEW && hasSubmittableRequiredMicroShotImage\(project\)/);
-  assert.match(pageSource, /item\.imageStatus === "running" \|\| item\.imageStatus === "pending" \|\| !item\.imageStatus \|\| item\.imageStatus === "idle"/);
+  assert.match(pageSource, /project\.productionState\?\.hasPendingJobs/);
+  assert.doesNotMatch(pageSource, /!item\.imageStatus \|\| item\.imageStatus === "idle"/);
 });
 
 test("reference approval returns before image submission and does not animate the save button", () => {
@@ -161,25 +163,23 @@ test("reference approval returns before image submission and does not animate th
   assert.doesNotMatch(pageSource, /\{loading \? <Loader2 className="h-4 w-4 animate-spin" \/> : <Save/);
 });
 
-test("image sync queues submission once and clears terminal work behind a protected selection", () => {
-  const syncImages = projectServiceSource.slice(
-    projectServiceSource.indexOf("async function syncImageTasks"),
-    projectServiceSource.indexOf("async function syncMicroShotImageTasks"),
-  );
-  assert.match(syncImages, /queueNextImageTask\(project\.userId, project\.id, "image\.sync"\)/);
-  assert.doesNotMatch(syncImages, /await submitNextImageTask\(/);
+test("target image jobs own polling and old entity-task pollers are absent", () => {
+  assert.doesNotMatch(projectServiceSource, /async function syncImageTasks|async function syncMicroShotImageTasks/);
   assert.match(projectServiceSource, /kind: "image_prepare_submit"/);
-  assert.match(productionJobQueueSource, /where: \{ idempotencyKey: input\.idempotencyKey \}/);
+  assert.match(projectServiceSource, /continueSubmittedTargetJob/);
+  assert.match(productionJobQueueSource, /where: \{ idempotencyKey: versionedIdempotencyKey \}/);
+  assert.match(productionJobQueueSource, /PAYLOAD_VERSION_SUPERSEDED/);
   assert.match(projectServiceSource, /image\.sync\.protected_selection_task_reconciled/);
   assert.match(projectServiceSource, /status: targetKeyframe\.locked[\s\S]*VideoShotStatus\.IMAGE_APPROVED[\s\S]*VideoShotStatus\.IMAGE_READY/);
 });
 
-test("sync queues durable quality work instead of awaiting vision evaluation", () => {
+test("worker queues durable quality work instead of the read-only sync endpoint", () => {
   const syncProject = projectServiceSource.slice(
     projectServiceSource.indexOf("export async function syncVideoProject"),
-    projectServiceSource.indexOf("export async function pumpGlobalProviderQueue"),
+    projectServiceSource.indexOf("async function runVideoProjectReconcileWorker"),
   );
-  assert.match(syncProject, /await syncGenerationCandidates\(project\)/);
+  assert.doesNotMatch(syncProject, /syncGenerationCandidates|runImageQualityWorker/);
+  assert.match(projectServiceSource, /await syncGenerationCandidates\(project\)/);
   assert.match(projectServiceSource, /kind: "image_quality"/);
   assert.match(projectServiceSource, /enqueueVideoProductionJob/);
   assert.match(projectServiceSource, /generation_quality\.worker\.queued/);
@@ -199,7 +199,7 @@ test("optional reference vision is gated, cached, short-lived, and circuit-broke
   assert.match(referenceVisionSource, /readProductionCircuit/);
   assert.match(referenceVisionSource, /recordProductionCircuitFailure/);
   assert.match(referenceVisionSource, /referenceVisionCircuitCooldownMs/);
-  assert.match(referenceVisionSource, /return Number\.isFinite\(value\) && value >= 3000 \? Math\.round\(value\) : 8000/);
+  assert.match(referenceVisionSource, /Number\.isFinite\(value\) && value >= 3000[\s\S]*Math\.min\(8000, Math\.round\(value\)\)[\s\S]*: 8000/);
 });
 
 test("prompt preparation keeps model compaction opt-in and blocks lossy fallbacks", () => {
@@ -218,10 +218,33 @@ test("runtime image compiler serializes canonical facts once instead of duplicat
     projectServiceSource.indexOf("function compileImagePromptForKeyframe"),
     projectServiceSource.indexOf("function compileImagePromptForMicroShot"),
   );
+  const narrativeImageContract = projectServiceSource.slice(
+    projectServiceSource.indexOf("function narrativeContextLinesForImage"),
+    projectServiceSource.indexOf("function narrativeContextLinesForVideo"),
+  );
+  const boundaryExecutionContract = projectServiceSource.slice(
+    projectServiceSource.indexOf("function imageBoundaryExecutionContract"),
+    projectServiceSource.indexOf("function compileImagePromptForKeyframe"),
+  );
+  const repairPacket = projectServiceSource.slice(
+    projectServiceSource.indexOf("function buildImageAttemptPrompt"),
+    projectServiceSource.indexOf("function isStructurallyUsableImageBaseline"),
+  );
   assert.doesNotMatch(compiler, /"Authoritative visual contract:\\n" \+ JSON\.stringify\(visualContract\)/);
   assert.doesNotMatch(compiler, /"Selected reference usage:"/);
   assert.match(compiler, /Reference role notes are serialized exactly once/);
   assert.match(compiler, /clipText\(sourceImagePrompt, 1000\)/);
+  assert.match(compiler, /const fallbackFrameFacts = sourceImagePrompt \? \[\] : \[/);
+  assert.match(compiler, /Boundary facts not already covered above/);
+  assert.match(compiler, /Identity lock \(sole textual identity source\)/);
+  assert.match(compiler, /Isolation: exactly one character/);
+  assert.match(compiler, /compilePersonCompositionPrompt/);
+  assert.match(compiler, /compactPersonCharacterState/);
+  assert.doesNotMatch(compiler, /compactJsonLine\("rendering_style"/);
+  assert.doesNotMatch(compiler, /AUTHORITATIVE PERSON IDENTITY \+ RENDERING STYLE|PERSON ASSET ISOLATION|imagePreservationRule/);
+  assert.doesNotMatch(narrativeImageContract, /"linkedBeatId: "|"linkedBeatIds: "|"narrativeStateBefore: "|"narrativeStateAfter: "/);
+  assert.doesNotMatch(boundaryExecutionContract, /sourceEventIds|linkedBeatIds|approvedAssetReferenceIds|immutableFields|status:/);
+  assert.doesNotMatch(repairPacket, /targetContract: inputs\.targetContract|visualContract: inputs\.visualContract|dependencyScope: inputs\.dependencyScope/);
 });
 
 test("asset planning uses one English execution contract and keeps Chinese copy presentation-only", () => {
@@ -269,8 +292,8 @@ test("boundary-frame preview switches between adjacent shots with buttons and ar
 
 test("double-clicking a shot card opens the existing shot editor", () => {
   const shotCards = pageSource.slice(
-    pageSource.indexOf("{project.shots.map((shot) => ("),
-    pageSource.indexOf("</section>", pageSource.indexOf("{project.shots.map((shot) => (")),
+    pageSource.indexOf("{segmentEditorItems.map((shot) => ("),
+    pageSource.indexOf("</section>", pageSource.indexOf("{segmentEditorItems.map((shot) => (")),
   );
   assert.match(shotCards, /onClick=\{\(\) => selectShot\(shot\.id\)\}/);
   assert.match(shotCards, /onDoubleClick=\{\(\) => openShotEditor\(shot\.id\)\}/);
@@ -281,19 +304,18 @@ test("double-clicking a shot card opens the existing shot editor", () => {
 test("micro-shot editors are collapsed by default and expand one item on demand", () => {
   assert.match(pageSource, /useState<Set<string>>\(\(\) => new Set\(\)\)/);
   assert.match(pageSource, /toggleMicroShotExpanded/);
-  assert.match(pageSource, /`detail:\$\{selectedShot\.id\}:\$\{item\.microShotNo\}:\$\{index\}`/);
   assert.match(pageSource, /`modal:\$\{selectedShot\.id\}:\$\{item\.microShotNo\}:\$\{index\}`/);
   assert.match(pageSource, /aria-expanded=\{expanded\}/);
   assert.match(pageSource, /\{expanded && <div className="space-y-2 p-3 pt-2">/);
   assert.match(pageSource, /expanded \? "xl:col-span-2" : ""/);
   assert.equal(
     [...pageSource.matchAll(/sticky top-0 z-30 flex items-center justify-between gap-2 rounded-t-md/g)].length,
-    2,
+    1,
   );
   assert.match(pageSource, /function confirmRemoveDraftMicroShot/);
   assert.match(pageSource, /确定删除\$\{label\}吗/);
-  assert.equal([...pageSource.matchAll(/onClick=\{\(\) => confirmRemoveDraftMicroShot\(index\)\}/g)].length, 2);
-  assert.equal([...pageSource.matchAll(/<Trash2 className="h-3\.5 w-3\.5" \/>/g)].length >= 2, true);
+  assert.equal([...pageSource.matchAll(/onClick=\{\(\) => confirmRemoveDraftMicroShot\(index\)\}/g)].length, 1);
+  assert.equal([...pageSource.matchAll(/<Trash2 className="h-3\.5 w-3\.5" \/>/g)].length >= 1, true);
   assert.match(pageSource, /点击“保存镜头”后生效/);
   const removeDraft = pageSource.slice(
     pageSource.indexOf("function removeDraftMicroShot"),
@@ -303,10 +325,10 @@ test("micro-shot editors are collapsed by default and expand one item on demand"
   assert.doesNotMatch(removeDraft, /\.map\(\(item, itemIndex\)/);
   assert.match(pageSource, /const nextMicroShotNo = Math\.max\(0, \.\.\.items\.map/);
   assert.match(pageSource, /microShots: \(\(draft\.microShots[\s\S]{0,180}\.map\(\(item, itemIndex\) => \(\{ \.\.\.item, microShotNo: itemIndex \+ 1 \}\)\)/);
-  assert.equal([...pageSource.matchAll(/String\(item\.microShotNo\)\.padStart\(2, "0"\)/g)].length >= 3, true);
+  assert.equal([...pageSource.matchAll(/String\(item\.microShotNo\)\.padStart\(2, "0"\)/g)].length >= 2, true);
   assert.match(pageSource, /micro-shots\/\$\{microShot\.microShotNo\}\/image/);
   assert.match(pageSource, /\}, \[selectedShot\?\.id, pageLang\]\);/);
-  assert.match(pageSource, /const savedShot = res\.project\.shots\.find/);
+  assert.match(pageSource, /const savedSegment = res\.project\.segments\?\.find/);
 });
 
 test("late candidate updates cannot recreate a micro-shot deleted by the user", () => {
@@ -383,16 +405,13 @@ test("candidate cards expose a concise asset-reference trust chain", () => {
   assert.match(picker, /不会消耗抽图重试次数/);
 });
 
-test("keyframe prompt editing uses one contract for localized form, JSON, and provider preview", () => {
-  assert.match(pageSource, /画面描述/);
-  assert.match(pageSource, /生成合同 JSON/);
-  assert.match(pageSource, /实际提交 Prompt/);
+test("keyframe prompt editing keeps the localized contract form without exposing internal JSON or provider previews", () => {
   assert.match(pageSource, /updateKeyframePromptContract/);
-  assert.match(pageSource, /updateKeyframePromptJson/);
-  assert.match(pageSource, /compileImagePromptForProvider/);
   assert.match(pageSource, /imagePromptEditContract/);
-  assert.match(pageSource, /JSON 格式不正确，修正后才能保存/);
-  assert.match(pageSource, /这里的修改会同步写入生成合同/);
+  assert.doesNotMatch(pageSource, /生成合同 JSON/);
+  assert.doesNotMatch(pageSource, /实际提交 Prompt/);
+  assert.doesNotMatch(pageSource, /只读预览。它由生成合同自动编译/);
+  assert.doesNotMatch(pageSource, /compileImagePromptForProvider/);
 });
 
 test("palette mood is presented as a non-scene guide instead of a generated asset", () => {
@@ -404,10 +423,10 @@ test("palette mood is presented as a non-scene guide instead of a generated asse
 
 test("asset progress counts approvals and keeps approval available after a recoverable failure", () => {
   assert.match(pageSource, /Boolean\(keyframe\.imageUrl\) && \(keyframe\.locked \|\| keyframe\.status === "IMAGE_APPROVED"\)/);
-  assert.match(pageSource, /project\.status === "IMAGE_REVIEW" \|\| project\.status === "FAILED"/);
+  assert.match(pageSource, /project\.status === "IMAGE_REVIEW" \|\| project\.status === "FAILED" \|\| project\.status === "WAITING_RECOVERY"/);
   const primaryActionStart = pageSource.indexOf("const primaryStageAction");
   const primaryAction = pageSource.slice(primaryActionStart, pageSource.indexOf("return (", primaryActionStart));
-  assert.ok(primaryAction.indexOf("if (canApproveAssets)") < primaryAction.indexOf('if (project.status === "FAILED")'));
+  assert.ok(primaryAction.indexOf("if (canApproveAssets)") < primaryAction.indexOf('if (project.status === "FAILED" || project.status === "WAITING_RECOVERY")'));
 });
 
 test("upstream edits preview and confirm dependency impact without deleting old revisions", () => {
@@ -543,6 +562,28 @@ test("workflow progress does not announce micro-shot review while assets are inc
   assert.match(progressFormatter, /全部确认后才能进入内部子分镜审核/);
 });
 
+test("resume progress preserves its recovery phase instead of pretending to create a project", () => {
+  const progressSelection = pageSource.slice(
+    pageSource.indexOf("const workflowProgress = useMemo"),
+    pageSource.indexOf("const workflowProgressBarClass"),
+  );
+  const resumeHandler = pageSource.slice(
+    pageSource.indexOf("async function resumeProject"),
+    pageSource.indexOf("async function resumePlanningProjectInBackground"),
+  );
+  const createHandler = pageSource.slice(
+    pageSource.indexOf("async function createAndPlan"),
+    pageSource.indexOf("async function planProjectInBackground"),
+  );
+  assert.match(progressSelection, /optimisticWorkflowProgressView\(optimisticProgress,\s*pageLang\)/);
+  assert.doesNotMatch(progressSelection, /phase:\s*"creating"/);
+  assert.doesNotMatch(progressSelection, /percent:\s*1/);
+  assert.match(resumeHandler, /let resumedRunning[\s\S]*setOptimisticProgress\(\{\s*active:\s*true,\s*phase:\s*"resuming"/);
+  assert.doesNotMatch(resumeHandler, /let resumedRunning[\s\S]*phase:\s*"creating"/);
+  assert.match(pageSource, /No new project is being created/);
+  assert.match(createHandler, /setOptimisticProgress\(\{\s*active:\s*true,\s*phase:\s*"creating"/);
+});
+
 test("keyframe regeneration preserves history and adds one learned candidate at a time", () => {
   const service = readFileSync(
     path.join(process.cwd(), "src/services/video-orchestrator/project-service.ts"),
@@ -562,7 +603,10 @@ test("keyframe regeneration preserves history and adds one learned candidate at 
   );
   assert.match(service, /historicalCandidateCount = await prisma\.videoGenerationCandidate\.count/);
   assert.match(service, /candidateNo = historicalCandidateCount \+ localCandidateNo/);
-  assert.match(learning, /Preserve every earlier candidate as history/);
+  assert.doesNotMatch(learning, /Preserve every earlier candidate as history/);
+  assert.doesNotMatch(learning, /Prior attempts reviewed/);
+  assert.doesNotMatch(learning, /Concretize any older vague feedback/i);
+  assert.match(learning, /CURRENT VERIFIED REPAIR DELTA/);
   assert.match(learning, /accumulatedFailureIssues/);
   assert.match(learning, /accumulatedRetryInstructions/);
   assert.match(learning, /strongDimensions/);
@@ -575,6 +619,47 @@ test("keyframe regeneration preserves history and adds one learned candidate at 
   assert.match(sequentialSubmission, /prepareKeyframeImageSubmission\(project, nextKeyframe\)/);
   assert.match(sequentialSubmission, /candidateCount: 1/);
   assert.match(sequentialSubmission, /incremental candidate #/);
+});
+
+test("provider image prompts scope rules and negatives to the current asset category", () => {
+  const keyframeCompiler = projectServiceSource.slice(
+    projectServiceSource.indexOf("function compileImagePromptForKeyframe"),
+    projectServiceSource.indexOf("function compileImagePromptForMicroShot"),
+  );
+  const negativeCompiler = projectServiceSource.slice(
+    projectServiceSource.indexOf("function compileImageNegativePrompt"),
+    projectServiceSource.indexOf("function compactJsonLine"),
+  );
+  const sceneNegativeBranch = negativeCompiler.slice(
+    negativeCompiler.indexOf('options.assetCategory === "scene"'),
+    negativeCompiler.indexOf('options.assetCategory === "person"'),
+  );
+
+  assert.match(keyframeCompiler, /const requiresNumericGameUi = !isConsistencyReference[\s\S]*test\(sourceImagePrompt\)/);
+  assert.doesNotMatch(keyframeCompiler, /game timer or score HUD|No text, logo, score, timer, or UI is allowed/);
+  assert.doesNotMatch(keyframeCompiler, /imagePreservationRule/);
+  assert.match(keyframeCompiler, /const fallbackFrameFacts = sourceImagePrompt \? \[\] : \[/);
+  assert.match(keyframeCompiler, /"Execution rules:"/);
+  assert.doesNotMatch(keyframeCompiler, /PERSON ASSET ISOLATION|Preserve face design|Preserve scene geometry/);
+  assert.match(negativeCompiler, /scopeNegativePromptForAsset/);
+  assert.match(sceneNegativeBranch, /malformed scene geometry/);
+  assert.doesNotMatch(sceneNegativeBranch, /people, characters|products, cards|distorted hands|distorted face|clothing drift|broken timer|illegible score/);
+});
+
+test("candidate learning prompt contains one compact current repair packet without history statistics", () => {
+  const learning = projectServiceSource.slice(
+    projectServiceSource.indexOf("function buildImageCandidateLearningSummary"),
+    projectServiceSource.indexOf("export async function regenerateShotImage"),
+  );
+
+  assert.match(learning, /CURRENT VERIFIED REPAIR DELTA/);
+  assert.match(learning, /currentRepairDirectives/);
+  assert.doesNotMatch(learning, /Preserve every earlier candidate as history/);
+  assert.doesNotMatch(learning, /Prior attempts reviewed/);
+  assert.doesNotMatch(learning, /Concretize any older vague feedback/i);
+  assert.doesNotMatch(learning, /Candidate \d+|passed candidates|accepted candidates/i);
+  assert.doesNotMatch(learning, /known logic, text, timer, score, lighting, anatomy/i);
+  assert.doesNotMatch(learning, /Approved reference roles/);
 });
 
 test("image and video candidates are progressive, fingerprinted, and reuse unchanged quality reports", () => {

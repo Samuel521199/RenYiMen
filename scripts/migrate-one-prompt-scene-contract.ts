@@ -1,7 +1,10 @@
-import { Prisma } from "@prisma/client";
 import { prisma } from "../src/lib/prisma";
 import { normalizeAnchorSemantics } from "../src/services/video-orchestrator/anchor-semantics";
 import { validateOnePromptVideoPlan } from "../src/services/video-orchestrator/plan-validator";
+import {
+  commitArtifactPlan,
+  readArtifactPlan,
+} from "../src/services/video-orchestrator/plan-artifact-store";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -33,7 +36,6 @@ async function main(): Promise<void> {
     select: {
       id: true,
       status: true,
-      planJson: true,
       keyframes: {
         where: { keyframeNo: { gt: 0 } },
         orderBy: { keyframeNo: "asc" },
@@ -43,7 +45,8 @@ async function main(): Promise<void> {
   });
   if (!project) throw new Error(`Video project ${projectId} not found`);
 
-  const plan = structuredClone(record(project.planJson));
+  const authority = await readArtifactPlan(projectId);
+  const plan = structuredClone(record(authority));
   const existingSceneContracts = records(plan.sceneContracts ?? plan.scene_contracts);
   const graphKey = Object.keys(record(plan.cameraGraph)).length ? "cameraGraph" : "camera_graph";
   const graph = record(plan[graphKey]);
@@ -125,10 +128,7 @@ async function main(): Promise<void> {
     existingSceneContractIds: existingSceneContracts.map((contract) => text(contract.sceneId ?? contract.scene_id)).filter(Boolean),
   };
   if (apply) {
-    await prisma.videoProject.update({
-      where: { id: projectId },
-      data: { planJson: plan as Prisma.InputJsonValue },
-    });
+    await commitArtifactPlan(projectId, plan);
   }
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }

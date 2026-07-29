@@ -240,7 +240,7 @@ export async function submitAliyunImageTask(params: {
 
 const PRIORITY_PROMPT_MARKERS = [
   "MULTI-IMAGE INPUT MAP",
-  "AUTHORITATIVE PERSON IDENTITY + RENDERING STYLE REFERENCE CONTRACT",
+  "Identity lock (sole textual identity source)",
   "MANDATORY RETRY CORRECTION",
   "INCREMENTAL CANDIDATE IMPROVEMENT",
   "LOCAL IMAGE REPAIR",
@@ -312,8 +312,25 @@ const IMAGE_PROMPT_PRIORITY_ORDER: ImagePromptUnitPriority[] = [
   "decorative",
 ];
 
+const EXACT_PROTECTED_PROMPT_FACT =
+  /\b(?:exact(?:ly)?|exact visible subject count|subject count|required literals?|must (?:preserve|remain|show|contain|include|match)|required visible invariant|identity|identity lock|brand(?: name)?|logo text|intrinsic markings?|card ranks?|card suits?|spatial relationships?|viewer-(?:left|right)|left of|right of|in front of|behind|user requirements?|user instructions?)\b/i;
+const SYMBOLIC_PROTECTED_PROMPT_FACT = /[♠♥♦♣]/;
+
+/**
+ * Only facts that would break the executable visual contract when omitted are
+ * protected from deterministic compaction.
+ *
+ * Repair and authority blocks are protected by construction. Core prose and
+ * negative prompts remain compressible unless they carry an explicit identity,
+ * literal, count, marking, spatial, or user-mandated invariant. This prevents
+ * generic descriptions, boilerplate, and broad negative lists from exhausting
+ * the provider budget while keeping mechanically testable facts lossless.
+ */
 function isProtectedPromptUnit(unit: ImagePromptUnit): boolean {
-  return unit.priority !== "decorative";
+  if (unit.priority === "repair" || unit.priority === "authority") return true;
+  if (unit.priority === "decorative") return false;
+  return EXACT_PROTECTED_PROMPT_FACT.test(unit.text)
+    || SYMBOLIC_PROTECTED_PROMPT_FACT.test(unit.text);
 }
 
 function sortPromptUnits(units: ImagePromptUnit[]): ImagePromptUnit[] {
@@ -324,18 +341,17 @@ function sortPromptUnits(units: ImagePromptUnit[]): ImagePromptUnit[] {
   );
 }
 
-function promptUnitPriority(unit: string, block: string): ImagePromptUnitPriority {
-  const searchable = `${block}\n${unit}`;
+function promptUnitPriority(unit: string): ImagePromptUnitPriority {
   if (
-    /MANDATORY RETRY CORRECTION|INCREMENTAL CANDIDATE IMPROVEMENT|LOCAL IMAGE REPAIR|GUIDED IMAGE REGENERATION|FULL IMAGE REGENERATION|RESOLVED-STATE PRESERVATION LOCK/i.test(searchable)
-    || /\b(retry instruction|do not repeat|exact corrections?|required visible)\b/i.test(searchable)
+    /MANDATORY RETRY CORRECTION|INCREMENTAL CANDIDATE IMPROVEMENT|LOCAL IMAGE REPAIR|GUIDED IMAGE REGENERATION|FULL IMAGE REGENERATION|RESOLVED-STATE PRESERVATION LOCK/i.test(unit)
+    || /\b(retry instruction|do not repeat|exact corrections?|required visible)\b/i.test(unit)
   ) {
     return "repair";
   }
   if (
-    PRIORITY_PROMPT_MARKERS.some((marker) => searchable.toUpperCase().includes(marker))
+    PRIORITY_PROMPT_MARKERS.some((marker) => unit.toUpperCase().includes(marker))
     || /^(?:INPUT IMAGE \d+|Role and allowed inheritance:|Scope boundary:|Global forbidden inheritance:|Cross-image rule:)/i.test(unit)
-    || /\b(?:hard anchor|authoritative|identity lock|consistency lock)\b/i.test(searchable)
+    || /\b(?:hard anchor|authoritative|identity lock|consistency lock)\b/i.test(unit)
   ) {
     return "authority";
   }
@@ -408,7 +424,7 @@ function imagePromptUnits(prompt: string): { units: ImagePromptUnit[]; removedDu
         continue;
       }
       seen.add(dedupeKey);
-      units.push({ text, priority: promptUnitPriority(text, block) });
+      units.push({ text, priority: promptUnitPriority(text) });
     }
   }
   return { units, removedDuplicateUnits };
@@ -587,12 +603,9 @@ export function buildAliyunReferenceImageMap(
   if (!references.length) return "";
   return [
     "MULTI-IMAGE INPUT MAP — image numbers below exactly match the uploaded image order",
-    "Use only each image's named role. Never copy or merge anything outside that role.",
     ...references.map((_, index) =>
       `INPUT IMAGE ${index + 1}: ${compileReferenceRoleProtocol(referenceUsageNotes[index])}`
     ),
-    "GLOBAL EXCLUSIONS: unrelated people, pose, expression, background, layout, props, duplicate products, UI, score, timer, logos, text, lighting, or defects.",
-    "Never merge unrelated subjects, text, UI, products, or backgrounds. If roles conflict, obey the target contract and the image explicitly assigned to that attribute.",
   ].join("\n\n");
 }
 
@@ -600,10 +613,21 @@ export function compileReferenceRoleProtocol(value: string | undefined): string 
   const note = value?.replace(/\s+/g, " ").trim() || "";
   const target = note.match(/(?:person asset|asset|anchor)\s+([A-Za-z0-9_-]+)/i)?.[1];
   const targetField = target ? `; target=${target}` : "";
+  const protocolKeywords = new Set([
+    "HARD",
+    "IDENTITY",
+    "RENDERING",
+    "STYLE",
+    "REFERENCE",
+    "AUTHORITATIVE",
+  ]);
   const requiredLiterals = [
     ...(note.match(/\b[A-Z][A-Z0-9_-]{2,}\b/g) ?? []),
     ...(note.match(/"[^"]{1,80}"/g) ?? []),
-  ].slice(0, 8);
+  ].filter((literal, index, values) =>
+    !protocolKeywords.has(literal)
+    && values.indexOf(literal) === index
+  ).slice(0, 8);
   const literalField = requiredLiterals.length
     ? `; required_literals=${requiredLiterals.join("|")}`
     : "";

@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "planning-route-v1-input.schema.json",
+  "title": "Planning Route V1 Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "userCreative",
+    "durationSeconds",
+    "aspectRatio",
+    "stylePreset",
+    "hasReferenceImage",
+    "referenceFacts",
+    "userConstraints",
+    "allowedValues",
+    "categoryTemplateMap"
+  ],
+  "properties": {
+    "version": {
+      "const": "planning-route-v1-input"
+    },
+    "userCreative": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "durationSeconds": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "exclusiveMinimum": 0,
+      "maximum": 3600,
+      "default": null
+    },
+    "aspectRatio": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[1-9][0-9]*:[1-9][0-9]*$",
+      "maxLength": 20,
+      "default": null
+    },
+    "stylePreset": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 120,
+      "default": null
+    },
+    "hasReferenceImage": {
+      "type": "boolean"
+    },
+    "referenceFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subjectTypes",
+        "categorySignals",
+        "containsUi",
+        "containsBrandElements",
+        "containsPeople",
+        "hasExplicitAdCategorySignals"
+      ],
+      "properties": {
+        "subjectTypes": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "enum": [
+              "person",
+              "game_ui",
+              "product",
+              "food",
+              "vehicle",
+              "scene",
+              "brand_mark",
+              "other"
+            ]
+          }
+        },
+        "categorySignals": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "enum": [
+              "game",
+              "product",
+              "food",
+              "auto",
+              "ecommerce",
+              "brand",
+              "tutorial",
+              "unknown"
+            ]
+          }
+        },
+        "containsUi": {
+          "type": "boolean"
+        },
+        "containsBrandElements": {
+          "type": "boolean"
+        },
+        "containsPeople": {
+          "type": "boolean"
+        },
+        "hasExplicitAdCategorySignals": {
+          "type": "boolean"
+        }
+      }
+    },
+    "userConstraints": {
+      "type": "array",
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+      }
+    },
+    "allowedValues": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "videoCategories",
+        "templateIds",
+        "chronologyModes",
+        "hookModes",
+        "hookRevealLevels"
+      ],
+      "properties": {
+        "videoCategories": {
+          "const": [
+            "game",
+            "product",
+            "ecommerce",
+            "food",
+            "auto",
+            "short_drama",
+            "brand",
+            "tutorial",
+            "custom"
+          ]
+        },
+        "templateIds": {
+          "const": [
+            "game_reversal",
+            "game_bonus_payoff",
+            "product_problem_solution",
+            "ecommerce_offer_conversion",
+            "food_sensory_reaction",
+            "auto_performance_hero",
+            "short_drama_conflict_twist",
+            "generic_brand_story"
+          ]
+        },
+        "chronologyModes": {
+          "const": [
+            "chronological",
+            "flashforward_hook",
+            "result_first",
+            "problem_solution",
+            "demonstration"
+          ]
+        },
+        "hookModes": {
+          "const": [
+            "pain_point",
+            "curiosity",
+            "tease",
+            "payoff_preview"
+          ]
+        },
+        "hookRevealLevels": {
+          "const": [
+            "none",
+            "partial",
+            "full"
+          ]
+        }
+      }
+    },
+    "categoryTemplateMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "game",
+        "product",
+        "ecommerce",
+        "food",
+        "auto",
+        "short_drama",
+        "brand",
+        "tutorial",
+        "custom"
+      ],
+      "properties": {
+        "game": {
+          "const": [
+            "game_reversal",
+            "game_bonus_payoff"
+          ]
+        },
+        "product": {
+          "const": [
+            "product_problem_solution"
+          ]
+        },
+        "ecommerce": {
+          "const": [
+            "ecommerce_offer_conversion"
+          ]
+        },
+        "food": {
+          "const": [
+            "food_sensory_reaction"
+          ]
+        },
+        "auto": {
+          "const": [
+            "auto_performance_hero"
+          ]
+        },
+        "short_drama": {
+          "const": [
+            "short_drama_conflict_twist"
+          ]
+        },
+        "brand": {
+          "const": [
+            "generic_brand_story"
+          ]
+        },
+        "tutorial": {
+          "const": [
+            "generic_brand_story"
+          ]
+        },
+        "custom": {
+          "const": [
+            "generic_brand_story"
+          ]
+        }
+      }
+    }
+  }
+}

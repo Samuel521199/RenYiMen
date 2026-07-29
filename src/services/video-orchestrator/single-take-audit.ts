@@ -258,7 +258,11 @@ export function auditSingleTakePlan(planValue: unknown, segmentNos?: number[]): 
     }
 
     const checkpoints = array(description.motionCheckpoints ?? description.motion_checkpoints);
-    const checkpointLimit = Math.max(1, Math.min(3, Math.ceil((durationSeconds || 5) / 2.5)));
+    // A five-second shot can naturally carry setup, action, and result
+    // checkpoints. The previous 2.5-second divisor limited it to two even
+    // though the downstream schema supports three, causing needless model
+    // repair loops for otherwise executable motion.
+    const checkpointLimit = Math.max(1, Math.min(3, Math.ceil((durationSeconds || 5) / 2)));
     if (checkpoints.length > checkpointLimit) {
       push(issues, {
         code: "SINGLE_TAKE_CHECKPOINT_BUDGET_EXCEEDED",
@@ -371,8 +375,8 @@ function classifyPositiveCutInstruction(
 function stripNegativeCutClauses(value: string): string {
   return value
     .replace(/\bnot\s+as\s+(?:an?\s+)?(?:extra\s+video\s+clip|separate\s+shot|scene\s+transition)\b/gi, "")
-    .replace(/\b(?:no|without|forbid(?:den)?|avoid|must not|do not|don't|never)\b[^.;\n]*/gi, "")
-    .replace(/(?:禁止|不得|不要|避免|不可|不能|无任何|无内部)[^。；\n]*/g, "")
+    .replace(/\b(?:no|without|strictly\s+forbid(?:den)?|forbid(?:den)?|avoid|must not|do not|don't|never)\b[^.;\n]*/gi, "")
+    .replace(/(?:严禁|禁止|不得|不要|避免|不可|不能|请勿|绝不|务必禁止|无任何|无内部)[^。；\n]*/g, "")
     .replace(/无(?:剪辑|剪切|切割|切镜|跳切|淡入淡出|淡入|淡出|叠化|溶解|交叉溶解|蒙太奇|场景切换|场景交换|瞬移|硬过渡|硬视觉过渡)/g, "");
 }
 

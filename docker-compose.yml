@@ -14,9 +14,37 @@ x-video-production-worker: &video-production-worker
     DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD_ENCODED:-${POSTGRES_PASSWORD:-postgres}}@db:5432/workflow?schema=public
     WORKBENCH_BACKEND_URL: http://workbench-backend:8000
     WORKBENCH_SSO_SECRET: ${WORKBENCH_SSO_SECRET:-change-me-workbench-sso-secret}
+    MODEL_TRANSLATION_ENABLED: "true"
+    MODEL_TRANSLATION_PROVIDER: qwen-mt
+    QWEN_MT_MODEL: qwen-mt-plus
+    LOCAL_TRANSLATION_BASE_URL: http://libretranslate:5000
     NODE_ENV: production
 
 services:
+  libretranslate:
+    profiles: ["local-translation-fallback"]
+    image: libretranslate/libretranslate:latest
+    container_name: workflow-libretranslate
+    restart: always
+    command:
+      - --load-only
+      - en,zh
+      - --disable-web-ui
+      - --translation-cache
+      - all
+      - --threads
+      - "4"
+    expose:
+      - "5000"
+    volumes:
+      - libretranslate_models:/home/libretranslate/.local
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/languages', timeout=5).read()"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
   db:
     image: postgres:15-alpine
     container_name: workflow-db
@@ -146,6 +174,10 @@ services:
       WORKBENCH_BACKEND_URL: http://workbench-backend:8000
       WORKBENCH_STATIC_CACHE_MAX_AGE: ${WORKBENCH_STATIC_CACHE_MAX_AGE:-86400}
       WORKBENCH_SSO_SECRET: ${WORKBENCH_SSO_SECRET:-change-me-workbench-sso-secret}
+      MODEL_TRANSLATION_ENABLED: "true"
+      MODEL_TRANSLATION_PROVIDER: qwen-mt
+      QWEN_MT_MODEL: qwen-mt-plus
+      LOCAL_TRANSLATION_BASE_URL: http://libretranslate:5000
       NODE_ENV: production
 
   video-planning-worker:
@@ -170,15 +202,7 @@ services:
     environment:
       <<: *video-production-worker-environment
       VIDEO_PRODUCTION_WORKER_ID: docker-clip
-      VIDEO_PRODUCTION_WORKER_KINDS: clip_prepare_submit
-
-  video-reconcile-worker:
-    <<: *video-production-worker
-    container_name: workflow-video-reconcile-worker
-    environment:
-      <<: *video-production-worker-environment
-      VIDEO_PRODUCTION_WORKER_ID: docker-reconcile
-      VIDEO_PRODUCTION_WORKER_KINDS: project_reconcile
+      VIDEO_PRODUCTION_WORKER_KINDS: clip_prepare_submit,compose
 
   video-quality-worker:
     <<: *video-production-worker
@@ -236,4 +260,5 @@ services:
     restart: "no"
 
 volumes:
+  libretranslate_models:
   nginx_static_cache:

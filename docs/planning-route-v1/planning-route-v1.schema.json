@@ -1,0 +1,530 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "planning-route-v1.schema.json",
+  "title": "Planning Route V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "videoCategory",
+    "templateId",
+    "chronologyMode",
+    "hookMode",
+    "hookRevealLevel",
+    "requiresReturnPoint",
+    "categoryReason",
+    "templateReason",
+    "chronologyReason",
+    "evidence",
+    "categoryConfidence",
+    "templateConfidence",
+    "chronologyConfidence",
+    "ambiguityCodes",
+    "fallbackUsed",
+    "fallbackReason",
+    "version",
+    "modelName",
+    "inputFingerprint",
+    "referenceFactFingerprint"
+  ],
+  "properties": {
+    "videoCategory": {
+      "type": "string",
+      "enum": [
+        "game",
+        "product",
+        "ecommerce",
+        "food",
+        "auto",
+        "short_drama",
+        "brand",
+        "tutorial",
+        "custom"
+      ]
+    },
+    "templateId": {
+      "type": "string",
+      "enum": [
+        "game_reversal",
+        "game_bonus_payoff",
+        "product_problem_solution",
+        "ecommerce_offer_conversion",
+        "food_sensory_reaction",
+        "auto_performance_hero",
+        "short_drama_conflict_twist",
+        "generic_brand_story"
+      ]
+    },
+    "chronologyMode": {
+      "type": "string",
+      "enum": [
+        "chronological",
+        "flashforward_hook",
+        "result_first",
+        "problem_solution",
+        "demonstration"
+      ]
+    },
+    "hookMode": {
+      "type": "string",
+      "enum": [
+        "pain_point",
+        "curiosity",
+        "tease",
+        "payoff_preview"
+      ]
+    },
+    "hookRevealLevel": {
+      "type": "string",
+      "enum": [
+        "none",
+        "partial",
+        "full"
+      ]
+    },
+    "requiresReturnPoint": {
+      "type": "boolean"
+    },
+    "categoryReason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "templateReason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "chronologyReason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceType",
+          "sourceField",
+          "summary",
+          "referenceFactField"
+        ],
+        "properties": {
+          "sourceType": {
+            "type": "string",
+            "enum": [
+              "user_prompt",
+              "explicit_metadata",
+              "reference_fact",
+              "program_policy"
+            ]
+          },
+          "sourceField": {
+            "type": "string",
+            "enum": [
+              "userCreative",
+              "durationSeconds",
+              "aspectRatio",
+              "stylePreset",
+              "hasReferenceImage",
+              "referenceFacts",
+              "userConstraints",
+              "allowedValues",
+              "categoryTemplateMap"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "referenceFactField": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "subjectTypes",
+              "categorySignals",
+              "containsUi",
+              "containsBrandElements",
+              "containsPeople",
+              "hasExplicitAdCategorySignals",
+              null
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "sourceType": {
+                  "const": "reference_fact"
+                }
+              },
+              "required": [
+                "sourceType"
+              ]
+            },
+            "then": {
+              "properties": {
+                "sourceField": {
+                  "const": "referenceFacts"
+                },
+                "referenceFactField": {
+                  "type": "string",
+                  "enum": [
+                    "subjectTypes",
+                    "categorySignals",
+                    "containsUi",
+                    "containsBrandElements",
+                    "containsPeople",
+                    "hasExplicitAdCategorySignals"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "referenceFactField": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "categoryConfidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "templateConfidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "chronologyConfidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ambiguityCodes": {
+      "type": "array",
+      "default": [],
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "INPUT_TOO_SHORT",
+          "INSUFFICIENT_EVIDENCE",
+          "CATEGORY_CONFLICT",
+          "TEMPLATE_CONFLICT",
+          "CHRONOLOGY_CONFLICT",
+          "HOOK_ROUTE_CONFLICT",
+          "REFERENCE_FACT_CONFLICT",
+          "UNSUPPORTED_CATEGORY",
+          "UNSUPPORTED_TEMPLATE"
+        ]
+      }
+    },
+    "fallbackUsed": {
+      "type": "boolean",
+      "default": false
+    },
+    "fallbackReason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 500,
+      "default": null
+    },
+    "version": {
+      "const": "planning-route-v1"
+    },
+    "modelName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "inputFingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "referenceFactFingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "game"
+            },
+            "templateId": {
+              "enum": [
+                "game_reversal",
+                "game_bonus_payoff"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "product"
+            },
+            "templateId": {
+              "const": "product_problem_solution"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "ecommerce"
+            },
+            "templateId": {
+              "const": "ecommerce_offer_conversion"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "food"
+            },
+            "templateId": {
+              "const": "food_sensory_reaction"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "auto"
+            },
+            "templateId": {
+              "const": "auto_performance_hero"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "short_drama"
+            },
+            "templateId": {
+              "const": "short_drama_conflict_twist"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "brand"
+            },
+            "templateId": {
+              "const": "generic_brand_story"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "tutorial"
+            },
+            "templateId": {
+              "const": "generic_brand_story"
+            }
+          }
+        },
+        {
+          "properties": {
+            "videoCategory": {
+              "const": "custom"
+            },
+            "templateId": {
+              "const": "generic_brand_story"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "chronologyMode": {
+            "const": "chronological"
+          }
+        },
+        "required": [
+          "chronologyMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requiresReturnPoint": {
+            "const": false
+          },
+          "hookRevealLevel": {
+            "enum": [
+              "none",
+              "partial"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "chronologyMode": {
+            "const": "flashforward_hook"
+          }
+        },
+        "required": [
+          "chronologyMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requiresReturnPoint": {
+            "const": true
+          },
+          "hookMode": {
+            "const": "payoff_preview"
+          },
+          "hookRevealLevel": {
+            "enum": [
+              "partial",
+              "full"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "chronologyMode": {
+            "const": "result_first"
+          }
+        },
+        "required": [
+          "chronologyMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requiresReturnPoint": {
+            "const": true
+          },
+          "hookMode": {
+            "const": "payoff_preview"
+          },
+          "hookRevealLevel": {
+            "const": "full"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "chronologyMode": {
+            "const": "problem_solution"
+          }
+        },
+        "required": [
+          "chronologyMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requiresReturnPoint": {
+            "const": false
+          },
+          "hookMode": {
+            "const": "pain_point"
+          },
+          "hookRevealLevel": {
+            "enum": [
+              "none",
+              "partial"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "chronologyMode": {
+            "const": "demonstration"
+          }
+        },
+        "required": [
+          "chronologyMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "requiresReturnPoint": {
+            "const": false
+          },
+          "hookMode": {
+            "enum": [
+              "curiosity",
+              "tease"
+            ]
+          },
+          "hookRevealLevel": {
+            "enum": [
+              "none",
+              "partial"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fallbackUsed": {
+            "const": true
+          }
+        },
+        "required": [
+          "fallbackUsed"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fallbackReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ambiguityCodes": {
+            "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "fallbackReason": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

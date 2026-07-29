@@ -1,12 +1,19 @@
-import { Prisma } from "@prisma/client";
 import { prisma } from "../src/lib/prisma";
 import { buildAssetConsistencyReference } from "../src/services/video-orchestrator/project-service";
+import {
+  commitArtifactPlan,
+  readArtifactPlan,
+} from "../src/services/video-orchestrator/plan-artifact-store";
 import type {
   OnePromptVideoPlan,
   VideoAssetLibraryItem,
   VideoConsistencyAnchor,
   VideoConsistencyReference,
 } from "../src/services/video-orchestrator/types";
+import {
+  isPlayingCardAnchor as isPlayingCardAnchorCanonical,
+  resolvePlayingCardAssetContract,
+} from "../src/services/video-orchestrator/playing-card-contract";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -25,29 +32,34 @@ function isPlayingCardAnchor(anchor: VideoConsistencyAnchor): boolean {
 
 async function main(): Promise<void> {
   const projects = await prisma.videoProject.findMany({
-    where: { planJson: { not: Prisma.JsonNull } },
-    select: { id: true, planJson: true },
+    select: { id: true },
   });
   let updatedProjects = 0;
   let updatedAssets = 0;
 
   for (const project of projects) {
-    if (!isRecord(project.planJson)) continue;
-    const plan = project.planJson as unknown as OnePromptVideoPlan;
+    const authority = await readArtifactPlan(project.id, {
+      allowMissing: true,
+    }).catch(() => null);
+    if (!isRecord(authority)) continue;
+    const plan = authority as unknown as OnePromptVideoPlan;
     const anchors = plan.consistencyManifest?.anchors ?? [];
     const references = plan.consistencyReferences ?? [];
     const items = plan.assetLibrary?.items ?? [];
     const replacements = new Map<number, VideoConsistencyReference>();
+    const resolvedAnchors = new Map<string, VideoConsistencyAnchor>();
 
     for (const item of items) {
       const anchor = anchors.find((candidate) => candidate.id === item.anchorId);
-      if (!anchor || item.category !== "prop" || !isPlayingCardAnchor(anchor)) continue;
+      if (!anchor || item.category !== "prop" || !isPlayingCardAnchorCanonical(anchor)) continue;
+      const resolvedAnchor = resolvePlayingCardAssetContract({ anchor }).anchor;
+      resolvedAnchors.set(anchor.id, resolvedAnchor);
       const baseReference = references.find((reference) =>
         reference.anchorId === anchor.id || reference.keyframeNo === item.keyframeNo
       );
       replacements.set(item.keyframeNo, buildAssetConsistencyReference({
         item: item as VideoAssetLibraryItem,
-        anchor,
+        anchor: resolvedAnchor,
         baseReference,
         userPrompt: "",
         negativePrompt: baseReference?.negativePrompt ?? "",
@@ -62,24 +74,38 @@ async function main(): Promise<void> {
     );
     const nextPlan = {
       ...plan,
+      consistencyManifest: plan.consistencyManifest
+        ? {
+            ...plan.consistencyManifest,
+            anchors: anchors.map((anchor) => resolvedAnchors.get(anchor.id) ?? anchor),
+          }
+        : plan.consistencyManifest,
+      planningManifest: plan.planningManifest
+        ? {
+            ...plan.planningManifest,
+            consistencyManifest: {
+              ...plan.planningManifest.consistencyManifest,
+              anchors: plan.planningManifest.consistencyManifest.anchors.map(
+                (anchor) => resolvedAnchors.get(anchor.id) ?? anchor,
+              ),
+            },
+          }
+        : plan.planningManifest,
       consistencyReferences: nextReferences,
     };
 
     await prisma.$transaction([
-      prisma.videoProject.update({
-        where: { id: project.id },
-        data: { planJson: nextPlan as unknown as Prisma.InputJsonValue },
-      }),
       ...[...replacements.values()].map((reference) =>
         prisma.videoKeyframe.updateMany({
           where: { projectId: project.id, keyframeNo: reference.keyframeNo },
           data: {
-            imagePrompt: reference.imagePromptZh ?? reference.imagePrompt,
-            negativePrompt: reference.negativePromptZh ?? reference.negativePrompt,
+            imagePrompt: reference.imagePromptEn ?? reference.imagePrompt,
+            negativePrompt: reference.negativePromptEn ?? reference.negativePrompt,
           },
         })
       ),
     ]);
+    await commitArtifactPlan(project.id, nextPlan);
     updatedProjects += 1;
     updatedAssets += replacements.size;
   }

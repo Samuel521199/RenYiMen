@@ -66,6 +66,36 @@ export interface VideoAssetImageContract {
   intrinsicDetails?: string[];
   forbiddenElements?: string[];
   acceptanceCriteria?: string[];
+  playingCards?: VideoPlayingCardContract;
+}
+
+export type VideoPlayingCardSuit = "spades" | "hearts" | "clubs" | "diamonds";
+export type VideoPlayingCardRank = "A" | "K" | "Q" | "J" | "10" | "9" | "8" | "7" | "6" | "5" | "4" | "3" | "2";
+export type VideoPlayingCardContractAuthority =
+  | "user_edit"
+  | "user_requirement"
+  | "reference_fact"
+  | "asset_contract"
+  | "category_default";
+
+export interface VideoPlayingCardContract {
+  cards: Array<{
+    rank: VideoPlayingCardRank;
+    suit: VideoPlayingCardSuit;
+    position: "left" | "right" | "center" | `index_${number}`;
+  }>;
+  face: "face_up" | "face_down";
+  overlap: {
+    mode: "none" | "percentage";
+    percentage: number;
+  };
+  cameraAngle: "top_down_orthographic" | "top_down_perspective" | "front" | "low_angle";
+  background: string;
+  allowedMarkings: string[];
+  fieldAuthority?: Partial<Record<
+    "cards" | "face" | "overlap" | "cameraAngle" | "background" | "allowedMarkings",
+    VideoPlayingCardContractAuthority
+  >>;
 }
 
 export interface VideoConsistencyAnchor {
@@ -98,6 +128,23 @@ export interface VideoConsistencyAnchor {
   imagePromptZh?: string;
   imagePromptEn?: string;
   assetImageContract?: VideoAssetImageContract;
+  /** Model-provided evidence; admission code treats this as input, not authority. */
+  sourceEvidence?: Array<{
+    source: "user_requirement" | "reference_fact" | "narrative_event" | "planner";
+    text: string;
+    eventIds?: string[];
+  }>;
+  candidateCategory?: "core_subject" | "brand" | "scene" | "prop" | "decoration" | "style" | "custom";
+  suggestedAsAnchor?: boolean;
+  candidateReason?: string;
+  /** The following fields are recomputed by the deterministic admission pass. */
+  usedByEventIds?: string[];
+  reuseCount?: number;
+  lockDimensions?: string[];
+  admissionReason?: string;
+  admissionRule?: string;
+  admissionScore?: number;
+  status?: "candidate" | "approved" | "event_local" | "discarded";
 }
 
 export interface VideoTimelineBlueprintSegment {
@@ -209,6 +256,21 @@ export interface VideoPlanningManifest {
   };
   consistencyManifest: {
     anchors: VideoConsistencyAnchor[];
+    eventLocalElements?: Array<{
+      id: string;
+      sourceAnchorId: string;
+      eventId: string;
+      description: string;
+      reason: string;
+    }>;
+    admissionDecisions?: Array<{
+      anchorId: string;
+      status: "approved" | "event_local" | "discarded";
+      rule: string;
+      score: number;
+      reason: string;
+      usedByEventIds: string[];
+    }>;
   };
   globalStyle?: {
     visualStyle?: string;
@@ -435,14 +497,13 @@ export interface VideoMicroShot extends VideoAssetDependencyFields {
   imagePromptZh?: string;
   imagePromptEn?: string;
   imageUrl?: string;
-  imageTaskId?: string;
   imageStatus?: "idle" | "pending" | "running" | "ready" | "failed";
   errorMessage?: string;
   usesConsistencyAnchors?: string[];
   prompt: string;
   promptZh?: string;
   promptEn?: string;
-  planningSource?: "provisional" | "media_conditioned" | "legacy_fallback";
+  planningSource?: "provisional" | "media_conditioned";
   sourceIntentMicroShotNo?: number;
   resolvedRevisionId?: string;
   resolvedAt?: string;
@@ -559,50 +620,13 @@ export interface VideoPlanSegment extends VideoAssetDependencyFields {
   usesConsistencyAnchors?: string[];
 }
 
-export interface VideoPlanShot extends VideoAssetDependencyFields {
-  shotNo: number;
-  durationSeconds: number;
-  boundaryMode?: "continuous" | "hard_cut" | "dissolve" | "match_cut";
-  purpose: string;
-  purposeZh?: string;
-  purposeEn?: string;
-  camera: string;
-  action: string;
-  imagePrompt: string;
-  imagePromptZh?: string;
-  imagePromptEn?: string;
-  videoPrompt: string;
-  videoPromptZh?: string;
-  videoPromptEn?: string;
-  outputMode?: "text" | "image" | "mixed";
-  linkedBeatIds?: string[];
-  storyFunction?: VideoStoryFunction;
-  emotionalBeat?: string;
-  emotionalBeatZh?: string;
-  emotionalBeatEn?: string;
-  cause?: string;
-  effect?: string;
-  informationUnit?: string;
-  keyEvidenceIds?: string[];
-  dependsOnBeatIds?: string[];
-  evidenceFromBeatIds?: string[];
-  resolvesConflictBeatId?: string;
-  actionContinuity?: VideoStoryTraceFields["actionContinuity"];
-  reactionBeat?: string;
-  powerShift?: string;
-  constraints?: string[];
-  timedPrompts?: VideoTimedPrompt[];
-  microShots?: VideoMicroShot[];
-  audioPlan?: VideoAudioPlan;
-  subtitle: string;
-  negativePrompt: string;
-  negativePromptZh?: string;
-  negativePromptEn?: string;
-  usesConsistencyAnchors?: string[];
-}
-
 export interface NarrativeEvent {
   eventId: string;
+  /**
+   * Authoritative story responsibilities carried by this event. Creative
+   * strategy event bindings are derived from these roles for new plans.
+   */
+  storyFunctions?: VideoStoryFunction[];
   dramaticGoal: string;
   participants: string[];
   locationId: string;
@@ -1542,6 +1566,7 @@ export interface OnePromptVideoPlan {
   timelineBlueprint?: VideoPlanningManifest["timelineBlueprint"];
   narrativeEvents?: NarrativeEvent[];
   creativeStrategy?: VideoCreativeStrategy;
+  approvedRouteContract?: Record<string, unknown>;
   storyBeats?: VideoStoryBeat[];
   evidenceRegistry?: VideoStoryEvidence[];
   assetContract?: VideoAssetContract;
@@ -1567,7 +1592,6 @@ export interface OnePromptVideoPlan {
   mediaRevisionHistory?: Record<string, VideoMediaRevision[]>;
   generationQualityReports?: GenerationQualityReport[];
   plannerWarnings?: string[];
-  storyboardPlan?: unknown;
   promptDetailPlan?: VideoPromptDetailPlan;
   boundaryContracts?: VideoBoundaryContract[];
   observedBoundaryFacts?: VideoObservedBoundaryFacts[];
@@ -1576,11 +1600,6 @@ export interface OnePromptVideoPlan {
   consistencyReferences?: VideoConsistencyReference[];
   keyframes: VideoPlanKeyframe[];
   segments: VideoPlanSegment[];
-  /**
-   * Compatibility view for older UI/API code. New logic should use
-   * keyframes + segments.
-   */
-  shots: VideoPlanShot[];
 }
 
 export interface CreateVideoProjectInput {

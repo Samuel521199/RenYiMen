@@ -1,0 +1,58 @@
+{
+  "capturedAt": "2026-07-29T03:20:00+08:00",
+  "phase8": {
+    "migration": "20260728235900_remove_legacy_video_execution_structure",
+    "startedAt": "2026-07-28T15:53:45.475Z",
+    "finishedAt": "2026-07-28T15:53:45.588Z",
+    "executionOrderDeviation": true,
+    "reason": "The irreversible Phase 8 migration was applied before Phase 9 completed a documented stable release cycle."
+  },
+  "compensatingReleaseCycle": {
+    "evidence": "docs/baselines/phase9-real-recovery-rollback-dashboard-2026-07-29.json",
+    "evidenceSha256": "9DF3DA929E9708546575B76AE8559DDF7ECF99E7B634BA9EBE1C644BC81B6F6A",
+    "previousRuntimeVersion": "video-production-v2:bc5888d781eabe7b",
+    "candidateRuntimeVersion": "video-production-v2:04118a638fa8acc8",
+    "finalRuntimeVersion": "video-production-v2:da41e1cfaed39918",
+    "rollbackCompleted": true,
+    "providerPollingRecoveryCompleted": true,
+    "ffmpegRecoveryCompleted": true,
+    "finalInvariantViolations": 0
+  },
+  "specialProject": {
+    "projectId": "cms45bepz0001tv8okj4l1o9w",
+    "sourceBackup": "backups/one-prompt-phase0/2026-07-28T09-13-44-266Z/workflow-pre-migration.dump",
+    "sourceBackupSha256": "EE053BD5A524F9EA37FDDEC1A79AC5B72F8133D0F5B811DF3407388A858E5A6C",
+    "baselineEvidence": "backups/one-prompt-phase0/2026-07-28T09-13-44-266Z/phase0-baseline.json",
+    "baselineEvidenceSha256": "7FC36091EF70C2E021AF44DC7D1E683C5E1D970C07A8405B3063342C2C25C4E5",
+    "originalStatus": "IMAGE_GENERATING",
+    "completedJobs": 45,
+    "failedJobs": 11,
+    "activeJobs": 0,
+    "planningJobCountBefore": 7,
+    "targetMinus1000": {
+      "keyframeId": "cms4aehx10002tvkw12raowb1",
+      "status": "FAILED",
+      "errorCode": "EXECUTION_CONTRACT_TOO_LARGE",
+      "recoveryAction": "REPAIR_CONTRACT",
+      "sourceError": "Image prompt contract invalid: protected facts exceed the provider budget (model_compaction_disabled). Repair the structured asset/frame contract; generation was not submitted."
+    },
+    "targetMinus1005": {
+      "keyframeId": "cms4aehx10007tvkwxeno38gk",
+      "status": "IMAGE_PENDING",
+      "candidateId": "cms4bltfk000btvb4mj78v1oj",
+      "candidateStatus": "quality_failed",
+      "providerTaskId": "bca74894-4808-4bee-96b9-d363d599d5c1",
+      "errorCode": "QUALITY_EVALUATION_FAILED",
+      "recoveryAction": "RETRY_QUALITY"
+    },
+    "orphanLease": {
+      "leaseId": "cms4blk550001tvb4eu370s6g",
+      "targetId": "cms4aehx10007tvkwxeno38gk",
+      "status": "waiting",
+      "attempt": 1,
+      "upstreamTaskId": null
+    },
+    "currentProductionProjectExists": false,
+    "deletionAuditExists": false
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "videoCategory": "product",
+  "templateId": "product_problem_solution",
+  "chronologyMode": "chronological",
+  "hookMode": "payoff_preview",
+  "hookRevealLevel": "full",
+  "requiresReturnPoint": true,
+  "categoryReason": "用户要求制作护肤产品广告。",
+  "templateReason": "需求包含问题与产品解决路径。",
+  "chronologyReason": "声称使用顺叙。",
+  "evidence": [
+    {
+      "sourceType": "user_prompt",
+      "sourceField": "userCreative",
+      "summary": "输入包含产品与使用前问题。",
+      "referenceFactField": null
+    }
+  ],
+  "categoryConfidence": 0.95,
+  "templateConfidence": 0.92,
+  "chronologyConfidence": 0.8,
+  "ambiguityCodes": [],
+  "fallbackUsed": false,
+  "fallbackReason": null,
+  "version": "planning-route-v1",
+  "modelName": "qwen3.7-plus",
+  "inputFingerprint": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "referenceFactFingerprint": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

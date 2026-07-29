@@ -4,6 +4,11 @@ import type {
   VideoConsistencyAnchorType,
 } from "./types";
 import { ONE_PROMPT_IMAGE_PROMPT_GENERATION_TARGET_CHARS } from "@/lib/one-prompt-video-limits";
+import {
+  isPlayingCardAnchor,
+  PlayingCardContractConflictError,
+  validatePlayingCardContract,
+} from "./playing-card-contract";
 
 export interface AssetImageContractIssue {
   anchorId: string;
@@ -79,6 +84,13 @@ export function validateAssetImageContract(anchor: VideoConsistencyAnchor): Asse
   }
 
   const issues: AssetImageContractIssue[] = [];
+  for (const conflict of validatePlayingCardContract(anchor)) {
+    issues.push({
+      anchorId: anchor.id,
+      field: `playingCards.${conflict.field}`,
+      message: `conflicting ${conflict.authority} values: ${conflict.values.join(" vs ")}`,
+    });
+  }
   const serializedContractLength = JSON.stringify(contract).length;
   if (serializedContractLength > ASSET_IMAGE_CONTRACT_MAX_JSON_CHARS) {
     issues.push({
@@ -239,6 +251,10 @@ export function compileAssetImagePromptZh(anchor: VideoConsistencyAnchor): strin
 export function compileAssetImagePromptEn(anchor: VideoConsistencyAnchor): string {
   const contract = anchor.assetImageContract;
   if (!contract) return anchor.imagePromptEn?.trim() || anchor.descriptionEn?.trim() || "";
+  if (isPlayingCardAnchor(anchor)) {
+    const conflicts = validatePlayingCardContract(anchor);
+    if (conflicts.length) throw new PlayingCardContractConflictError(anchor.id, conflicts);
+  }
   return join([
     `Asset reference sheet for ${anchor.displayNameEn || anchor.id}`,
     `Exact visible subject count: ${contract.subjectCount ?? 0}. ${contract.subjectDescription ?? ""}`,

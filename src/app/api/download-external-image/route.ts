@@ -137,13 +137,13 @@ async function proxyExternalMedia(
   const timeoutMs = isVideo ? 120_000 : FETCH_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const upstream = await fetch(url, {
+    const upstream = await fetchExternalMediaWithRetry(url, {
       redirect: "follow",
       signal: controller.signal,
       headers: {
         Accept: isVideo ? "video/*,*/*;q=0.9" : "image/*,*/*;q=0.8",
       },
-    });
+    }, isVideo ? 2 : 3);
 
     if (!upstream.ok) {
       return NextResponse.json(
@@ -178,4 +178,24 @@ async function proxyExternalMedia(
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchExternalMediaWithRetry(
+  url: string,
+  init: RequestInit,
+  maxAttempts: number,
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok || response.status < 500 || attempt === maxAttempts) return response;
+      lastError = new Error(`Preview origin returned HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+      if (init.signal?.aborted || attempt === maxAttempts) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
+  }
+  throw lastError instanceof Error ? lastError : new Error("Preview origin fetch failed");
 }

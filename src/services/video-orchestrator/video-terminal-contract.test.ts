@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   assertEndFrameRequirementSupported,
-  buildLegacyVideoPromptContract,
   compileHappyHorseAudioContract,
   compileHappyHorseVideoPrompt,
   compileAliyunVideoPrompt,
@@ -13,6 +12,36 @@ import {
   validateVideoPromptContract,
   videoPromptContractFromUnknown,
 } from "./video-terminal-contract.ts";
+import type { VideoPromptContract } from "./types.ts";
+
+function completeTestContract(input: {
+  terminalState: string;
+  motionPath: string;
+  preserveRequirements: string[];
+  narrativeBoundary: string;
+  shotIntent: string;
+}): VideoPromptContract {
+  return {
+    version: "video-prompt-contract-v1",
+    terminalRequirements: [{
+      requirementId: "terminal.complete_state",
+      priority: "hard",
+      observableFact: input.terminalState,
+      acceptanceCriteria: "The final stable frames visibly satisfy the complete approved terminal state.",
+      evidenceRefs: [{ type: "approved_end_frame", id: "keyframe:end" }],
+      source: "approved_end_frame",
+      sources: ["approved_end_frame"],
+    }],
+    motionSteps: input.motionPath ? [input.motionPath] : [],
+    preserveRequirements: input.preserveRequirements,
+    forbiddenOutcomes: [
+      "No cut, dissolve, teleportation, scene replacement, pasted still, or inserted freeze-frame.",
+      "No subtitles, captions, watermarks, timecodes, random letters, lyrics, or unrequested UI.",
+    ],
+    narrativeBoundary: input.narrativeBoundary,
+    shotIntent: input.shotIntent,
+  };
+}
 
 test("terminal requirement defaults to semantic and preserves explicit levels", () => {
   assert.equal(resolveEndFrameRequirementLevel({}), "hard_semantic");
@@ -148,7 +177,7 @@ test("ordinary segment data is not mistaken for a prompt contract and malformed 
 });
 
 test("HappyHorse compiler serializes the model contract without truncating, deduplicating, or selecting", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "The character visibly holds the same product beside the face.",
     motionPath: "The hand lifts the product in one continuous movement.",
     preserveRequirements: ["same face; same product; same room"],
@@ -163,7 +192,7 @@ test("HappyHorse compiler serializes the model contract without truncating, dedu
     retryCorrections: ["product position: finish the lift one second earlier"],
   });
   assert.ok(compiled.prompt.length <= 4200);
-  assert.match(compiled.prompt, /REQUIREMENT legacy\.complete_terminal_state \[hard\]/);
+  assert.match(compiled.prompt, /REQUIREMENT terminal\.complete_state \[hard\]/);
   assert.match(compiled.prompt, /The character visibly holds the same product beside the face/);
   assert.match(compiled.prompt, /Complete the main action by 3\.5s/);
   assert.match(compiled.prompt, /STRUCTURED RETRY DELTA/);
@@ -172,7 +201,7 @@ test("HappyHorse compiler serializes the model contract without truncating, dedu
 });
 
 test("compiler states whether the approved last image is a real native model input", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "The approved terminal composition is visible.",
     motionPath: "Move continuously into the terminal composition.",
     preserveRequirements: [],
@@ -199,7 +228,7 @@ test("compiler states whether the approved last image is a real native model inp
 });
 
 test("compiler does not label an R2V start reference as a hard native first frame", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "approved end reference",
     motionPath: "continuous motion",
     preserveRequirements: [],
@@ -221,7 +250,7 @@ test("compiler does not label an R2V start reference as a hard native first fram
 });
 
 test("Wan 2.7 compiler uses native boundary semantics and omits HappyHorse R2V instructions", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "The supplied closing composition is fully visible.",
     motionPath: "The character lowers one hand and continuously turns toward the product.",
     preserveRequirements: ["same character", "same product", "same camera axis"],
@@ -245,7 +274,7 @@ test("Wan 2.7 compiler uses native boundary semantics and omits HappyHorse R2V i
 });
 
 test("Aliyun video prompt dispatch preserves HappyHorse and selects Wan 2.7 by model family", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "approved ending",
     motionPath: "continuous movement",
     preserveRequirements: [],
@@ -333,7 +362,7 @@ test("post-only audio contract suppresses all provider audio", () => {
 });
 
 test("HappyHorse R2V compiler identifies the audio-capable model and embeds the audio contract", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "The product remains visible.",
     motionPath: "The character closes the product lid.",
     preserveRequirements: ["same character", "same product"],
@@ -360,7 +389,7 @@ test("HappyHorse R2V compiler identifies the audio-capable model and embeds the 
 });
 
 test("invalid, duplicate, or over-budget model contracts fail instead of being rewritten", () => {
-  const contract = buildLegacyVideoPromptContract({
+  const contract = completeTestContract({
     terminalState: "The product is visible.",
     motionPath: "Lift the product.",
     preserveRequirements: ["same face"],

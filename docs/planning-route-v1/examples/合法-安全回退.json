@@ -1,0 +1,32 @@
+{
+  "videoCategory": "custom",
+  "templateId": "generic_brand_story",
+  "chronologyMode": "chronological",
+  "hookMode": "curiosity",
+  "hookRevealLevel": "none",
+  "requiresReturnPoint": false,
+  "categoryReason": "输入只要求制作一个有吸引力的视频，没有足够信息判断垂直品类。",
+  "templateReason": "没有证据支持游戏、产品、电商、餐饮、汽车或短剧模板，因此使用通用品牌故事模板。",
+  "chronologyReason": "用户没有提供倒叙、结果先行或演示顺序要求，采用风险最低的顺叙。",
+  "evidence": [
+    {
+      "sourceType": "user_prompt",
+      "sourceField": "userCreative",
+      "summary": "输入只包含笼统的视频制作要求。",
+      "referenceFactField": null
+    }
+  ],
+  "categoryConfidence": 0,
+  "templateConfidence": 0,
+  "chronologyConfidence": 0,
+  "ambiguityCodes": [
+    "INPUT_TOO_SHORT",
+    "INSUFFICIENT_EVIDENCE"
+  ],
+  "fallbackUsed": true,
+  "fallbackReason": "输入证据不足，无法可靠确定视频品类或叙事模板。冲突信息：未发现可明确列出的输入冲突。已采用通用品牌故事顺叙路线继续规划，建议在计划审核阶段确认或修改品类与叙事路线。",
+  "version": "planning-route-v1",
+  "modelName": "qwen3.7-plus",
+  "inputFingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "referenceFactFingerprint": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}

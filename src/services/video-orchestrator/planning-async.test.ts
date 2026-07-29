@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { planningCheckpointResumeProgress } from "./project-service.ts";
 
 const root = process.cwd();
 const service = readFileSync(path.join(root, "src/services/video-orchestrator/project-service.ts"), "utf8");
@@ -12,6 +13,40 @@ const productionJobQueue = readFileSync(
   path.join(root, "src/services/video-orchestrator/production-job-queue.ts"),
   "utf8",
 );
+
+test("retry resumes from the persisted segment checkpoint instead of resetting to zero", () => {
+  const resumed = planningCheckpointResumeProgress({
+    version: 11,
+    inputFingerprint: "same-input",
+    planningRaw: {},
+    storyboardArtistPlan: {},
+    storyContractReport: { passed: true, issues: [] },
+    storySemanticReview: {
+      passed: true,
+      score: 100,
+      issueCodes: [],
+      blockingIssueCodes: [],
+      summaryZh: "",
+      summaryEn: "",
+      evidence: [],
+    },
+    shotDecomposerSegmentPlans: Object.fromEntries(
+      [1, 2, 3, 4, 5].map((segmentNo) => [String(segmentNo), {}]),
+    ),
+    approvedShotDecomposerSegmentPlans: Object.fromEntries(
+      [1, 3, 4, 5].map((segmentNo) => [String(segmentNo), {}]),
+    ),
+    promptDetailSegmentPlans: Object.fromEntries(
+      [1, 3, 4, 5].map((segmentNo) => [String(segmentNo), {}]),
+    ),
+    updatedAt: new Date(0).toISOString(),
+  } as never, 1);
+  assert.equal(resumed?.completedSteps, 15);
+  assert.equal(resumed?.totalSteps, 17);
+  assert.equal(resumed?.completedSegments, 4);
+  assert.equal(resumed?.totalSegments, 5);
+  assert.equal(resumed?.stage, "prompt_detailer");
+});
 
 test("plan endpoint accepts a background job without waiting for the planner", () => {
   assert.match(planRoute, /queueVideoProjectPlanning/);
@@ -42,6 +77,10 @@ test("planning state persists real stages and survives refresh or process restar
   ]) assert.match(planner, new RegExp(`stage: "${stage}"`));
   assert.match(planner, /completedSegments/);
   assert.match(planner, /totalSegments/);
+  assert.match(planner, /story_gates\.checkpoint_reused/);
+  assert.match(planner, /final_prompt_validation\.local_repair/);
+  assert.match(planner, /delete checkpoint\.promptDetailSegmentPlans\?\.\[String\(segmentNo\)\]/);
+  assert.match(service, /Math\.max\(previous\.completedSteps/);
 });
 
 test("hidden repair multipliers are measured and exposed", () => {

@@ -5,7 +5,6 @@ import type {
   VideoMicroShot,
   VideoPlanKeyframe,
   VideoPlanSegment,
-  VideoPlanShot,
   VideoStyleBible,
 } from "./types";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
@@ -241,7 +240,7 @@ function buildSegments(input: PlanVideoProjectInput & { shotCount: number }, sty
       camera,
       subjectMotion,
       environmentMotion,
-      videoPrompt: videoPromptZh,
+      videoPrompt: videoPromptEn,
       videoPromptZh,
       videoPromptEn,
       subtitle: "",
@@ -321,43 +320,12 @@ function buildFallbackMicroShots(params: {
       action: phase,
       camera: params.camera,
       referenceType: "mixed",
-      imagePrompt: imagePromptZh,
+      imagePrompt: imagePromptEn,
       imagePromptZh,
       imagePromptEn,
-      prompt: promptZh,
+      prompt: promptEn,
       promptZh,
       promptEn,
-    };
-  });
-}
-
-function segmentsToCompatShots(keyframes: VideoPlanKeyframe[], segments: VideoPlanSegment[]): VideoPlanShot[] {
-  return segments.map((segment) => {
-    const start = keyframes[segment.startKeyframeNo - 1];
-    return {
-      shotNo: segment.segmentNo,
-      durationSeconds: segment.durationSeconds,
-      boundaryMode: segment.boundaryMode,
-      purpose: segment.purpose,
-      purposeZh: segment.purposeZh,
-      purposeEn: segment.purposeEn,
-      camera: segment.camera,
-      action: segment.motion,
-      imagePrompt: start?.imagePrompt ?? "",
-      imagePromptZh: start?.imagePromptZh ?? start?.imagePrompt ?? "",
-      imagePromptEn: start?.imagePromptEn ?? start?.imagePrompt ?? "",
-      videoPrompt: segment.videoPrompt,
-      videoPromptZh: segment.videoPromptZh,
-      videoPromptEn: segment.videoPromptEn,
-      subtitle: segment.subtitle,
-      negativePrompt: segment.negativePrompt,
-      negativePromptZh: segment.negativePromptZh,
-      negativePromptEn: segment.negativePromptEn,
-      outputMode: segment.outputMode,
-      constraints: segment.constraints,
-      timedPrompts: segment.timedPrompts,
-      microShots: segment.microShots,
-      audioPlan: segment.audioPlan,
     };
   });
 }
@@ -382,7 +350,6 @@ export function createVideoPlan(input: PlanVideoProjectInput): OnePromptVideoPla
     styleBible,
     keyframes,
     segments,
-    shots: segmentsToCompatShots(keyframes, segments),
   };
 }
 

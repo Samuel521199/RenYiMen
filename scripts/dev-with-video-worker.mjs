@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const nextCli = require.resolve("next/dist/bin/next");
+const { loadEnvConfig } = require("@next/env");
+loadEnvConfig(process.cwd(), true);
 const children = new Set();
 let stopping = false;
 
@@ -41,13 +43,12 @@ start("web", [nextCli, "dev", "--turbopack", "--port", "3001"]);
 for (const worker of [
   { label: "planning worker", id: "local-planning", kinds: "planning" },
   { label: "image worker", id: "local-image", kinds: "image_prepare_submit,micro_shot_prepare_submit" },
-  { label: "clip worker", id: "local-clip", kinds: "clip_prepare_submit" },
-  { label: "reconcile worker", id: "local-reconcile", kinds: "project_reconcile" },
+  { label: "clip and compose worker", id: "local-clip-compose", kinds: "clip_prepare_submit,compose" },
   { label: "quality worker", id: "local-quality", kinds: "image_quality" },
 ]) {
   start(
     worker.label,
-    ["--import", "tsx", "scripts/video-production-worker.ts"],
+    ["--watch", "--watch-preserve-output", "--import", "tsx", "scripts/video-production-worker.ts"],
     {
       ...process.env,
       VIDEO_PRODUCTION_WORKER_ID: worker.id,

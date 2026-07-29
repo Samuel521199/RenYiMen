@@ -1,0 +1,12 @@
+{
+  "videoCategory": "game",
+  "templateId": "game_bonus_payoff",
+  "chronologyMode": "flashforward_hook",
+  "hookMode": "payoff_preview",
+  "hookRevealLevel": "full",
+  "requiresReturnPoint": true,
+  "hookEventIds": [
+    "event_3"
+  ],
+  "returnToEventId": "event_1"
+}

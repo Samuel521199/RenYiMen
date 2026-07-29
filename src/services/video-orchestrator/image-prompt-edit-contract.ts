@@ -1,4 +1,5 @@
 import type { ImagePromptEditContract, VideoAssetImageContract } from "./types";
+import { normalizePlayingCardContract } from "./playing-card-contract";
 
 export type ImagePromptContractLocale = "zh" | "en";
 export type { ImagePromptEditContract } from "./types";
@@ -84,6 +85,7 @@ export function normalizeVideoAssetImageContract(value: unknown): VideoAssetImag
     intrinsicDetails: cleanStrings(value.intrinsicDetails ?? value.intrinsic_details),
     forbiddenElements: cleanStrings(value.forbiddenElements ?? value.forbidden_elements),
     acceptanceCriteria: cleanStrings(value.acceptanceCriteria ?? value.acceptance_criteria),
+    playingCards: normalizePlayingCardContract(value.playingCards ?? value.playing_cards),
   };
 }
 

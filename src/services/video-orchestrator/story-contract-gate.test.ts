@@ -132,6 +132,54 @@ test("planning narrative contract accepts chronological event bindings", () => {
   assert.equal(report.passed, true, JSON.stringify(report.issues, null, 2));
 });
 
+test("planning narrative contract rejects creative-strategy drift from event authority", () => {
+  const eventsWithAuthority = [
+    {
+      eventId: "event_1",
+      storyFunctions: ["conflict" as const],
+      dramaticGoal: "establish conflict",
+      participants: [],
+      locationId: "room",
+      initialState: "ready",
+      action: "challenge",
+      resultingState: "conflict visible",
+      requiredAnchorIds: [],
+      previousEventIds: [],
+      mustBecomeSeparateSegment: true,
+    },
+    {
+      eventId: "event_2",
+      storyFunctions: ["turning_point" as const],
+      dramaticGoal: "turn the result",
+      participants: [],
+      locationId: "room",
+      initialState: "conflict visible",
+      action: "decisive move",
+      resultingState: "advantage",
+      requiredAnchorIds: [],
+      previousEventIds: ["event_1"],
+      mustBecomeSeparateSegment: true,
+    },
+  ];
+  const report = validatePlanningNarrativeContract({
+    creativeStrategy: {
+      chronologyMode: "chronological",
+      conflictEventIds: ["event_2"],
+      turningPointEventIds: ["event_1"],
+    },
+    narrativeEvents: eventsWithAuthority,
+    timelineSegments: eventsWithAuthority.map((event, index) => ({
+      segmentNo: index + 1,
+      startTimeSeconds: index * 3,
+      endTimeSeconds: (index + 1) * 3,
+      durationSeconds: 3,
+      requiredAnchorIds: [],
+      sourceEventIds: [event.eventId],
+    })),
+  });
+  assert.ok(report.issues.some((issue) => issue.code === "STRATEGY_EVENT_AUTHORITY_DRIFT"));
+});
+
 test("adjacent story functions may share one event but reversed order still fails", () => {
   const narrativeEvents = Array.from({ length: 4 }, (_, index) => ({
     eventId: `event_${index + 1}`,

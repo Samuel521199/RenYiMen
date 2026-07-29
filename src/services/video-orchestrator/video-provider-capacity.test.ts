@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { selectFairVideoProviderWaiter } from "./video-provider-capacity.ts";
-import { dashScopeResourceKey } from "./provider-capacity.ts";
+import {
+  acquireProviderCapacity,
+  dashScopeResourceKey,
+} from "./provider-capacity.ts";
 
 const at = (seconds: number) => new Date(1_700_000_000_000 + seconds * 1_000);
 
@@ -34,6 +37,16 @@ test("a single user's oldest demand can consume otherwise idle capacity", () => 
   assert.equal(selected?.id, "first");
 });
 
+test("asset image demand outranks boundary demand before fairness and queue age", () => {
+  const selected = selectFairVideoProviderWaiter([
+    { id: "old-boundary", userId: "idle-user", projectId: "idle-project", queuedAt: at(0), createdAt: at(0), priority: 50 },
+    { id: "new-asset", userId: "busy-user", projectId: "busy-project", queuedAt: at(2), createdAt: at(2), priority: 100 },
+  ], [
+    { userId: "busy-user", projectId: "busy-project" },
+  ]);
+  assert.equal(selected?.id, "new-asset");
+});
+
 test("text, image, visual-QA and video capacity never share a resource pool", () => {
   const model = "shared-model-name";
   const keys = new Set([
@@ -46,4 +59,22 @@ test("text, image, visual-QA and video capacity never share a resource pool", ()
   for (const key of keys) {
     assert.doesNotMatch(key, /DASHSCOPE_API_KEY|BAILIAN_API_KEY/);
   }
+});
+
+test("an already-cancelled planning request never enters the shared capacity queue", async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException("peer anchor failed", "AbortError"));
+  await assert.rejects(
+    () => acquireProviderCapacity({
+      lane: "text_planning",
+      modelId: "qwen-test",
+      context: {
+        userId: "user-cancelled",
+        projectId: "project-cancelled",
+        targetId: "anchor-cancelled",
+      },
+      signal: controller.signal,
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
 });

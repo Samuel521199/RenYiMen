@@ -12,6 +12,7 @@ const MAX_SPAN_AGE_MS = 6 * 60 * 60 * 1000;
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 const SECRET_KEY_PATTERN = /(api[_-]?key|access[_-]?key|secret|authorization|token|password|signature)/i;
+const SAFE_NUMERIC_TOKEN_METRIC_KEYS = new Set(["inputTokens", "outputTokens"]);
 const START_EVENT_SUFFIXES = [".start", ".request", ".prepare", ".queued"] as const;
 const END_EVENT_SUFFIXES = [".success", ".response", ".done", ".ready", ".completed", ".error", ".failed"] as const;
 
@@ -479,7 +480,7 @@ function readableDetails(data: Record<string, unknown>): string[] {
   appendDetail(details, "候选图", data.candidateCount);
   appendDetail(details, "超时上限", typeof data.timeoutMs === "number" ? formatDuration(data.timeoutMs) : undefined);
   appendDetail(details, "降级原因", data.fallbackReason);
-  appendDetail(details, "任务", shortId(data.taskId ?? data.imageTaskId ?? data.clipTaskId ?? data.jobId));
+  appendDetail(details, "任务", shortId(data.taskId ?? data.upstreamTaskId ?? data.jobId));
   appendDetail(details, "接口", data.route);
   appendDetail(details, "方式", data.mode);
   if (typeof data.passed === "boolean") details.push(`质检 ${data.passed ? "通过" : "未通过"}`);
@@ -699,6 +700,13 @@ function sanitizeForLog(value: unknown, depth = 0): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     if (SECRET_KEY_PATTERN.test(key)) {
+      if (
+        SAFE_NUMERIC_TOKEN_METRIC_KEYS.has(key)
+        && (item === null || (typeof item === "number" && Number.isFinite(item)))
+      ) {
+        out[key] = item;
+        continue;
+      }
       out[key] = "[REDACTED]";
       continue;
     }

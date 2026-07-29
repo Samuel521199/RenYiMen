@@ -31,6 +31,9 @@ const PHYSICAL_SCENE_PATTERN =
   /(?:舞台|房间|室内|街道|建筑|墙面|地面|天花板|门窗|桌面|牌桌|柜台|道路|广场|森林|海滩|山谷|城市|商店|餐厅|厨房|办公室|车内|stage|room|interior|street|building|wall|floor|ceiling|door|window|table|counter|road|plaza|forest|beach|valley|city|shop|restaurant|kitchen|office|vehicle\s*interior)/i;
 const EMPTY_LAYER_PATTERN = /^(?:none|null|empty|n\/a|无|空|留空|不存在)[\s.。]*$/i;
 
+const PURE_PALETTE_BACKGROUND_PATTERN =
+  /(?:主色|配色|色板|色调|氛围|光斑|散景|模糊|虚化|色块|渐变|高饱和|抽象背景|彩色背景|色彩背景|渐变背景|模糊背景|palette|color(?:ful)?\s*(?:palette|tone|mood|block|field|background)|bokeh|blurred|soft[- ]focus|gradient|abstract\s*(?:background|pattern)|festive\s*(?:mood|atmosphere))/i;
+
 export function normalizeAnchorSemantics(anchor: VideoConsistencyAnchor): VideoConsistencyAnchor {
   const type = inferAnchorSemanticType(anchor);
   if (type === "palette_mood") {
@@ -57,7 +60,9 @@ export function normalizeAnchorSemantics(anchor: VideoConsistencyAnchor): VideoC
     return {
       ...anchor,
       semanticRole: "rendering_style",
-      referenceUsage: anchorReferenceUsagePolicy(anchor),
+      needsReferenceImage: false,
+      referenceStrength: "soft",
+      referenceUsage: anchorReferenceUsagePolicy({ type }),
     };
   }
   if (type === "location" || type === "space_layout") {
@@ -76,10 +81,11 @@ export function normalizeAnchorSemantics(anchor: VideoConsistencyAnchor): VideoC
 
 export function inferAnchorSemanticType(anchor: VideoConsistencyAnchor): VideoConsistencyAnchorType {
   if (anchor.type === "palette_mood" || anchor.type === "graphic_backdrop") return anchor.type;
-  if (anchor.type !== "location" && anchor.type !== "space_layout" && anchor.type !== "style") return anchor.type;
+  if (anchor.type === "style") return "style";
+  if (anchor.type !== "location" && anchor.type !== "space_layout") return anchor.type;
   const text = anchorSemanticText(anchor);
   if (GRAPHIC_BACKDROP_PATTERN.test(text) && !hasPhysicalSceneEvidence(anchor)) return "graphic_backdrop";
-  if (PALETTE_MOOD_PATTERN.test(text) && !hasPhysicalSceneEvidence(anchor)) return "palette_mood";
+  if ((PALETTE_MOOD_PATTERN.test(text) || PURE_PALETTE_BACKGROUND_PATTERN.test(text)) && !hasPhysicalSceneEvidence(anchor)) return "palette_mood";
   return anchor.type;
 }
 
@@ -111,10 +117,45 @@ export function isVisibleEvidenceAnchor(anchor: Pick<VideoConsistencyAnchor, "ty
 
 export function isReferenceImageEligibleAnchor(anchor: VideoConsistencyAnchor): boolean {
   if (anchor.type === "palette_mood") return false;
-  if (anchor.type === "graphic_backdrop" || anchor.type === "style") {
+  if (anchor.type === "style") return false;
+  if (anchor.type === "graphic_backdrop") {
     return anchor.needsReferenceImage === true;
   }
   return anchor.mustStayConsistent || anchor.needsReferenceImage;
+}
+
+export interface AssetVisualSpecEligibility {
+  anchor: VideoConsistencyAnchor;
+  eligible: boolean;
+  reason:
+    | "eligible_visible_asset"
+    | "palette_or_mood_only"
+    | "rendering_style_only"
+    | "reference_image_not_required"
+    | "not_reference_eligible";
+}
+
+/**
+ * Final deterministic gate before a paid per-anchor visual-spec call.
+ * Preliminary planner flags cannot make pure palette/style anchors billable.
+ */
+export function assessAssetVisualSpecEligibility(
+  anchor: VideoConsistencyAnchor,
+): AssetVisualSpecEligibility {
+  const normalized = normalizeAnchorSemantics(anchor);
+  if (normalized.type === "palette_mood") {
+    return { anchor: normalized, eligible: false, reason: "palette_or_mood_only" };
+  }
+  if (normalized.type === "style") {
+    return { anchor: normalized, eligible: false, reason: "rendering_style_only" };
+  }
+  if (!normalized.needsReferenceImage) {
+    return { anchor: normalized, eligible: false, reason: "reference_image_not_required" };
+  }
+  if (!isReferenceImageEligibleAnchor(normalized)) {
+    return { anchor: normalized, eligible: false, reason: "not_reference_eligible" };
+  }
+  return { anchor: normalized, eligible: true, reason: "eligible_visible_asset" };
 }
 
 export function anchorReferenceUsagePolicy(

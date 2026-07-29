@@ -4,8 +4,6 @@ import path from "node:path";
 import test from "node:test";
 import {
   assemblePlanningAssetSpecs,
-  planningDecompositionMode,
-  validateLocalJsonSchema,
 } from "./three-stage-planner.ts";
 import type { VideoConsistencyAnchor } from "./types.ts";
 
@@ -14,23 +12,6 @@ const plannerSource = readFileSync(
   path.join(root, "src/services/video-orchestrator/three-stage-planner.ts"),
   "utf8",
 );
-
-test("split planning is the default with explicit legacy and shadow rollback modes", () => {
-  const previous = process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION;
-  try {
-    delete process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION;
-    assert.equal(planningDecompositionMode(), "split");
-    process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION = "legacy";
-    assert.equal(planningDecompositionMode(), "legacy");
-    process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION = "split_shadow";
-    assert.equal(planningDecompositionMode(), "split_shadow");
-    process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION = "unknown";
-    assert.equal(planningDecompositionMode(), "split");
-  } finally {
-    if (previous === undefined) delete process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION;
-    else process.env.ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION = previous;
-  }
-});
 
 test("asset spec assembler preserves narrative fields and mirrors anchors into compatibility locations", () => {
   const anchors: VideoConsistencyAnchor[] = [{
@@ -74,30 +55,36 @@ test("planning decomposition uses per-anchor bounded workers and checkpoint fing
   assert.match(plannerSource, /Do not output asset_image_contract, image_prompt_zh, image_prompt_en/);
   assert.match(plannerSource, /ASSET_VISUAL_SPEC_DETAILER_SYSTEM_PROMPT/);
   assert.match(plannerSource, /detailPlanningAssetVisualSpecs/);
+  assert.match(plannerSource, /const eligibility = params\.planningManifest\.consistencyManifest\.anchors\.map\(\s*assessAssetVisualSpecEligibility/);
+  assert.match(plannerSource, /const callGate = assessAssetVisualSpecEligibility\(anchor\)/);
+  assert.match(plannerSource, /asset_visual_spec\.skipped_ineligible/);
   assert.match(plannerSource, /mapWithConcurrency\(\s*targets,\s*assetVisualSpecConcurrency\(\)/);
+  assert.match(plannerSource, /const batchController = new AbortController\(\)/);
+  assert.match(plannerSource, /signal: batchController\.signal/);
+  assert.match(plannerSource, /asset_visual_spec\.batch_cancel_requested/);
+  assert.match(plannerSource, /asset_visual_spec\.batch_cancel_settled/);
+  assert.match(plannerSource, /throw rootFailure\.error/);
   assert.match(plannerSource, /assetVisualSpecsByAnchorId/);
   assert.match(plannerSource, /assetVisualSpecFingerprints/);
   assert.match(plannerSource, /assemblePlanningAssetSpecs/);
-  assert.match(plannerSource, /planningDecompositionMode\(\)/);
-  assert.match(plannerSource, /split_shadow/);
+  assert.doesNotMatch(plannerSource, /fallback_legacy/);
+  assert.doesNotMatch(plannerSource, /splitPlanningLegacyFallbackEnabled/);
+  assert.doesNotMatch(plannerSource, /shotDecomposerMode/);
+  assert.doesNotMatch(plannerSource, /callWholeShotDecomposerPlan/);
+  assert.doesNotMatch(plannerSource, /ONE_PROMPT_VIDEO_PLANNING_DECOMPOSITION/);
 });
 
-test("segment contracts use local strict schema validation because DashScope only transports JSON mode", () => {
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["source"],
-    properties: {
-      source: { type: "string", enum: ["verified"] },
-    },
-  };
-  assert.deepEqual(validateLocalJsonSchema({ source: "verified" }, schema), []);
-  assert.ok(validateLocalJsonSchema({ source: "guessed", extra: true }, schema).some(
-    (message) => message.includes("allowed enum"),
-  ));
-  assert.ok(validateLocalJsonSchema({ source: "guessed", extra: true }, schema).some(
-    (message) => message.includes("additional property"),
-  ));
-  assert.match(plannerSource, /json_object_plus_local_strict_schema/);
+test("segment contracts use Zod locally because DashScope only transports JSON mode", () => {
+  assert.match(plannerSource, /json_object_plus_local_zod_contract/);
+  assert.match(plannerSource, /contract:\s*segmentShotDecomposerContract/);
+  assert.match(plannerSource, /JSON\.stringify\(segmentShotDecomposerExample/);
+  assert.doesNotMatch(plannerSource, /SEGMENT_SHOT_DECOMPOSER_JSON_SCHEMA/);
   assert.doesNotMatch(plannerSource, /type:\s*"json_schema"/);
+});
+
+test("unchanged structured contract failures persist a checkpoint fuse and stop retrying", () => {
+  assert.match(plannerSource, /structuredFailures\?: Record<string, StructuredFailureState>/);
+  assert.match(plannerSource, /shouldStopStructuredFailureRetry\(state\)/);
+  assert.match(plannerSource, /disposition: "contract_repair_required"/);
+  assert.match(plannerSource, /retryable: false/);
 });

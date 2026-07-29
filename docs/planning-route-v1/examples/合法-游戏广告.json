@@ -1,0 +1,35 @@
+{
+  "videoCategory": "game",
+  "templateId": "game_bonus_payoff",
+  "chronologyMode": "chronological",
+  "hookMode": "tease",
+  "hookRevealLevel": "partial",
+  "requiresReturnPoint": false,
+  "categoryReason": "用户明确要求制作游戏广告，参考事实包含可见的 Bonus 机制。",
+  "templateReason": "核心卖点是奖励机制触发与兑现，适合 game_bonus_payoff。",
+  "chronologyReason": "需求没有要求先展示最终奖励，按触发到兑现的顺序更清晰。",
+  "evidence": [
+    {
+      "sourceType": "user_prompt",
+      "sourceField": "userCreative",
+      "summary": "用户明确说明这是游戏广告。",
+      "referenceFactField": null
+    },
+    {
+      "sourceType": "reference_fact",
+      "sourceField": "referenceFacts",
+      "summary": "参考画面存在 Bonus 按钮和奖励界面。",
+      "referenceFactField": "categorySignals"
+    }
+  ],
+  "categoryConfidence": 0.99,
+  "templateConfidence": 0.94,
+  "chronologyConfidence": 0.87,
+  "ambiguityCodes": [],
+  "fallbackUsed": false,
+  "fallbackReason": null,
+  "version": "planning-route-v1",
+  "modelName": "qwen3.7-plus",
+  "inputFingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "referenceFactFingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

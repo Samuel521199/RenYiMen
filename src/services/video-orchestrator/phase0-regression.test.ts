@@ -366,7 +366,7 @@ test("boundary image generation unlocks per approved asset subset", () => {
   assert.match(source, /const unapprovedConsistencyReferences = consistencyReferences\.filter/);
   assert.match(source, /function isBoundaryAssetDependencyReady/);
   assert.match(source, /const dependencyReadyBoundaryKeyframes = nextKeyframes\.filter/);
-  assert.match(source, /\.\.\.dependencyReadyBoundaryKeyframes,[\s\S]*?\.\.\.dependencyReadyAssetKeyframes/);
+  assert.match(source, /\.\.\.dependencyReadyAssetKeyframes,[\s\S]*?\.\.\.dependencyReadyBoundaryKeyframes/);
   assert.match(source, /Each boundary keyframe starts as soon as its own required assets are approved/);
   assert.match(source, /assetLibraryFirst/);
   assert.match(source, /asset_library\.batch/);
@@ -392,7 +392,7 @@ test("provider dispatch uses independent global pools with fair cross-project ca
   assert.match(workflow, /requestVideoProviderLease/);
   assert.match(workflow, /releaseVideoProviderLeaseByTaskId/);
   assert.match(source, /schedulingContext: \{[\s\S]*?userId[\s\S]*?projectId[\s\S]*?targetId/);
-  assert.match(cron, /pumpGlobalProviderQueue/);
+  assert.doesNotMatch(cron, /pumpGlobalProviderQueue|project_reconcile/);
   assert.match(migration, /video_provider_task_leases/);
   assert.match(migration, /resource_key.*target_id/);
 });

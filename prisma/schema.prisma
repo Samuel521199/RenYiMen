@@ -38,6 +38,8 @@ enum VideoProjectStatus {
   FINAL_REVIEW
   DONE
   FAILED
+  WAITING_RECOVERY
+  STATE_INVARIANT_VIOLATION
 }
 
 enum VideoShotStatus {
@@ -93,11 +95,9 @@ model VideoProject {
   durationSeconds    Int                @default(30) @map("duration_seconds")
   stylePreset        String             @default("") @map("style_preset")
   finalVideoUrl      String?            @map("final_video_url") @db.Text
-  composeTaskId      String?            @map("compose_task_id")
   errorMessage       String?            @map("error_message") @db.Text
 
   user                      User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  shots                     VideoShot[]
   keyframes                 VideoKeyframe[]
   segments                  VideoSegment[]
   generationCandidates      VideoGenerationCandidate[]
@@ -122,19 +122,19 @@ model VideoProject {
 }
 
 model VideoProviderTaskLease {
-  id                String   @id @default(cuid())
-  resourceKey       String   @map("resource_key")
-  userId            String   @map("user_id")
-  projectId         String   @map("project_id")
-  targetId          String   @map("target_id")
-  status            String   @default("waiting")
-  leaseToken        String?  @unique @map("lease_token")
-  upstreamTaskId    String?  @unique @map("upstream_task_id")
-  queuedAt          DateTime @default(now()) @map("queued_at")
-  lastRequestedAt   DateTime @default(now()) @map("last_requested_at")
-  leaseExpiresAt    DateTime? @map("lease_expires_at")
-  attempt           Int      @default(0)
-  lastError         String?  @map("last_error") @db.Text
+  id              String    @id @default(cuid())
+  resourceKey     String    @map("resource_key")
+  userId          String    @map("user_id")
+  projectId       String    @map("project_id")
+  targetId        String    @map("target_id")
+  status          String    @default("waiting")
+  leaseToken      String?   @unique @map("lease_token")
+  upstreamTaskId  String?   @unique @map("upstream_task_id")
+  queuedAt        DateTime  @default(now()) @map("queued_at")
+  lastRequestedAt DateTime  @default(now()) @map("last_requested_at")
+  leaseExpiresAt  DateTime? @map("lease_expires_at")
+  attempt         Int       @default(0)
+  lastError       String?   @map("last_error") @db.Text
 
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -150,26 +150,32 @@ model VideoProviderTaskLease {
 }
 
 model VideoProductionJob {
-  id             String   @id @default(cuid())
-  projectId      String   @map("project_id")
-  userId         String   @map("user_id")
-  artifactId     String?  @map("artifact_id")
-  targetId       String?  @map("target_id")
-  kind           String
-  stage          String
-  status         String   @default("queued")
-  priority       Int      @default(0)
-  payload        Json     @default("{}")
-  idempotencyKey String   @unique @map("idempotency_key")
-  leaseToken     String?  @unique @map("lease_token")
-  workerId       String?  @map("worker_id")
-  leaseExpiresAt DateTime? @map("lease_expires_at")
-  availableAt    DateTime @default(now()) @map("available_at")
-  attempt        Int      @default(0)
-  maxAttempts    Int      @default(5) @map("max_attempts")
-  lastError      String?  @map("last_error") @db.Text
-  startedAt      DateTime? @map("started_at")
-  completedAt    DateTime? @map("completed_at")
+  id                    String    @id @default(cuid())
+  projectId             String    @map("project_id")
+  userId                String    @map("user_id")
+  artifactId            String?   @map("artifact_id")
+  targetId              String    @map("target_id")
+  kind                  String
+  stage                 String
+  status                String    @default("queued")
+  priority              Int       @default(0)
+  payload               Json      @default("{}")
+  idempotencyKey        String    @unique @map("idempotency_key")
+  leaseToken            String?   @unique @map("lease_token")
+  workerId              String?   @map("worker_id")
+  requiredWorkerVersion String    @map("required_worker_version")
+  claimedWorkerVersion  String?   @map("claimed_worker_version")
+  leaseExpiresAt        DateTime? @map("lease_expires_at")
+  availableAt           DateTime  @default(now()) @map("available_at")
+  attempt               Int       @default(0)
+  maxAttempts           Int       @default(5) @map("max_attempts")
+  lastError             String?   @map("last_error") @db.Text
+  errorCategory         String?   @map("error_category")
+  errorCode             String?   @map("error_code")
+  recoveryAction        String?   @map("recovery_action")
+  progressAt            DateTime  @default(now()) @map("progress_at")
+  startedAt             DateTime? @map("started_at")
+  completedAt           DateTime? @map("completed_at")
 
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -184,13 +190,69 @@ model VideoProductionJob {
   @@map("video_production_jobs")
 }
 
+model VideoProductionWorkerRuntime {
+  workerId                 String    @id @map("worker_id")
+  runtimeVersion           String    @map("runtime_version")
+  supportedKinds           Json      @default("[]") @map("supported_kinds")
+  supportedPayloadVersions Json      @default("[2]") @map("supported_payload_versions")
+  processId                Int?      @map("process_id")
+  startedAt                DateTime  @default(now()) @map("started_at")
+  heartbeatAt              DateTime  @default(now()) @map("heartbeat_at")
+  lastClaimedAt            DateTime? @map("last_claimed_at")
+  lastMeaningfulProgressAt DateTime? @map("last_meaningful_progress_at")
+  currentJobId             String?   @map("current_job_id")
+  lastError                String?   @map("last_error") @db.Text
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
+
+  @@index([runtimeVersion, heartbeatAt])
+  @@index([heartbeatAt])
+  @@map("video_production_worker_runtimes")
+}
+
+model VideoArchitectureMigrationAudit {
+  id             String   @id
+  phase          String
+  auditType      String   @map("audit_type")
+  status         String
+  observedFrom   DateTime @map("observed_from")
+  observedTo     DateTime @map("observed_to")
+  releaseCycleId String?  @map("release_cycle_id")
+  evidence       Json
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@index([phase, status])
+  @@map("video_architecture_migration_audits")
+}
+
+model VideoSpecialProjectRecoveryRecord {
+  projectId               String   @id @map("project_id")
+  sourceBackup            String   @map("source_backup")
+  sourceBackupSha256      String   @map("source_backup_sha256")
+  originalStatus          String   @map("original_status")
+  resultingState          String   @map("resulting_state")
+  disposition             String
+  recoveryActions         Json     @map("recovery_actions")
+  orphanLeaseDisposition  String   @map("orphan_lease_disposition")
+  planningRestarted       Boolean  @default(false) @map("planning_restarted")
+  planningJobCountBefore  Int      @map("planning_job_count_before")
+  planningJobCountAfter   Int      @map("planning_job_count_after")
+  evidence                Json
+  recordedAt              DateTime @default(now()) @map("recorded_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  @@index([resultingState, disposition])
+  @@map("video_special_project_recovery_records")
+}
+
 model VideoProductionCircuit {
-  key                String   @id
-  consecutiveFailures Int     @default(0) @map("consecutive_failures")
-  openUntil          DateTime? @map("open_until")
-  lastError          String?  @map("last_error") @db.Text
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  key                 String    @id
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+  openUntil           DateTime? @map("open_until")
+  lastError           String?   @map("last_error") @db.Text
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
   @@index([openUntil])
   @@map("video_production_circuits")
@@ -229,11 +291,11 @@ model VideoPlanningRunMetric {
   createdAt                  DateTime                   @default(now()) @map("created_at")
   updatedAt                  DateTime                   @updatedAt @map("updated_at")
 
+  @@unique([rootTaskId, attemptNumber])
   @@index([status, completedAt])
   @@index([durationSeconds, completedAt])
   @@index([modelName, completedAt])
   @@index([userId, completedAt])
-  @@unique([rootTaskId, attemptNumber])
   @@index([rootTaskId, completedAt])
   @@map("video_planning_run_metrics")
 }
@@ -429,26 +491,26 @@ model VideoArtifactMetadata {
 }
 
 model VideoGenerationCandidate {
-  id               String   @id @default(cuid())
-  projectId        String   @map("project_id")
-  artifactId       String   @map("artifact_id")
-  targetId         String   @map("target_id")
-  kind             String
-  batchId          String   @map("batch_id")
-  candidateNo      Int      @map("candidate_no")
-  taskId           String?  @map("task_id")
-  mediaUrl         String?  @map("media_url") @db.Text
-  status           String   @default("pending")
-  prompt           String   @default("") @db.Text
-  negativePrompt   String   @default("") @map("negative_prompt") @db.Text
-  qualityReport    Json?    @map("quality_report")
-  compositeScore   Float?   @map("composite_score")
-  passed           Boolean?
-  selected         Boolean  @default(false)
-  userAccepted     Boolean  @default(false) @map("user_accepted")
-  retryInstruction String?  @map("retry_instruction") @db.Text
-  errorMessage     String?  @map("error_message") @db.Text
-  metadata         Json?
+  id                      String    @id @default(cuid())
+  projectId               String    @map("project_id")
+  artifactId              String    @map("artifact_id")
+  targetId                String    @map("target_id")
+  kind                    String
+  batchId                 String    @map("batch_id")
+  candidateNo             Int       @map("candidate_no")
+  taskId                  String?   @map("task_id")
+  mediaUrl                String?   @map("media_url") @db.Text
+  status                  String    @default("pending")
+  prompt                  String    @default("") @db.Text
+  negativePrompt          String    @default("") @map("negative_prompt") @db.Text
+  qualityReport           Json?     @map("quality_report")
+  compositeScore          Float?    @map("composite_score")
+  passed                  Boolean?
+  selected                Boolean   @default(false)
+  userAccepted            Boolean   @default(false) @map("user_accepted")
+  retryInstruction        String?   @map("retry_instruction") @db.Text
+  errorMessage            String?   @map("error_message") @db.Text
+  metadata                Json?
   upstreamSubmittedAt     DateTime? @map("upstream_submitted_at")
   upstreamPollCount       Int       @default(0) @map("upstream_poll_count")
   upstreamPollTotalMs     Int       @default(0) @map("upstream_poll_total_ms")
@@ -467,20 +529,20 @@ model VideoGenerationCandidate {
 }
 
 model VideoQualityEvaluationCache {
-  id                   String       @id @default(cuid())
-  projectId            String       @map("project_id")
-  cacheKey             String       @map("cache_key")
-  status               String       @default("evaluating")
-  candidateContentHash String       @map("candidate_content_hash")
-  referenceSetHash     String       @map("reference_set_hash")
-  policyVersion        String       @map("policy_version")
-  promptVersion        String       @map("prompt_version")
-  modelId              String       @map("model_id")
-  reportJson           Json?        @map("report_json")
-  sourceCandidateId    String?      @map("source_candidate_id")
-  leaseToken           String?      @unique @map("lease_token")
-  leaseExpiresAt       DateTime?    @map("lease_expires_at")
-  lastError            String?      @map("last_error") @db.Text
+  id                   String    @id @default(cuid())
+  projectId            String    @map("project_id")
+  cacheKey             String    @map("cache_key")
+  status               String    @default("evaluating")
+  candidateContentHash String    @map("candidate_content_hash")
+  referenceSetHash     String    @map("reference_set_hash")
+  policyVersion        String    @map("policy_version")
+  promptVersion        String    @map("prompt_version")
+  modelId              String    @map("model_id")
+  reportJson           Json?     @map("report_json")
+  sourceCandidateId    String?   @map("source_candidate_id")
+  leaseToken           String?   @unique @map("lease_token")
+  leaseExpiresAt       DateTime? @map("lease_expires_at")
+  lastError            String?   @map("last_error") @db.Text
 
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -490,37 +552,6 @@ model VideoQualityEvaluationCache {
   @@unique([projectId, cacheKey])
   @@index([projectId, status, updatedAt])
   @@map("video_quality_evaluation_caches")
-}
-
-model VideoShot {
-  id              String          @id @default(cuid())
-  projectId       String          @map("project_id")
-  shotNo          Int             @map("shot_no")
-  status          VideoShotStatus @default(SCRIPT_READY)
-  durationSeconds Int             @default(5) @map("duration_seconds")
-  purpose         String          @default("") @db.Text
-  camera          String          @default("") @db.Text
-  action          String          @default("") @db.Text
-  imagePrompt     String          @map("image_prompt") @db.Text
-  videoPrompt     String          @map("video_prompt") @db.Text
-  negativePrompt  String          @default("") @map("negative_prompt") @db.Text
-  subtitle        String          @default("") @db.Text
-  imageUrl        String?         @map("image_url") @db.Text
-  clipUrl         String?         @map("clip_url") @db.Text
-  imageTaskId     String?         @map("image_task_id")
-  clipTaskId      String?         @map("clip_task_id")
-  qualityScore    Int?            @map("quality_score")
-  errorMessage    String?         @map("error_message") @db.Text
-  locked          Boolean         @default(false)
-
-  project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
-
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@unique([projectId, shotNo])
-  @@index([projectId, status])
-  @@map("video_shots")
 }
 
 model VideoKeyframe {
@@ -536,7 +567,6 @@ model VideoKeyframe {
   imagePrompt    String          @map("image_prompt") @db.Text
   negativePrompt String          @default("") @map("negative_prompt") @db.Text
   imageUrl       String?         @map("image_url") @db.Text
-  imageTaskId    String?         @map("image_task_id")
   qualityScore   Int?            @map("quality_score")
   errorMessage   String?         @map("error_message") @db.Text
   locked         Boolean         @default(false)
@@ -570,7 +600,6 @@ model VideoSegment {
   negativePrompt    String          @default("") @map("negative_prompt") @db.Text
   subtitle          String          @default("") @db.Text
   clipUrl           String?         @map("clip_url") @db.Text
-  clipTaskId        String?         @map("clip_task_id")
   qualityScore      Int?            @map("quality_score")
   errorMessage      String?         @map("error_message") @db.Text
   locked            Boolean         @default(false)

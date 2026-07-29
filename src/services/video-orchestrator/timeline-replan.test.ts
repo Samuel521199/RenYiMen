@@ -4,13 +4,34 @@ import { createVideoPlan } from "./planner.ts";
 import {
   applyTimelineReplanToPlanningRaw,
   createTimelineChangeRequest,
+  hasMeaningfulTimelineChangeDirective,
   invalidateCheckpointAfterTimelineReplan,
+  locallyRepairableFinalPromptSegmentNos,
   repairAlternateViewCameraGraph,
   repairMissingSingleTakeContracts,
+  timelineChangeRequestRepairIssues,
   type AliyunStoryboardPlannerCheckpoint,
 } from "./three-stage-planner.ts";
 import { auditSingleTakePlan } from "./single-take-audit.ts";
 import type { VideoPlanningManifest } from "./types.ts";
+
+test("final validation routes only prompt-level cut issues back to their owning segments", () => {
+  assert.deepEqual(locallyRepairableFinalPromptSegmentNos([
+    {
+      code: "INTERNAL_CUT_LANGUAGE",
+      severity: "error",
+      artifactId: "segment:3",
+      messageZh: "local wording repair",
+      retryFromStage: "stage2b",
+    },
+    {
+      code: "SINGLE_TAKE_HIGH_RISK",
+      severity: "warning",
+      artifactId: "segment:4",
+      messageZh: "warning only",
+    },
+  ]), [3]);
+});
 
 const input = {
   userPrompt: "A person leaves a room and appears on a rooftop.",
@@ -105,6 +126,58 @@ test("non-repairable single-take audit becomes a structured timeline change requ
   assert.deepEqual(request.affectedSegmentNos, [2]);
   assert.deepEqual(request.issueCodes, ["SINGLE_TAKE_REQUIRES_CUT"]);
   assert.equal(request.requestedChanges.length, 2);
+});
+
+test("empty timeline hints do not trigger replanning and fallback repair issues are never empty", () => {
+  assert.equal(hasMeaningfulTimelineChangeDirective([]), false);
+  assert.equal(hasMeaningfulTimelineChangeDirective({}), false);
+  assert.equal(hasMeaningfulTimelineChangeDirective([{ at: "card reveal" }]), true);
+
+  const issues = timelineChangeRequestRepairIssues({
+    requestId: "timeline_empty_issue_defense",
+    source: "single_take_audit",
+    changeType: "split_segment",
+    affectedSegmentNos: [2],
+    firstAffectedSegmentNo: 2,
+    issueCodes: [],
+    reasons: [],
+    requestedChanges: [{ at: "card reveal" }],
+  });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]?.code, "TIMELINE_SPLIT_DIRECTIVE");
+  assert.equal(issues[0]?.segmentNo, 2);
+});
+
+test("an explicit split directive synthesizes a timeline audit issue", () => {
+  const request = createTimelineChangeRequest({
+    passed: false,
+    action: "repair_segment",
+    auditedSegmentNos: [2],
+    auditVersion: "single-take-audit-v2",
+    issues: [{
+      code: "SINGLE_TAKE_CHECKPOINT_BUDGET_EXCEEDED",
+      severity: "error",
+      segmentNo: 2,
+      artifactId: "segment:2",
+      reason: "checkpoint_count_3_exceeds_2",
+      reasonCode: "checkpoint_count_3_exceeds_2",
+      messageZh: "动作检查点过多",
+      retryFromStage: "stage2b",
+      repairable: true,
+      sourcePath: "segmentRenderDescriptions[2].motionCheckpoints",
+      evidenceType: "timing_budget",
+      confidence: 0.9,
+      structural: false,
+      repairScope: "segment",
+    }],
+  }, {
+    segment_render_descriptions: [{
+      segment_no: 2,
+      recommended_split: [{ at: "card reveal" }],
+    }],
+  });
+  assert.deepEqual(request.issueCodes, ["TIMELINE_SPLIT_DIRECTIVE"]);
+  assert.equal(request.reasons[0], "single_take_repair_exhausted_with_explicit_split_directive");
 });
 
 test("timeline replan preserves the locked prefix and adds a real segment", () => {

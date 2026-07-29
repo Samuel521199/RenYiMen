@@ -74,6 +74,15 @@ test("asset binding does not rewrite the canonical story state", () => {
   assert.equal(bound[1].storyState, contracts[1].storyState);
 });
 
+test("execution boundary state prefers English over localized display copy", () => {
+  const plan = fixture();
+  plan.keyframes[0].purpose = "行动开始";
+  plan.keyframes[0].purposeZh = "行动开始";
+  plan.keyframes[0].purposeEn = "Action begins";
+  const [contract] = deriveCanonicalBoundaryContracts(plan);
+  assert.equal(contract.storyState, "Action begins");
+});
+
 test("partial asset binding only unlocks boundaries whose scoped assets are approved", () => {
   const contracts = deriveCanonicalBoundaryContracts(fixture());
   const requiredAssetsByBoundary = new Map([

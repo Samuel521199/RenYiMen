@@ -1,0 +1,31 @@
+{
+  "fixtureVersion": 1,
+  "sampleId": "planning-route-product-skincare-ad-v1",
+  "purpose": "Planning route classification regression baseline",
+  "provenance": {
+    "type": "normalized_regression_input",
+    "isVerbatimOriginalPrompt": false,
+    "reason": "旧日志保留了分类理由和解析结果，但没有保留可直接复用的完整原始用户 Prompt。",
+    "derivedFrom": [
+      "one-prompt-video.log 中的产品广告分类理由",
+      "src/services/video-orchestrator/__fixtures__/story-quality/acceptance-samples.json#product-skincare-proof"
+    ]
+  },
+  "input": {
+    "prompt": "制作一个25秒、9:16竖屏的护肤精华产品广告：年轻女性早晨发现熬夜后的皮肤干燥紧绷，随后使用两滴精华；通过吸收过程、皮肤变得水润有光泽以及保湿效果证据展示产品作用；最后用精华瓶产品特写、品牌记忆画面和购买 CTA 收尾。保持人物与产品外观前后一致。",
+    "durationSeconds": 25,
+    "aspectRatio": "9:16",
+    "stylePreset": "高端护肤产品广告",
+    "referenceImageCount": 0
+  },
+  "expectedRoute": {
+    "videoCategory": "product",
+    "templateId": "product_problem_solution",
+    "chronologyMode": "chronological"
+  },
+  "comparisonFields": [
+    "videoCategory",
+    "templateId",
+    "chronologyMode"
+  ]
+}

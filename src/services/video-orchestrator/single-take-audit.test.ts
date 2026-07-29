@@ -57,6 +57,18 @@ test("Chinese repeated no-cut wording from prompt detailer is treated as a prohi
   assert.equal(auditSingleTakePlan(value).passed, true);
 });
 
+test("the real prompt-detailer strict-prohibition wording is not treated as a positive cut instruction", () => {
+  const value = plan({
+    segments: [{
+      segmentNo: 1,
+      videoPrompt: "连续单镜头视频，时长5秒。角色将牌垂直向上抛出，相机轻微上移跟随牌的轨迹。严禁内部剪辑、跳切、淡入淡出、场景切换、角色形象漂移、牌面变化、出现文字或UI。",
+    }],
+  });
+  const result = auditSingleTakePlan(value);
+  assert.equal(result.passed, true);
+  assert.equal(result.action, "allow");
+});
+
 test("fallback micro-shot safety wording is not mistaken for a scene transition", () => {
   const value = plan({
     segments: [{
@@ -179,6 +191,29 @@ test("small timing overflow repairs one segment while severe overflow replans ti
   const structuralDescription = (structural.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
   structuralDescription.minimumExecutableSeconds = 8;
   assert.equal(auditSingleTakePlan(structural).action, "replan_timeline");
+});
+
+test("a five-second shot supports setup, action, and result motion checkpoints", () => {
+  const value = plan({
+    segments: [{
+      segmentNo: 1,
+      durationSeconds: 5,
+      videoPrompt: "One continuous take. Do not cut, dissolve, fade, or switch shots.",
+    }],
+  });
+  const description = (value.segmentRenderDescriptions as Array<Record<string, unknown>>)[0];
+  description.motionCheckpoints = [
+    { timePercent: 0.2, description: "The hands start moving forward." },
+    { timePercent: 0.5, description: "The cards become visible." },
+    { timePercent: 0.8, description: "The cards settle face-up." },
+  ];
+  assert.equal(auditSingleTakePlan(value).passed, true);
+
+  (value.segments as Array<Record<string, unknown>>)[0].durationSeconds = 3;
+  const shortResult = auditSingleTakePlan(value);
+  assert.ok(shortResult.issues.some(
+    (issue) => issue.code === "SINGLE_TAKE_CHECKPOINT_BUDGET_EXCEEDED",
+  ));
 });
 
 test("incomplete alternate view requests camera-graph repair", () => {

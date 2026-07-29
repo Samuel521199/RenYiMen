@@ -1,0 +1,215 @@
+{
+  "snapshotVersion": 1,
+  "snapshotId": "planning-route-pre-split-2026-07-29",
+  "frozenAt": "2026-07-29",
+  "timezone": "Asia/Shanghai",
+  "scope": {
+    "component": "Planning Architect",
+    "subcomponent": "video category / template / chronology mode",
+    "observationWindow": {
+      "start": "2026-07-27T14:35:00+08:00",
+      "end": "2026-07-28T18:20:00+08:00"
+    },
+    "excludes": [
+      "Storyboard Artist",
+      "asset contract validation",
+      "timeline replanning",
+      "video generation"
+    ]
+  },
+  "expectedRoutes": {
+    "gameAd": {
+      "videoCategory": "game",
+      "templateId": "game_bonus_payoff",
+      "chronologyMode": "chronological"
+    },
+    "productAd": {
+      "videoCategory": "product",
+      "templateId": "product_problem_solution",
+      "chronologyMode": "chronological"
+    }
+  },
+  "stageLedgerTimingMs": {
+    "definition": "项目耗时台账中的 Planning Architect/故事架构阶段记录；包含一条 checkpoint 复用阶段记录。",
+    "sampleCount": 5,
+    "values": [
+      129300,
+      159500,
+      164200,
+      252300,
+      156300
+    ],
+    "min": 129300,
+    "median": 159500,
+    "mean": 172320,
+    "max": 252300
+  },
+  "actualModelCalls": {
+    "definition": "结构化日志中存在 planning_architect_lite.response 的真实模型网络调用。",
+    "sampleCount": 4,
+    "records": [
+      {
+        "projectId": "cms2zysqx0005tvto5sa0cbf1",
+        "responseAt": "2026-07-27T09:03:18.026Z",
+        "durationMs": 129277,
+        "firstNetworkResponseMs": 1229,
+        "firstAnswerContentMs": 48254,
+        "contentLengthChars": 14426,
+        "reasoningContentLengthChars": 5781,
+        "combinedOutputLengthChars": 20207,
+        "chunkCount": 1261
+      },
+      {
+        "projectId": "cms30whhb0001tv803pawxrde",
+        "responseAt": "2026-07-27T09:29:59.047Z",
+        "durationMs": 159464,
+        "firstNetworkResponseMs": 909,
+        "firstAnswerContentMs": 56996,
+        "contentLengthChars": 18071,
+        "reasoningContentLengthChars": 7196,
+        "combinedOutputLengthChars": 25267,
+        "chunkCount": 1603
+      },
+      {
+        "projectId": "cms45bepz0001tv8okj4l1o9w",
+        "responseAt": "2026-07-28T04:21:27.281Z",
+        "durationMs": 164222,
+        "firstNetworkResponseMs": 1105,
+        "firstAnswerContentMs": 49906,
+        "contentLengthChars": 19381,
+        "reasoningContentLengthChars": 6586,
+        "combinedOutputLengthChars": 25967,
+        "chunkCount": 1739
+      },
+      {
+        "projectId": "cms4hwin700kltvvww69mtj5c",
+        "responseAt": "2026-07-28T10:13:51.530Z",
+        "durationMs": 156305,
+        "firstNetworkResponseMs": 1046,
+        "firstAnswerContentMs": 43948,
+        "contentLengthChars": 20752,
+        "reasoningContentLengthChars": 5460,
+        "combinedOutputLengthChars": 26212,
+        "chunkCount": 1704
+      }
+    ],
+    "durationStatsMs": {
+      "min": 129277,
+      "median": 157884.5,
+      "mean": 152317,
+      "max": 164222
+    },
+    "firstAnswerContentStatsMs": {
+      "min": 43948,
+      "median": 49080,
+      "mean": 49776,
+      "max": 56996
+    },
+    "outputLengthStatsChars": {
+      "content": {
+        "min": 14426,
+        "median": 18726,
+        "mean": 18157.5,
+        "max": 20752
+      },
+      "reasoning": {
+        "min": 5460,
+        "median": 6183.5,
+        "mean": 6255.75,
+        "max": 7196
+      },
+      "combined": {
+        "min": 20207,
+        "median": 25617,
+        "mean": 24413.25,
+        "max": 26212
+      }
+    }
+  },
+  "checkpointReuseDiscrepancy": {
+    "stageLedgerDurationMs": 252300,
+    "projectId": "cms45bepz0001tv8okj4l1o9w",
+    "structuredEvent": "aliyun.storyboard.planning_architect.checkpoint_reused",
+    "hasMatchingNewModelResponse": false,
+    "rule": "后续性能对比不得把该记录当作一次独立模型调用。"
+  },
+  "routeConsistency": {
+    "gameAd": {
+      "matchingParsedEvents": 18,
+      "totalParsedEvents": 18,
+      "exactRouteAgreementRate": 1,
+      "independentModelRunCount": null,
+      "caveat": "包含重复解析和 checkpoint 复用事件，不等同于 18 次独立模型采样。",
+      "observedEventAndSegmentCounts": [
+        {
+          "eventCount": 4,
+          "segmentCount": 4
+        },
+        {
+          "eventCount": 5,
+          "segmentCount": 5
+        }
+      ]
+    },
+    "productAd": {
+      "matchingParsedEvents": 2,
+      "totalParsedEvents": 2,
+      "exactRouteAgreementRate": 1,
+      "independentModelRunCount": null,
+      "caveat": "旧日志没有为这两条产品解析结果保留可直接关联的 projectId。",
+      "observedEventAndSegmentCounts": [
+        {
+          "eventCount": 5,
+          "segmentCount": 5
+        },
+        {
+          "eventCount": 4,
+          "segmentCount": 4
+        }
+      ]
+    }
+  },
+  "classificationErrors": {
+    "observedExactRouteMisclassifications": 0,
+    "sampleSizeWarning": "观察样本有限，0 条观测错误不代表总体准确率为 100%。",
+    "adjacentContractFailures": [
+      {
+        "projectId": "cms2zysqx0005tvto5sa0cbf1",
+        "code": "STRATEGY_FUNCTION_ORDER_INVALID",
+        "routeWasCorrect": true,
+        "repairAttempts": 2,
+        "repairDurationsMs": [
+          25100,
+          24600
+        ],
+        "repairTotalMs": 49700,
+        "resolvedWithinAttempt": false,
+        "cause": "叙事功能顺序与 creative_strategy 事件 ID 绑定不一致；局部返修没有锁定已正确字段，造成 conflict 与 turning point 问题回摆。",
+        "currentStatus": "流程可在两次返修后终止并报错，但根因未在本次基线冻结中修改。"
+      }
+    ]
+  },
+  "telemetry": {
+    "model": "qwen3.7-plus",
+    "thinkingEnabled": true,
+    "fullModelPromptLengthChars": {
+      "available": false,
+      "reason": "planning_architect_lite.request 未记录完整请求消息长度。"
+    },
+    "tokenUsage": {
+      "available": false,
+      "promptTokens": null,
+      "completionTokens": null,
+      "totalTokens": null,
+      "reason": "结构化日志中的 usage token 字段为 [REDACTED]。"
+    },
+    "userPromptLengthIsNotModelPromptLength": true
+  },
+  "sourceLogs": [
+    "D:\\zzz\\v debug\\one-prompt-video.log",
+    "D:\\zzz\\v debug\\projects\\cms2zysqx0005tvto5sa0cbf1\\耗时日志.log",
+    "D:\\zzz\\v debug\\projects\\cms30whhb0001tv803pawxrde\\耗时日志.log",
+    "D:\\zzz\\v debug\\projects\\cms45bepz0001tv8okj4l1o9w\\耗时日志.log",
+    "D:\\zzz\\v debug\\projects\\cms4hwin700kltvvww69mtj5c\\耗时日志.log"
+  ]
+}

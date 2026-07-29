@@ -16,7 +16,6 @@ import type {
   ImageRepairMode,
   VisualEvidenceObservation,
 } from "./types";
-import { onePromptRolloutEnabled } from "./rollout-flags";
 import type { AuthoritativeVisualContract } from "./visual-quality-contract";
 import {
   compileAtomicVisualRequirements,
@@ -119,7 +118,6 @@ export async function evaluateGeneratedImageQuality(params: BaseEvaluationParams
     passed: true,
     resultZh: "质检输入齐全",
   });
-  if (!onePromptRolloutEnabled("ONE_PROMPT_VISUAL_QUALITY_EVAL")) return legacyQualityFallback(params, false);
   if (!qualityVisionEnabled()) return evaluationFailure(params, "真实图片视觉质量评估未启用或缺少 DashScope API Key。", "manual");
   const qualityPromptStartedAtMs = Date.now();
   const atomicRequirements = compileAtomicVisualRequirements({
@@ -426,7 +424,6 @@ export async function evaluateGeneratedVideoQuality(params: BaseEvaluationParams
   startFrameUrl: string;
   endFrameUrl: string;
 }): Promise<GenerationQualityReport> {
-  if (!onePromptRolloutEnabled("ONE_PROMPT_VISUAL_QUALITY_EVAL")) return legacyQualityFallback(params, true);
   if (!qualityVisionEnabled()) return evaluationFailure(params, "真实视频多帧视觉质量评估未启用或缺少 DashScope API Key。", "manual");
   const workDir = path.join(os.tmpdir(), `one-prompt-video-quality-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const clipPath = path.join(workDir, "candidate.mp4");
@@ -1536,33 +1533,6 @@ export function isTechnicalQualityEvaluationFailure(report: GenerationQualityRep
   return report.artifactIssues.some((issue) =>
     /视觉质量评估失败|quality evaluation failed|this operation was aborted|aborterror|timed? out|timeout|rate limit|too many requests|fetch failed|network/i.test(issue),
   );
-}
-
-function legacyQualityFallback(params: BaseEvaluationParams, video: boolean): GenerationQualityReport {
-  const hasMedia = Boolean(params.mediaUrl?.trim());
-  const hasPrompt = params.prompt.trim().length >= (video ? 60 : 30);
-  const passed = hasMedia && hasPrompt;
-  return {
-    evaluationStatus: "not_run",
-    assetId: params.assetId,
-    candidateId: params.candidateId,
-    candidateNo: params.candidateNo,
-    mediaUrl: params.mediaUrl,
-    identityScore: null,
-    layoutScore: null,
-    promptAlignmentScore: null,
-    continuityScore: null,
-    styleFidelityScore: null,
-    styleScoreApplicable: false,
-    singleTakeScore: video ? null : undefined,
-    artifactIssues: passed ? [] : [!hasMedia ? "missing generated media url" : "generation prompt is too short"],
-    passed,
-    originalPassed: passed,
-    contentBased: false,
-    qualityDecision: "review",
-    retryFromStage: "generation",
-    retryInstruction: passed ? undefined : "Regenerate using the legacy precheck path while visual quality evaluation is disabled.",
-  };
 }
 
 async function callVision(

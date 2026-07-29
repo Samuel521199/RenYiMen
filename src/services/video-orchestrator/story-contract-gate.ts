@@ -9,6 +9,7 @@ import type {
 export type PlanningNarrativeContractIssueCode =
   | "STRATEGY_EVENT_BINDING_MISSING"
   | "STRATEGY_EVENT_REFERENCE_INVALID"
+  | "STRATEGY_EVENT_AUTHORITY_DRIFT"
   | "STRATEGY_FUNCTION_ORDER_INVALID"
   | "HOOK_TURNING_POINT_EVENT_OVERLAP"
   | "CHRONOLOGICAL_HOOK_FULL_REVEAL"
@@ -124,6 +125,29 @@ export function validatePlanningNarrativeContract(params: {
           "只引用 narrative_events 中已经定义的 event_id。",
         );
       }
+    }
+  }
+
+  const eventAuthorityBindings = new Map<string, string[]>();
+  for (const event of params.narrativeEvents) {
+    for (const storyFunction of event.storyFunctions ?? []) {
+      eventAuthorityBindings.set(storyFunction, [
+        ...(eventAuthorityBindings.get(storyFunction) ?? []),
+        event.eventId,
+      ]);
+    }
+  }
+  if (eventAuthorityBindings.size > 0) {
+    for (const [storyFunction, eventIds] of bindings) {
+      const authoritativeIds = eventAuthorityBindings.get(storyFunction) ?? [];
+      if (sameStringSet(eventIds, authoritativeIds)) continue;
+      planningIssue(
+        issues,
+        "STRATEGY_EVENT_AUTHORITY_DRIFT",
+        `creative_strategy.${storyFunction}_event_ids`,
+        `${storyFunction} 的策略绑定与 narrative_events.story_functions 不一致。`,
+        "以 narrative_events.story_functions 为唯一事实源，重新派生 creative_strategy 事件绑定。",
+      );
     }
   }
 
@@ -471,4 +495,10 @@ function numbers(value: unknown): number[] {
 }
 function unique<T>(values: T[]): T[] {
   return Array.from(new Set(values));
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
 }

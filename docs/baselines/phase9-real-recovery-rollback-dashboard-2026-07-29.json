@@ -1,0 +1,66 @@
+{
+  "executedAt": "2026-07-29T02:57:08+08:00",
+  "projectId": "cms4v75gr0001tv6cfo0tpf7m",
+  "providerPollingRecovery": {
+    "jobId": "cms5062nn00aptvf842qwfg4h",
+    "jobKind": "clip_prepare_submit",
+    "killedWorkerPid": 55208,
+    "killedAt": "2026-07-28T18:42:38.116Z",
+    "stageAtKill": "provider_polling",
+    "statusAtKill": "running",
+    "attemptAtKill": 1,
+    "providerTaskId": "df21b3b2-016a-4e44-b425-613927c2800e",
+    "recoveredStatus": "completed",
+    "recoveredAttempt": 2,
+    "completedAt": "2026-07-28T18:45:49.459Z",
+    "duplicateProviderSubmission": false
+  },
+  "ffmpegCompositionRecovery": {
+    "jobId": "cms50cixo0001tvswltzd3zks",
+    "jobKind": "compose",
+    "killedWorkerPid": 22980,
+    "killedFfmpegPid": 57840,
+    "killedAt": "2026-07-28T18:47:15.7366371Z",
+    "stageAtKill": "composition",
+    "statusAtKill": "running",
+    "attemptAtKill": 1,
+    "recoveredStatus": "completed",
+    "recoveredAttempt": 2,
+    "completedAt": "2026-07-28T18:50:21.409Z",
+    "finalVideoUrl": "https://jachin-workflow.oss-cn-hongkong.aliyuncs.com/one-prompt-video/final/cms4v75gr0001tv6cfo0tpf7m-1785264617383.mp4"
+  },
+  "previousReleaseRollback": {
+    "jobId": "cms50jbwl0001tvbwcc39u6v1",
+    "jobKind": "image_quality",
+    "billable": false,
+    "previousRuntimeVersion": "video-production-v2:bc5888d781eabe7b",
+    "newRuntimeVersionDuringRejection": "video-production-v2:04118a638fa8acc8",
+    "newWorkerObservedStatus": "queued",
+    "newWorkerObservedAttempt": 0,
+    "newWorkerObservedErrorCode": "NO_COMPATIBLE_WORKER",
+    "newWorkerObservedRecoveryAction": "DEPLOY_COMPATIBLE_WORKER",
+    "rollbackWorkerId": "rollback-previous-quality",
+    "recoveredStatus": "completed",
+    "recoveredAttempt": 1,
+    "completedAt": "2026-07-28T18:55:04.628Z"
+  },
+  "finalProductionRuntimeVersion": "video-production-v2:da41e1cfaed39918",
+  "dashboard": {
+    "url": "http://127.0.0.1:3011",
+    "refreshMs": 5000,
+    "cutoverAt": "2026-07-28T15:53:45.588Z",
+    "capturedAt": "2026-07-28T18:57:08.926Z",
+    "metrics": {
+      "projectReconcileSinceCutover": 0,
+      "nullOrEmptyTargetId": 0,
+      "generatingWithoutActiveJob": 0,
+      "duplicateActiveTargetRevision": 0,
+      "terminalProjectActiveJobs": 0,
+      "incompatibleWorkerConsumptions": 0,
+      "activeJobs": 0,
+      "activeProviderLeases": 0,
+      "healthyWorkers": 4
+    }
+  },
+  "finalProjectStatus": "DONE"
+}
