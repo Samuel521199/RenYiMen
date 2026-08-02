@@ -24,6 +24,7 @@ test("story rollout defaults to off with shot grouping on and no auto rewrite", 
 
 test("story rollout can be disabled to recover legacy behavior", () => {
   const config = readStoryRolloutConfig({
+    ONE_PROMPT_VIDEO_SCRIPT_QA: "true",
     ONE_PROMPT_VIDEO_STORY_GATE: "off",
     ONE_PROMPT_VIDEO_STORY_REWRITE_MAX: "2",
     ONE_PROMPT_VIDEO_SHOT_GROUPING: "off",
@@ -40,6 +41,7 @@ test("story rollout can be disabled to recover legacy behavior", () => {
 
 test("story rollout strict mode enables review blocking and bounded rewrites", () => {
   const config = readStoryRolloutConfig({
+    ONE_PROMPT_VIDEO_SCRIPT_QA: "true",
     ONE_PROMPT_VIDEO_STORY_GATE: "strict",
     ONE_PROMPT_VIDEO_STORY_REWRITE_MAX: "2",
     ONE_PROMPT_VIDEO_SHOT_GROUPING: "on",
@@ -54,6 +56,7 @@ test("story rollout strict mode enables review blocking and bounded rewrites", (
 
 test("story rollout invalid values fall back to safe defaults", () => {
   const config = readStoryRolloutConfig({
+    ONE_PROMPT_VIDEO_SCRIPT_QA: "true",
     ONE_PROMPT_VIDEO_STORY_GATE: "force",
     ONE_PROMPT_VIDEO_STORY_REWRITE_MAX: "9",
     ONE_PROMPT_VIDEO_SHOT_GROUPING: "maybe",

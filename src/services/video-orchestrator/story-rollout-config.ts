@@ -1,4 +1,6 @@
-﻿export type OnePromptVideoStoryGateMode = "off" | "warn" | "strict";
+import { isOnePromptVideoScriptQaEnabled } from "./script-qa-config";
+
+export type OnePromptVideoStoryGateMode = "off" | "warn" | "strict";
 export type OnePromptVideoShotGroupingMode = "off" | "on";
 
 export interface OnePromptVideoStoryRolloutConfig {
@@ -38,6 +40,13 @@ function readShotGroupingMode(env: EnvLike): OnePromptVideoShotGroupingMode {
 }
 
 export function readStoryRolloutConfig(env: EnvLike = process.env): OnePromptVideoStoryRolloutConfig {
+  if (!isOnePromptVideoScriptQaEnabled(env)) {
+    return {
+      storyGateMode: "off",
+      storyRewriteMax: 0,
+      shotGroupingMode: readShotGroupingMode(env),
+    };
+  }
   return {
     storyGateMode: readStoryGateMode(env),
     storyRewriteMax: readStoryRewriteMax(env),

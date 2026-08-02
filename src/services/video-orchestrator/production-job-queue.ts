@@ -1162,7 +1162,7 @@ export function classifyVideoProductionFailure(error: unknown): VideoProductionF
     return failure(
       "terminal",
       "provider_quota",
-      "上游翻译或模型额度已用尽；请检查套餐和账单。任务检查点已保留，不会按未知错误盲目重试。",
+      "上游模型额度已用尽；请检查套餐和账单。任务检查点已保留，不会按未知错误盲目重试。",
     );
   }
   if (

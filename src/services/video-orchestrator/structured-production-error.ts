@@ -143,8 +143,8 @@ function displayMessageFor(
 ): StructuredProductionError["displayMessage"] {
   if (errorCode === "PROVIDER_QUOTA_EXHAUSTED") {
     return {
-      zh: "上游翻译或模型额度已用尽。已保留任务检查点，请检查服务套餐和账单后继续。",
-      en: "The upstream translation or model quota is exhausted. The checkpoint was preserved; check the provider plan and billing before continuing.",
+      zh: "上游模型额度已用尽。已保留任务检查点，请检查服务套餐和账单后继续。",
+      en: "The upstream model quota is exhausted. The checkpoint was preserved; check the provider plan and billing before continuing.",
     };
   }
   if (

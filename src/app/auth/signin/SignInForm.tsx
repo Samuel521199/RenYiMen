@@ -89,9 +89,17 @@ export function SignInForm({ showGitHub }: { showGitHub: boolean }) {
             />
           </div>
           <div>
-            <label htmlFor="signin-password" className="block text-sm font-medium text-neutral-800">
-              密码
-            </label>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="signin-password" className="block text-sm font-medium text-neutral-800">
+                密码
+              </label>
+              <Link
+                href={`/auth/forgot-password?callbackUrl=${encodeURIComponent(callbackUrl)}${email.trim() ? `&email=${encodeURIComponent(email.trim())}` : ""}`}
+                className="text-xs font-medium text-emerald-700 underline-offset-2 hover:underline"
+              >
+                忘记密码？
+              </Link>
+            </div>
             <input
               id="signin-password"
               type="password"

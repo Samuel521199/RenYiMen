@@ -183,6 +183,7 @@ import {
   StructuredCommandError,
   type ProductionErrorCategory,
 } from "./structured-production-error";
+import { isOnePromptVideoFastPreviewEnabled } from "./fast-preview-config";
 
 const PROJECT_INCLUDE = {
   keyframes: { orderBy: { keyframeNo: "asc" as const } },
@@ -2756,6 +2757,7 @@ export function readAudioBible(planJson: Prisma.JsonValue | null): Record<string
 }
 
 function transitionReferenceMode(): "short" | "full" {
+  if (isOnePromptVideoFastPreviewEnabled()) return "short";
   return process.env.ONE_PROMPT_TRANSITION_REFERENCE_MODE?.trim().toLowerCase() === "full" ? "full" : "short";
 }
 
@@ -8874,6 +8876,7 @@ function buildFinalCompositionSequence(project: VideoProjectRecord): {
   if (!sources.length) throw new Error("Project has no canonical video segments");
   const originalPlan = readFinalTransitionPlan(project.planJson);
   const bridges = generatedBridgeArtifactsFromPlan(project.planJson);
+  const skipGeneratedBridges = isOnePromptVideoFastPreviewEnabled();
   const entries: Array<{
     url: string;
     duration: number;
@@ -8899,6 +8902,7 @@ function buildFinalCompositionSequence(project: VideoProjectRecord): {
     const nextSegmentNo = next.segmentNo;
     const transition = originalPlan.find((item) => item.fromSegmentNo === segmentNo && item.toSegmentNo === nextSegmentNo);
     if (transition?.visualMode !== "generated_bridge" && !transition?.generatedBridgeRequired) continue;
+    if (skipGeneratedBridges) continue;
     const bridge = bridges.find((item) => item.fromSegmentNo === segmentNo && item.toSegmentNo === nextSegmentNo);
     if (!bridge?.locked || bridge.status !== "approved" || !bridge.selectedVideoUrl) throw new Error(`Generated bridge ${segmentNo}->${nextSegmentNo} must be generated, quality-passed, reviewed and locked before final composition`);
     entries.push({
@@ -9558,6 +9562,94 @@ async function persistProjectProductionProjection(projectId: string): Promise<vo
   });
 }
 
+const fastPreviewAutoAdvanceLocks = new Set<string>();
+
+async function autoAdvanceFastPreviewProject(
+  userId: string,
+  projectId: string,
+): Promise<void> {
+  if (!isOnePromptVideoFastPreviewEnabled() || fastPreviewAutoAdvanceLocks.has(projectId)) return;
+  fastPreviewAutoAdvanceLocks.add(projectId);
+  try {
+    for (let step = 0; step < 6; step += 1) {
+      const project = await requireVideoProject(userId, projectId);
+      if (project.status === VideoProjectStatus.PLAN_REVIEW) {
+        await logOnePromptVideo("fast_preview.review_auto_approved", {
+          userId,
+          projectId,
+          review: "plan",
+        }, "warn");
+        await approveVideoPlan(userId, projectId);
+        continue;
+      }
+      if (project.status === VideoProjectStatus.IMAGE_REVIEW) {
+        const assets = project.keyframes.filter((keyframe) =>
+          isConsistencyKeyframeNo(keyframe.keyframeNo)
+          && isEligibleConsistencyKeyframe(project.planJson, keyframe.keyframeNo)
+        );
+        const pendingAssetReview = assets.some((keyframe) => !keyframe.locked);
+        if (pendingAssetReview && assets.every((keyframe) => Boolean(keyframe.imageUrl))) {
+          await logOnePromptVideo("fast_preview.review_auto_approved", {
+            userId,
+            projectId,
+            review: "asset_library",
+          }, "warn");
+          await approveAssetLibrary(userId, projectId);
+          continue;
+        }
+        if (!pendingAssetReview && project.keyframes.every((keyframe) => Boolean(keyframe.imageUrl))) {
+          await logOnePromptVideo("fast_preview.review_auto_approved", {
+            userId,
+            projectId,
+            review: "boundary_images",
+          }, "warn");
+          await approveShotImages(userId, projectId);
+          continue;
+        }
+        return;
+      }
+      if (project.status === VideoProjectStatus.MICRO_SHOT_REVIEW) {
+        if (requiredMicroShotImageIssues(project).length) return;
+        await logOnePromptVideo("fast_preview.review_auto_approved", {
+          userId,
+          projectId,
+          review: "micro_shot_references",
+        }, "warn");
+        await approveMicroShotReferences(userId, projectId);
+        continue;
+      }
+      if (project.status === VideoProjectStatus.CLIP_REVIEW) {
+        if (!project.segments.length || project.segments.some((segment) => !segment.clipUrl)) return;
+        await logOnePromptVideo("fast_preview.review_auto_approved", {
+          userId,
+          projectId,
+          review: "video_clips",
+        }, "warn");
+        await approveVideoClips(userId, projectId);
+        await composeVideoProject(userId, projectId);
+        return;
+      }
+      if (project.status === VideoProjectStatus.FINAL_REVIEW && project.finalVideoUrl) {
+        await logOnePromptVideo("fast_preview.review_auto_approved", {
+          userId,
+          projectId,
+          review: "final_video",
+        }, "warn");
+        await finishVideoProject(userId, projectId);
+      }
+      return;
+    }
+  } catch (error) {
+    await logOnePromptVideo("fast_preview.auto_advance_blocked", {
+      userId,
+      projectId,
+      ...errorForLog(error),
+    }, "warn");
+  } finally {
+    fastPreviewAutoAdvanceLocks.delete(projectId);
+  }
+}
+
 export async function pumpVideoProductionJobs(options: {
   maxJobs?: number;
   workerId?: string;
@@ -9737,6 +9829,7 @@ export async function pumpVideoProductionJobs(options: {
           ...errorForLog(error),
         }, "error")
       );
+      await autoAdvanceFastPreviewProject(job.userId, job.projectId);
     }
   }
   return { claimedCount, completedCount, retriedCount, failedCount, meaningfulProgressCount };
@@ -11434,6 +11527,38 @@ async function syncGenerationCandidates(
   if (requeuedHistoricalTechnicalFailures) {
     fresh = await prisma.videoGenerationCandidate.findMany({ where: { projectId: project.id, kind: { in: [...coreKinds] } }, orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }] });
     fresh = await excludeObsoletePlanningRevisionCandidates(project, fresh);
+  }
+  if (isOnePromptVideoFastPreviewEnabled()) {
+    const selectedArtifactIds = new Set(
+      fresh.filter((candidate) => candidate.selected).map((candidate) => candidate.artifactId),
+    );
+    const previewCandidates = fresh.filter((candidate) =>
+      Boolean(candidate.mediaUrl)
+      && !selectedArtifactIds.has(candidate.artifactId)
+      && !["failed", "quality_failed", "cancelled", "superseded"].includes(candidate.status)
+    );
+    const previewCandidateByArtifact = new Map<string, typeof previewCandidates[number]>();
+    for (const candidate of previewCandidates) {
+      if (!previewCandidateByArtifact.has(candidate.artifactId)) {
+        previewCandidateByArtifact.set(candidate.artifactId, candidate);
+      }
+    }
+    for (const candidate of previewCandidateByArtifact.values()) {
+      await applySelectedGenerationCandidate(project, candidate.id, true, false, [], true);
+      await logOnePromptVideo("fast_preview.candidate_auto_selected", {
+        projectId: project.id,
+        artifactId: candidate.artifactId,
+        candidateId: candidate.id,
+        kind: candidate.kind,
+      }, "warn");
+    }
+    if (previewCandidateByArtifact.size) {
+      fresh = await prisma.videoGenerationCandidate.findMany({
+        where: { projectId: project.id, kind: { in: [...coreKinds] } },
+        orderBy: [{ createdAt: "desc" }, { candidateNo: "asc" }],
+      });
+      fresh = await excludeObsoletePlanningRevisionCandidates(project, fresh);
+    }
   }
   for (const candidate of fresh) {
     if (

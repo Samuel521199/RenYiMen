@@ -107,10 +107,6 @@ import {
   segmentShotDecomposerExample,
   type SegmentShotDecomposerOutput,
 } from "./segment-shot-decomposer-contract";
-import {
-  localizeChineseDisplayFieldsNonCritical,
-  prepareEnglishOnlyModelRequestBody,
-} from "./local-translation";
 import { JsonStageStreamAssembler } from "./json-stage-stream-assembler";
 import {
   repairJsonDeterministically,
@@ -158,6 +154,7 @@ import {
 } from "./anchor-admission";
 import { normalizePlayingCardContract } from "./playing-card-contract";
 import { errorForLog, logOnePromptVideo } from "./logger";
+import { isOnePromptVideoScriptQaEnabled } from "./script-qa-config";
 import { assertPlanValidForGeneration, validateOnePromptVideoPlan } from "./plan-validator";
 import { repairMotionfulEndpointContracts } from "./frame-contract";
 import { auditSingleTakePlan, type SingleTakeAuditResult } from "./single-take-audit";
@@ -3351,7 +3348,7 @@ ${STRUCTURED_REPAIR_EXECUTION_RULES}`
       validEventIds: (plan.narrativeEvents ?? []).map((event) => event.eventId),
       validSegmentNos: plan.segments.map((segment) => segment.segmentNo),
     });
-    if (!finalStoryContract.passed) {
+    if (isOnePromptVideoScriptQaEnabled() && !finalStoryContract.passed) {
       throw new Error(`Final story contract drifted after normalization: ${finalStoryContract.issues
         .slice(0, 8)
         .map((issue) => `${issue.code}@${issue.path}`)
@@ -3755,35 +3752,7 @@ async function executeStructuredStage<T = unknown>(params: {
       parsed = contractResult.value;
     }
     throwIfBatchCancelled(params.stage, params.signal);
-    const localized = await localizeChineseDisplayFieldsNonCritical(parsed);
-    if (localized.deferred) {
-      await logOnePromptVideo("local_translation.model_output.deferred", {
-        stage: params.stage,
-        source: "en",
-        target: "zh",
-        disposition: "non_critical_display_fallback",
-        canonicalOutputPreserved: true,
-        backgroundRetryScheduled: true,
-        error: errorForLog(localized.deferredError),
-      }, "warn");
-    }
-    throwIfBatchCancelled(params.stage, params.signal);
-    if (localized.metrics.translatedTexts || localized.metrics.cacheHits) {
-      await logOnePromptVideo("local_translation.model_output.localized", {
-        stage: params.stage,
-        source: "en",
-        target: "zh",
-        ...localized.metrics,
-      });
-      await logOnePromptVideo("production.step.completed", {
-        moduleNameZh: "本地语言边界",
-        stepNameZh: "把大模型英文结果翻译为中文展示字段",
-        executionMethod: "local_translation",
-        durationMs: localized.metrics.durationMs,
-        resultZh: `翻译 ${localized.metrics.translatedTexts} 条，缓存命中 ${localized.metrics.cacheHits} 条`,
-      });
-    }
-    return localized.value as T;
+    return parsed as T;
   } catch (error) {
     if (!observationRecorded) {
       const completedAt = new Date();
@@ -3857,30 +3826,13 @@ async function fetchJsonStage(
   const detachParentAbort = forwardAbortSignal(signal, controller);
   try {
     throwIfBatchCancelled(stage, signal);
-    const prepared = await prepareEnglishOnlyModelRequestBody(body);
-    throwIfBatchCancelled(stage, signal);
-    if (prepared.metrics.translatedTexts || prepared.metrics.cacheHits) {
-      await logOnePromptVideo("local_translation.model_input.english_only", {
-        stage,
-        source: "zh",
-        target: "en",
-        ...prepared.metrics,
-      });
-      await logOnePromptVideo("production.step.completed", {
-        moduleNameZh: "本地语言边界",
-        stepNameZh: "把非英文输入翻译为英文后再交给大模型",
-        executionMethod: "local_translation",
-        durationMs: prepared.metrics.durationMs,
-        resultZh: `翻译 ${prepared.metrics.translatedTexts} 条，缓存命中 ${prepared.metrics.cacheHits} 条`,
-      });
-    }
     const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${requireDashScopeApiKey()}`,
       },
-      body: JSON.stringify(prepared.body),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     const schedulingContext = plannerProgressStorage.getStore()?.schedulingContext;
@@ -3969,23 +3921,6 @@ async function fetchJsonStageContentStream(
 
   try {
     throwIfBatchCancelled(stage, signal);
-    const prepared = await prepareEnglishOnlyModelRequestBody(body);
-    throwIfBatchCancelled(stage, signal);
-    if (prepared.metrics.translatedTexts || prepared.metrics.cacheHits) {
-      await logOnePromptVideo("local_translation.model_input.english_only", {
-        stage,
-        source: "zh",
-        target: "en",
-        ...prepared.metrics,
-      });
-      await logOnePromptVideo("production.step.completed", {
-        moduleNameZh: "本地语言边界",
-        stepNameZh: "把非英文输入翻译为英文后再交给大模型",
-        executionMethod: "local_translation",
-        durationMs: prepared.metrics.durationMs,
-        resultZh: `翻译 ${prepared.metrics.translatedTexts} 条，缓存命中 ${prepared.metrics.cacheHits} 条`,
-      });
-    }
     const operation = () => fetch(`${compatibleBaseUrl()}/chat/completions`, {
       method: "POST",
       headers: {
@@ -3993,7 +3928,7 @@ async function fetchJsonStageContentStream(
         Authorization: `Bearer ${requireDashScopeApiKey()}`,
       },
       body: JSON.stringify({
-        ...prepared.body,
+        ...body,
         stream: true,
         stream_options: { include_usage: true },
       }),
@@ -4720,10 +4655,23 @@ async function ensurePlanningNarrativeContract(params: {
     narrativeEvents: currentEvents,
     timelineSegments: params.planningManifest.timelineBlueprint.segments,
   });
+  if (!isOnePromptVideoScriptQaEnabled()) {
+    await logOnePromptVideo("aliyun.storyboard.planning_contract.advisory_only", {
+      passed: report.passed,
+      issues: report.issues,
+      reason: "ONE_PROMPT_VIDEO_SCRIPT_QA is disabled",
+    }, report.passed ? "info" : "warn");
+    return {
+      creativeStrategy: current,
+      narrativeEvents: currentEvents,
+      report,
+      repairCount: 0,
+    };
+  }
   const attempts = [...(params.checkpoint.planningContractRepairState?.attempts ?? [])].slice(-8);
   let previousAttempt = attempts.at(-1);
   let repairCount = 0;
-  const maxStageVisits = maxRepairs + 1;
+  const maxStageVisits = maxRepairs === 0 ? 0 : maxRepairs + 1;
   for (; !report.passed && repairCount < maxStageVisits; repairCount += 1) {
     const issuesBefore = report.issues;
     const issueCountBefore = report.issues.length;
@@ -5161,6 +5109,14 @@ async function ensureStoryboardStoryContract(params: {
     validEventIds,
     validSegmentNos,
   });
+  if (!isOnePromptVideoScriptQaEnabled()) {
+    await logOnePromptVideo("aliyun.storyboard.story_contract.advisory_only", {
+      passed: report.passed,
+      issues: report.issues,
+      reason: "ONE_PROMPT_VIDEO_SCRIPT_QA is disabled",
+    }, report.passed ? "info" : "warn");
+    return { storyboardArtistPlan: current, report, repairCount: 0 };
+  }
   for (let repairCount = 0; !report.passed && repairCount < maxRepairs; repairCount += 1) {
     await reportPlannerProgress({
       stage: "story_contract_repair",
@@ -5540,29 +5496,34 @@ function attachSemanticReview(
 }
 
 function semanticStoryGateMode(): "off" | "warn" | "strict" {
+  if (!isOnePromptVideoScriptQaEnabled()) return "off";
   const raw = String(process.env.ONE_PROMPT_VIDEO_SEMANTIC_STORY_GATE ?? "warn").trim().toLowerCase();
   return raw === "off" || raw === "strict" ? raw : "warn";
 }
 
 function semanticStoryRepairMax(): number {
+  if (!isOnePromptVideoScriptQaEnabled()) return 0;
   const raw = Number(process.env.ONE_PROMPT_VIDEO_SEMANTIC_STORY_REPAIR_MAX);
   if (!Number.isFinite(raw)) return 1;
   return Math.max(0, Math.min(2, Math.round(raw)));
 }
 
 function storyContractRepairMax(): number {
+  if (!isOnePromptVideoScriptQaEnabled()) return 0;
   const raw = Number(process.env.ONE_PROMPT_VIDEO_STORY_CONTRACT_REPAIR_MAX);
   if (!Number.isFinite(raw)) return 2;
   return Math.max(0, Math.min(3, Math.round(raw)));
 }
 
 function timelineReplanMax(): number {
+  if (!isOnePromptVideoScriptQaEnabled()) return 0;
   const raw = Number(process.env.ONE_PROMPT_VIDEO_TIMELINE_REPLAN_MAX);
   if (!Number.isFinite(raw)) return 2;
   return Math.max(0, Math.min(3, Math.round(raw)));
 }
 
 function planningDurationRepairMax(): number {
+  if (!isOnePromptVideoScriptQaEnabled()) return 0;
   const raw = Number(process.env.ONE_PROMPT_VIDEO_DURATION_REPAIR_MAX);
   if (!Number.isFinite(raw)) return 2;
   return Math.max(0, Math.min(3, Math.round(raw)));
@@ -10102,6 +10063,7 @@ function shotDecomposerConcurrency(): number {
 }
 
 function singleTakeMaxRevisions(targetedSegmentRepair: boolean): number {
+  if (!isOnePromptVideoScriptQaEnabled()) return 0;
   const raw = Number(process.env.ONE_PROMPT_VIDEO_SINGLE_TAKE_MAX_REVISIONS);
   if (Number.isFinite(raw) && raw >= 0) return Math.max(0, Math.min(3, Math.round(raw)));
   return targetedSegmentRepair ? 2 : MAX_SINGLE_TAKE_REVISIONS;

@@ -1,14 +1,12 @@
 {
   "name": "workflow-frontend",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "private": true,
   "scripts": {
     "dev:kill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-dev-port.ps1",
     "dev": "npm run dev:kill && node scripts/dev-with-video-worker.mjs",
     "dev:web": "next dev --turbopack --port 3001",
     "dev:3000": "next dev --turbopack --port 3000",
-    "translation:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local-translation.ps1",
-    "test:local-translation": "tsx --test src/services/video-orchestrator/local-translation.test.ts",
     "test:project-deletion": "tsx --test src/services/video-orchestrator/project-deletion.test.ts",
     "test:planning-route": "tsx --test src/services/video-orchestrator/planning-route-mapping.test.ts src/services/video-orchestrator/planning-chronology-policy.test.ts src/services/video-orchestrator/planning-route-input-contract.test.ts src/services/video-orchestrator/planning-route-deterministic-repair.test.ts src/services/video-orchestrator/planning-route-safe-fallback.test.ts src/services/video-orchestrator/planning-route-gate.test.ts src/services/video-orchestrator/planning-route-model-repair-policy.test.ts src/services/video-orchestrator/planning-route-model-call.test.ts src/services/video-orchestrator/planning-route-checkpoint.test.ts src/services/video-orchestrator/planning-route-invalidation.test.ts src/services/video-orchestrator/planning-route-telemetry.test.ts src/services/video-orchestrator/planning-route-review-ui.test.ts src/services/video-orchestrator/planning-route-planning-architect.test.ts src/services/video-orchestrator/planning-route-step17.test.ts src/services/video-orchestrator/planning-route-fixed-samples.test.ts src/services/video-orchestrator/planning-route-stability.test.ts src/services/video-orchestrator/planning-route-rollout.test.ts",
     "test:anchor-admission": "tsx --test src/services/video-orchestrator/anchor-admission.test.ts src/services/video-orchestrator/anchor-semantics.test.ts src/services/video-orchestrator/planning-decomposition.test.ts src/services/video-orchestrator/plan-validator.test.ts",
