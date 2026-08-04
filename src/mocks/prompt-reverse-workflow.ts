@@ -21,16 +21,12 @@ export const promptReverseWorkflowMock: WorkflowFormSchema = {
       id: "input",
       label: "输入图片",
       labelEn: "Input Image",
-      description: "上传需要分析的图片，写入节点 3（LoadImage）。",
-      descriptionEn: "Upload the image to analyze. Written to node 3 (LoadImage).",
       children: [
         {
           kind: "imageUpload",
           id: "sourceImage",
-          label: "待分析图片",
-          labelEn: "Image to Analyze",
-          description: "上传您希望反推提示词的图片，支持人像、场景、艺术作品等。",
-          descriptionEn: "Upload the image you want to reverse-engineer a prompt for. Supports portraits, scenes, artworks, etc.",
+          label: "",
+          labelEn: "",
           mapping: { nodeId: "3", inputPath: ["image"] },
           validation: {
             required: true,

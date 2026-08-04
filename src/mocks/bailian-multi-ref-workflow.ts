@@ -120,6 +120,8 @@ export const bailianMultiRefWorkflowMock: WorkflowFormSchema = {
           descriptionEn: "Longer videos consume more credits. Allowed range: 3–15 seconds.",
           mapping: { nodeId: "input", inputPath: ["duration"] },
           defaultValue: 5,
+          showMinLabel: false,
+          showMaxLabel: false,
           validation: { min: 3, max: 15, step: 1, integer: true },
         },
         {

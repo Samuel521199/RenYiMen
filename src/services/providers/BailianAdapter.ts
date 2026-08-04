@@ -204,6 +204,9 @@ function extractPromptFromNodeInputs(nodeInputs: StandardPayload["nodeInputs"]):
 }
 
 function resolveDashScopeModel(payload: StandardPayload): string {
+  const templateId = payload.templateId.trim().toLowerCase();
+  if (templateId.includes(WAN_ANIMATE_MOVE_MODEL)) return WAN_ANIMATE_MOVE_MODEL;
+  if (templateId.includes(WAN_S2V_MODEL)) return WAN_S2V_MODEL;
   const input = payload.nodeInputs["input"];
   if (isRecord(input)) {
     const mn = input.modelName;

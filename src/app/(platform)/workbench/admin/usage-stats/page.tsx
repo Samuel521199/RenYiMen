@@ -101,8 +101,8 @@ export default function UsageStatsPage() {
             </button>
           ))}
         </div>
-        <Link href="/workbench/dashboard" className="text-sm text-cyan-300 hover:text-cyan-200">
-          返回首页看板
+        <Link href="/workbench/operations" className="text-sm text-cyan-300 hover:text-cyan-200">
+          返回运营部
         </Link>
       </div>
 

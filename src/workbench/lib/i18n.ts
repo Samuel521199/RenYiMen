@@ -3,6 +3,8 @@ import { readStoredLocale } from "@/lib/locale-preference";
 export type Language = "zh" | "en";
 
 const DICTIONARY: Record<string, { zh: string; en: string }> = {
+  "调整侧边栏宽度": { zh: "调整侧边栏宽度", en: "Resize sidebar" },
+  "拖动调整宽度，双击恢复默认": { zh: "拖动调整宽度，双击恢复默认", en: "Drag to resize; double-click to reset" },
   "AI 图片工作台": { zh: "AI 图片工作台", en: "AI Workbench" },
   AI图片工作台: { zh: "AI 图片工作台", en: "AI Workbench" },
   "视频成品库": { zh: "视频成品库", en: "Video Gallery" },

@@ -1441,7 +1441,7 @@ export default function OnePromptVideoPage() {
   const { lang, toggleLang } = useLanguage();
   const pageLang: PageLang = lang === "en" ? "en" : "zh";
   const copy = TEXT[pageLang];
-  const [prompt, setPrompt] = useState(copy.defaultPrompt);
+  const [prompt, setPrompt] = useState("");
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>("9:16");
   const [durationSeconds, setDurationSeconds] = useState(30);
   const [stylePreset, setStylePreset] = useState("guofeng");
@@ -3191,7 +3191,12 @@ export default function OnePromptVideoPage() {
         </section>
 
         <section className="grid gap-3 rounded-md border border-white/10 bg-slate-950/70 p-4 shadow-[0_18px_60px_rgba(0,0,0,0.22)] lg:grid-cols-[minmax(0,1fr)_220px_130px_140px]">
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-24 resize-none rounded-md border border-white/10 bg-slate-900/90 px-4 py-3 text-sm leading-6 text-slate-100 outline-none transition focus:border-cyan-400 focus:bg-slate-900" />
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            placeholder={copy.defaultPrompt}
+            className="min-h-24 resize-none rounded-md border border-white/10 bg-slate-900/90 px-4 py-3 text-sm leading-6 text-slate-100 outline-none transition placeholder:text-slate-500 placeholder:opacity-80 focus:border-cyan-400 focus:bg-slate-900"
+          />
           <div className="space-y-2">
             <select value={stylePreset} onChange={(event) => setStylePreset(event.target.value)} className="h-11 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400">
               {Object.entries(copy.styles).map(([value, label]) => <option key={value} value={value}>{label}</option>)}

@@ -5,10 +5,12 @@ import type { NextRequest } from "next/server";
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  if (pathname === "/") {
-    return NextResponse.redirect(new URL("/workbench/dashboard", request.url));
-  }
-  if (pathname === "/studio") {
+  if (
+    pathname === "/" ||
+    pathname === "/studio" ||
+    pathname === "/workbench" ||
+    pathname === "/workbench/dashboard"
+  ) {
     return NextResponse.redirect(new URL("/workbench/tools", request.url));
   }
 
@@ -16,5 +18,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/", "/studio"],
+  matcher: ["/", "/studio", "/workbench", "/workbench/dashboard"],
 };

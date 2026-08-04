@@ -25,7 +25,7 @@ export function HistoryFilmstrip({ history, activeId, onSelect }: HistoryFilmstr
   return (
     <div
       className={cn(
-        "flex w-full shrink-0 gap-3 overflow-x-auto py-4",
+        "flex w-full shrink-0 gap-2.5 overflow-x-auto py-3",
         "[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
       )}
       role="list"
@@ -46,8 +46,8 @@ export function HistoryFilmstrip({ history, activeId, onSelect }: HistoryFilmstr
               type="button"
               onClick={() => onSelect(item.taskId)}
               className={cn(
-                "relative flex h-20 w-20 overflow-hidden rounded-lg border border-neutral-200 bg-neutral-100 text-left shadow-sm outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-neutral-400",
-                selected && "ring-2 ring-primary ring-offset-2 ring-offset-background"
+                "relative flex h-[72px] w-[72px] overflow-hidden rounded-xl border border-white/[0.1] bg-[#0b1626] text-left shadow-lg shadow-black/20 outline-none transition-all duration-200 hover:-translate-y-0.5 hover:border-white/25 focus-visible:ring-2 focus-visible:ring-emerald-400/50",
+                selected && "border-emerald-400/70 ring-2 ring-emerald-400/25"
               )}
               aria-pressed={selected}
               aria-label={`查看任务 ${item.taskId}`}

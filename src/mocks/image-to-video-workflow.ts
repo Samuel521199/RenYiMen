@@ -19,8 +19,6 @@ export const imageToVideoWorkflowMock: WorkflowFormSchema = {
       id: "media",
       label: "素材",
       labelEn: "Media",
-      description: "首帧写入节点 23，尾帧写入节点 20（经缩放后接入 WanFirstLastFrameToVideo）。",
-      descriptionEn: "First frame written to node 23; last frame written to node 20 (scaled, then fed into WanFirstLastFrameToVideo).",
       children: [
         {
           kind: "imageUpload",
@@ -87,6 +85,7 @@ export const imageToVideoWorkflowMock: WorkflowFormSchema = {
           descriptionEn: "Duration of the generated video, mapped to workflow node 50. Actual frames = seconds × 16 + 1. Longer videos consume more VRAM; recommend keeping under 8 seconds.",
           mapping: { nodeId: "50", inputPath: ["value"] },
           defaultValue: 5,
+          showMinLabel: false,
           validation: { min: 3, max: 10, step: 1, integer: true },
         },
         {

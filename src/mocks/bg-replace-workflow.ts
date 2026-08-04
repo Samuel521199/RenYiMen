@@ -24,8 +24,8 @@ export const bgReplaceWorkflowMock: WorkflowFormSchema = {
     {
       kind: "group",
       id: "images",
-      label: "上传图片",
-      labelEn: "Upload Images",
+      label: "",
+      labelEn: "",
       description: "两张图片均为必填，顺序不可颠倒。",
       descriptionEn: "Both images are required. Order matters — do not reverse them.",
       children: [

@@ -21,12 +21,13 @@ const studioSource = readFileSync(
 );
 
 test("video upload preview cannot be widened by long filenames or OSS URLs", () => {
-  assert.match(source, /min-w-0 max-w-full space-y-2 overflow-hidden/);
+  assert.match(source, /min-w-0 max-w-full space-y-3 overflow-hidden/);
+  assert.match(source, /h-\[176px\]/);
   assert.match(source, /w-full min-w-0 max-w-full flex-col items-center gap-2 overflow-hidden/);
   assert.match(source, /block w-full min-w-0 truncate text-center/);
-  assert.match(dynamicFormSource, /fieldset className="min-w-0 max-w-full overflow-hidden/);
-  assert.match(dynamicFormSource, /min-w-0 max-w-full space-y-6 overflow-hidden/);
-  assert.match(imageUploadSource, /min-w-0 max-w-full flex-1 space-y-2 overflow-hidden/);
+  assert.match(dynamicFormSource, /fieldset className="group\/section min-w-0 max-w-full overflow-visible/);
+  assert.match(dynamicFormSource, /grid min-w-0 max-w-full grid-cols-1 gap-x-5 gap-y-5 overflow-visible/);
+  assert.match(imageUploadSource, /min-w-0 max-w-full space-y-2 overflow-hidden/);
   assert.match(studioSource, /aside className="min-w-0 max-w-full overflow-x-hidden/);
 });
 

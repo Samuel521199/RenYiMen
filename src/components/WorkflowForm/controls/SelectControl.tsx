@@ -16,16 +16,15 @@ export function SelectControl({ field, error, locale = "zh" }: SelectControlProp
   const raw = useWorkflowStore((s) => (path ? getAtPath(s.parameters, path) : undefined));
   const setFieldValue = useWorkflowStore((s) => s.setFieldValue);
   const value = typeof raw === "string" ? raw : field.options[0]?.value ?? "";
-  const description = field.description ? loc(field.description, field.descriptionEn, locale) : undefined;
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-2">
       <select
         id={field.id}
         value={value}
         onChange={(e) => setFieldValue(field.id, e.target.value)}
-        className={`w-full max-w-md rounded-lg border bg-[#1a2840] px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-emerald-500/40 ${
-          error ? "border-red-500/50" : "border-[#2a3d5e]"
+        className={`h-11 w-full rounded-xl border bg-[#091526]/90 px-3.5 text-sm text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] outline-none transition-all duration-200 focus:border-emerald-400/55 focus:ring-4 focus:ring-emerald-500/10 ${
+          error ? "border-red-500/50" : "border-white/[0.1] hover:border-white/[0.16]"
         }`}
       >
         {field.options.map((opt) => (
@@ -34,7 +33,6 @@ export function SelectControl({ field, error, locale = "zh" }: SelectControlProp
           </option>
         ))}
       </select>
-      {description && <p className="text-xs text-slate-500">{description}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );

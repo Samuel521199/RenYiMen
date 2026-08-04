@@ -7,7 +7,6 @@ import type { VideoUploadField } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { useT } from "@/i18n";
-import { loc } from "@/components/WorkflowForm/DynamicForm";
 
 export interface VideoUploadControlProps {
   field: VideoUploadField;
@@ -33,12 +32,12 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
   }, []);
 
   const dashedFrameClass = [
-    "relative flex h-[120px] w-full min-w-0 max-w-full items-center justify-center overflow-hidden rounded-lg border-2 border-dashed bg-[#1a2840]",
-    error ? "border-red-500/50" : "border-[#2a3d5e]",
+    "relative flex h-[176px] w-full min-w-0 max-w-full items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 hover:bg-[#0b1a2d]",
+    error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45",
   ].join(" ");
 
   return (
-    <div className="min-w-0 max-w-full space-y-2 overflow-hidden">
+    <div className="min-w-0 max-w-full space-y-3 overflow-hidden">
       {/* Preview / drop zone */}
       <div className={dashedFrameClass}>
         {v.status === "uploading" ? (
@@ -72,8 +71,10 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
             onClick={triggerFilePick}
             className="flex flex-col items-center gap-2 px-4"
           >
-            <Video className="h-9 w-9 text-slate-600" strokeWidth={1.25} />
-            <span className="text-center text-xs text-slate-500">{t.uploadNoPreview}</span>
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.045]">
+              <Video className="h-5 w-5 text-slate-400" strokeWidth={1.5} />
+            </span>
+            <span className="text-center text-xs font-medium text-slate-500">{t.uploadNoPreview}</span>
           </button>
         )}
       </div>
@@ -95,18 +96,17 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
           type="button"
           disabled={v.status === "uploading"}
           onClick={triggerFilePick}
-          className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-xl bg-emerald-500/90 px-3.5 py-2 text-xs font-semibold text-white transition-all hover:-translate-y-0.5 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {v.status === "ready" ? t.uploadChangeBtn : t.uploadSelectBtn}
+          {v.status === "ready"
+            ? locale === "en" ? "Change video" : "更换视频"
+            : locale === "en" ? "Select video" : "选择视频"}
         </button>
         {v.fileName && v.status !== "ready" && (
           <span className="min-w-0 max-w-full self-center truncate text-xs text-slate-500">{t.uploadFileName(v.fileName)}</span>
         )}
       </div>
 
-      {field.description && (
-        <p className="break-words text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
-      )}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );

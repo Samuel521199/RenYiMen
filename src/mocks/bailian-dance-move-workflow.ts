@@ -18,18 +18,6 @@ export const bailianDanceMoveWorkflowMock: WorkflowFormSchema = {
       labelEn: "",
       children: [
         {
-          kind: "select",
-          id: "modelName",
-          label: "生成模型",
-          labelEn: "Model",
-          mapping: { nodeId: "input", inputPath: ["modelName"] },
-          defaultValue: "wan2.2-animate-move",
-          options: [
-            { value: "wan2.2-animate-move", label: "万相 2.2 图生动作", labelEn: "Wan 2.2 Animate Move" },
-          ],
-          validation: { required: true },
-        },
-        {
           kind: "imageUpload",
           id: "characterImage",
           label: "人物图片",
@@ -61,8 +49,8 @@ export const bailianDanceMoveWorkflowMock: WorkflowFormSchema = {
         {
           kind: "select",
           id: "mode",
-          label: "",
-          labelEn: "",
+          label: "生成质量",
+          labelEn: "Generation Quality",
           description: "专业模式动作更流畅、画面更真实，但通常需要更长时间。",
           descriptionEn: "Professional mode is smoother and more realistic, but usually takes longer.",
           mapping: { nodeId: "input", inputPath: ["mode"] },

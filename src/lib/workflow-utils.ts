@@ -4,7 +4,6 @@ import type {
   MultiImageFieldValue,
   NumberSliderField,
   SelectField,
-  TextInputField,
   WorkflowField,
   WorkflowFormSchema,
 } from "@/types/workflow";
@@ -75,7 +74,9 @@ function defaultValueForField(f: WorkflowField): unknown {
     case "multiImageUpload":
       return emptyMultiImageValue();
     case "textInput":
-      return (f as TextInputField).defaultValue ?? "";
+      // Text defaults are presentation examples, not submitted user input.
+      // TextInputControl renders a legacy defaultValue as placeholder copy.
+      return "";
     case "numberSlider": {
       const s = f as NumberSliderField;
       return s.defaultValue ?? s.validation.min;

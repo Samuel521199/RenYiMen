@@ -14,7 +14,7 @@ test("top navigation switches between isolated sidebar menus", () => {
   const headerSource = readFileSync("src/components/platform/PlatformShell.tsx", "utf8");
   const sidebarSource = readFileSync("src/workbench/components/layout/Sidebar.tsx", "utf8");
 
-  assert.match(headerSource, /href="\/workbench\/dashboard"/);
+  assert.match(headerSource, /href="\/workbench\/tools"/);
   assert.match(headerSource, /href="\/workbench\/operations"/);
   assert.match(headerSource, /workspaceGeneral/);
   assert.match(headerSource, /workspaceOperations/);

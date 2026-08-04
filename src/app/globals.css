@@ -423,3 +423,38 @@
 .workbench-content .recharts-cartesian-axis-tick-value {
   fill: rgb(148 163 184) !important;
 }
+
+@keyframes wf-panel-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes wf-ambient-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(28px, -18px, 0) scale(1.06); }
+}
+
+@keyframes wf-stage-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.wf-panel-enter {
+  animation: wf-panel-enter 520ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.wf-ambient-orb {
+  animation: wf-ambient-drift 13s ease-in-out infinite;
+}
+
+.wf-stage-orb > :first-child {
+  animation: wf-stage-orbit 18s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-panel-enter,
+  .wf-ambient-orb,
+  .wf-stage-orb > :first-child {
+    animation: none !important;
+  }
+}

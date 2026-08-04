@@ -78,6 +78,8 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
           labelEn: "Duration (seconds) — 150 credits/sec",
           mapping: { nodeId: "input", inputPath: ["duration"] },
           defaultValue: 5,
+          showMinLabel: false,
+          showMaxLabel: false,
           validation: { min: 3, max: 15, step: 1, integer: true },
         },
         {

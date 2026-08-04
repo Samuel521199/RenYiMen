@@ -1,6 +1,6 @@
 {
   "name": "workflow-frontend",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "private": true,
   "scripts": {
     "dev:kill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-dev-port.ps1",

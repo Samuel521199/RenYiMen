@@ -30,7 +30,7 @@ function WorkbenchAuthSync({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (status === "loading") return;
     if (status === "unauthenticated") {
-      router.replace("/auth/signin?callbackUrl=/workbench/dashboard");
+      router.replace("/auth/signin?callbackUrl=/workbench/tools");
       return;
     }
     void doSync();

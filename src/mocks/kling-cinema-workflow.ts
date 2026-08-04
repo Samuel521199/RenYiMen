@@ -17,8 +17,6 @@ export const klingCinemaWorkflowMock: WorkflowFormSchema = {
       id: "reference",
       label: "参考图与描述",
       labelEn: "Reference & Description",
-      description: "参考图经上传后写入 LoadImage；主题与手写描述对应工作流中的「主题」与「自定义提示词」链路。",
-      descriptionEn: "The reference image is written to LoadImage after upload; theme and hand-written description map to the 'theme' and 'custom prompt' paths in the workflow.",
       children: [
         {
           kind: "imageUpload",
@@ -77,6 +75,8 @@ export const klingCinemaWorkflowMock: WorkflowFormSchema = {
           descriptionEn: "Duration of the generated video, mapped to workflow node 99. Actual frames = seconds × 16 + 1. Longer videos consume more VRAM; recommend keeping under 8 seconds.",
           mapping: { nodeId: "99", inputPath: ["value"] },
           defaultValue: 5,
+          showMinLabel: false,
+          showMaxLabel: false,
           validation: { min: 3, max: 10, step: 1, integer: true },
         },
       ],

@@ -42,10 +42,6 @@ export const videoEnhanceWorkflowMock: WorkflowFormSchema = {
       id: "maxEdge",
       label: "输出最大边（像素）",
       labelEn: "Output Max Edge (px)",
-      description:
-        "控制修复后视频的最大边长。分辨率越高耗时越长，建议先用 1280 试效果。对应节点 5148。",
-      descriptionEn:
-        "Controls the maximum edge length of the enhanced video. Higher resolution takes longer. Start with 1280 to preview the effect. Maps to node 5148.",
       mapping: { nodeId: "5148", inputPath: ["value"] },
       defaultValue: "1280",
       options: [

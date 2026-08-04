@@ -306,7 +306,6 @@ test("Bailian dance motion transfer uses the dedicated image and video contract"
       templateId: "bailian-wan2.2-animate-move",
       nodeInputs: {
         input: {
-          modelName: "wan2.2-animate-move",
           image_url: "https://example.com/character.png",
           video_url: "https://example.com/dance.mp4",
           mode: "wan-pro",

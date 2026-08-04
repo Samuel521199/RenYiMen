@@ -67,8 +67,6 @@ export const klingStdWorkflowMock: WorkflowFormSchema = {
           id: "duration",
           label: "视频时长",
           labelEn: "Video Duration",
-          description: "5 秒或 10 秒，时长越长消耗越多。",
-          descriptionEn: "5 or 10 seconds. Longer duration costs more.",
           mapping: { nodeId: "input", inputPath: ["duration"] },
           defaultValue: "5",
           options: [

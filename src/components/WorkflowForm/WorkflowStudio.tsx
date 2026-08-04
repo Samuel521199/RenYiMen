@@ -1,6 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEventHandler } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEventHandler,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { createPortal } from "react-dom";
 import type { Session } from "next-auth";
 import Link from "next/link";
@@ -36,6 +46,16 @@ import { useLanguage, useT } from "@/i18n";
 
 type View = "gallery" | "studio";
 
+const WORKFLOW_STUDIO_HISTORY_KEY = "__workflowStudioSkuId";
+const STUDIO_SPLIT_STORAGE_KEY = "workflow-studio-split-percent";
+const DEFAULT_STUDIO_SPLIT_PERCENT = 58;
+const MIN_STUDIO_SPLIT_PERCENT = 32;
+const MAX_STUDIO_SPLIT_PERCENT = 72;
+
+function clampStudioSplit(percent: number): number {
+  return Math.round(Math.min(Math.max(percent, MIN_STUDIO_SPLIT_PERCENT), MAX_STUDIO_SPLIT_PERCENT) * 10) / 10;
+}
+
 // ─── Category metadata ──────────────────────────────────────────────────────
 
 const CATEGORY_ICON: Record<SkuCategory, string> = {
@@ -68,6 +88,11 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const [autoSaveToAssetLibrary, setAutoSaveToAssetLibrary] = useState(false);
   const [isAutoSaving, setIsAutoSaving] = useState(false);
   const [autoSaveNotice, setAutoSaveNotice] = useState<string | null>(null);
+  const [studioSplitPercent, setStudioSplitPercent] = useState(DEFAULT_STUDIO_SPLIT_PERCENT);
+  const studioSplitRef = useRef(DEFAULT_STUDIO_SPLIT_PERCENT);
+  const studioColumnsRef = useRef<HTMLDivElement>(null);
+  const splitResizeActiveRef = useRef(false);
+  const splitPreviousBodyStylesRef = useRef<{ cursor: string; userSelect: string } | null>(null);
 
   const [skus, setSkus] = useState<SkuDefinition[]>([]);
   const [selectedSkuId, setSelectedSkuId] = useState<string | null>(null);
@@ -75,6 +100,74 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [profileRefreshKey, setProfileRefreshKey] = useState(0);
+  const historyViewRestoredRef = useRef(false);
+
+  const applyStudioSplit = (percent: number, persist = false) => {
+    const nextPercent = clampStudioSplit(percent);
+    studioSplitRef.current = nextPercent;
+    setStudioSplitPercent(nextPercent);
+    if (persist) window.localStorage.setItem(STUDIO_SPLIT_STORAGE_KEY, String(nextPercent));
+  };
+
+  const finishStudioSplitResize = () => {
+    if (!splitResizeActiveRef.current) return;
+    splitResizeActiveRef.current = false;
+    window.localStorage.setItem(STUDIO_SPLIT_STORAGE_KEY, String(studioSplitRef.current));
+    const previous = splitPreviousBodyStylesRef.current;
+    if (previous) {
+      document.body.style.cursor = previous.cursor;
+      document.body.style.userSelect = previous.userSelect;
+      splitPreviousBodyStylesRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    const storedPercent = Number(window.localStorage.getItem(STUDIO_SPLIT_STORAGE_KEY));
+    if (Number.isFinite(storedPercent) && storedPercent > 0) applyStudioSplit(storedPercent);
+    return () => {
+      if (splitPreviousBodyStylesRef.current) {
+        document.body.style.cursor = splitPreviousBodyStylesRef.current.cursor;
+        document.body.style.userSelect = splitPreviousBodyStylesRef.current.userSelect;
+      }
+    };
+  }, []);
+
+  const handleSplitPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    splitResizeActiveRef.current = true;
+    splitPreviousBodyStylesRef.current = {
+      cursor: document.body.style.cursor,
+      userSelect: document.body.style.userSelect,
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleSplitPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!splitResizeActiveRef.current) return;
+    const bounds = studioColumnsRef.current?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0) return;
+    applyStudioSplit(((event.clientX - bounds.left) / bounds.width) * 100);
+  };
+
+  const handleSplitPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    finishStudioSplitResize();
+  };
+
+  const handleSplitKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    let nextPercent: number | null = null;
+    if (event.key === "ArrowLeft") nextPercent = studioSplitRef.current - 1;
+    if (event.key === "ArrowRight") nextPercent = studioSplitRef.current + 1;
+    if (event.key === "Home") nextPercent = MIN_STUDIO_SPLIT_PERCENT;
+    if (event.key === "End") nextPercent = MAX_STUDIO_SPLIT_PERCENT;
+    if (nextPercent === null) return;
+    event.preventDefault();
+    applyStudioSplit(nextPercent, true);
+  };
 
   const bumpProfileBalance = useCallback(() => setProfileRefreshKey((k) => k + 1), []);
 
@@ -179,6 +272,14 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         window.location.assign(sku.href);
         return;
       }
+      const currentState = window.history.state && typeof window.history.state === "object"
+        ? window.history.state
+        : {};
+      window.history.pushState(
+        { ...currentState, [WORKFLOW_STUDIO_HISTORY_KEY]: sku.skuId },
+        "",
+        window.location.href,
+      );
       applySku(sku);
       setActiveCategory(sku.category);
       setView("studio");
@@ -187,8 +288,41 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   );
 
   const backToGallery = useCallback(() => {
+    const currentState = window.history.state;
+    if (currentState?.[WORKFLOW_STUDIO_HISTORY_KEY]) {
+      window.history.back();
+      return;
+    }
     setView("gallery");
   }, []);
+
+  useEffect(() => {
+    const syncViewFromHistory = (state: unknown) => {
+      const skuId = state && typeof state === "object"
+        ? (state as Record<string, unknown>)[WORKFLOW_STUDIO_HISTORY_KEY]
+        : undefined;
+      if (typeof skuId !== "string") {
+        setView("gallery");
+        return;
+      }
+      const sku = skus.find((item) => item.skuId === skuId && !item.href);
+      if (!sku) {
+        setView("gallery");
+        return;
+      }
+      applySku(sku);
+      setActiveCategory(sku.category);
+      setView("studio");
+    };
+
+    const onPopState = (event: PopStateEvent) => syncViewFromHistory(event.state);
+    window.addEventListener("popstate", onPopState);
+    if (!historyViewRestoredRef.current && skus.length > 0) {
+      historyViewRestoredRef.current = true;
+      syncViewFromHistory(window.history.state);
+    }
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [applySku, skus]);
 
   // ── Expected duration / viewer model ────────────────────────────────────
   const expectedDurationMs = useMemo(
@@ -575,18 +709,26 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   // STUDIO VIEW
   // ──────────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex min-h-screen flex-col bg-[#0f1728]">
+    <div className={embedded ? "relative flex h-full min-h-0 flex-col overflow-y-auto bg-[#08111f]" : "relative flex min-h-screen flex-col bg-[#08111f]"}>
+      <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden>
+        <div className="wf-ambient-orb absolute -left-40 top-10 h-[34rem] w-[34rem] rounded-full bg-cyan-500/[0.055] blur-[110px]" />
+        <div className="wf-ambient-orb absolute right-0 top-1/3 h-[30rem] w-[30rem] rounded-full bg-emerald-500/[0.045] blur-[120px] [animation-delay:-5s]" />
+      </div>
       {renderNav}
 
-      <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col px-4 py-6 lg:px-6 lg:py-8">
+      <div className="relative z-10 mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col px-4 py-5 lg:px-6 lg:py-7">
         {/* Two-column layout */}
-        <div className="grid flex-1 grid-cols-1 gap-4 lg:grid-cols-12 lg:items-stretch lg:gap-5">
+        <div
+          ref={studioColumnsRef}
+          className="flex min-h-0 flex-1 flex-col items-start gap-5 lg:flex-row lg:gap-0"
+          style={{ "--studio-left-width": `${studioSplitPercent}%` } as CSSProperties}
+        >
 
           {/* ── Left: form only ── */}
-          <aside className="min-w-0 max-w-full overflow-x-hidden lg:col-span-5">
+          <aside className="w-full min-w-0 max-w-full overflow-x-hidden lg:w-[var(--studio-left-width)] lg:flex-none">
 
             {/* Parameter form */}
-            <div className="min-w-0 max-w-full overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#152035] shadow-lg shadow-black/20 lg:h-full">
+            <div className="wf-panel-enter min-w-0 max-w-full overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#111d31]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-xl">
               {schema ? (
                 <DynamicForm
                   schema={schema}
@@ -601,7 +743,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     />
                   ) : null}
                   formFooter={
-                    <div className="space-y-4 border-t border-[#1e2d4a] pt-4">
+                    <div className="-mx-5 -mb-5 space-y-3 border-t border-white/[0.07] bg-[#0b1628]/75 px-5 pb-5 pt-4 lg:-mx-6 lg:-mb-6 lg:px-6 lg:pb-6">
                       {showErrors && Object.keys(errors).length > 0 && (
                         <div className="rounded-xl border border-red-500/25 bg-red-900/20 p-3.5 text-sm">
                           <p className="font-semibold text-red-400">{t.errFixFields}</p>
@@ -621,13 +763,13 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                         </div>
                       )}
 
-                      <div className="rounded-xl border border-[#2a3d5e] bg-[#12233c] px-3.5 py-3">
-                        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-200">
+                      <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] px-3.5 py-3 transition-colors hover:bg-white/[0.04]">
+                        <label className="flex cursor-pointer items-center gap-3 text-sm text-slate-300">
                           <input
                             type="checkbox"
                             checked={autoSaveToAssetLibrary}
                             onChange={(e) => setAutoSaveToAssetLibrary(e.target.checked)}
-                            className="h-4 w-4 rounded border-[#3a5070] bg-[#0f1728] text-emerald-500 focus:ring-emerald-500/30"
+                            className="h-4 w-4 rounded border-[#3a5070] bg-[#0f1728] text-emerald-500 focus:ring-2 focus:ring-emerald-500/30 focus:ring-offset-0"
                           />
                           {t.autoSaveToAssetToggle}
                         </label>
@@ -639,11 +781,11 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                         </div>
                       )}
 
-                      <div className="flex flex-wrap items-center gap-2.5">
+                      <div className="flex flex-wrap items-center gap-2.5 pt-1">
                         <button
                           type="submit"
                           disabled={isSubmitting || isPolling || hasImageUploadInFlight || !selectedSku || sessionStatus !== "authenticated"}
-                          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-emerald-500/20 transition-all hover:from-emerald-400 hover:to-teal-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+                          className="group relative inline-flex min-h-11 items-center gap-2 overflow-hidden rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 px-6 py-2.5 text-sm font-semibold text-white shadow-[0_12px_30px_-12px_rgba(16,185,129,0.7)] transition-all duration-300 hover:-translate-y-0.5 hover:brightness-110 hover:shadow-[0_16px_36px_-12px_rgba(16,185,129,0.8)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
                         >
                           {isSubmitting ? (
                             <>
@@ -667,7 +809,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                         <button
                           type="button"
                           onClick={() => { setShowErrors(false); setSubmitError(null); reset(); }}
-                          className="rounded-xl border border-[#3a5070] bg-[#1e3050] px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:border-[#4a6888] hover:bg-[#243860] hover:text-slate-100"
+                          className="min-h-11 rounded-xl border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-slate-300 transition-all duration-200 hover:border-white/[0.18] hover:bg-white/[0.075] hover:text-white active:scale-[0.98]"
                         >
                           {t.resetBtn}
                         </button>
@@ -675,7 +817,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                           <button
                             type="button"
                             onClick={handleRegenerate}
-                            className="rounded-xl border border-[#3a5070] bg-[#1e3050] px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:border-[#4a6888] hover:bg-[#243860] hover:text-slate-100"
+                            className="min-h-11 rounded-xl border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-slate-300 transition-all duration-200 hover:border-white/[0.18] hover:bg-white/[0.075] hover:text-white active:scale-[0.98]"
                           >
                             {t.closeTaskBtn}
                           </button>
@@ -697,18 +839,52 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
             </div>
           </aside>
 
+          <div
+            role="separator"
+            aria-label={locale === "en" ? "Resize parameter and result panels" : "调整参数面板与结果面板宽度"}
+            aria-orientation="vertical"
+            aria-valuemin={MIN_STUDIO_SPLIT_PERCENT}
+            aria-valuemax={MAX_STUDIO_SPLIT_PERCENT}
+            aria-valuenow={studioSplitPercent}
+            aria-valuetext={`${studioSplitPercent}%`}
+            tabIndex={0}
+            title={locale === "en" ? "Drag to resize; double-click to reset" : "拖动调整宽度，双击恢复默认"}
+            onPointerDown={handleSplitPointerDown}
+            onPointerMove={handleSplitPointerMove}
+            onPointerUp={handleSplitPointerEnd}
+            onPointerCancel={handleSplitPointerEnd}
+            onLostPointerCapture={finishStudioSplitResize}
+            onKeyDown={handleSplitKeyDown}
+            onDoubleClick={() => applyStudioSplit(DEFAULT_STUDIO_SPLIT_PERCENT, true)}
+            className="group relative hidden min-h-[560px] w-6 shrink-0 cursor-col-resize touch-none self-stretch outline-none lg:block"
+          >
+            <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 rounded-full bg-white/[0.06] transition-all duration-200 group-hover:w-0.5 group-hover:bg-emerald-400/55 group-focus-visible:w-0.5 group-focus-visible:bg-emerald-400/80 group-active:w-0.5 group-active:bg-emerald-300" />
+          </div>
+
           {/* ── Right: viewer + history ── */}
-          <div className="flex min-h-[min(640px,calc(100vh-8rem))] flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-xl shadow-black/25 lg:col-span-7 lg:h-full lg:min-h-[calc(100vh-7rem)]">
+          <div className="wf-panel-enter flex min-h-[560px] w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1 lg:max-h-[calc(100vh-2.5rem)]">
+            <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
+              <div className="flex items-center gap-2.5">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />
+                <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  {locale === "en" ? "Output stage" : "结果舞台"}
+                </span>
+              </div>
+              <span className="rounded-full border border-white/[0.07] bg-white/[0.035] px-2.5 py-1 text-[10px] font-medium text-slate-500">
+                {activeTaskId ? (locale === "en" ? "LIVE" : "任务中") : (locale === "en" ? "READY" : "待命")}
+              </span>
+            </div>
             <div className="flex-1">
               <TaskStatusViewer
                 model={displayViewerModel}
                 onRegenerate={handleRegenerate}
                 downloadFileName="workflow-studio.mp4"
                 className="h-full w-full"
+                compact={embedded}
               />
             </div>
             {cloudHistory.length > 0 && (
-              <div className="shrink-0 border-t border-[#1e2d4a] bg-[#0f1728]/80 px-2">
+              <div className="shrink-0 border-t border-white/[0.07] bg-[#08111f]/80 px-3">
                 <HistoryFilmstrip
                   history={cloudHistory}
                   activeId={viewingHistoryId}

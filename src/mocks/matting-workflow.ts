@@ -26,16 +26,14 @@ export const mattingWorkflowMock: WorkflowFormSchema = {
       id: "input",
       label: "上传图片",
       labelEn: "Upload Image",
-      description: "建议上传人物清晰、主体突出的图片，效果更佳。支持 JPG / PNG / WebP，不超过 20MB。",
-      descriptionEn: "For best results, upload an image with a clear subject. Supports JPG / PNG / WebP, max 20 MB.",
       children: [
         {
           kind: "imageUpload",
           id: "inputImage",
           label: "待处理图片",
           labelEn: "Image to Process",
-          description: "AI 将根据下方指令对此图进行处理。",
-          descriptionEn: "The AI will process this image according to the instruction below.",
+          description: "建议上传人物清晰、主体突出的图片，效果更佳。支持 JPG / PNG / WebP，不超过 20MB。AI 将根据下方指令对此图进行处理。",
+          descriptionEn: "For best results, upload an image with a clear subject. Supports JPG / PNG / WebP, max 20 MB. The AI will process this image according to the instruction below.",
           mapping: { nodeId: "1", inputPath: ["image"] },
           validation: {
             required: true,

@@ -25,12 +25,8 @@ export const gptImage2WorkflowMock: WorkflowFormSchema = {
     {
       kind: "group",
       id: "inputGroup",
-      label: "输入素材",
-      labelEn: "Input Material",
-      description:
-        "参考图为可选项：上传后将作为风格参考；不上传则纯文字生成。",
-      descriptionEn:
-        "Reference image is optional: when uploaded it guides the style; when omitted the model generates from text only.",
+      label: "",
+      labelEn: "",
       children: [
         {
           kind: "imageUpload",
@@ -53,8 +49,8 @@ export const gptImage2WorkflowMock: WorkflowFormSchema = {
     {
       kind: "group",
       id: "promptGroup",
-      label: "创作提示词",
-      labelEn: "Creative Prompt",
+      label: "",
+      labelEn: "",
       children: [
         {
           kind: "textInput",
@@ -78,8 +74,8 @@ export const gptImage2WorkflowMock: WorkflowFormSchema = {
     {
       kind: "group",
       id: "generationGroup",
-      label: "生成参数",
-      labelEn: "Generation Settings",
+      label: "",
+      labelEn: "",
       children: [
         {
           kind: "numberSlider",

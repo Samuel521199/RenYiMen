@@ -8,7 +8,6 @@ import { isPresignPayload } from "@/services/oss-upload";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
 import { useT } from "@/i18n";
-import { loc } from "@/components/WorkflowForm/DynamicForm";
 
 const HARD_MAX_IMAGES = 9;
 
@@ -61,13 +60,13 @@ function thumbUrl(item: MultiImageItemValue): string | null {
 }
 
 const addTileBase =
-  "flex aspect-square w-full flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-neutral-200 bg-neutral-50 text-neutral-500 transition hover:border-neutral-300 hover:bg-neutral-100";
+  "flex aspect-square w-full flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-white/[0.14] bg-[#091526]/75 text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:text-slate-300";
 
 /**
  * 多图参考上传：原生嵌套 `<label>` + `hidden` 的 `type=file"`；
  * 上传与 `uploadImageToOSS` 同源：`POST /api/upload/presign` + `PUT` 直传（本组件内联以便显式 `return publicUrl`）。
  */
-export function MultiImageUploadWidget({ field, error, value, onChange, locale = "zh" }: MultiImageUploadWidgetProps) {
+export function MultiImageUploadWidget({ field, error, value, onChange }: MultiImageUploadWidgetProps) {
   const [localUploading, setLocalUploading] = useState(false);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   const t = useT();
@@ -84,6 +83,14 @@ export function MultiImageUploadWidget({ field, error, value, onChange, locale =
   const canAddMore = items.length < maxItems;
   const accept = field.validation?.accept?.join(",") ?? "image/*";
   const isBusy = localUploading;
+  const visibleTileCount = items.length + (canAddMore ? 1 : 0);
+  const desktopGridColumns = visibleTileCount <= 1
+    ? "sm:grid-cols-[repeat(1,minmax(0,10.5rem))]"
+    : visibleTileCount === 2
+      ? "sm:grid-cols-[repeat(2,minmax(0,10.5rem))]"
+      : visibleTileCount === 3
+        ? "sm:grid-cols-[repeat(3,minmax(0,10.5rem))]"
+        : "sm:grid-cols-[repeat(3,minmax(0,10.5rem))] lg:grid-cols-[repeat(4,minmax(0,10.5rem))]";
 
   const handleFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -223,7 +230,7 @@ export function MultiImageUploadWidget({ field, error, value, onChange, locale =
         setLocalUploading(false);
       }
     },
-    [field.id, field.validation?.maxSizeMB, maxItems, onChange, value]
+    [field.id, field.validation?.maxSizeMB, field.validation?.minDimension, maxItems, onChange, value]
   );
 
   const handleAssetSelect = useCallback(
@@ -234,19 +241,18 @@ export function MultiImageUploadWidget({ field, error, value, onChange, locale =
   );
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
         <div
           className={[
-            "grid shrink-0 gap-2 [grid-auto-rows:minmax(5.5rem,auto)]",
-            "w-full min-w-[200px] max-w-[520px] sm:w-[min(100%,520px)]",
-            items.length <= 3 ? "grid-cols-3" : "grid-cols-3 sm:grid-cols-4",
+            "grid w-full shrink-0 grid-cols-2 gap-2 [grid-auto-rows:minmax(5.5rem,auto)] sm:w-fit",
+            desktopGridColumns,
           ].join(" ")}
         >
           {items.map((it) => {
             const url = thumbUrl(it);
-            const frameClass = `relative aspect-square w-full overflow-hidden rounded-lg border bg-neutral-50 ${
-              error ? "border-red-200" : "border-neutral-200"
+            const frameClass = `relative aspect-square w-full overflow-hidden rounded-xl border bg-[#091526] shadow-lg shadow-black/20 transition-transform duration-200 hover:-translate-y-0.5 ${
+              error ? "border-red-500/40" : "border-white/[0.1]"
             }`;
             return (
               <div key={it.id} className={frameClass}>
@@ -255,11 +261,11 @@ export function MultiImageUploadWidget({ field, error, value, onChange, locale =
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={url} alt="" className="h-full w-full object-cover opacity-50" draggable={false} />
                     <div
-                      className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-white/40 backdrop-blur-sm"
+                      className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-[#07111d]/70 backdrop-blur-sm"
                       aria-busy="true"
                     >
-                      <Loader2 className="h-6 w-6 animate-spin text-neutral-800" strokeWidth={2} />
-                      <span className="text-[10px] font-medium text-neutral-900">上传中</span>
+                      <Loader2 className="h-6 w-6 animate-spin text-emerald-300" strokeWidth={2} />
+                      <span className="text-[10px] font-medium text-slate-200">上传中</span>
                     </div>
                   </div>
                 ) : url && it.status === "error" ? (
@@ -274,7 +280,7 @@ export function MultiImageUploadWidget({ field, error, value, onChange, locale =
                   /* eslint-disable-next-line @next/next/no-img-element */
                   <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
                 ) : (
-                  <div className="flex h-full items-center justify-center text-[10px] text-neutral-400">无预览</div>
+                  <div className="flex h-full items-center justify-center text-[10px] text-slate-500">无预览</div>
                 )}
 
                 <button
@@ -330,24 +336,21 @@ export function MultiImageUploadWidget({ field, error, value, onChange, locale =
             <button
               type="button"
               onClick={() => setAssetPickerOpen(true)}
-              className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-700 transition hover:border-neutral-400 hover:bg-neutral-50"
+              className="rounded-xl border border-white/[0.1] bg-white/[0.025] px-3.5 py-2 text-xs font-medium text-slate-300 transition-all hover:border-white/[0.18] hover:bg-white/[0.055] hover:text-white"
             >
               {t.uploadFromAssetLibraryBtn}
             </button>
           )}
           {!canAddMore && (
-            <p className="text-xs text-neutral-500">已达上限（{maxItems} 张），请删除后再添加。</p>
+            <p className="text-xs text-slate-500">已达上限（{maxItems} 张），请删除后再添加。</p>
           )}
           {items.some((it) => it.status === "error") && (
-            <p className="text-xs text-amber-700">部分图片上传失败，可删除后重新添加。</p>
+            <p className="text-xs text-amber-400">部分图片上传失败，可删除后重新添加。</p>
           )}
         </div>
       </div>
 
-      {field.description && (
-        <p className="text-xs text-neutral-500">{loc(field.description, field.descriptionEn, locale)}</p>
-      )}
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {error && <p className="text-xs text-red-400">{error}</p>}
       <AssetLibraryPicker
         open={assetPickerOpen}
         onClose={() => setAssetPickerOpen(false)}

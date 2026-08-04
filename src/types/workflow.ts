@@ -131,6 +131,7 @@ export interface MultiImageUploadField extends WorkflowFieldBase {
 
 export interface TextInputField extends WorkflowFieldBase {
   kind: "textInput";
+  /** Legacy example copy. Text fields render this as a placeholder and initialize empty. */
   defaultValue?: string;
   /** true 时使用多行文本框 */
   multiline?: boolean;
@@ -143,6 +144,10 @@ export interface TextInputField extends WorkflowFieldBase {
 export interface NumberSliderField extends WorkflowFieldBase {
   kind: "numberSlider";
   defaultValue?: number;
+  /** Whether to render the minimum endpoint below the slider. Defaults to true. */
+  showMinLabel?: boolean;
+  /** Whether to render the maximum endpoint below the slider. Defaults to true. */
+  showMaxLabel?: boolean;
   validation: SliderValidation;
 }
 

@@ -8,7 +8,6 @@ import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
 import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
 import { useT } from "@/i18n";
-import { loc } from "@/components/WorkflowForm/DynamicForm";
 
 /**
  * 首帧 / 尾帧等「图片上传」控件（原虚线预览 + 选择图片区域，语义上即 ImageUploadPreview）。
@@ -24,7 +23,7 @@ export interface ImageUploadControlProps {
   locale?: "zh" | "en";
 }
 
-export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadControlProps) {
+export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
   const t = useT();
   const inputRef = useRef<HTMLInputElement>(null);
   const path = useWorkflowStore((s) => s.fieldPaths[field.id]);
@@ -73,8 +72,8 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
     [applyImageFromAsset, field.id],
   );
 
-  const dashedFrameClass = `relative flex h-[180px] w-[250px] shrink-0 items-center justify-center overflow-hidden rounded-lg border-2 border-dashed bg-[#1a2840] ${
-    error ? "border-red-500/50" : "border-[#2a3d5e]"
+  const dashedFrameClass = `relative flex h-[176px] w-full max-w-full shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 ${
+    error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:shadow-[0_0_0_1px_rgba(52,211,153,0.05),0_18px_45px_-30px_rgba(16,185,129,0.65)]"
   }`;
 
   /** 虚线框的点击行为随状态而变，但元素本身始终是 div，避免 div↔button 切换引发 insertBefore */
@@ -96,7 +95,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
 
   return (
     <div className="min-w-0 max-w-full space-y-2 overflow-hidden">
-      <div className="flex min-w-0 max-w-full flex-wrap items-start gap-3 overflow-hidden">
+      <div className="min-w-0 max-w-full space-y-3 overflow-hidden">
         {/* 始终渲染 div，仅切换内容，避免 React 协调时 div↔button 类型切换引发 insertBefore 崩溃 */}
         <div
           className={[
@@ -162,14 +161,16 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
               </div>
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center gap-2 px-3">
-              <Upload className="h-9 w-9 text-slate-600" strokeWidth={1.25} aria-hidden />
-              <span className="text-center text-xs text-slate-600">{t.uploadNoPreview}</span>
+            <div className="flex flex-col items-center justify-center gap-3 px-3">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.045] shadow-inner">
+                <Upload className="h-5 w-5 text-slate-400" strokeWidth={1.5} aria-hidden />
+              </span>
+              <span className="text-center text-xs font-medium text-slate-500">{t.uploadNoPreview}</span>
             </div>
           )}
         </div>
 
-        <div className="min-w-0 max-w-full flex-1 space-y-2 overflow-hidden">
+        <div className="min-w-0 max-w-full space-y-2 overflow-hidden">
           <input
             ref={inputRef}
             type="file"
@@ -186,7 +187,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
               type="button"
               disabled={v.status === "uploading"}
               onClick={triggerFilePick}
-              className="rounded-lg bg-emerald-600/90 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-xl bg-emerald-500/90 px-3.5 py-2 text-xs font-semibold text-white shadow-[0_8px_22px_-12px_rgba(16,185,129,0.8)] transition-all hover:-translate-y-0.5 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {v.status === "ready" ? t.uploadChangeBtn : t.uploadSelectBtn}
             </button>
@@ -194,7 +195,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
               type="button"
               disabled={v.status === "uploading"}
               onClick={() => setAssetPickerOpen(true)}
-              className="rounded-lg border border-[#2a3d5e] px-3 py-1.5 text-sm text-slate-300 transition-colors hover:border-[#3a5070] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-xl border border-white/[0.1] bg-white/[0.025] px-3.5 py-2 text-xs font-medium text-slate-300 transition-all hover:border-white/[0.18] hover:bg-white/[0.055] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t.uploadFromAssetLibraryBtn}
             </button>
@@ -204,9 +205,6 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
           )}
         </div>
       </div>
-      {field.description && (
-        <p className="break-words text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
-      )}
       {error && <p className="text-xs text-red-400">{error}</p>}
 
       <LightboxModal open={lightboxOpen} imageUrl={lightboxUrl} onClose={closeLightbox} />

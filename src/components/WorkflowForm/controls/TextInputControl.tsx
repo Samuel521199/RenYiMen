@@ -16,11 +16,14 @@ export function TextInputControl({ field, error, locale = "zh" }: TextInputContr
   const raw = useWorkflowStore((s) => (path ? getAtPath(s.parameters, path) : undefined));
   const setFieldValue = useWorkflowStore((s) => s.setFieldValue);
   const value = typeof raw === "string" ? raw : "";
-  const placeholder = loc(field.placeholder ?? "", field.placeholderEn, locale) || undefined;
-  const description = field.description ? loc(field.description, field.descriptionEn, locale) : undefined;
+  const placeholder = loc(
+    field.defaultValue || field.placeholder || "",
+    field.placeholderEn,
+    locale,
+  ) || undefined;
 
-  const className = `w-full rounded-lg border bg-[#1a2840] px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-emerald-500/40 ${
-    error ? "border-red-500/50" : "border-[#2a3d5e]"
+  const className = `w-full rounded-xl border bg-[#091526]/90 px-3.5 py-3 text-sm leading-relaxed text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] placeholder:text-slate-500 placeholder:opacity-80 outline-none transition-all duration-200 focus:border-emerald-400/55 focus:ring-4 focus:ring-emerald-500/10 ${
+    error ? "border-red-500/50" : "border-white/[0.1] hover:border-white/[0.16]"
   }`;
 
   return (
@@ -28,7 +31,7 @@ export function TextInputControl({ field, error, locale = "zh" }: TextInputContr
       {field.multiline ? (
         <textarea
           id={field.id}
-          rows={5}
+          rows={4}
           placeholder={placeholder}
           value={value}
           onChange={(e) => setFieldValue(field.id, e.target.value)}
@@ -44,7 +47,6 @@ export function TextInputControl({ field, error, locale = "zh" }: TextInputContr
           className={className}
         />
       )}
-      {description && <p className="text-xs text-slate-500">{description}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>
   );

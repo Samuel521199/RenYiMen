@@ -13,15 +13,14 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
   const t = useT();
   const { locale, toggleLocale } = useLanguage();
   const isWorkbench = pathname.startsWith("/workbench");
-  const isGeneralWorkspace =
-    pathname === "/workbench/dashboard" || pathname.startsWith("/workbench/tools");
+  const isGeneralWorkspace = pathname.startsWith("/workbench/tools");
 
   return (
     <div className="flex min-h-screen flex-col bg-[#0a0f1e] text-slate-100">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-[#0f1728]/95 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-4 px-4 sm:px-6">
           <Link
-            href="/workbench/dashboard"
+            href="/workbench/tools"
             className="inline-flex shrink-0 items-center gap-1.5 text-sm font-semibold tracking-wide text-white"
           >
             <span aria-hidden className="text-indigo-300">
@@ -33,7 +32,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
           {isWorkbench && (
             <nav aria-label={t.workspaceSwitchLabel} className="flex items-center gap-2">
               <Link
-                href="/workbench/dashboard"
+                href="/workbench/tools"
                 className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
                   isGeneralWorkspace
                     ? "border-indigo-400/50 bg-indigo-500/20 text-indigo-100"

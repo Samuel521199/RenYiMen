@@ -38,6 +38,8 @@ export interface TaskStatusViewerProps {
   /** 下载时建议文件名（图片经 Canvas 另存；视频经同源代理拉流后以 Blob 触发保存） */
   downloadFileName?: string;
   className?: string;
+  /** 嵌入工作台时由父容器控制高度，避免重复叠加视口最小高度。 */
+  compact?: boolean;
 }
 
 /**
@@ -52,18 +54,21 @@ export function TaskStatusViewer({
   onRegenerate,
   downloadFileName = "generated-video.mp4",
   className = "",
+  compact = false,
 }: TaskStatusViewerProps) {
   if (model == null) {
     return (
       <section
         className={cn(
-          "relative isolate min-h-[600px] overflow-hidden rounded-2xl border border-zinc-700/45 shadow-md lg:min-h-[calc(100vh-10rem)]",
+          compact
+            ? "relative isolate h-full min-h-[510px] overflow-hidden border-0 shadow-none lg:min-h-0"
+            : "relative isolate min-h-[600px] overflow-hidden rounded-2xl border border-zinc-700/45 shadow-md lg:min-h-[calc(100vh-10rem)]",
           className
         )}
         aria-live="polite"
         aria-label="artboard"
       >
-        <IdleArtboard />
+        <IdleArtboard compact={compact} />
       </section>
     );
   }
@@ -75,7 +80,9 @@ export function TaskStatusViewer({
   return (
     <section
       className={cn(
-        "relative isolate flex min-h-[600px] flex-1 flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-sm lg:min-h-[calc(100vh-10rem)]",
+        compact
+          ? "relative isolate flex h-full min-h-[510px] flex-1 flex-col overflow-hidden border-0 bg-[#07111d] shadow-none lg:min-h-0"
+          : "relative isolate flex min-h-[600px] flex-1 flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-sm lg:min-h-[calc(100vh-10rem)]",
         className
       )}
       aria-live="polite"
@@ -84,7 +91,10 @@ export function TaskStatusViewer({
         子层均为 absolute：若此处 min-height 过小，画板会被压成一条带并被 section 的 overflow-hidden 裁切。
         使用与视口相关的 min-height，保证成功态图片有足够纵向空间做 object-contain 预览。
       */}
-      <div className="relative min-h-[min(64vh,640px)] w-full flex-1 p-6 lg:min-h-[calc(100vh-11rem)]">
+      <div className={compact
+        ? "relative min-h-[510px] w-full flex-1 p-4 lg:min-h-0"
+        : "relative min-h-[min(64vh,640px)] w-full flex-1 p-6 lg:min-h-[calc(100vh-11rem)]"
+      }>
         <LoadingLayer
           active={loadingActive}
           model={model}
@@ -108,32 +118,41 @@ export function TaskStatusViewer({
   );
 }
 
-function IdleArtboard() {
+function IdleArtboard({ compact = false }: { compact?: boolean }) {
   const t = useT();
   return (
-    <div className="relative flex min-h-[600px] flex-1 flex-col lg:min-h-[calc(100vh-10rem)]">
-      <div className="pointer-events-none absolute inset-0 bg-[#060a10]" aria-hidden />
+    <div className={compact
+      ? "relative flex h-full min-h-[510px] flex-1 flex-col lg:min-h-0"
+      : "relative flex min-h-[600px] flex-1 flex-col lg:min-h-[calc(100vh-10rem)]"
+    }>
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(145deg,#050b13_0%,#07111d_48%,#06101a_100%)]" aria-hidden />
       <div
-        className="pointer-events-none absolute inset-0 opacity-[0.42]"
+        className="pointer-events-none absolute inset-0 opacity-[0.22] [mask-image:radial-gradient(ellipse_at_center,black_20%,transparent_76%)]"
         style={ARTBOARD_GRID_STYLE}
         aria-hidden
       />
       <div
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_75%_55%_at_50%_42%,transparent_0%,rgba(0,0,0,0.55)_100%)]"
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(16,185,129,0.08),transparent_30%),radial-gradient(ellipse_75%_55%_at_50%_42%,transparent_0%,rgba(0,0,0,0.6)_100%)]"
         aria-hidden
       />
-      <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-5 px-6 py-16 text-center">
-        <Sparkles
-          className="h-20 w-20 text-sky-400/30 drop-shadow-[0_0_28px_rgba(56,189,248,0.2)]"
-          strokeWidth={1}
-          aria-hidden
-        />
-        <p className="max-w-sm text-sm font-medium tracking-wide text-slate-400/90">
+      <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-6 px-6 py-16 text-center">
+        <div className="wf-stage-orb relative flex h-24 w-24 items-center justify-center rounded-full border border-emerald-300/15 bg-emerald-400/[0.035] shadow-[0_0_60px_rgba(16,185,129,0.12)]">
+          <div className="absolute inset-2 rounded-full border border-dashed border-cyan-300/15" />
+          <div className="absolute inset-5 rounded-full border border-white/[0.06]" />
+          <Sparkles
+            className="h-9 w-9 text-cyan-300/55 drop-shadow-[0_0_20px_rgba(34,211,238,0.35)]"
+            strokeWidth={1.25}
+            aria-hidden
+          />
+        </div>
+        <div className="space-y-2.5">
+        <p className="max-w-sm text-sm font-medium tracking-wide text-slate-300/90">
           {t.idleWaiting}
         </p>
         <p className="max-w-xs text-xs leading-relaxed text-slate-600">
           {t.idleHint}
         </p>
+        </div>
       </div>
     </div>
   );
@@ -141,8 +160,8 @@ function IdleArtboard() {
 
 function layerClass(active: boolean) {
   return cn(
-    "absolute inset-0 flex flex-col p-6 transition-all duration-300 ease-out",
-    active ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0"
+    "absolute inset-0 flex flex-col p-6 transition-all duration-500 ease-out",
+    active ? "z-10 translate-y-0 scale-100 opacity-100" : "pointer-events-none z-0 translate-y-2 scale-[0.995] opacity-0"
   );
 }
 
