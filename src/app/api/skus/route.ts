@@ -137,6 +137,21 @@ const CATALOG: SkuDefinition[] = [
     sellCredits: 30,
     uiSchema: storyboardWorkflowMock,
   },
+  {
+    skuId: "CHARACTER_TURNAROUND",
+    providerCode: "VIDEO_ORCHESTRATOR",
+    category: "image",
+    cover: "/covers/character-turnaround.webp",
+    displayName: "人物三视图",
+    displayNameEn: "Character Turnaround",
+    description:
+      "上传一张人物身份参考图，依次生成并审核正面、侧面和背面三张独立全身设定图。侧面继承已批准正面，背面继承已批准侧面，避免身份漂移。",
+    descriptionEn:
+      "Upload one identity reference to generate three separate full-body views: front, side, and back. Each derived view waits for the previous approved view to preserve identity.",
+    sellCredits: 0,
+    href: "/workbench/tools/character-turnaround",
+    uiSchema: textToImageWorkflowMock,
+  },
   // ── 视频 / Video ─────────────────────────────────────────────────
   {
     skuId: "ONE_PROMPT_30S_VIDEO",

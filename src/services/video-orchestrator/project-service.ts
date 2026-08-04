@@ -40,7 +40,7 @@ import { errorForLog, logOnePromptVideo, withOnePromptVideoLogContext } from "./
 import { composeVideoClipsLocally } from "./local-compose";
 import { isTemporaryDashScopeUrl, persistRemoteMediaToOss } from "./oss-media";
 import { appendProjectStageLog, writeProjectOverviewLog, writeScriptBreakdownLog, writeStageErrorLog } from "./stage-logger";
-import type { ArtifactMetadata, CameraRelation, CreateVideoProjectInput, DeferredVideoQualityCheck, FinalTransitionPlan, GeneratedBridgeArtifact, GenerationQualityReport, ImageRepairDecision, ImageRepairMode, OnePromptVideoPlan, PlanVideoProjectInput, PromptDebugArtifact, ReferenceSelectionOutput, RollbackVideoMediaInput, SegmentRenderDescription, TransitionReferenceArtifact, TransitionReferenceFrameCandidate, UpdateShotInput, VideoAssetCategory, VideoAssetLibrary, VideoAssetLibraryItem, VideoAssetView, VideoAudioPlan, VideoBoundaryContract, VideoChronologyMode, VideoConsistencyAnchor, VideoConsistencyReference, VideoCreativeCategory, VideoCreativeTemplateId, VideoHookMode, VideoHookRevealLevel, VideoMediaConditionedSegmentPlan, VideoMediaRevision, VideoMicroShot, VideoObservedBoundaryFacts } from "./types";
+import type { ArtifactMetadata, CameraRelation, CreateCharacterTurnaroundInput, CreateVideoProjectInput, DeferredVideoQualityCheck, FinalTransitionPlan, GeneratedBridgeArtifact, GenerationQualityReport, ImageRepairDecision, ImageRepairMode, OnePromptVideoPlan, PlanVideoProjectInput, PromptDebugArtifact, ReferenceSelectionOutput, RollbackVideoMediaInput, SegmentRenderDescription, TransitionReferenceArtifact, TransitionReferenceFrameCandidate, UpdateShotInput, VideoAssetCategory, VideoAssetLibrary, VideoAssetLibraryItem, VideoAssetView, VideoAudioPlan, VideoBoundaryContract, VideoChronologyMode, VideoConsistencyAnchor, VideoConsistencyReference, VideoCreativeCategory, VideoCreativeTemplateId, VideoHookMode, VideoHookRevealLevel, VideoMediaConditionedSegmentPlan, VideoMediaRevision, VideoMicroShot, VideoObservedBoundaryFacts } from "./types";
 import { detectReferenceOrientation, referenceRecencyScore, referenceViewMatchScore, selectReferenceCandidates, type ReferenceOrientation, type SelectableReferenceCandidate, REFERENCE_SELECTION_POLICY_VERSION } from "./reference-selector";
 import { enrichReferenceCandidatesWithVision } from "./reference-vision-evaluator";
 import { readCameraGraph, resolveCameraInheritanceContext } from "./camera-graph";
@@ -406,6 +406,7 @@ const DEMO_PROJECT_SOURCE_IDS = ["cmrlwfpz10001tvu4g80aou8c", "cmrlur1ue0001tvw4
 const DEMO_PROJECT_PROMPT = "Create a 30s game ad with strong visual polish and consistent characters throughout.";
 const DEMO_PROJECT_FINAL_VIDEO_URL = "/demo/tongits/final.mp4";
 const ONE_PROMPT_VIDEO_COST_CREDITS = 5000;
+const CHARACTER_TURNAROUND_STYLE_PRESET = "character-turnaround";
 const MANUAL_STOP_MESSAGE = "Generation stopped by user";
 const CLIP_CONTINUITY_REPORT_MISSING_ERROR = "Clip has no passed end-frame continuity report; visual continuity evaluation is required.";
 
@@ -493,13 +494,13 @@ export function serializeVideoProject(project: VideoProjectRecord) {
     && node.type !== "review_gate"
     && !node.id.startsWith("cancelled:")
   );
-  const productionProjection = computeProjectProductionProjection({
+  const productionProjection = normalizeCharacterTurnaroundProductionProjection(project, computeProjectProductionProjection({
     jobs: project.productionJobs,
     taskGraphNodes: taskGraph.nodes,
     completedArtifactCount: activeTaskNodes.filter((node) => node.status === "completed").length,
     totalArtifactCount: activeTaskNodes.length,
     finalVideoReady: Boolean(project.finalVideoUrl),
-  });
+  }));
   const projectedTaskGraph = {
     ...taskGraph,
     recoveryAction:
@@ -2946,10 +2947,18 @@ function ensureProjectAssetLibrary(plan: OnePromptVideoPlan, input: PlanVideoPro
         descriptionZh: anchor.descriptionZh,
         descriptionEn: anchor.descriptionEn,
         required: true,
-        sourceView: category === "person" && view !== "front" ? "front" : undefined,
-        sourceArtifactId: category === "person" && view !== "front" ? `${anchor.id || category}:front` : undefined,
+        sourceView: category === "person" && view === "side" ? "front" : category === "person" && view === "back" ? "side" : undefined,
+        sourceArtifactId: category === "person" && view === "side"
+          ? `${anchor.id || category}:front`
+          : category === "person" && view === "back"
+            ? `${anchor.id || category}:side`
+            : undefined,
         orientation: category === "person" && (view === "front" || view === "side" || view === "back") ? view : "unknown",
-        viewGenerationMode: category === "person" && view !== "front" ? "derived_from_front" : "primary",
+        viewGenerationMode: category === "person" && view === "side"
+          ? "derived_from_front"
+          : category === "person" && view === "back"
+            ? "derived_from_side"
+            : "primary",
       };
       items.push(item);
       references.push(buildAssetConsistencyReference({
@@ -4602,6 +4611,21 @@ export async function listVideoProjects(userId: string): Promise<VideoProjectRec
   return projects;
 }
 
+export async function listCharacterTurnaroundProjects(userId: string): Promise<VideoProjectRecord[]> {
+  const projects = await prisma.videoProject.findMany({
+    where: { userId, stylePreset: CHARACTER_TURNAROUND_STYLE_PRESET },
+    include: PROJECT_INCLUDE,
+    orderBy: { updatedAt: "desc" },
+    take: 12,
+  });
+  return Promise.all(projects.map(async (project) => ({
+    ...project,
+    planJson: await readArtifactPlan(project.id, {
+      allowMissing: !project.planJson,
+    }).catch(() => project.planJson),
+  } as VideoProjectRecord)));
+}
+
 async function ensureDemoVideoProject(userId: string): Promise<VideoProjectRecord | null> {
   const existing = await prisma.videoProject.findFirst({
     where: { userId },
@@ -5117,6 +5141,122 @@ export async function createVideoProject(
   });
   await commitArtifactPlan(project.id, {});
   return requireVideoProject(userId, project.id);
+}
+
+export async function createCharacterTurnaroundProject(
+  userId: string,
+  input: CreateCharacterTurnaroundInput,
+): Promise<VideoProjectRecord> {
+  const referenceImageUrl = input.referenceImageUrl?.trim();
+  if (!referenceImageUrl) throw new Error("请先上传人物身份参考图");
+  const characterDescription = input.characterDescription?.trim()
+    || "Preserve the exact identity, face, hairstyle, body proportions, outfit, materials, colors, and accessories from the uploaded identity reference.";
+  const title = input.title?.trim().slice(0, 80) || "人物三视图";
+  const aspectRatio = input.aspectRatio === "1:1" || input.aspectRatio === "16:9"
+    ? input.aspectRatio
+    : "9:16";
+  const anchor: VideoConsistencyAnchor = normalizeAnchorSemantics({
+    id: "turnaround-character",
+    type: "person",
+    displayNameZh: "人物",
+    displayNameEn: "Character",
+    mustStayConsistent: true,
+    needsReferenceImage: true,
+    referenceStrength: "hard",
+    descriptionZh: characterDescription,
+    descriptionEn: characterDescription,
+    imagePromptZh: characterDescription,
+    imagePromptEn: characterDescription,
+    appliesTo: ["keyframes"],
+    userEditable: true,
+    status: "approved",
+    assetImageContract: {
+      subjectCount: 1,
+      subjectDescription: characterDescription,
+      composition: {
+        framing: "full body",
+        cameraAngle: "eye level",
+        placement: "centered",
+        occupancy: "the complete character remains visible from head to feet",
+      },
+      environment: { background: "plain white or light neutral studio background" },
+      renderingStyle: {
+        medium: "match the uploaded identity reference exactly",
+        authority: "user_reference",
+        forbiddenDrift: ["identity drift", "style drift", "outfit redesign"],
+      },
+      forbiddenElements: ["multiple characters", "multiple views", "collage", "text", "logo", "watermark", "interface"],
+      acceptanceCriteria: ["one character only", "full body visible", "identity matches the uploaded source"],
+    },
+  });
+  const basePlan: OnePromptVideoPlan = {
+    workflowKind: "character_turnaround",
+    title,
+    logline: characterDescription,
+    durationSeconds: 0,
+    aspectRatio,
+    keyframeCount: 0,
+    segmentCount: 0,
+    styleBible: {
+      visualStyle: "Match the uploaded identity reference exactly",
+      characterLock: characterDescription,
+      colorPalette: "Match the uploaded identity reference exactly",
+      negativePrompt: "identity drift, different person, different outfit, multiple characters, multiple views, collage, split screen, cropped feet, cropped head, text, logo, watermark, interface, scenery",
+      negativePromptZh: "身份漂移，不同人物，不同服装，多个人物，多视图，拼图，分屏，脚部裁切，头部裁切，文字，标志，水印，界面，复杂场景",
+      negativePromptEn: "identity drift, different person, different outfit, multiple characters, multiple views, collage, split screen, cropped feet, cropped head, text, logo, watermark, interface, scenery",
+    },
+    consistencyManifest: { anchors: [anchor] },
+    assetLibrary: { items: [] },
+    consistencyReferences: [],
+    keyframes: [],
+    segments: [],
+  };
+  const plan = ensureProjectAssetLibrary(basePlan, {
+    userPrompt: characterDescription,
+    aspectRatio,
+    durationSeconds: 0,
+    stylePreset: CHARACTER_TURNAROUND_STYLE_PRESET,
+    referenceImageUrls: [referenceImageUrl],
+  });
+  ensurePlanArtifactMetadata(plan as unknown as Record<string, unknown>);
+  const references = plan.consistencyReferences ?? [];
+  const frontReference = references.find((reference) => reference.assetView === "front");
+  if (!frontReference || references.length !== 3) {
+    throw new Error("人物三视图计划创建失败：正面、侧面、背面合同不完整");
+  }
+
+  const created = await prisma.$transaction(async (tx) => {
+    const project = await tx.videoProject.create({
+      data: {
+        userId,
+        status: VideoProjectStatus.IMAGE_GENERATING,
+        title,
+        userPrompt: characterDescription,
+        referenceImageUrls: [referenceImageUrl],
+        aspectRatio,
+        durationSeconds: 0,
+        stylePreset: CHARACTER_TURNAROUND_STYLE_PRESET,
+      },
+    });
+    await tx.videoKeyframe.createMany({
+      data: references.map((reference) => ({
+        projectId: project.id,
+        keyframeNo: reference.keyframeNo,
+        timeSeconds: 0,
+        status: reference.assetView === "front" ? VideoShotStatus.IMAGE_PENDING : VideoShotStatus.SCRIPT_READY,
+        purpose: reference.purpose,
+        scene: reference.scene,
+        characterState: reference.characterState,
+        productState: reference.productState,
+        imagePrompt: reference.imagePromptEn ?? reference.imagePrompt,
+        negativePrompt: reference.negativePromptEn ?? reference.negativePrompt,
+      })),
+    });
+    return project;
+  });
+  await commitArtifactPlan(created.id, plan as unknown as Prisma.JsonValue);
+  await queueNextImageTask(userId, created.id, "character_turnaround.front");
+  return requireVideoProject(userId, created.id);
 }
 
 export async function getVideoProject(
@@ -6232,7 +6372,6 @@ async function updateVideoEntity(
 ): Promise<VideoProjectRecord> {
   const project = await requireVideoProject(userId, projectId);
   const shotId = entityId;
-  let approvedFrontKeyframeNo: number | undefined;
   let unlockedParentKeyframeNo: number | undefined;
   let changedAssetApproval: { keyframeNo: number; approved: boolean } | undefined;
   let removedMicroShotArtifactIds: string[] = [];
@@ -6324,9 +6463,6 @@ async function updateVideoEntity(
             approved: input.locked,
           };
         }
-        if (input.locked && keyframe.keyframeNo < 0 && readPlanShotString(reference, ["assetView", "asset_view"]) === "front") {
-          approvedFrontKeyframeNo = keyframe.keyframeNo;
-        }
         if (!input.locked && keyframe.keyframeNo >= 0) unlockedParentKeyframeNo = keyframe.keyframeNo;
       }
       if (Object.keys(data).length) {
@@ -6405,7 +6541,7 @@ async function updateVideoEntity(
       });
     }
 
-    const hasReadyDerivedViews = approvedFrontKeyframeNo !== undefined && updatedProject.keyframes.some((keyframe) =>
+    const hasReadyDerivedViews = changedAssetApproval.approved && updatedProject.keyframes.some((keyframe) =>
       keyframe.keyframeNo < 0 && !keyframe.imageUrl && isAssetViewGenerationReady(updatedProject, keyframe.keyframeNo)
     );
     if (hasReadyDerivedViews || dependencyReadyBoundaryNos.length) {
@@ -6421,6 +6557,16 @@ async function updateVideoEntity(
           ? "asset_library.asset_approved"
           : "asset_library.asset_unlocked",
       );
+    }
+    if (
+      isCharacterTurnaroundProject(updatedProject.planJson)
+      && updatedProject.keyframes.filter((keyframe) => keyframe.keyframeNo < 0).every(isApprovedConsistencyReference)
+    ) {
+      updatedProject = await prisma.videoProject.update({
+        where: { id: projectId },
+        data: { status: VideoProjectStatus.DONE, errorMessage: null },
+        include: PROJECT_INCLUDE,
+      });
     }
   }
   return updatedProject;
@@ -7172,6 +7318,14 @@ async function regenerateKeyframeImageInternal(
   const keyframe = project.keyframes.find((item) => item.id === shotId) ??
     (segment ? project.keyframes.find((item) => item.keyframeNo === segment.startKeyframeNo) : undefined);
   if (!keyframe) throw new Error("Keyframe not found");
+  if (isConsistencyKeyframeNo(keyframe.keyframeNo) && !isAssetViewGenerationReady(project, keyframe.keyframeNo)) {
+    const target = readPlanConsistencyReferenceMap(project.planJson).get(keyframe.keyframeNo);
+    const view = readPlanShotString(target, ["assetView", "asset_view"]);
+    const required = requiredApprovedAssetViewsForTarget(view).at(-1);
+    throw new Error(required === "side"
+      ? "背面图生成已阻止：请先批准并锁定侧面图"
+      : "侧面图生成已阻止：请先批准并锁定正面图");
+  }
   if (!options.executeInline) {
     const revision = stableShortHash(JSON.stringify({
       keyframeId: keyframe.id,
@@ -9520,13 +9674,55 @@ export async function projectProductionProjection(projectId: string) {
     && node.type !== "review_gate"
     && !node.id.startsWith("cancelled:")
   );
-  return computeProjectProductionProjection({
+  return normalizeCharacterTurnaroundProductionProjection(project, computeProjectProductionProjection({
     jobs: project.productionJobs,
     taskGraphNodes: taskGraph.nodes,
     completedArtifactCount: artifactNodes.filter((node) => node.status === "completed").length,
     totalArtifactCount: artifactNodes.length,
     finalVideoReady: Boolean(project.finalVideoUrl),
-  });
+  }));
+}
+
+function normalizeCharacterTurnaroundProductionProjection(
+  project: VideoProjectRecord,
+  projection: ReturnType<typeof computeProjectProductionProjection>,
+): ReturnType<typeof computeProjectProductionProjection> {
+  if (!isCharacterTurnaroundProject(project.planJson)) return projection;
+  const assetFrames = project.keyframes.filter((keyframe) =>
+    isConsistencyKeyframeNo(keyframe.keyframeNo)
+  );
+  const allApproved = assetFrames.length === 3 && assetFrames.every((keyframe) =>
+    Boolean(keyframe.imageUrl)
+    && (keyframe.locked || keyframe.status === VideoShotStatus.IMAGE_APPROVED)
+  );
+  if (allApproved) {
+    return {
+      ...projection,
+      status: "DONE",
+      source: "task_graph",
+      errorCode: undefined,
+      errorMessage: undefined,
+      recoveryAction: undefined,
+      frontierNodeId: undefined,
+    };
+  }
+  const awaitingAssetApproval = assetFrames.some((keyframe) =>
+    Boolean(keyframe.imageUrl)
+    && !keyframe.locked
+    && keyframe.status !== VideoShotStatus.IMAGE_APPROVED
+  );
+  if (awaitingAssetApproval && projection.status === "STATE_INVARIANT_VIOLATION") {
+    return {
+      ...projection,
+      status: "IMAGE_REVIEW",
+      source: "review_gate",
+      errorCode: undefined,
+      errorMessage: undefined,
+      recoveryAction: undefined,
+      frontierNodeId: undefined,
+    };
+  }
+  return projection;
 }
 
 async function persistProjectProductionProjection(projectId: string): Promise<void> {
@@ -14123,7 +14319,20 @@ function isApprovedConsistencyReference(keyframe: Pick<VideoProjectRecord["keyfr
 function assetGenerationPriority(planJson: Prisma.JsonValue | null, keyframeNo: number): number {
   if (!isConsistencyKeyframeNo(keyframeNo)) return 2;
   const reference = readPlanConsistencyReferenceMap(planJson).get(keyframeNo);
-  return readPlanShotString(reference, ["viewGenerationMode", "view_generation_mode"]) === "derived_from_front" ? 1 : 0;
+  const assetView = readPlanShotString(reference, ["assetView", "asset_view"]);
+  if (assetView === "back") return 2;
+  if (assetView === "side") return 1;
+  return 0;
+}
+
+function isCharacterTurnaroundProject(planJson: Prisma.JsonValue | null): boolean {
+  return readPlanShotString(planRecord(planJson), ["workflowKind", "workflow_kind"]) === "character_turnaround";
+}
+
+export function requiredApprovedAssetViewsForTarget(assetView: string | undefined): Array<"front" | "side"> {
+  if (assetView === "side") return ["front"];
+  if (assetView === "back") return ["front", "side"];
+  return [];
 }
 
 function isAssetViewGenerationReady(
@@ -14134,15 +14343,18 @@ function isAssetViewGenerationReady(
   const referenceMap = readPlanConsistencyReferenceMap(project.planJson);
   const reference = referenceMap.get(keyframeNo);
   const assetView = readPlanShotString(reference, ["assetView", "asset_view"]);
-  const derivedFromFront = readPlanShotString(reference, ["viewGenerationMode", "view_generation_mode"]) === "derived_from_front" || assetView === "side" || assetView === "back";
-  if (!derivedFromFront) return true;
+  const requiredViews = requiredApprovedAssetViewsForTarget(assetView);
+  if (!requiredViews.length) return true;
   const anchorId = anchorIdForConsistencyReference(reference);
-  const frontReferenceEntry = [...referenceMap.entries()].find(([, candidate]) =>
-    anchorIdForConsistencyReference(candidate) === anchorId && readPlanShotString(candidate, ["assetView", "asset_view"]) === "front"
-  );
-  if (!frontReferenceEntry) return false;
-  const frontKeyframe = project.keyframes.find((candidate) => candidate.keyframeNo === frontReferenceEntry[0]);
-  return Boolean(frontKeyframe && isApprovedConsistencyReference(frontKeyframe));
+  return requiredViews.every((requiredView) => {
+    const entry = [...referenceMap.entries()].find(([, candidate]) =>
+      anchorIdForConsistencyReference(candidate) === anchorId
+      && readPlanShotString(candidate, ["assetView", "asset_view"]) === requiredView
+    );
+    if (!entry) return false;
+    const keyframe = project.keyframes.find((candidate) => candidate.keyframeNo === entry[0]);
+    return Boolean(keyframe && isApprovedConsistencyReference(keyframe));
+  });
 }
 
 function consistencyReferenceImageUrls(
@@ -14191,12 +14403,29 @@ async function selectReferenceImagesForKeyframe(
     const targetIsPersonAsset =
       dependencyScope.assetCategory === "person"
       || targetConsistencyKind === "character";
-    const derivedFromFront = readPlanShotString(planKeyframe, ["viewGenerationMode", "view_generation_mode"]) === "derived_from_front" || targetView === "side" || targetView === "back";
+    const requiredSourceViews = requiredApprovedAssetViewsForTarget(targetView);
+    const closestSourceView = requiredSourceViews.at(-1);
     candidates = candidates.filter((candidate) =>
       candidate.sourceType === "user_upload" ||
       candidate.sourceType === "style_brand" ||
-      (derivedFromFront && candidate.sourceType === "hard_anchor" && candidate.anchorId === targetAnchorId && candidate.assetView === "front")
+      (requiredSourceViews.length > 0
+        && candidate.sourceType === "hard_anchor"
+        && candidate.anchorId === targetAnchorId
+        && requiredSourceViews.includes(candidate.assetView as "front" | "side"))
     ).map((candidate) => {
+      if (candidate.sourceType === "hard_anchor") {
+        const isClosestSource = candidate.assetView === closestSourceView;
+        return {
+          ...candidate,
+          hardRequired: isClosestSource,
+          relevanceScore: isClosestSource ? 1 : Math.max(candidate.relevanceScore, 0.82),
+          conflictScore: isClosestSource ? 0 : candidate.conflictScore,
+          viewMatchScore: isClosestSource ? 0.98 : candidate.viewMatchScore,
+          usageNote: isClosestSource
+            ? `Required approved ${closestSourceView} view for ${targetView} view derivation.`
+            : candidate.usageNote,
+        };
+      }
       if (candidate.sourceType !== "user_upload") return candidate;
       if (targetIsPersonAsset) {
         return {
@@ -14218,8 +14447,11 @@ async function selectReferenceImagesForKeyframe(
         usageNote: `STYLE-ONLY reference for isolated asset ${targetAnchorId || targetArtifactId}. Inherit rendering medium, palette, and line treatment only. Do not copy unrelated subjects, scenery, props, text, logo, or UI.`,
       };
     });
-    if (derivedFromFront && !candidates.some((candidate) => candidate.sourceType === "hard_anchor" && candidate.assetView === "front")) {
-      throw new Error(`Person ${targetView || "derived"} view requires an approved front reference before generation`);
+    const missingSourceView = requiredSourceViews.find((requiredView) =>
+      !candidates.some((candidate) => candidate.sourceType === "hard_anchor" && candidate.assetView === requiredView)
+    );
+    if (missingSourceView) {
+      throw new Error(`Person ${targetView || "derived"} view requires an approved ${missingSourceView} reference before generation`);
     }
     const enriched = await enrichReferenceCandidatesWithVision({ candidates, targetOrientation, targetPrompt: finalTextPrompt, targetArtifactId });
     const result = buildReferenceSelectionOutput({
@@ -14230,6 +14462,27 @@ async function selectReferenceImagesForKeyframe(
       finalTextPrompt,
       missingHardAnchorWarnings: enriched.warnings,
     });
+    if (targetView === "back") {
+      const approvedFront = result.output.candidates.find((candidate) =>
+        candidate.sourceType === "hard_anchor"
+        && candidate.anchorId === targetAnchorId
+        && candidate.assetView === "front"
+      );
+      if (approvedFront?.url && !result.output.selectedArtifactIds.includes(approvedFront.artifactId)) {
+        result.urls = uniqueStrings([...result.urls, approvedFront.url]);
+        result.output.selectedArtifactIds = uniqueStrings([...result.output.selectedArtifactIds, approvedFront.artifactId]);
+        result.output.selectedReferenceUrls = result.urls;
+        result.output.usageNotes = uniqueStrings([
+          ...(result.output.usageNotes ?? []),
+          "Approved front view retained as direct identity evidence for back-view generation.",
+        ]);
+        result.output.candidates = result.output.candidates.map((candidate) =>
+          candidate.artifactId === approvedFront.artifactId
+            ? { ...candidate, selected: true, rejectionReason: undefined }
+            : candidate
+        );
+      }
+    }
     assertPlanValidForGeneration(project.planJson, { stage: "keyframe_generation", targetArtifactId });
     return result;
   }

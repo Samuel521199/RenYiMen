@@ -8,6 +8,7 @@ import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
 import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
 import { useT } from "@/i18n";
+import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
 
 /**
  * 首帧 / 尾帧等「图片上传」控件（原虚线预览 + 选择图片区域，语义上即 ImageUploadPreview）。
@@ -44,6 +45,15 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
     inputRef.current?.click();
   }, []);
 
+  const handleFiles = useCallback((files: File[]) => {
+    const file = files[0];
+    if (file) void applyImageFile(field.id, file);
+  }, [applyImageFile, field.id]);
+  const { isDragging, dropZoneProps } = useFileDrop({
+    disabled: v.status === "uploading",
+    onFiles: handleFiles,
+  });
+
   /** 优先使用本地 blob（`previewUrl`），不把下游用的 `remoteUrl` 当作缩略图，避免与所选文件不一致。 */
   const displayUrl =
     v.previewUrl && (v.status === "uploading" || v.status === "ready" || v.status === "error")
@@ -73,7 +83,7 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
   );
 
   const dashedFrameClass = `relative flex h-[176px] w-full max-w-full shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 ${
-    error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:shadow-[0_0_0_1px_rgba(52,211,153,0.05),0_18px_45px_-30px_rgba(16,185,129,0.65)]"
+    isDragging ? "border-emerald-400 bg-emerald-400/10" : error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:shadow-[0_0_0_1px_rgba(52,211,153,0.05),0_18px_45px_-30px_rgba(16,185,129,0.65)]"
   }`;
 
   /** 虚线框的点击行为随状态而变，但元素本身始终是 div，避免 div↔button 切换引发 insertBefore */
@@ -104,17 +114,25 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
           ].join(" ")}
           onClick={handleFrameClick}
           onKeyDown={handleFrameKeyDown}
+          {...dropZoneProps}
           role="button"
           tabIndex={v.status !== "uploading" ? 0 : -1}
           aria-label={
-            v.status === "uploading"
+            isDragging
+              ? t.uploadDropActive
+              : v.status === "uploading"
               ? t.uploadUploading
               : displayUrl && v.status !== "error"
               ? t.uploadZoomHint
               : t.uploadSelectBtn
           }
         >
-          {displayUrl && v.status === "uploading" ? (
+          {isDragging ? (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-emerald-400/10 px-3 text-emerald-300">
+              <Upload className="h-9 w-9" strokeWidth={1.5} aria-hidden />
+              <span className="text-center text-sm font-medium">{t.uploadDropActive}</span>
+            </div>
+          ) : displayUrl && v.status === "uploading" ? (
             <div className="relative flex h-full w-full items-center justify-center">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
@@ -165,7 +183,7 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
               <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.045] shadow-inner">
                 <Upload className="h-5 w-5 text-slate-400" strokeWidth={1.5} aria-hidden />
               </span>
-              <span className="text-center text-xs font-medium text-slate-500">{t.uploadNoPreview}</span>
+              <span className="text-center text-xs font-medium text-slate-500">{t.uploadDropHint}</span>
             </div>
           )}
         </div>
@@ -179,7 +197,7 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
-              if (file) void applyImageFile(field.id, file);
+              if (file) handleFiles([file]);
             }}
           />
           <div className="flex min-w-0 max-w-full flex-wrap gap-2">

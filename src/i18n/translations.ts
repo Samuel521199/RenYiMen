@@ -122,6 +122,8 @@ export const translations = {
     uploadFileName: (name: string) => `已选：${name}`,
     uploadRemoteUrl: (url: string) => `远端：${url}`,
     uploadZoomHint: "点击放大观看",
+    uploadDropHint: "拖拽文件到此处，或点击选择",
+    uploadDropActive: "松开即可上传",
 
     // ── TextResultDisplay ──
     textResultTitle: "生成的提示词",
@@ -260,6 +262,8 @@ export const translations = {
     uploadFileName: (name: string) => `Selected: ${name}`,
     uploadRemoteUrl: (url: string) => `Remote: ${url}`,
     uploadZoomHint: "Click to zoom",
+    uploadDropHint: "Drop a file here, or click to choose",
+    uploadDropActive: "Release to upload",
 
     // ── TextResultDisplay ──
     textResultTitle: "Generated Prompt",

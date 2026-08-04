@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useEffect, useId, type FormEventHandler, type ReactNode } from "react";
 import { FormErrorBoundary } from "@/components/WorkflowForm/FormErrorBoundary";
-import type { WorkflowField, WorkflowFormSchema } from "@/types/workflow";
-import { isGroupField } from "@/types/workflow";
+import type { MediaUploadFieldKind, WorkflowField, WorkflowFormSchema } from "@/types/workflow";
+import { isGroupField, isMediaUploadField } from "@/types/workflow";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { ImageUploadControl } from "@/components/WorkflowForm/controls/ImageUploadControl";
 import { VideoUploadControl } from "@/components/WorkflowForm/controls/VideoUploadControl";
@@ -231,7 +231,7 @@ function FieldBranch({
   }
 
   const err = errors[field.id];
-  const useSpanLabel = field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload" || field.kind === "multiImageUpload";
+  const useSpanLabel = isMediaUploadField(field);
   const displayLabel = loc(field.label, field.labelEn, locale);
   const authoredDescription = field.description
     ? loc(field.description, field.descriptionEn, locale)
@@ -321,6 +321,14 @@ const widgets = {
 
 type WidgetKey = keyof typeof widgets;
 
+/** 新增媒体字段 kind 时，TypeScript 会要求在此注册一个拖拽上传控件。 */
+const mediaUploadWidgetByFieldKind = {
+  imageUpload: "imageUpload",
+  videoUpload: "videoUpload",
+  audioUpload: "audioUpload",
+  multiImageUpload: "multiImageUploader",
+} as const satisfies Record<MediaUploadFieldKind, WidgetKey>;
+
 function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, unknown>): WidgetKey | null {
   if (isGroupField(field)) return null;
   const entry = uiSchema?.[field.id];
@@ -328,9 +336,7 @@ function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, un
     const w = (entry as Record<string, unknown>)["ui:widget"];
     if (w === "multiImageUploader") return "multiImageUploader";
   }
-  if (field.kind === "multiImageUpload") return "multiImageUploader";
-  if (field.kind === "videoUpload") return "videoUpload";
-  if (field.kind === "audioUpload") return "audioUpload";
+  if (isMediaUploadField(field)) return mediaUploadWidgetByFieldKind[field.kind];
   if (field.kind in widgets) return field.kind as WidgetKey;
   return null;
 }

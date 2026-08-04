@@ -28,7 +28,7 @@ test("video upload preview cannot be widened by long filenames or OSS URLs", () 
   assert.match(dynamicFormSource, /fieldset className="group\/section min-w-0 max-w-full overflow-visible/);
   assert.match(dynamicFormSource, /grid min-w-0 max-w-full grid-cols-1 gap-x-5 gap-y-5 overflow-visible/);
   assert.match(imageUploadSource, /min-w-0 max-w-full space-y-2 overflow-hidden/);
-  assert.match(studioSource, /aside className="min-w-0 max-w-full overflow-x-hidden/);
+  assert.match(studioSource, /aside className="w-full min-w-0 max-w-full overflow-x-hidden/);
 });
 
 test("upload controls hide clear actions and remote storage metadata", () => {

@@ -328,7 +328,8 @@ test("Worker shutdown drains the active lease and requeues it if the grace perio
   assert.match(workerSource, /VIDEO_PRODUCTION_WORKER_SHUTDOWN_GRACE_MS/);
   assert.match(queueSource, /DEFAULT_DEPLOYMENT_GRACE_MS\s*=\s*10\s*\*\s*60_000/);
   assert.match(queueSource, /lastInterruptionReason:\s*"deployment_draining"/);
-  assert.match(queueSource, /GREATEST\([\s\S]*deployment_grace_until/);
+  assert.match(queueSource, /current\.deploymentGraceUntil\?\.getTime\(\)/);
+  assert.match(queueSource, /deploymentGraceUntil:\s*current\.deploymentGraceUntil/);
   assert.match(composeSource, /stop_grace_period:\s*10m30s/);
 });
 

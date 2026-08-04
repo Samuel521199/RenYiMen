@@ -129,6 +129,19 @@ export interface MultiImageUploadField extends WorkflowFieldBase {
   validation?: ImageValidation;
 }
 
+/**
+ * 通用型工作流的媒体上传字段。
+ * 新工作流应优先复用这些 kind，以自动获得统一的点击选择、键盘入口和拖拽上传能力。
+ * 若未来新增媒体 kind，请加入此联合类型；DynamicForm 的穷尽映射会强制注册对应拖拽控件。
+ */
+export type MediaUploadField =
+  | ImageUploadField
+  | VideoUploadField
+  | AudioUploadField
+  | MultiImageUploadField;
+
+export type MediaUploadFieldKind = MediaUploadField["kind"];
+
 export interface TextInputField extends WorkflowFieldBase {
   kind: "textInput";
   /** Legacy example copy. Text fields render this as a placeholder and initialize empty. */
@@ -175,10 +188,7 @@ export interface GroupField {
 }
 
 export type WorkflowField =
-  | ImageUploadField
-  | VideoUploadField
-  | AudioUploadField
-  | MultiImageUploadField
+  | MediaUploadField
   | TextInputField
   | NumberSliderField
   | SelectField
@@ -186,6 +196,13 @@ export type WorkflowField =
 
 export function isGroupField(f: WorkflowField): f is GroupField {
   return f.kind === "group";
+}
+
+export function isMediaUploadField(f: WorkflowField): f is MediaUploadField {
+  return f.kind === "imageUpload"
+    || f.kind === "videoUpload"
+    || f.kind === "audioUpload"
+    || f.kind === "multiImageUpload";
 }
 
 export interface WorkflowFormSchema {

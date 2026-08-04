@@ -6,6 +6,7 @@ import type { AudioUploadField, ImageFieldValue } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { useT } from "@/i18n";
+import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
 
 export interface AudioUploadControlProps {
   field: AudioUploadField;
@@ -24,11 +25,27 @@ export function AudioUploadControl({ field, error, locale = "zh" }: AudioUploadC
   const accept = field.validation?.accept?.join(",") ?? "audio/mpeg,audio/wav,.mp3,.wav";
   const v = value ?? ({ status: "empty" } satisfies ImageFieldValue);
   const triggerFilePick = useCallback(() => inputRef.current?.click(), []);
+  const handleFiles = useCallback((files: File[]) => {
+    const file = files[0];
+    if (file) void applyImageFile(field.id, file);
+  }, [applyImageFile, field.id]);
+  const { isDragging, dropZoneProps } = useFileDrop({
+    disabled: v.status === "uploading",
+    onFiles: handleFiles,
+  });
 
   return (
     <div className="min-w-0 max-w-full space-y-2 overflow-hidden">
-      <div className={`relative flex h-[160px] w-full min-w-0 max-w-full items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 hover:bg-[#0b1a2d] ${error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45"}`}>
-        {v.status === "uploading" ? (
+      <div
+        className={`relative flex h-[160px] w-full min-w-0 max-w-full items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 hover:bg-[#0b1a2d] ${isDragging ? "border-emerald-400 bg-emerald-400/10" : error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45"}`}
+        {...dropZoneProps}
+      >
+        {isDragging ? (
+          <div className="flex flex-col items-center gap-2 px-4 text-emerald-300">
+            <Upload className="h-9 w-9" strokeWidth={1.5} aria-hidden />
+            <span className="text-sm font-medium">{t.uploadDropActive}</span>
+          </div>
+        ) : v.status === "uploading" ? (
           <div className="flex flex-col items-center gap-2 px-4">
             <Loader2 className="h-8 w-8 animate-spin text-emerald-400" />
             <span className="text-sm font-medium text-slate-300">{t.uploadUploading}</span>
@@ -51,7 +68,7 @@ export function AudioUploadControl({ field, error, locale = "zh" }: AudioUploadC
               <AudioLines className="h-5 w-5 text-slate-400" strokeWidth={1.5} />
             </span>
             <span className="text-center text-xs text-slate-500">
-              {locale === "en" ? "No audio selected" : "暂未选择音频"}
+              {t.uploadDropHint}
             </span>
           </button>
         )}
@@ -66,7 +83,7 @@ export function AudioUploadControl({ field, error, locale = "zh" }: AudioUploadC
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            if (file) void applyImageFile(field.id, file);
+            if (file) handleFiles([file]);
           }}
         />
         <button
@@ -75,7 +92,9 @@ export function AudioUploadControl({ field, error, locale = "zh" }: AudioUploadC
           onClick={triggerFilePick}
           className="rounded-xl bg-emerald-500/90 px-3.5 py-2 text-xs font-semibold text-white transition-all hover:-translate-y-0.5 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {v.status === "ready" ? t.uploadChangeBtn : locale === "en" ? "Select audio" : "选择音频"}
+          {v.status === "ready"
+            ? locale === "en" ? "Replace audio" : "更换音频"
+            : locale === "en" ? "Select audio" : "选择音频"}
         </button>
       </div>
 

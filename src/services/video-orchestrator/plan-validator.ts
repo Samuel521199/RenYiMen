@@ -68,6 +68,11 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
   const graph = readCameraGraph(plan.cameraGraph ?? plan.camera_graph);
   const durationSeconds = number(plan.durationSeconds ?? plan.duration_seconds);
   validateAnchorSemanticRoles(plan, context, issues);
+  if (text(plan.workflowKind ?? plan.workflow_kind) === "character_turnaround") {
+    validateCharacterTurnaroundPlan(plan, issues);
+    validateHardAnchors(context, issues);
+    return dedupe(issues);
+  }
   validateSceneContracts(plan, graph, context, issues);
 
   for (const segment of segments) {
@@ -200,6 +205,43 @@ export function validateOnePromptVideoPlan(planValue: unknown, context: PlanVali
 
   if (!graph.cameras.length) warning(issues, "CAMERA_GRAPH_MISSING", "camera_graph", "计划缺少 Camera Graph；历史计划可以打开，但重新生成前应补齐机位继承关系。", "stage_2a_storyboard");
   return dedupe(issues);
+}
+
+function validateCharacterTurnaroundPlan(
+  plan: Record<string, unknown>,
+  issues: PlanValidationIssue[],
+): void {
+  const references = arrayRecords(plan.consistencyReferences ?? plan.consistency_references);
+  const personReferences = references.filter((reference) =>
+    text(reference.assetCategory ?? reference.asset_category) === "person"
+    || text(reference.kind) === "character"
+  );
+  const byView = new Map(personReferences.map((reference) => [
+    text(reference.assetView ?? reference.asset_view),
+    reference,
+  ]));
+  for (const view of ["front", "side", "back"] as const) {
+    if (!byView.has(view)) {
+      error(issues, "CHARACTER_TURNAROUND_VIEW_MISSING", `turnaround:${view}`, `人物三视图缺少 ${view} 视图生成合同。`, "stage_2b_shot_decomposer");
+    }
+  }
+  if (personReferences.length !== 3 || byView.size !== 3) {
+    error(issues, "CHARACTER_TURNAROUND_VIEW_COUNT_INVALID", "turnaround", "人物三视图必须且只能包含正面、侧面、背面三张独立图片。", "stage_2b_shot_decomposer");
+  }
+  const anchorIds = new Set(personReferences.map((reference) =>
+    text(reference.anchorId ?? reference.anchor_id)
+  ).filter(Boolean));
+  if (anchorIds.size !== 1) {
+    error(issues, "CHARACTER_TURNAROUND_IDENTITY_CHAIN_BROKEN", "turnaround", "正面、侧面、背面必须绑定同一个人物身份锚点。", "stage_1_timeline");
+  }
+  const side = byView.get("side");
+  if (side && text(side.sourceView ?? side.source_view) !== "front") {
+    error(issues, "CHARACTER_TURNAROUND_SIDE_SOURCE_INVALID", "turnaround:side", "侧面图必须从已批准的正面图派生。", "reference_selector");
+  }
+  const back = byView.get("back");
+  if (back && text(back.sourceView ?? back.source_view) !== "side") {
+    error(issues, "CHARACTER_TURNAROUND_BACK_SOURCE_INVALID", "turnaround:back", "背面图必须从已批准的侧面图派生。", "reference_selector");
+  }
 }
 
 const SPATIAL_CONTINUITY_RELATIONS = new Set([
