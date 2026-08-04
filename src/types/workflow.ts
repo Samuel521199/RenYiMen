@@ -26,6 +26,8 @@ export interface ImageFieldValue {
   /** 上传完成后后端返回的可用于推理的地址 */
   remoteUrl?: string;
   fileName?: string;
+  /** 音视频媒体时长（秒），用于按时长预估计费。 */
+  durationSec?: number;
   errorMessage?: string;
 }
 
@@ -37,6 +39,10 @@ export interface ImageValidation {
   accept?: string[];
   /** 图片最小边长（宽和高均须 ≥ 此值，单位 px）；上传前在浏览器端校验 */
   minDimension?: number;
+  /** 音视频最短时长（秒）；上传前在浏览器端校验。 */
+  minDurationSec?: number;
+  /** 音视频最长时长（秒）；上传前在浏览器端校验。 */
+  maxDurationSec?: number;
 }
 
 export interface TextValidation {
@@ -90,6 +96,15 @@ export interface VideoUploadField extends WorkflowFieldBase {
   kind: "videoUpload";
   defaultValue?: Partial<ImageFieldValue>;
   validation?: ImageValidation;
+}
+
+/** 音频上传字段，运行时状态与图片/视频上传一致。 */
+export interface AudioUploadField extends WorkflowFieldBase {
+  kind: "audioUpload";
+  defaultValue?: Partial<ImageFieldValue>;
+  validation?: ImageValidation;
+  /** 可选：把浏览器读取到的音频时长映射到标准负载。 */
+  durationMapping?: NodeInputMapping;
 }
 
 /** 多图槽位：每张独立上传状态，成功后写入 `remoteUrl` */
@@ -157,6 +172,7 @@ export interface GroupField {
 export type WorkflowField =
   | ImageUploadField
   | VideoUploadField
+  | AudioUploadField
   | MultiImageUploadField
   | TextInputField
   | NumberSliderField

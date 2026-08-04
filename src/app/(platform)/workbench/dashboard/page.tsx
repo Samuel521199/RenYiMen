@@ -2,6 +2,7 @@
 "use client";
 
 import { Fragment, useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import {
   LineChart, Line,
   BarChart, Bar,
@@ -114,6 +115,8 @@ function ChartShell({ title, loading, empty, children, action }: {
 type Dimension = "time" | "model" | "user";
 
 export default function DashboardPage() {
+  const pathname = usePathname();
+  const mode = pathname === "/workbench/operations" ? "operations" : "general";
   const { t } = useLanguage();
   const { isAdmin } = usePermission();
 
@@ -145,6 +148,7 @@ export default function DashboardPage() {
 
   // ── 加载基础统计 ──
   useEffect(() => {
+    if (mode !== "general") return;
     let active = true;
     async function load() {
       setStatsLoading(true);
@@ -157,10 +161,11 @@ export default function DashboardPage() {
     }
     load();
     return () => { active = false; };
-  }, []);
+  }, [mode, t]);
 
   // ── 加载历史图表 ──
   useEffect(() => {
+    if (mode !== "general") return;
     let active = true;
     async function load() {
       setChartsLoading(true);
@@ -194,11 +199,11 @@ export default function DashboardPage() {
     }
     load();
     return () => { active = false; };
-  }, []);
+  }, [mode]);
 
   // ── 加载 AI 调用统计（仅 admin） ──
   useEffect(() => {
-    if (!isAdmin) return;
+    if (mode !== "operations" || !isAdmin) return;
     let active = true;
     async function load() {
       setAiLoading(true);
@@ -233,7 +238,7 @@ export default function DashboardPage() {
     }
     load();
     return () => { active = false; };
-  }, [isAdmin]);
+  }, [isAdmin, mode]);
 
   // ── 派生数据：按时间范围切片 ──
   const costDays = costRange === "7d" ? 7 : 30;
@@ -284,12 +289,21 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title={t("首页看板")} description={t("生产成本、模型调用与用户使用概览")} />
+      <PageHeader
+        title={mode === "general" ? t("通用型") : t("运营部")}
+        description={
+          mode === "general"
+            ? t("生产成本与模型费用概览")
+            : t("模型调用与用户使用概览")
+        }
+      />
 
-      {statsError && <div className={WB_ERROR_BANNER_CLASS}>{statsError}</div>}
+      {mode === "general" && (
+        <>
+          {statsError && <div className={WB_ERROR_BANNER_CLASS}>{statsError}</div>}
 
-      {/* ── 基础统计卡片 ── */}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {/* ── 基础统计卡片 ── */}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
           { label: t("今日任务"), value: stats.today_tasks ?? 0 },
           { label: t("今日花费"), value: Number(stats.today_cost_usd ?? 0).toFixed(2), unit: "USD" },
@@ -298,10 +312,10 @@ export default function DashboardPage() {
         ].map((c) => (
           <StatCard key={c.label} label={c.label} value={statsLoading ? "…" : c.value} unit={c.unit} />
         ))}
-      </div>
+          </div>
 
-      {/* ── 历史趋势图（所有用户） ── */}
-      <div className="grid gap-6 lg:grid-cols-2">
+          {/* ── 历史趋势图（所有用户） ── */}
+          <div className="grid gap-6 lg:grid-cols-2">
         <ChartShell
           title={t("花费趋势")}
           loading={chartsLoading}
@@ -340,12 +354,14 @@ export default function DashboardPage() {
             </PieChart>
           </ResponsiveContainer>
         </ChartShell>
-      </div>
+          </div>
+        </>
+      )}
 
       {/* ════════════════════════════════════════════════════
           以下为管理员专属：AI 模型调用统计
           ════════════════════════════════════════════════════ */}
-      {isAdmin && (
+      {mode === "operations" && isAdmin && (
         <div className="space-y-4">
           {/* 分隔标题 */}
           <div className="flex items-center gap-3">
@@ -594,6 +610,12 @@ export default function DashboardPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {mode === "operations" && !isAdmin && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-5 text-sm text-amber-200">
+          运营部页面仅对管理员开放。
         </div>
       )}
     </div>

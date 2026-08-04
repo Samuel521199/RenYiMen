@@ -36,7 +36,6 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
     modelName: { "ui:widget": "select" },
     duration: {
       "ui:widget": "range",
-      "ui:help": "时长越长，消耗积分越多。允许范围：3-15秒。",
     },
   },
   fields: [
@@ -51,8 +50,6 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
           id: "modelName",
           label: "选择生成模型",
           labelEn: "Select Model",
-          description: "最新版 HappyHorse 1.1 功能更强大。",
-          descriptionEn: "The latest HappyHorse 1.1 is more powerful.",
           mapping: { nodeId: "input", inputPath: ["modelName"] },
           defaultValue: "wan2.7-i2v-2026-04-25",
           options: [
@@ -79,8 +76,6 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
           id: "duration",
           label: "视频时长 (秒) - 150积分/秒",
           labelEn: "Duration (seconds) — 150 credits/sec",
-          description: "时长越长，消耗积分越多。允许范围：3–15 秒。",
-          descriptionEn: "Longer videos consume more credits. Allowed range: 3–15 seconds.",
           mapping: { nodeId: "input", inputPath: ["duration"] },
           defaultValue: 5,
           validation: { min: 3, max: 15, step: 1, integer: true },

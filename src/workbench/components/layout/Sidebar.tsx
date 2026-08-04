@@ -101,12 +101,19 @@ export default function Sidebar() {
   const { t } = useLanguage();
   const { canView, canViewWorkflow, canViewTemplate, canViewAdmin } = usePermission();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const isGeneralWorkspace =
+    pathname === "/workbench/dashboard" || pathname.startsWith("/workbench/tools");
+  const workspaceNavGroups = SIDEBAR_NAV_GROUPS.filter((item) =>
+    isGeneralWorkspace
+      ? item.href === "/workbench/tools"
+      : item.href !== "/workbench/tools",
+  );
 
   return (
     <aside className="relative z-30 flex h-full min-h-[calc(100vh-3.5rem)] w-56 shrink-0 flex-col border-r border-white/10 bg-[#0f1728]">
       <nav className="flex-1 overflow-y-auto px-3 py-4">
         <ul className="space-y-1">
-          {SIDEBAR_NAV_GROUPS.map((item) => {
+          {workspaceNavGroups.map((item) => {
             const rawChildren = Array.isArray(item.children) ? item.children : [];
             let children = rawChildren;
             if (item.label === "任务中心") {

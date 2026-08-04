@@ -6,6 +6,9 @@ export const translations = {
     brandBadge: "Beta",
     navAiStudio: "AI 创作",
     navWorkbench: "社媒工作台",
+    workspaceSwitchLabel: "工作台切换",
+    workspaceGeneral: "通用型",
+    workspaceOperations: "运营部",
     pageTitle: "AI 创作工作室",
     pageSubtitle: "选择创作功能，上传素材，一键生成高质量 AI 内容",
 
@@ -142,6 +145,9 @@ export const translations = {
     brandBadge: "Beta",
     navAiStudio: "AI Studio",
     navWorkbench: "Workbench",
+    workspaceSwitchLabel: "Workspace switcher",
+    workspaceGeneral: "General",
+    workspaceOperations: "Operations",
     pageTitle: "AI Creation Studio",
     pageSubtitle: "Choose a workflow, upload your assets, and generate high-quality AI content in one click.",
 

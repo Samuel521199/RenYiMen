@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { promptForInterfaceLanguage } from "@/lib/prompt-display-language";
+import { FixedWorkflowPricing } from "@/components/WorkflowForm/FixedWorkflowPricing";
 import { zoomViewAtPoint } from "@/lib/zoomable-image-math";
 import { ONE_PROMPT_MAX_REFERENCE_IMAGES } from "@/lib/one-prompt-video-limits";
 import {
@@ -3064,7 +3065,10 @@ export default function OnePromptVideoPage() {
               <Sparkles className="h-3.5 w-3.5" />
               ONE_PROMPT_30S_VIDEO
             </div>
-            <h1 className="text-2xl font-semibold tracking-normal text-white">{copy.title}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-semibold tracking-normal text-white">{copy.title}</h1>
+              <FixedWorkflowPricing name={copy.title} credits={5000} locale={pageLang} />
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <button

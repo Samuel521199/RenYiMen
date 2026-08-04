@@ -126,7 +126,6 @@ type NavGroupItem = {
 export type NavItem = NavSingleItem | NavGroupItem;
 
 export const NAV_GROUPS = [
-  { href: "/workbench/dashboard", label: "首页看板", single: true },
   {
     label: "任务中心",
     children: [

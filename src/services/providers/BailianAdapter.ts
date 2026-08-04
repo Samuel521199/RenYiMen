@@ -12,6 +12,7 @@ const DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
 const IMAGE_TO_VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/image2video/video-synthesis";
 const WAN_ANIMATE_MOVE_MODEL = "wan2.2-animate-move";
+const WAN_S2V_MODEL = "wan2.2-s2v";
 
 /** 网关轮询单次 GET `/api/v1/tasks/{id}` 超时上限（DashScope 排队可能较久） */
 export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
@@ -28,6 +29,9 @@ export const BAILIAN_CREDITS_PER_CNY = 250;
 /** wan2.2-animate-move 华北 2 官方原价：标准 0.4 元/秒、专业 0.6 元/秒。 */
 export const BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND = Math.round(0.4 * BAILIAN_CREDITS_PER_CNY);
 export const BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND = Math.round(0.6 * BAILIAN_CREDITS_PER_CNY);
+/** wan2.2-s2v 华北 2 官方原价：480P 0.5 元/秒、720P 0.9 元/秒。 */
+export const BAILIAN_S2V_480P_CREDITS_PER_SECOND = Math.round(0.5 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_S2V_720P_CREDITS_PER_SECOND = Math.round(0.9 * BAILIAN_CREDITS_PER_CNY);
 
 const BAILIAN_DEFAULT_USAGE_DURATION_SEC = 5;
 
@@ -363,6 +367,11 @@ export type BailianAnimateMoveInput = {
   watermark?: boolean;
 };
 
+export type BailianS2vInput = {
+  image_url: string;
+  audio_url: string;
+};
+
 export type BailianVideoSynthesisRequestBody =
   | {
       model: typeof WAN_ANIMATE_MOVE_MODEL;
@@ -371,6 +380,11 @@ export type BailianVideoSynthesisRequestBody =
         mode: "wan-std" | "wan-pro";
         check_image?: boolean;
       };
+    }
+  | {
+      model: typeof WAN_S2V_MODEL;
+      input: BailianS2vInput;
+      parameters: { resolution: "480P" | "720P" };
     }
   | {
       model: string;
@@ -393,8 +407,9 @@ export type BailianVideoSynthesisRequestBody =
 export class BailianAdapter implements IProviderAdapter {
   getVideoInputCapabilities(payload: StandardPayload): VideoProviderInputCapabilities {
     const requestedModel = resolveDashScopeModel(payload);
-    const targetModel = requestedModel.toLowerCase() === WAN_ANIMATE_MOVE_MODEL
-      ? WAN_ANIMATE_MOVE_MODEL
+    const requestedLc = requestedModel.toLowerCase();
+    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
+      ? requestedLc
       : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
@@ -461,15 +476,24 @@ export class BailianAdapter implements IProviderAdapter {
     const requestedModel = resolveDashScopeModel(payload).toLowerCase();
     const secs = requestedModel === WAN_ANIMATE_MOVE_MODEL
       ? resolveRequestedVideoDurationSec(payload, 2, 30)
-      : resolveRequestedVideoDurationSec(payload);
+      : requestedModel === WAN_S2V_MODEL
+        ? resolveRequestedVideoDurationSec(payload, 1, 20)
+        : resolveRequestedVideoDurationSec(payload);
     const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
     const requestedMode =
       readStringFlag(isRecord(f) ? f : undefined, ["mode", "qualityMode"]) ??
       readStringFromNode(inputNode, ["mode", "qualityMode"]);
+    const requestedResolution =
+      readStringFlag(isRecord(f) ? f : undefined, ["resolution", "videoResolution"]) ??
+      readStringFromNode(inputNode, ["resolution", "videoResolution"]);
     const creditsPerSecond = requestedModel === WAN_ANIMATE_MOVE_MODEL
       ? requestedMode === "wan-pro"
         ? BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND
         : BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND
+      : requestedModel === WAN_S2V_MODEL
+        ? requestedResolution?.toUpperCase() === "720P"
+          ? BAILIAN_S2V_720P_CREDITS_PER_SECOND
+          : BAILIAN_S2V_480P_CREDITS_PER_SECOND
       : BAILIAN_VIDEO_CREDITS_PER_SECOND;
     let cost = secs * creditsPerSecond;
     if (isRecord(f) && typeof f.catalogBaseCost === "number" && Number.isFinite(f.catalogBaseCost)) {
@@ -514,8 +538,9 @@ export class BailianAdapter implements IProviderAdapter {
       extractPromptFromNodeInputs(payload.nodeInputs);
     const prompt = promptRaw?.trim() ?? "";
     const requestedModel = resolveDashScopeModel(payload);
-    const targetModel = requestedModel.toLowerCase() === WAN_ANIMATE_MOVE_MODEL
-      ? WAN_ANIMATE_MOVE_MODEL
+    const requestedLc = requestedModel.toLowerCase();
+    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
+      ? requestedLc
       : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
@@ -562,6 +587,31 @@ export class BailianAdapter implements IProviderAdapter {
             readBooleanFlag(flags, ["check_image", "checkImage"]) ??
             readBooleanFromNode(inputNode, ["check_image", "checkImage"]) ??
             true,
+        },
+      };
+    }
+    if (modelLc === WAN_S2V_MODEL) {
+      const audioUrl =
+        readStringFlag(flags, ["audioUrl", "audio_url", "voiceAudioUrl", "voice_audio_url"]) ??
+        readStringFromNode(inputNode, ["audio_url", "audioUrl", "voice_audio_url", "voiceAudioUrl"]);
+      if (!audioUrl || !/^https?:\/\//i.test(audioUrl)) {
+        throw new ProviderError(
+          "缺少人声音频的公网 URL（请提供 input.audio_url）",
+          "BAILIAN_MISSING_AUDIO_URL",
+          400
+        );
+      }
+      const resolutionRaw =
+        readStringFlag(flags, ["resolution", "videoResolution"]) ??
+        readStringFromNode(inputNode, ["resolution", "videoResolution"]);
+      return {
+        model: WAN_S2V_MODEL,
+        input: {
+          image_url: imageUrl!.trim(),
+          audio_url: audioUrl.trim(),
+        },
+        parameters: {
+          resolution: resolutionRaw?.toUpperCase() === "720P" ? "720P" : "480P",
         },
       };
     }
@@ -658,7 +708,8 @@ export class BailianAdapter implements IProviderAdapter {
     credentials: unknown
   ): Promise<{ taskId: string; raw: unknown }> {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
-    const path = body.model.toLowerCase() === WAN_ANIMATE_MOVE_MODEL
+    const bodyModel = body.model.toLowerCase();
+    const path = bodyModel === WAN_ANIMATE_MOVE_MODEL || bodyModel === WAN_S2V_MODEL
       ? IMAGE_TO_VIDEO_SYNTHESIS_PATH
       : VIDEO_SYNTHESIS_PATH;
     const url = `${baseUrl}${path}`;
@@ -820,6 +871,13 @@ function extractDashScopeUsageVideoRatio(raw: unknown): string {
   return typeof ratio === "string" ? ratio.trim().toLowerCase() : "";
 }
 
+function extractDashScopeUsageResolution(raw: unknown): number | undefined {
+  if (!isRecord(raw) || !isRecord(raw.usage)) return undefined;
+  const value = raw.usage.SR ?? raw.usage.sr;
+  const resolution = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(resolution) ? resolution : undefined;
+}
+
 function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
   const st = readTaskStatus(raw);
   if (st === "FAILED" || st === "FAILURE" || st === "ERROR") {
@@ -838,7 +896,12 @@ function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
     }
     const durationSec = extractDashScopeUsageDurationSec(raw);
     const videoRatio = extractDashScopeUsageVideoRatio(raw);
-    const creditsPerSecond = videoRatio === "pro"
+    const resolution = extractDashScopeUsageResolution(raw);
+    const creditsPerSecond = resolution === 720
+      ? BAILIAN_S2V_720P_CREDITS_PER_SECOND
+      : resolution === 480
+        ? BAILIAN_S2V_480P_CREDITS_PER_SECOND
+      : videoRatio === "pro"
       ? BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND
       : videoRatio === "standard"
         ? BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND

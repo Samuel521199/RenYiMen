@@ -7,6 +7,7 @@ import { isGroupField } from "@/types/workflow";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { ImageUploadControl } from "@/components/WorkflowForm/controls/ImageUploadControl";
 import { VideoUploadControl } from "@/components/WorkflowForm/controls/VideoUploadControl";
+import { AudioUploadControl } from "@/components/WorkflowForm/controls/AudioUploadControl";
 import { MultiImageUploadWidget } from "@/components/WorkflowForm/controls/MultiImageUploadWidget";
 import { TextInputControl } from "@/components/WorkflowForm/controls/TextInputControl";
 import { NumberSliderControl } from "@/components/WorkflowForm/controls/NumberSliderControl";
@@ -154,7 +155,7 @@ function FieldBranch({
   }
 
   const err = errors[field.id];
-  const useSpanLabel = field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "multiImageUpload";
+  const useSpanLabel = field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload" || field.kind === "multiImageUpload";
   const displayLabel = loc(field.label, field.labelEn, locale);
 
   return (
@@ -182,6 +183,10 @@ const widgets = {
   videoUpload: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
     if (isGroupField(field) || field.kind !== "videoUpload") return null;
     return <VideoUploadControl field={field} error={error} locale={locale} />;
+  },
+  audioUpload: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
+    if (isGroupField(field) || field.kind !== "audioUpload") return null;
+    return <AudioUploadControl field={field} error={error} locale={locale} />;
   },
   multiImageUploader: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
     if (isGroupField(field)) return null;
@@ -218,6 +223,7 @@ function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, un
   }
   if (field.kind === "multiImageUpload") return "multiImageUploader";
   if (field.kind === "videoUpload") return "videoUpload";
+  if (field.kind === "audioUpload") return "audioUpload";
   if (field.kind in widgets) return field.kind as WidgetKey;
   return null;
 }

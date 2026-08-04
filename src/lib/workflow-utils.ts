@@ -70,6 +70,7 @@ function defaultValueForField(f: WorkflowField): unknown {
   switch (f.kind) {
     case "imageUpload":
     case "videoUpload":
+    case "audioUpload":
       return emptyImageValue((f as ImageUploadField).defaultValue);
     case "multiImageUpload":
       return emptyMultiImageValue();

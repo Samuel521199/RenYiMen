@@ -25,9 +25,23 @@ export const DANCE_MOVE_LOADING_HINTS = [
   "正在渲染舞蹈视频，平均约需 377 秒，请耐心等待…",
 ];
 
+export const S2V_LOADING_HINTS = [
+  "正在分析人声音频的节奏、语气与口型…",
+  "正在让人物表情和动作与声音同步…",
+  "正在优化嘴型、面部细节与身体动作…",
+  "正在渲染有声视频，通常约需 5–10 分钟，请耐心等待…",
+];
+
+function resolveLoadingHints(skuId?: string): string[] {
+  if (skuId === "BAILIAN_WAN22_ANIMATE_MOVE") return DANCE_MOVE_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN22_S2V") return S2V_LOADING_HINTS;
+  return DEFAULT_TASK_LOADING_HINTS;
+}
+
 /** 各 SKU 预计完成耗时（毫秒），未列出的 SKU 使用默认 150s。 */
 const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   BAILIAN_WAN22_ANIMATE_MOVE: 377_000,
+  BAILIAN_WAN22_S2V: 450_000,
   BAILIAN_WANX_I2V: 180_000,
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
@@ -110,7 +124,7 @@ export function buildTaskViewerModel(
       ...(mediaType !== undefined ? { mediaType } : {}),
       ...(resultUrls !== undefined ? { resultUrls } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
-      hints: ctx.skuId === "BAILIAN_WAN22_ANIMATE_MOVE" ? DANCE_MOVE_LOADING_HINTS : DEFAULT_TASK_LOADING_HINTS,
+      hints: resolveLoadingHints(ctx.skuId),
       ...(sellPrice !== undefined ? { sellPrice } : {}),
     };
   }
@@ -119,7 +133,7 @@ export function buildTaskViewerModel(
     return {
       phase: "failure",
       errorMessage: data.errorMessage ?? "生成失败，原因未知。",
-      hints: ctx.skuId === "BAILIAN_WAN22_ANIMATE_MOVE" ? DANCE_MOVE_LOADING_HINTS : DEFAULT_TASK_LOADING_HINTS,
+      hints: resolveLoadingHints(ctx.skuId),
     };
   }
 
@@ -139,7 +153,7 @@ export function buildTaskViewerModel(
     subPhase,
     elapsedMs: elapsed,
     expectedDurationMs: expectedMs,
-    hints: ctx.skuId === "BAILIAN_WAN22_ANIMATE_MOVE" ? DANCE_MOVE_LOADING_HINTS : DEFAULT_TASK_LOADING_HINTS,
+    hints: resolveLoadingHints(ctx.skuId),
     transportMessage,
   };
 }

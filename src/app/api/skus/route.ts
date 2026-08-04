@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { bailianMultiRefWorkflowMock } from "@/mocks/bailian-multi-ref-workflow";
 import { bailianDanceMoveWorkflowMock } from "@/mocks/bailian-dance-move-workflow";
+import { bailianWan22S2vWorkflowMock } from "@/mocks/bailian-wan22-s2v-workflow";
 import { bailianWanxI2vWorkflowMock } from "@/mocks/bailian-wanx-i2v-workflow";
 import { bgReplaceWorkflowMock } from "@/mocks/bg-replace-workflow";
 import { videoEnhanceWorkflowMock } from "@/mocks/video-enhance-workflow";
@@ -27,7 +28,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_PROMPT_REVERSE",
     providerCode: "RUNNINGHUB_PROMPT_REVERSE",
     category: "prompt",
-    cover: "/covers/sample-a.png",
+    cover: "/covers/prompt-reverse.webp",
     displayName: "提示词反推",
     displayNameEn: "Image to Prompt",
     description:
@@ -42,6 +43,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "GPT_IMAGE2_REF",
     providerCode: "GPT_IMAGE2",
     category: "image",
+    cover: "/covers/ai-image-generation.webp",
     displayName: "智能图片生成",
     displayNameEn: "AI Image Generation",
     description:
@@ -55,7 +57,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_BG_REPLACE",
     providerCode: "RUNNINGHUB_BG_REPLACE",
     category: "image",
-    cover: "/covers/scene.png",
+    cover: "/covers/background-replace.webp",
     displayName: "背景替换",
     displayNameEn: "Background Replace",
     description:
@@ -69,7 +71,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_MATTING",
     providerCode: "RUNNINGHUB_MATTING",
     category: "image",
-    cover: "/covers/character.png",
+    cover: "/covers/portrait-cutout.webp",
     displayName: "人像抠图",
     displayNameEn: "Portrait Cutout",
     description:
@@ -83,7 +85,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_HD_UPSCALE",
     providerCode: "RUNNINGHUB_HD_UPSCALE",
     category: "image",
-    cover: "/covers/sample-b.png",
+    cover: "/covers/hd-upscale.webp",
     displayName: "高清放大",
     displayNameEn: "HD Upscale",
     description:
@@ -97,7 +99,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_FACE_SWAP",
     providerCode: "RUNNINGHUB_FACE_SWAP",
     category: "image",
-    cover: "/covers/character.png",
+    cover: "/covers/face-swap.webp",
     displayName: "换头换脸",
     displayNameEn: "Face Swap",
     description:
@@ -111,7 +113,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_TXT2IMG_SHORTDRAMA",
     providerCode: "RUNNINGHUB_TXT2IMG",
     category: "image",
-    cover: "/covers/sample-a.png",
+    cover: "/covers/text-to-image.webp",
     displayName: "文字生成图片",
     displayNameEn: "Text to Image",
     description:
@@ -125,7 +127,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_STORYBOARD",
     providerCode: "RUNNINGHUB_STORYBOARD",
     category: "image",
-    cover: "/covers/sample-b.png",
+    cover: "/covers/storyboard-generator.webp",
     displayName: "分镜生成出图",
     displayNameEn: "Storyboard Generator",
     description:
@@ -154,7 +156,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_VIDEO_ENHANCE",
     providerCode: "RUNNINGHUB_VIDEO_ENHANCE",
     category: "video",
-    cover: "/covers/animated-cover.webp",
+    cover: "/covers/video-enhance.webp",
     displayName: "视频模糊修复",
     displayNameEn: "Video Enhance",
     description:
@@ -168,7 +170,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "KLING_CINEMA_PRO",
     providerCode: "RUNNINGHUB_IMG2VIDEO",
     category: "video",
-    cover: "/covers/animated-cover.webp",
+    cover: "/covers/image-to-video.webp",
     displayName: "单图生成短视频",
     displayNameEn: "Image to Video",
     description:
@@ -182,7 +184,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "KLING_STD_I2V",
     providerCode: "KLING_STD",
     category: "video",
-    cover: "/covers/animated-cover.webp",
+    cover: "/covers/kling-standard.webp",
     displayName: "Kling 标准版·图生视频",
     displayNameEn: "Kling Standard · Image to Video",
     description:
@@ -197,7 +199,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "BAILIAN_WAN22_ANIMATE_MOVE",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
-    cover: "/covers/animated-cover.webp",
+    cover: "/covers/dance-motion-transfer.webp",
     displayName: "模仿生成舞蹈视频",
     displayNameEn: "Dance Motion Transfer",
     description:
@@ -208,10 +210,24 @@ const CATALOG: SkuDefinition[] = [
     uiSchema: bailianDanceMoveWorkflowMock,
   },
   {
+    skuId: "BAILIAN_WAN22_S2V",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "video",
+    cover: "/covers/talking-character-video.webp",
+    displayName: "有声视频",
+    displayNameEn: "Talking Character Video",
+    description:
+      "上传人物图片和人声音频，生成口型、表情和动作同步的说话、唱歌或表演视频。使用阿里百炼 wan2.2-s2v，支持 480P 与 720P。",
+    descriptionEn:
+      "Upload a character image and human-voice audio to generate a synchronized speaking, singing, or performing video with Alibaba Model Studio wan2.2-s2v.",
+    sellCredits: 625,
+    uiSchema: bailianWan22S2vWorkflowMock,
+  },
+  {
     skuId: "BAILIAN_WANX_I2V",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
-    cover: "/covers/sample-a.png",
+    cover: "/covers/multimodal-image-to-video.webp",
     displayName: "多模态图生视频",
     displayNameEn: "Multimodal Image-to-Video",
     description:
@@ -225,7 +241,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "BAILIAN_MULTI_REF_I2V",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
-    cover: "/covers/sample-b.png",
+    cover: "/covers/multi-reference-drama.webp",
     displayName: "多参考图剧场生成",
     displayNameEn: "Multi-Reference Drama",
     description:
@@ -239,7 +255,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "RH_SVD_IMG2VID",
     providerCode: "RUNNINGHUB_SVD",
     category: "video",
-    cover: "/covers/scene.png",
+    cover: "/covers/first-last-frame.webp",
     displayName: "首尾帧过渡视频",
     displayNameEn: "First-Last Frame Video",
     description:

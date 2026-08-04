@@ -108,7 +108,8 @@ function mapLeafToApiValue(field: WorkflowField, raw: unknown): unknown {
   if (isGroupField(field)) return undefined;
   switch (field.kind) {
     case "imageUpload":
-    case "videoUpload": {
+    case "videoUpload":
+    case "audioUpload": {
       const v = raw as ImageFieldValue;
       if (v?.status === "ready" && v.remoteUrl) return v.remoteUrl;
       return undefined;
@@ -177,7 +178,11 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       if (!path || !schema) return;
 
       const field = [...iterateLeafFields(schema.fields)].find((f) => f.id === fieldId);
-      if (!field || (field.kind !== "imageUpload" && field.kind !== "videoUpload")) return;
+      if (!field || (
+        field.kind !== "imageUpload"
+        && field.kind !== "videoUpload"
+        && field.kind !== "audioUpload"
+      )) return;
 
       const maxMb = field.validation?.maxSizeMB;
       if (maxMb != null && file.size > maxMb * 1024 * 1024) {
@@ -191,6 +196,63 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         return;
       }
 
+      if (field.kind === "audioUpload" && field.validation?.accept?.length) {
+        const allowed = field.validation.accept;
+        const extension = file.name.split(".").pop()?.toLowerCase();
+        const accepted = allowed.includes(file.type)
+          || (extension != null && allowed.some((type) => type.endsWith(`/${extension}`)));
+        if (!accepted) {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: "仅支持 MP3 或 WAV 音频",
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+      }
+
+      let mediaDurationSec: number | undefined;
+      if (field.kind === "audioUpload" && field.validation?.maxDurationSec != null) {
+        const durationSec = await new Promise<number>((resolve, reject) => {
+          const objectUrl = URL.createObjectURL(file);
+          const audio = new Audio();
+          const cleanup = () => URL.revokeObjectURL(objectUrl);
+          audio.onloadedmetadata = () => {
+            const duration = audio.duration;
+            cleanup();
+            Number.isFinite(duration) ? resolve(duration) : reject(new Error("无法读取音频时长"));
+          };
+          audio.onerror = () => {
+            cleanup();
+            reject(new Error("无法读取音频文件"));
+          };
+          audio.src = objectUrl;
+        }).catch((error: unknown) => {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: error instanceof Error ? error.message : "无法读取音频文件",
+            } satisfies ImageFieldValue);
+          });
+          return null;
+        });
+        if (durationSec == null) return;
+        mediaDurationSec = durationSec;
+        if (durationSec >= field.validation.maxDurationSec) {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: `音频时长须小于 ${field.validation?.maxDurationSec} 秒`,
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+      }
+
       const previewUrl = URL.createObjectURL(file);
       set((draft) => {
         const prev = getAtPath(draft.parameters, path) as ImageFieldValue | undefined;
@@ -199,6 +261,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
           status: "uploading",
           previewUrl,
           fileName: file.name,
+          durationSec: mediaDurationSec,
         } satisfies ImageFieldValue);
       });
 
@@ -210,6 +273,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             previewUrl,
             remoteUrl,
             fileName: file.name,
+            durationSec: mediaDurationSec,
           } satisfies ImageFieldValue);
         });
       } catch (e) {
@@ -406,17 +470,19 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
 
         switch (field.kind) {
           case "imageUpload":
-          case "videoUpload": {
+          case "videoUpload":
+          case "audioUpload": {
             const v = raw as ImageFieldValue | undefined;
             const isVideo = field.kind === "videoUpload";
+            const isAudio = field.kind === "audioUpload";
             if (field.validation?.required && (!v || v.status !== "ready" || !v.remoteUrl)) {
-              errors[field.id] = isVideo ? "请完成视频上传" : "请完成图片上传";
+              errors[field.id] = isVideo ? "请完成视频上传" : isAudio ? "请完成音频上传" : "请完成图片上传";
             }
             if (v?.status === "error") {
-              errors[field.id] = v.errorMessage ?? (isVideo ? "视频处理失败" : "图片处理失败");
+              errors[field.id] = v.errorMessage ?? (isVideo ? "视频处理失败" : isAudio ? "音频处理失败" : "图片处理失败");
             }
             if (v?.status === "uploading") {
-              errors[field.id] = isVideo ? "视频仍在上传中" : "图片仍在上传中";
+              errors[field.id] = isVideo ? "视频仍在上传中" : isAudio ? "音频仍在上传中" : "图片仍在上传中";
             }
             break;
           }
@@ -477,7 +543,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         for (const field of iterateLeafFields(schema.fields)) {
           const p = fieldPaths[field.id];
           const raw = p ? getAtPath(parameters, p) : undefined;
-          if (field.kind === "imageUpload" || field.kind === "videoUpload") {
+          if (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload") {
             if ((raw as ImageFieldValue | undefined)?.status === "uploading") return null;
           } else if (field.kind === "multiImageUpload") {
             const items = (raw as MultiImageFieldValue | undefined)?.items ?? [];
@@ -496,11 +562,24 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         const path = fieldPaths[field.id];
         const raw = path ? getAtPath(parameters, path) : undefined;
         const mapped = mapLeafToApiValue(field, raw);
-        if (mapped === undefined && (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "multiImageUpload")) continue;
+        if (mapped === undefined && (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload" || field.kind === "multiImageUpload")) continue;
 
         const { nodeId, inputPath } = field.mapping;
         if (!nodeInputs[nodeId]) nodeInputs[nodeId] = {};
         deepAssignInput(nodeInputs[nodeId], inputPath, mapped);
+        if (
+          field.kind === "audioUpload"
+          && field.durationMapping
+          && typeof (raw as ImageFieldValue | undefined)?.durationSec === "number"
+        ) {
+          const { nodeId: durationNodeId, inputPath: durationInputPath } = field.durationMapping;
+          if (!nodeInputs[durationNodeId]) nodeInputs[durationNodeId] = {};
+          deepAssignInput(
+            nodeInputs[durationNodeId],
+            durationInputPath,
+            (raw as ImageFieldValue).durationSec,
+          );
+        }
       }
 
       return {

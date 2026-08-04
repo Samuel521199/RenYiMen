@@ -9,8 +9,12 @@ import { useLanguage, useT } from "@/i18n";
 
 export function PlatformShell({ children }: { children: React.ReactNode }) {
   const { data: session } = useSession();
+  const pathname = usePathname();
   const t = useT();
   const { locale, toggleLocale } = useLanguage();
+  const isWorkbench = pathname.startsWith("/workbench");
+  const isGeneralWorkspace =
+    pathname === "/workbench/dashboard" || pathname.startsWith("/workbench/tools");
 
   return (
     <div className="flex min-h-screen flex-col bg-[#0a0f1e] text-slate-100">
@@ -25,6 +29,31 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
             </span>
             {t.navWorkbench}
           </Link>
+
+          {isWorkbench && (
+            <nav aria-label={t.workspaceSwitchLabel} className="flex items-center gap-2">
+              <Link
+                href="/workbench/dashboard"
+                className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  isGeneralWorkspace
+                    ? "border-indigo-400/50 bg-indigo-500/20 text-indigo-100"
+                    : "border-white/10 text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                }`}
+              >
+                {t.workspaceGeneral}
+              </Link>
+              <Link
+                href="/workbench/operations"
+                className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  !isGeneralWorkspace
+                    ? "border-indigo-400/50 bg-indigo-500/20 text-indigo-100"
+                    : "border-white/10 text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                }`}
+              >
+                {t.workspaceOperations}
+              </Link>
+            </nav>
+          )}
 
           <div className="flex flex-1 items-center justify-end gap-2">
             <button

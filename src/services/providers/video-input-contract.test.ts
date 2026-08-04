@@ -379,6 +379,85 @@ test("Bailian dance result prices professional output from usage duration and mo
   }
 });
 
+test("Bailian wan2.2-s2v uses native image/audio fields and the image-to-video endpoint", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousForce = process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL;
+  try {
+    process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL = "true";
+    const adapter = new BailianAdapter();
+    const body = adapter.buildPayload({
+      templateId: "bailian-wan2.2-s2v",
+      nodeInputs: {
+        input: {
+          modelName: "wan2.2-s2v",
+          image_url: "https://example.com/character.png",
+          audio_url: "https://example.com/voice.mp3",
+          resolution: "720P",
+        },
+      },
+    });
+
+    assert.deepEqual(body, {
+      model: "wan2.2-s2v",
+      input: {
+        image_url: "https://example.com/character.png",
+        audio_url: "https://example.com/voice.mp3",
+      },
+      parameters: { resolution: "720P" },
+    });
+    assert.deepEqual(adapter.calculateCost({
+      templateId: "bailian-wan2.2-s2v",
+      nodeInputs: { input: { modelName: "wan2.2-s2v", resolution: "480P", duration: 5 } },
+    }), { cost: 625, sellPrice: 625 });
+    assert.deepEqual(adapter.calculateCost({
+      templateId: "bailian-wan2.2-s2v",
+      nodeInputs: { input: { modelName: "wan2.2-s2v", resolution: "720P", duration: 18 } },
+    }), { cost: 4050, sellPrice: 4050 });
+
+    let submittedUrl = "";
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      submittedUrl = String(input);
+      return new Response(JSON.stringify({ output: { task_id: "s2v-task" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    await adapter.submitTask(body, { apiKey: "test-key", baseUrl: "https://dashscope.example.com" });
+    assert.equal(
+      submittedUrl,
+      "https://dashscope.example.com/api/v1/services/aigc/image2video/video-synthesis",
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv("BAILIAN_FORCE_HAPPYHORSE_MODEL", previousForce);
+  }
+});
+
+test("Bailian wan2.2-s2v result prices actual duration using the returned resolution", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      output: {
+        task_status: "SUCCEEDED",
+        results: { video_url: "https://example.com/talking.mp4" },
+      },
+      usage: { duration: 18.13, SR: 720, video_count: 1 },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+    const result = await new BailianAdapter().queryTask("s2v-task", {
+      apiKey: "test-key",
+      baseUrl: "https://dashscope.example.com",
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.providerDurationSec, 18.13);
+    assert.equal(result.providerCost, 4079);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("smart selection preserves required active entities and a motion checkpoint before optional references", () => {
   const referenceBinding = {
     transportRole: "reference_image",
