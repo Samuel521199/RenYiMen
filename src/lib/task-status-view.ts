@@ -17,8 +17,17 @@ export const DEFAULT_TASK_LOADING_HINTS = [
   "长任务预计数分钟，您可暂时离开本页，稍后返回查看结果。",
 ];
 
+export const DANCE_MOVE_LOADING_HINTS = [
+  "正在分析参考视频中的舞蹈动作与节奏…",
+  "正在识别人物姿态和面部表情…",
+  "正在将动作轨迹迁移到图片人物…",
+  "正在优化肢体连贯性与画面稳定性…",
+  "正在渲染舞蹈视频，平均约需 377 秒，请耐心等待…",
+];
+
 /** 各 SKU 预计完成耗时（毫秒），未列出的 SKU 使用默认 150s。 */
 const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
+  BAILIAN_WAN22_ANIMATE_MOVE: 377_000,
   BAILIAN_WANX_I2V: 180_000,
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
@@ -46,13 +55,16 @@ export function resolveExpectedDurationMsForSku(sku: { skuId: string } | null): 
 }
 
 /**
- * 伪进度：ease-out 缓动，随已耗时 / 预计耗时趋近 99%，成功后再由 UI 切到 100%。
+ * 伪进度：预计耗时内按真实时间比例线性增长并封顶 95%；超过预计耗时后缓慢趋近 99%。
+ * 只有上游明确成功时，UI 才切换到 100%。
  */
 export function computePseudoProgressPercent(elapsedMs: number, expectedDurationMs: number): number {
   if (!(expectedDurationMs > 0) || !Number.isFinite(elapsedMs) || elapsedMs < 0) return 0;
-  const t = Math.min(1, Math.max(0, elapsedMs / expectedDurationMs));
-  const eased = 1 - (1 - t) ** 3;
-  return Math.min(99, 99 * eased);
+  const elapsedRatio = elapsedMs / expectedDurationMs;
+  if (elapsedRatio <= 1) return Math.min(95, 100 * elapsedRatio);
+
+  const overtimeRatio = elapsedRatio - 1;
+  return Math.min(99, 95 + 4 * (1 - Math.exp(-overtimeRatio)));
 }
 
 /**
@@ -68,6 +80,8 @@ export function buildTaskViewerModel(
     elapsedMs?: number;
     /** 当前 SKU 预计总耗时；缺省按 150s 伪进度 */
     expectedDurationMs?: number;
+    /** 用于选择与当前生成类型匹配的阶段提示。 */
+    skuId?: string;
   }
 ): TaskStatusViewModel {
   if (data?.status === "succeeded") {
@@ -96,7 +110,7 @@ export function buildTaskViewerModel(
       ...(mediaType !== undefined ? { mediaType } : {}),
       ...(resultUrls !== undefined ? { resultUrls } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
-      hints: DEFAULT_TASK_LOADING_HINTS,
+      hints: ctx.skuId === "BAILIAN_WAN22_ANIMATE_MOVE" ? DANCE_MOVE_LOADING_HINTS : DEFAULT_TASK_LOADING_HINTS,
       ...(sellPrice !== undefined ? { sellPrice } : {}),
     };
   }
@@ -105,7 +119,7 @@ export function buildTaskViewerModel(
     return {
       phase: "failure",
       errorMessage: data.errorMessage ?? "生成失败，原因未知。",
-      hints: DEFAULT_TASK_LOADING_HINTS,
+      hints: ctx.skuId === "BAILIAN_WAN22_ANIMATE_MOVE" ? DANCE_MOVE_LOADING_HINTS : DEFAULT_TASK_LOADING_HINTS,
     };
   }
 
@@ -125,7 +139,7 @@ export function buildTaskViewerModel(
     subPhase,
     elapsedMs: elapsed,
     expectedDurationMs: expectedMs,
-    hints: DEFAULT_TASK_LOADING_HINTS,
+    hints: ctx.skuId === "BAILIAN_WAN22_ANIMATE_MOVE" ? DANCE_MOVE_LOADING_HINTS : DEFAULT_TASK_LOADING_HINTS,
     transportMessage,
   };
 }

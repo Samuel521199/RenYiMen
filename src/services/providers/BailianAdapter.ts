@@ -10,6 +10,8 @@ import type { VideoProviderInputCapabilities } from "./video-input-contract";
 
 const DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
+const IMAGE_TO_VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/image2video/video-synthesis";
+const WAN_ANIMATE_MOVE_MODEL = "wan2.2-animate-move";
 
 /** 网关轮询单次 GET `/api/v1/tasks/{id}` 超时上限（DashScope 排队可能较久） */
 export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
@@ -20,6 +22,12 @@ export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
  */
 const POINTS_PER_SECOND = 150;
 export const BAILIAN_VIDEO_CREDITS_PER_SECOND = POINTS_PER_SECOND;
+
+/** 项目积分口径：人民币 1 元折算为 250 积分。 */
+export const BAILIAN_CREDITS_PER_CNY = 250;
+/** wan2.2-animate-move 华北 2 官方原价：标准 0.4 元/秒、专业 0.6 元/秒。 */
+export const BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND = Math.round(0.4 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND = Math.round(0.6 * BAILIAN_CREDITS_PER_CNY);
 
 const BAILIAN_DEFAULT_USAGE_DURATION_SEC = 5;
 
@@ -241,7 +249,11 @@ function shouldForceHappyHorseModel(): boolean {
 }
 
 /** 表单 / flags / 顶层 inputs 请求的成片时长（秒），钳制在 DashScope 常见区间 3–15 */
-function resolveRequestedVideoDurationSec(payload: StandardPayload): number {
+function resolveRequestedVideoDurationSec(
+  payload: StandardPayload,
+  minSeconds = BAILIAN_REQUEST_DURATION_MIN,
+  maxSeconds = BAILIAN_REQUEST_DURATION_MAX,
+): number {
   const fromInputs =
     payload.inputs?.duration != null && payload.inputs.duration !== ""
       ? Number(payload.inputs.duration)
@@ -262,7 +274,7 @@ function resolveRequestedVideoDurationSec(payload: StandardPayload): number {
         : readNumberFlag(flags, ["duration", "videoDuration", "seconds"]) ??
           readNumberFromNode(inputNode, ["duration", "videoDuration", "seconds"]);
   const n = typeof raw === "number" && Number.isFinite(raw) ? raw : BAILIAN_DEFAULT_USAGE_DURATION_SEC;
-  return Math.min(BAILIAN_REQUEST_DURATION_MAX, Math.max(BAILIAN_REQUEST_DURATION_MIN, Math.round(n)));
+  return Math.min(maxSeconds, Math.max(minSeconds, Math.round(n)));
 }
 
 const BAILIAN_RATIO_WHITELIST = new Set(["16:9", "9:16", "3:4", "4:3", "1:1"]);
@@ -344,7 +356,22 @@ export type BailianVideoSynthesisInputLegacy = {
   prompt: string;
 };
 
+/** 万相图生动作：把参考视频中的动作与表情迁移到人物图片。 */
+export type BailianAnimateMoveInput = {
+  image_url: string;
+  video_url: string;
+  watermark?: boolean;
+};
+
 export type BailianVideoSynthesisRequestBody =
+  | {
+      model: typeof WAN_ANIMATE_MOVE_MODEL;
+      input: BailianAnimateMoveInput;
+      parameters: {
+        mode: "wan-std" | "wan-pro";
+        check_image?: boolean;
+      };
+    }
   | {
       model: string;
       input: BailianVideoSynthesisInputWan27;
@@ -366,7 +393,9 @@ export type BailianVideoSynthesisRequestBody =
 export class BailianAdapter implements IProviderAdapter {
   getVideoInputCapabilities(payload: StandardPayload): VideoProviderInputCapabilities {
     const requestedModel = resolveDashScopeModel(payload);
-    const targetModel = shouldForceHappyHorseModel()
+    const targetModel = requestedModel.toLowerCase() === WAN_ANIMATE_MOVE_MODEL
+      ? WAN_ANIMATE_MOVE_MODEL
+      : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
     const modelLc = targetModel.toLowerCase();
@@ -429,8 +458,20 @@ export class BailianAdapter implements IProviderAdapter {
 
   calculateCost(payload: StandardPayload): ProviderCostResult {
     const f = payload.flags;
-    const secs = resolveRequestedVideoDurationSec(payload);
-    let cost = secs * BAILIAN_VIDEO_CREDITS_PER_SECOND;
+    const requestedModel = resolveDashScopeModel(payload).toLowerCase();
+    const secs = requestedModel === WAN_ANIMATE_MOVE_MODEL
+      ? resolveRequestedVideoDurationSec(payload, 2, 30)
+      : resolveRequestedVideoDurationSec(payload);
+    const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
+    const requestedMode =
+      readStringFlag(isRecord(f) ? f : undefined, ["mode", "qualityMode"]) ??
+      readStringFromNode(inputNode, ["mode", "qualityMode"]);
+    const creditsPerSecond = requestedModel === WAN_ANIMATE_MOVE_MODEL
+      ? requestedMode === "wan-pro"
+        ? BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND
+        : BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND
+      : BAILIAN_VIDEO_CREDITS_PER_SECOND;
+    let cost = secs * creditsPerSecond;
     if (isRecord(f) && typeof f.catalogBaseCost === "number" && Number.isFinite(f.catalogBaseCost)) {
       const b = Math.floor(f.catalogBaseCost);
       if (b >= 1) cost = b;
@@ -473,10 +514,57 @@ export class BailianAdapter implements IProviderAdapter {
       extractPromptFromNodeInputs(payload.nodeInputs);
     const prompt = promptRaw?.trim() ?? "";
     const requestedModel = resolveDashScopeModel(payload);
-    const targetModel = shouldForceHappyHorseModel()
+    const targetModel = requestedModel.toLowerCase() === WAN_ANIMATE_MOVE_MODEL
+      ? WAN_ANIMATE_MOVE_MODEL
+      : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
     const modelLc = targetModel.toLowerCase();
+    if (modelLc === WAN_ANIMATE_MOVE_MODEL) {
+      const videoUrl =
+        readStringFlag(flags, ["videoUrl", "video_url", "referenceVideoUrl", "reference_video_url"]) ??
+        readStringFromNode(inputNode, ["video_url", "videoUrl", "reference_video_url", "referenceVideoUrl"]);
+      if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
+        throw new ProviderError(
+          "缺少舞蹈参考视频的公网 URL（请提供 input.video_url）",
+          "BAILIAN_MISSING_VIDEO_URL",
+          400
+        );
+      }
+      const characterImageUrl =
+        readStringFlag(flags, ["imageUrl", "image_url", "characterImageUrl", "character_image_url"]) ??
+        readStringFromNode(inputNode, ["image_url", "imageUrl", "character_image_url", "characterImageUrl"]) ??
+        refImageUrls[0];
+      if (!characterImageUrl) {
+        throw new ProviderError(
+          "缺少人物图片的公网 URL（请提供 input.image_url）",
+          "BAILIAN_MISSING_IMAGE_URL",
+          400
+        );
+      }
+      const requestedMode =
+        readStringFlag(flags, ["mode", "qualityMode"]) ??
+        readStringFromNode(inputNode, ["mode", "qualityMode"]);
+      const mode: "wan-std" | "wan-pro" = requestedMode === "wan-pro" ? "wan-pro" : "wan-std";
+      return {
+        model: WAN_ANIMATE_MOVE_MODEL,
+        input: {
+          image_url: characterImageUrl,
+          video_url: videoUrl.trim(),
+          watermark:
+            readBooleanFlag(flags, ["watermark", "showWatermark"]) ??
+            readBooleanFromNode(inputNode, ["watermark", "showWatermark"]) ??
+            false,
+        },
+        parameters: {
+          mode,
+          check_image:
+            readBooleanFlag(flags, ["check_image", "checkImage"]) ??
+            readBooleanFromNode(inputNode, ["check_image", "checkImage"]) ??
+            true,
+        },
+      };
+    }
     const usesMediaInput = modelLc.includes("wan2") || modelLc.includes("happyhorse");
     const extraParams = flags?.bailianParameters ?? flags?.dashscopeParameters;
     const requestDuration = resolveRequestedVideoDurationSec(payload);
@@ -570,7 +658,10 @@ export class BailianAdapter implements IProviderAdapter {
     credentials: unknown
   ): Promise<{ taskId: string; raw: unknown }> {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
-    const url = `${baseUrl}${VIDEO_SYNTHESIS_PATH}`;
+    const path = body.model.toLowerCase() === WAN_ANIMATE_MOVE_MODEL
+      ? IMAGE_TO_VIDEO_SYNTHESIS_PATH
+      : VIDEO_SYNTHESIS_PATH;
+    const url = `${baseUrl}${path}`;
     let res: Response;
     try {
       res = await fetch(url, {
@@ -695,6 +786,12 @@ function extractResultVideoUrl(raw: unknown): string | undefined {
       (typeof out.videoUrl === "string" && out.videoUrl.trim());
     if (vu) return vu;
     const results = out.results;
+    if (isRecord(results)) {
+      const u =
+        (typeof results.video_url === "string" && results.video_url.trim()) ||
+        (typeof results.videoUrl === "string" && results.videoUrl.trim());
+      if (u) return u;
+    }
     if (Array.isArray(results) && results[0] && isRecord(results[0])) {
       const u = results[0].url;
       if (typeof u === "string" && u.trim()) return u.trim();
@@ -708,13 +805,19 @@ function extractDashScopeUsageDurationSec(raw: unknown): number {
   if (!isRecord(raw)) return BAILIAN_DEFAULT_USAGE_DURATION_SEC;
   const usage = raw.usage;
   if (!isRecord(usage)) return BAILIAN_DEFAULT_USAGE_DURATION_SEC;
-  const d = usage.duration;
+  const d = usage.video_duration ?? usage.duration;
   if (typeof d === "number" && Number.isFinite(d) && d > 0) return d;
   if (typeof d === "string" && d.trim()) {
     const n = Number(d.trim());
     if (Number.isFinite(n) && n > 0) return n;
   }
   return BAILIAN_DEFAULT_USAGE_DURATION_SEC;
+}
+
+function extractDashScopeUsageVideoRatio(raw: unknown): string {
+  if (!isRecord(raw) || !isRecord(raw.usage)) return "";
+  const ratio = raw.usage.video_ratio;
+  return typeof ratio === "string" ? ratio.trim().toLowerCase() : "";
 }
 
 function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
@@ -734,7 +837,13 @@ function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
       return { status: "failed", errorMessage: "任务成功但未解析到 output.video_url" };
     }
     const durationSec = extractDashScopeUsageDurationSec(raw);
-    const providerCost = Math.round(durationSec * POINTS_PER_SECOND);
+    const videoRatio = extractDashScopeUsageVideoRatio(raw);
+    const creditsPerSecond = videoRatio === "pro"
+      ? BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND
+      : videoRatio === "standard"
+        ? BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND
+        : POINTS_PER_SECOND;
+    const providerCost = Math.round(durationSec * creditsPerSecond);
     return {
       status: "succeeded",
       resultUrl: url,

@@ -6,6 +6,7 @@ import {
   serializeVideoProject,
 } from "@/services/video-orchestrator/project-service";
 import { normalizePlanInput } from "@/services/video-orchestrator/planner";
+import { isOnePromptVideoWorkbenchEnabled } from "@/lib/one-prompt-video-feature";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,6 +31,13 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    if (!isOnePromptVideoWorkbenchEnabled()) {
+      return NextResponse.json({
+        ok: false,
+        error: "一句话成片工作台当前未开放。",
+        errorCode: "ONE_PROMPT_VIDEO_WORKBENCH_DISABLED",
+      }, { status: 404 });
+    }
     if (process.env.NEXT_PUBLIC_ONE_PROMPT_MIGRATION_FROZEN === "true") {
       return NextResponse.json({
         ok: false,

@@ -24,7 +24,6 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
   );
   /** 视频文件复用图片上传通道（OSS presign → PUT）*/
   const applyImageFile = useWorkflowStore((s) => s.applyImageFile);
-  const clearImageField = useWorkflowStore((s) => s.clearImageField);
 
   const accept = field.validation?.accept?.join(",") ?? "video/mp4,video/webm,video/quicktime,video/*";
   const v = value ?? ({ status: "empty" } satisfies ImageFieldValue);
@@ -34,12 +33,12 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
   }, []);
 
   const dashedFrameClass = [
-    "relative flex h-[120px] w-full items-center justify-center overflow-hidden rounded-lg border-2 border-dashed bg-[#1a2840]",
+    "relative flex h-[120px] w-full min-w-0 max-w-full items-center justify-center overflow-hidden rounded-lg border-2 border-dashed bg-[#1a2840]",
     error ? "border-red-500/50" : "border-[#2a3d5e]",
   ].join(" ");
 
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 max-w-full space-y-2 overflow-hidden">
       {/* Preview / drop zone */}
       <div className={dashedFrameClass}>
         {v.status === "uploading" ? (
@@ -49,16 +48,11 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
             <span className="text-xs text-slate-500">{t.uploadWait}</span>
           </div>
         ) : v.status === "ready" ? (
-          <div className="flex w-full flex-col items-center gap-2 px-4">
+          <div className="flex w-full min-w-0 max-w-full flex-col items-center gap-2 overflow-hidden px-4">
             <Video className="h-8 w-8 text-emerald-400" strokeWidth={1.5} />
-            <p className="max-w-full truncate text-center text-xs font-medium text-slate-300">
+            <p className="block w-full min-w-0 truncate text-center text-xs font-medium text-slate-300">
               {v.fileName ?? "video"}
             </p>
-            {v.remoteUrl && (
-              <p className="max-w-full truncate text-center text-[10px] text-emerald-500/70">
-                {t.uploadRemoteUrl(v.remoteUrl)}
-              </p>
-            )}
           </div>
         ) : v.status === "error" ? (
           <button
@@ -85,7 +79,7 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
       </div>
 
       {/* Action buttons */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex min-w-0 max-w-full flex-wrap gap-2">
         <input
           ref={inputRef}
           type="file"
@@ -105,23 +99,13 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
         >
           {v.status === "ready" ? t.uploadChangeBtn : t.uploadSelectBtn}
         </button>
-        {(v.status === "ready" || v.status === "error" || v.status === "uploading") && (
-          <button
-            type="button"
-            disabled={v.status === "uploading"}
-            onClick={() => clearImageField(field.id)}
-            className="rounded-lg border border-[#2a3d5e] px-3 py-1.5 text-sm text-slate-400 transition-colors hover:border-[#3a5070] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {t.uploadClearBtn}
-          </button>
-        )}
         {v.fileName && v.status !== "ready" && (
-          <span className="self-center truncate text-xs text-slate-500">{t.uploadFileName(v.fileName)}</span>
+          <span className="min-w-0 max-w-full self-center truncate text-xs text-slate-500">{t.uploadFileName(v.fileName)}</span>
         )}
       </div>
 
       {field.description && (
-        <p className="text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
+        <p className="break-words text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>

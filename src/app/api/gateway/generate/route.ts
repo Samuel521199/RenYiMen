@@ -8,7 +8,6 @@ import {
   getProviderAdapter,
   resolveProviderCodeFromBody,
 } from "@/services/providers/ProviderFactory";
-import { BailianAdapter } from "@/services/providers/BailianAdapter";
 import type { IProviderAdapter, StandardPayload } from "@/services/providers/types";
 import { ProviderError } from "@/services/providers/types";
 import { expireStaleUserPending } from "@/lib/stale-pending-cleanup";
@@ -85,10 +84,7 @@ export async function POST(req: Request) {
 
     let adapter: IProviderAdapter;
     try {
-      adapter =
-        providerCode.trim().toUpperCase() === "ALIYUN_BAILIAN"
-          ? new BailianAdapter()
-          : getProviderAdapter(providerCode);
+      adapter = getProviderAdapter(providerCode);
     } catch (e) {
       if (e instanceof ProviderError) {
         return NextResponse.json(

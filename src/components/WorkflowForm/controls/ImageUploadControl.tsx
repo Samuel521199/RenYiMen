@@ -33,7 +33,6 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
   );
   const applyImageFile = useWorkflowStore((s) => s.applyImageFile);
   const applyImageFromAsset = useWorkflowStore((s) => s.applyImageFromAsset);
-  const clearImageField = useWorkflowStore((s) => s.clearImageField);
 
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -96,8 +95,8 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
   }, [handleFrameClick]);
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-start gap-3">
+    <div className="min-w-0 max-w-full space-y-2 overflow-hidden">
+      <div className="flex min-w-0 max-w-full flex-wrap items-start gap-3 overflow-hidden">
         {/* 始终渲染 div，仅切换内容，避免 React 协调时 div↔button 类型切换引发 insertBefore 崩溃 */}
         <div
           className={[
@@ -170,7 +169,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
           )}
         </div>
 
-        <div className="min-w-0 flex-1 space-y-2">
+        <div className="min-w-0 max-w-full flex-1 space-y-2 overflow-hidden">
           <input
             ref={inputRef}
             type="file"
@@ -182,7 +181,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
               if (file) void applyImageFile(field.id, file);
             }}
           />
-          <div className="flex flex-wrap gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap gap-2">
             <button
               type="button"
               disabled={v.status === "uploading"}
@@ -199,28 +198,14 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
             >
               {t.uploadFromAssetLibraryBtn}
             </button>
-            {(v.status === "ready" || v.status === "error" || v.status === "uploading") && (
-              <button
-                type="button"
-                disabled={v.status === "uploading"}
-                onClick={() => clearImageField(field.id)}
-                className="rounded-lg border border-[#2a3d5e] px-3 py-1.5 text-sm text-slate-400 transition-colors hover:border-[#3a5070] hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {t.uploadClearBtn}
-              </button>
-            )}
           </div>
-          {v.fileName && <p className="truncate text-xs text-slate-500">{t.uploadFileName(v.fileName)}</p>}
-          {v.status === "ready" && v.remoteUrl && (
-            <p className="break-all text-xs text-emerald-500/80">{t.uploadRemoteUrl(v.remoteUrl)}</p>
-          )}
           {v.status === "error" && (
             <p className="text-xs text-red-600">{v.errorMessage ?? t.uploadFailedRetry}</p>
           )}
         </div>
       </div>
       {field.description && (
-        <p className="text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
+        <p className="break-words text-xs text-slate-500">{loc(field.description, field.descriptionEn, locale)}</p>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
 

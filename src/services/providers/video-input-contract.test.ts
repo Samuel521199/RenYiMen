@@ -296,6 +296,89 @@ test("Bailian gateway keeps the explicit HappyHorse compatibility switch", () =>
   }
 });
 
+test("Bailian dance motion transfer uses the dedicated image and video contract", async () => {
+  const previousForce = process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL;
+  const previousFetch = globalThis.fetch;
+  try {
+    process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL = "true";
+    const adapter = new BailianAdapter();
+    const body = adapter.buildPayload({
+      templateId: "bailian-wan2.2-animate-move",
+      nodeInputs: {
+        input: {
+          modelName: "wan2.2-animate-move",
+          image_url: "https://example.com/character.png",
+          video_url: "https://example.com/dance.mp4",
+          mode: "wan-pro",
+        },
+      },
+    });
+
+    assert.equal(body.model, "wan2.2-animate-move");
+    assert.deepEqual(body.input, {
+      image_url: "https://example.com/character.png",
+      video_url: "https://example.com/dance.mp4",
+      watermark: false,
+    });
+    assert.deepEqual(body.parameters, { mode: "wan-pro", check_image: true });
+    assert.deepEqual(adapter.calculateCost({
+      templateId: "bailian-wan2.2-animate-move",
+      nodeInputs: { input: { modelName: "wan2.2-animate-move", mode: "wan-std", duration: 5 } },
+    }), { cost: 500, sellPrice: 500 });
+    assert.deepEqual(adapter.calculateCost({
+      templateId: "bailian-wan2.2-animate-move",
+      nodeInputs: { input: { modelName: "wan2.2-animate-move", mode: "wan-pro", duration: 5 } },
+    }), { cost: 750, sellPrice: 750 });
+
+    let submittedUrl = "";
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      submittedUrl = String(input);
+      return new Response(JSON.stringify({ output: { task_id: "dance-task" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const submitted = await adapter.submitTask(body, {
+      apiKey: "test-key",
+      baseUrl: "https://dashscope.example.com",
+    });
+    assert.equal(submitted.taskId, "dance-task");
+    assert.equal(
+      submittedUrl,
+      "https://dashscope.example.com/api/v1/services/aigc/image2video/video-synthesis",
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv("BAILIAN_FORCE_HAPPYHORSE_MODEL", previousForce);
+  }
+});
+
+test("Bailian dance result prices professional output from usage duration and mode", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      output: {
+        task_status: "SUCCEEDED",
+        results: { video_url: "https://example.com/result.mp4" },
+      },
+      usage: { video_duration: 12.5, video_ratio: "pro" },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+    const result = await new BailianAdapter().queryTask("dance-task", {
+      apiKey: "test-key",
+      baseUrl: "https://dashscope.example.com",
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.resultUrl, "https://example.com/result.mp4");
+    assert.equal(result.providerDurationSec, 12.5);
+    assert.equal(result.providerCost, 1875);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("smart selection preserves required active entities and a motion checkpoint before optional references", () => {
   const referenceBinding = {
     transportRole: "reference_image",

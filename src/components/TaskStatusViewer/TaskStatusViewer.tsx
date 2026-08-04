@@ -183,10 +183,7 @@ function LoadingLayer({
   }, [active, hints.length]);
 
   const title = model.subPhase === "queued" ? tt.statusQueued : tt.statusGenerating;
-  const subtitle =
-    model.subPhase === "queued"
-      ? tt.subtitleQueued
-      : tt.subtitleGenerating;
+  const subtitle = model.subPhase === "queued" ? tt.subtitleQueued : null;
 
   const elapsed = model.elapsedMs ?? 0;
   const expected = expectedProp ?? model.expectedDurationMs ?? 150_000;
@@ -197,7 +194,7 @@ function LoadingLayer({
       <div className="flex flex-1 flex-col gap-5">
         <header>
           <p className="text-xs font-medium uppercase tracking-widest text-slate-500">{title}</p>
-          <h3 className="mt-1 text-base font-semibold text-slate-300">{subtitle}</h3>
+          {subtitle && <h3 className="mt-1 text-base font-semibold text-slate-300">{subtitle}</h3>}
         </header>
 
         {model.transportMessage && (
@@ -230,17 +227,15 @@ function LoadingLayer({
               style={{ width: `${barPct}%` }}
             />
           </div>
-          <p className="text-right text-xs tabular-nums text-slate-500">
-            {tt.progressPct(barPct)}
-          </p>
+          <div className="flex items-center justify-between gap-4 text-xs text-slate-500">
+            <p key={hintIndex} className="min-w-0 truncate transition-opacity duration-500">
+              {hints[hintIndex]}
+            </p>
+            <p className="shrink-0 text-right tabular-nums">
+              {tt.progressPct(barPct)}
+            </p>
+          </div>
         </div>
-
-        <p
-          key={hintIndex}
-          className="max-w-xl text-sm leading-relaxed text-slate-500 transition-opacity duration-500"
-        >
-          {hints[hintIndex]}
-        </p>
       </div>
     </div>
   );

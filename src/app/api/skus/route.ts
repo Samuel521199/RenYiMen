@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { bailianMultiRefWorkflowMock } from "@/mocks/bailian-multi-ref-workflow";
+import { bailianDanceMoveWorkflowMock } from "@/mocks/bailian-dance-move-workflow";
 import { bailianWanxI2vWorkflowMock } from "@/mocks/bailian-wanx-i2v-workflow";
 import { bgReplaceWorkflowMock } from "@/mocks/bg-replace-workflow";
 import { videoEnhanceWorkflowMock } from "@/mocks/video-enhance-workflow";
@@ -14,6 +15,7 @@ import { klingProWorkflowMock } from "@/mocks/kling-pro-workflow";
 import { storyboardWorkflowMock } from "@/mocks/storyboard-workflow";
 import { promptReverseWorkflowMock } from "@/mocks/prompt-reverse-workflow";
 import { textToImageWorkflowMock } from "@/mocks/text-to-image-workflow";
+import { isOnePromptVideoWorkbenchEnabled } from "@/lib/one-prompt-video-feature";
 import type { SkuCatalogResponse, SkuDefinition } from "@/types/sku-catalog";
 
 export const runtime = "nodejs";
@@ -192,6 +194,20 @@ const CATALOG: SkuDefinition[] = [
   },
   // KLING_PRO_I2V 暂时隐藏（O3-pro 生成较慢，体验待优化后再上线）
   {
+    skuId: "BAILIAN_WAN22_ANIMATE_MOVE",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "video",
+    cover: "/covers/animated-cover.webp",
+    displayName: "模仿生成舞蹈视频",
+    displayNameEn: "Dance Motion Transfer",
+    description:
+      "上传人物图片和舞蹈参考视频，将视频中的动作与表情迁移到图片人物上。使用阿里百炼 wan2.2-animate-move，平均生成约 377 秒。",
+    descriptionEn:
+      "Upload a character image and dance reference video to transfer its motion and expressions with Alibaba Model Studio wan2.2-animate-move. Average generation time: about 377 seconds.",
+    sellCredits: 500,
+    uiSchema: bailianDanceMoveWorkflowMock,
+  },
+  {
     skuId: "BAILIAN_WANX_I2V",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
@@ -239,6 +255,9 @@ const CATALOG: SkuDefinition[] = [
  * GET `/api/skus` — 返回创作功能目录与表单配置，供工作台动态渲染。
  */
 export async function GET(): Promise<NextResponse<SkuCatalogResponse>> {
-  const body: SkuCatalogResponse = { ok: true, skus: CATALOG };
+  const skus = isOnePromptVideoWorkbenchEnabled()
+    ? CATALOG
+    : CATALOG.filter((sku) => sku.skuId !== "ONE_PROMPT_30S_VIDEO");
+  const body: SkuCatalogResponse = { ok: true, skus };
   return NextResponse.json(body);
 }

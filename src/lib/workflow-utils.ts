@@ -69,6 +69,7 @@ export function buildInitialParameters(schema: WorkflowFormSchema): Record<strin
 function defaultValueForField(f: WorkflowField): unknown {
   switch (f.kind) {
     case "imageUpload":
+    case "videoUpload":
       return emptyImageValue((f as ImageUploadField).defaultValue);
     case "multiImageUpload":
       return emptyMultiImageValue();

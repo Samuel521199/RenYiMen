@@ -177,7 +177,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       if (!path || !schema) return;
 
       const field = [...iterateLeafFields(schema.fields)].find((f) => f.id === fieldId);
-      if (!field || field.kind !== "imageUpload") return;
+      if (!field || (field.kind !== "imageUpload" && field.kind !== "videoUpload")) return;
 
       const maxMb = field.validation?.maxSizeMB;
       if (maxMb != null && file.size > maxMb * 1024 * 1024) {

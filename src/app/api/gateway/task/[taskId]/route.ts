@@ -14,7 +14,7 @@ import {
   DEFAULT_PROVIDER_CODE,
   getProviderAdapter,
 } from "@/services/providers/ProviderFactory";
-import { BailianAdapter, BAILIAN_GATEWAY_POLL_DEADLINE_MS } from "@/services/providers/BailianAdapter";
+import { BAILIAN_GATEWAY_POLL_DEADLINE_MS } from "@/services/providers/BailianAdapter";
 import {
   RUNNINGHUB_GATEWAY_POLL_DEADLINE_MS,
 } from "@/services/providers/RunningHubAdapter";
@@ -308,8 +308,7 @@ export async function GET(
 
   let adapter: IProviderAdapter;
   try {
-    adapter =
-      providerCode === "ALIYUN_BAILIAN" ? new BailianAdapter() : getProviderAdapter(providerCode);
+    adapter = getProviderAdapter(providerCode);
   } catch (e) {
     if (e instanceof ProviderError) {
       return pollFailure(e.message, e.httpStatus ?? 400);
