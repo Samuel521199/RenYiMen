@@ -2,7 +2,7 @@
 
 FROM node:18-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl ffmpeg fontconfig font-noto-cjk \
+RUN apk add --no-cache libc6-compat openssl ffmpeg fontconfig font-noto-cjk blender-headless \
   && fc-cache -f \
   && fc-list | grep -q "Noto Sans CJK SC"
 
@@ -60,10 +60,12 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/config ./config
+COPY --from=builder --chown=nextjs:nodejs /app/scripts/model-export-blender.py ./scripts/model-export-blender.py
 
 USER nextjs
 EXPOSE 3001
 ENV PORT=3001
 ENV HOSTNAME=0.0.0.0
+ENV BLENDER_EXECUTABLE=/usr/bin/blender-headless
 
 CMD ["node", "server.js"]

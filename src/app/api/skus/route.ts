@@ -42,6 +42,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_PROMPT_REVERSE",
     category: "prompt",
     cover: "/covers/prompt-reverse.webp",
+    coverVideo: "/covers/prompt-reverse-motion.mp4",
     displayName: "提示词反推",
     displayNameEn: "Image to Prompt",
     description:
@@ -57,6 +58,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "GPT_IMAGE2",
     category: "image",
     cover: "/covers/ai-image-generation.webp",
+    coverVideo: "/covers/ai-image-generation-motion.mp4",
     displayName: "智能图片生成",
     displayNameEn: "AI Image Generation",
     description:
@@ -71,6 +73,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_BG_REPLACE",
     category: "image",
     cover: "/covers/background-replace.webp",
+    coverVideo: "/covers/background-replace-motion.mp4",
     displayName: "背景替换",
     displayNameEn: "Background Replace",
     description:
@@ -85,6 +88,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_MATTING",
     category: "image",
     cover: "/covers/portrait-cutout.webp",
+    coverVideo: "/covers/portrait-cutout-motion.mp4",
     displayName: "人像抠图",
     displayNameEn: "Portrait Cutout",
     description:
@@ -99,6 +103,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_HD_UPSCALE",
     category: "image",
     cover: "/covers/hd-upscale.webp",
+    coverVideo: "/covers/hd-upscale-motion.mp4",
     displayName: "高清放大",
     displayNameEn: "HD Upscale",
     description:
@@ -113,6 +118,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_FACE_SWAP",
     category: "image",
     cover: "/covers/face-swap.webp",
+    coverVideo: "/covers/face-swap-motion.mp4",
     displayName: "换头换脸",
     displayNameEn: "Face Swap",
     description:
@@ -127,6 +133,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_TXT2IMG",
     category: "image",
     cover: "/covers/text-to-image.webp",
+    coverVideo: "/covers/text-to-image-motion.mp4",
     displayName: "文字生成图片",
     displayNameEn: "Text to Image",
     description:
@@ -141,6 +148,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_STORYBOARD",
     category: "image",
     cover: "/covers/storyboard-generator.webp",
+    coverVideo: "/covers/storyboard-generator-motion.mp4",
     displayName: "分镜生成出图",
     displayNameEn: "Storyboard Generator",
     description:
@@ -155,6 +163,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "VIDEO_ORCHESTRATOR",
     category: "image",
     cover: "/covers/character-turnaround.webp",
+    coverVideo: "/covers/character-turnaround-motion.mp4",
     displayName: "人物三视图",
     displayNameEn: "Character Turnaround",
     description:
@@ -171,6 +180,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "model",
     cover: "/covers/tripo-3d.webp",
+    coverVideo: "/covers/tripo-3d-motion.mp4",
     displayName: "Tripo 3D 模型生成",
     displayNameEn: "Tripo 3D Model Generation",
     description: "支持文生 3D、单图生 3D 和 2–4 张多视角图生 3D，可选择快速 P1.0 或高精度 H3.1，并控制贴图、PBR 与几何精度。",
@@ -184,6 +194,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "LOCAL_MEDIA",
     category: "video",
     cover: "/covers/auto-subtitles.webp",
+    coverVideo: "/covers/auto-subtitles-motion.mp4",
     displayName: "自动添加字幕",
     displayNameEn: "Auto Subtitles",
     description: "上传带有人声的视频，自动完成语音识别、时间轴匹配与字幕合成，并输出一个新的字幕版视频。",
@@ -196,6 +207,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "VIDEO_ORCHESTRATOR",
     category: "video",
     cover: "/covers/animated-cover.webp",
+    coverVideo: "/covers/animated-cover-motion.mp4",
     displayName: "一句话成片",
     displayNameEn: "One Prompt 30s Video",
     description:
@@ -210,6 +222,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_VIDEO_ENHANCE",
     category: "video",
     cover: "/covers/video-enhance.webp",
+    coverVideo: "/covers/video-enhance-motion.mp4",
     displayName: "视频模糊修复",
     displayNameEn: "Video Enhance",
     description:
@@ -224,6 +237,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_IMG2VIDEO",
     category: "video",
     cover: "/covers/image-to-video.webp",
+    coverVideo: "/covers/image-to-video-motion.mp4",
     displayName: "单图生成短视频",
     displayNameEn: "Image to Video",
     description:
@@ -238,6 +252,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "KLING_STD",
     category: "video",
     cover: "/covers/kling-standard.webp",
+    coverVideo: "/covers/kling-standard-motion.mp4",
     displayName: "Kling 标准版·图生视频",
     displayNameEn: "Kling Standard · Image to Video",
     description:
@@ -253,6 +268,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/dance-motion-transfer.webp",
+    coverVideo: "/covers/dance-motion-transfer-motion.mp4",
     displayName: "模仿生成舞蹈视频",
     displayNameEn: "Dance Motion Transfer",
     description:
@@ -267,6 +283,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/camera-movement-replication.webp",
+    coverVideo: "/covers/camera-movement-replication-motion.mp4",
     displayName: "运镜复刻",
     displayNameEn: "Camera Movement Replication",
     description:
@@ -281,6 +298,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/effect-replication.webp",
+    coverVideo: "/covers/effect-replication-motion.mp4",
     displayName: "特效复刻",
     displayNameEn: "Effect Replication",
     description:
@@ -295,6 +313,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/talking-character-video.webp",
+    coverVideo: "/covers/talking-character-video-motion.mp4",
     displayName: "有声视频",
     displayNameEn: "Talking Character Video",
     description:
@@ -309,6 +328,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN_VOICE_CLONE",
     category: "video",
     cover: "/covers/voice-cloning.webp",
+    coverVideo: "/covers/voice-cloning-motion.mp4",
     displayName: "声音克隆",
     displayNameEn: "Voice Cloning",
     description:
@@ -323,6 +343,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN_VOICE_DESIGN",
     category: "video",
     cover: "/covers/voice-design-from-text.webp",
+    coverVideo: "/covers/voice-design-from-text-motion.mp4",
     displayName: "文字设计新音色",
     displayNameEn: "Design a New Voice from Text",
     description:
@@ -337,6 +358,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN_EMOTIONAL_TTS",
     category: "video",
     cover: "/covers/expressive-voiceover.webp",
+    coverVideo: "/covers/expressive-voiceover-motion.mp4",
     displayName: "情绪化配音",
     displayNameEn: "Expressive Voiceover",
     description:
@@ -351,6 +373,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/local-video-edit.webp",
+    coverVideo: "/covers/local-video-edit-motion.mp4",
     displayName: "局部修改",
     displayNameEn: "Local Video Edit",
     description:
@@ -365,6 +388,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/scene-light-transform.webp",
+    coverVideo: "/covers/scene-light-transform-motion.mp4",
     displayName: "场景与光影变换",
     displayNameEn: "Scene & Lighting Transform",
     description:
@@ -379,6 +403,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/overall-style-transfer.webp",
+    coverVideo: "/covers/overall-style-transfer-motion.mp4",
     displayName: "整体风格迁移",
     displayNameEn: "Overall Style Transfer",
     description:
@@ -393,6 +418,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/high-motion-redraw.webp",
+    coverVideo: "/covers/high-motion-redraw-motion.mp4",
     displayName: "高动态重绘",
     displayNameEn: "High-Motion Restyle",
     description:
@@ -407,6 +433,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/multimodal-image-to-video.webp",
+    coverVideo: "/covers/multimodal-image-to-video-motion.mp4",
     displayName: "多模态图生视频",
     displayNameEn: "Multimodal Image-to-Video",
     description:
@@ -421,6 +448,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/video-continuation.webp",
+    coverVideo: "/covers/video-continuation-motion.mp4",
     displayName: "视频续写",
     displayNameEn: "Video Continuation",
     description:
@@ -435,6 +463,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
     cover: "/covers/multi-reference-drama.webp",
+    coverVideo: "/covers/multi-reference-drama-motion.mp4",
     displayName: "多参考图剧场生成",
     displayNameEn: "Multi-Reference Drama",
     description:
@@ -449,6 +478,7 @@ const CATALOG: SkuDefinition[] = [
     providerCode: "RUNNINGHUB_SVD",
     category: "video",
     cover: "/covers/first-last-frame.webp",
+    coverVideo: "/covers/first-last-frame-motion.mp4",
     displayName: "首尾帧过渡视频",
     displayNameEn: "First-Last Frame Video",
     description:

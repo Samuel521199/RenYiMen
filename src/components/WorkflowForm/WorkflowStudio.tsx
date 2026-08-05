@@ -1941,6 +1941,13 @@ function WorkflowCard({
     || sku.skuId === "BAILIAN_COSYVOICE_VOICE_DESIGN"
     || sku.skuId === "BAILIAN_EMOTIONAL_TTS";
   const favoriteActionLabel = isFavorite ? favoriteRemoveLabel : favoriteAddLabel;
+  const priceLabel = isDanceMove
+    ? `${BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND}–${BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
+    : isS2v
+      ? `${BAILIAN_S2V_480P_CREDITS_PER_SECOND}–${BAILIAN_S2V_720P_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
+      : isVideoEdit
+        ? `${BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND}–${BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
+        : `${sku.sellCredits} ${creditsLabel}`;
 
   return (
     <article className="group relative flex flex-col overflow-hidden rounded-2xl bg-[#111e34] shadow-lg shadow-black/30 transition-all duration-300 hover:-translate-y-1.5 hover:shadow-2xl hover:shadow-black/50">
@@ -1950,16 +1957,35 @@ function WorkflowCard({
         aria-label={`${startLabel}: ${name}`}
         className="absolute inset-0 z-10 cursor-pointer rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-inset"
       />
-      {/* Cover image */}
+      {/* Cover media */}
       <div className="relative aspect-video w-full overflow-hidden">
         {sku.cover ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={sku.cover}
-            alt={name}
-            loading="lazy"
-            className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.06]"
-          />
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={sku.cover}
+              alt={name}
+              loading="lazy"
+              className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.06]"
+            />
+            {sku.coverVideo && (
+              <video
+                src={sku.coverVideo}
+                poster={sku.cover}
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="metadata"
+                aria-hidden="true"
+                onCanPlay={(event) => {
+                  if (event.currentTarget.paused) void event.currentTarget.play().catch(() => undefined);
+                }}
+                onMouseEnter={(event) => void event.currentTarget.play().catch(() => undefined)}
+                className="absolute inset-0 h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.04]"
+              />
+            )}
+          </>
         ) : isCoverReserved ? (
           <div className="h-full w-full bg-[#07101f]" aria-label={locale === "en" ? "Cover image reserved" : "封面图片预留"} />
         ) : (
@@ -1970,58 +1996,31 @@ function WorkflowCard({
           </div>
         )}
 
-        {/* Persistent bottom gradient overlay */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[#07101f]/85 via-[#07101f]/10 to-transparent" />
-
-        {/* Badges row */}
-        <div className="absolute left-3 right-3 top-3 flex items-start justify-between gap-2">
-          <span className="rounded-full border border-white/10 bg-black/50 px-2.5 py-0.5 text-[11px] font-medium text-slate-300 backdrop-blur-sm">
-            {categoryLabel}
-          </span>
-          <span className="rounded-full border border-emerald-500/25 bg-emerald-950/60 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400 backdrop-blur-sm">
-            {isDanceMove
-              ? `${BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND}–${BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
-              : isS2v
-                ? `${BAILIAN_S2V_480P_CREDITS_PER_SECOND}–${BAILIAN_S2V_720P_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
-              : isVideoEdit
-                ? `${BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND}–${BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
-              : `${sku.sellCredits} ${creditsLabel}`}
-          </span>
-        </div>
-
-        {/* Description on hover */}
-        {desc && (
-          <div className="absolute bottom-0 left-0 right-0 translate-y-2 p-4 opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100">
-            <p className="line-clamp-3 text-xs leading-relaxed text-slate-300">{desc}</p>
+        <div className="pointer-events-none absolute inset-0 z-[11] flex translate-y-2 flex-col justify-end bg-gradient-to-t from-[#050a13]/95 via-[#07101f]/80 to-[#07101f]/15 p-4 opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100">
+          <span className="mb-1 text-[10px] font-medium text-cyan-200/80">{categoryLabel}</span>
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <h3 className="line-clamp-2 min-w-0 text-sm font-semibold leading-snug text-white">{name}</h3>
+            <span className="max-w-[48%] shrink-0 text-right text-[11px] font-semibold leading-snug text-emerald-300">
+              {priceLabel}
+            </span>
           </div>
-        )}
-      </div>
-
-      {/* Bottom bar */}
-      <div className="flex items-center justify-between bg-[#0e1929] px-4 py-3">
-        <span className="min-w-0 truncate text-sm font-semibold text-slate-200">{name}</span>
-        <div className="ml-3 flex shrink-0 items-center gap-2">
-          <span className="flex items-center gap-1 text-xs font-medium text-emerald-400 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-            {startLabel}
-            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-            </svg>
-          </span>
-          <button
-            type="button"
-            onClick={onToggleFavorite}
-            aria-pressed={isFavorite}
-            aria-label={favoriteActionLabel}
-            title={favoriteActionLabel}
-            className={`relative z-20 inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 ${
-              isFavorite
-                ? "border-amber-300/45 bg-amber-400/15 text-amber-300"
-                : "border-white/15 bg-white/[0.035] text-slate-400 hover:border-amber-300/45 hover:bg-amber-400/10 hover:text-amber-300"
-            }`}
-          >
-            <Star className="h-4 w-4" fill={isFavorite ? "currentColor" : "none"} strokeWidth={1.8} aria-hidden />
-          </button>
+          {desc && <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-slate-200/90">{desc}</p>}
         </div>
+
+        <button
+          type="button"
+          onClick={onToggleFavorite}
+          aria-pressed={isFavorite}
+          aria-label={favoriteActionLabel}
+          title={favoriteActionLabel}
+          className={`absolute right-3 top-3 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border opacity-0 shadow-lg backdrop-blur-md transition-all focus:outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-amber-300/70 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 ${
+            isFavorite
+              ? "border-amber-300/45 bg-amber-400/20 text-amber-300"
+              : "border-white/20 bg-black/45 text-slate-300 hover:border-amber-300/45 hover:bg-amber-400/15 hover:text-amber-300"
+          }`}
+        >
+          <Star className="h-4 w-4" fill={isFavorite ? "currentColor" : "none"} strokeWidth={1.8} aria-hidden />
+        </button>
       </div>
     </article>
   );

@@ -21,6 +21,8 @@ export interface SkuDefinition {
    * 鏇挎崲灏侀潰鏃跺彧闇€瑕嗙洊 public/covers/ 涓搴旀枃浠跺嵆鍙紝鏃犻渶淇敼浠ｇ爜銆?
    */
   cover?: string;
+  /** Optional muted looping preview shown over the static cover in the gallery. */
+  coverVideo?: string;
   /** 鍞环锛堢Н鍒嗭級锛岀敤浜庢寜閽笌灞曠ず */
   sellCredits: number;
   /** Optional direct app entry. When present, the gallery card navigates to this route instead of opening DynamicForm. */

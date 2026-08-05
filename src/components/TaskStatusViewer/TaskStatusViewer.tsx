@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
+import { downloadModelExport, type ModelExportFormat } from "@/lib/download-model-export";
 import { downloadResultImageAsPng } from "@/lib/download-result-image-png";
 import { downloadResultVideoAsFile } from "@/lib/download-result-video";
 import { computePseudoProgressPercent } from "@/lib/task-status-view";
@@ -293,6 +294,8 @@ function SuccessLayer({
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [imageDownloadBusy, setImageDownloadBusy] = useState(false);
   const [videoDownloadBusy, setVideoDownloadBusy] = useState(false);
+  const [modelExportBusy, setModelExportBusy] = useState<ModelExportFormat | null>(null);
+  const [modelExportError, setModelExportError] = useState<string | null>(null);
 
   const mediaUrl = model.videoUrl;
   const mediaType: "image" | "video" | "audio" | "text" | "model" | undefined =
@@ -344,6 +347,20 @@ function SuccessLayer({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onDownload, mediaUrl, resolvedDownloadName, mediaType]);
+
+  const handleModelExport = useCallback(async (format: ModelExportFormat) => {
+    if (!mediaUrl || modelExportBusy) return;
+    setModelExportBusy(format);
+    setModelExportError(null);
+    try {
+      await downloadModelExport(mediaUrl, format);
+    } catch (error) {
+      console.error("[TaskStatusViewer] 模型资源导出失败", error);
+      setModelExportError(error instanceof Error ? error.message : tt.modelExportFailed);
+    } finally {
+      setModelExportBusy(null);
+    }
+  }, [mediaUrl, modelExportBusy, tt.modelExportFailed]);
 
   const resultHeadline =
     mediaType === "text" ? tt.successPrompt :
@@ -501,11 +518,35 @@ function SuccessLayer({
             <button
               type="button"
               onClick={() => void handleDownload()}
-              disabled={imageDownloadBusy || videoDownloadBusy}
-              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:from-emerald-400 hover:to-teal-400 disabled:cursor-wait disabled:opacity-60"
+              disabled={imageDownloadBusy || videoDownloadBusy || modelExportBusy !== null}
+              className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-emerald-900/30 transition-all hover:from-emerald-400 hover:to-teal-400 disabled:cursor-wait disabled:opacity-60"
             >
-              {imageDownloadBusy || videoDownloadBusy ? tt.downloadingBtn : tt.downloadBtn}
+              {imageDownloadBusy || videoDownloadBusy
+                ? tt.downloadingBtn
+                : mediaType === "model"
+                  ? tt.downloadGlbBtn
+                  : tt.downloadBtn}
             </button>
+            {mediaType === "model" && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void handleModelExport("fbx")}
+                  disabled={modelExportBusy !== null || videoDownloadBusy}
+                  className="inline-flex min-h-11 items-center rounded-xl border border-violet-400/35 bg-violet-500/10 px-4 py-2 text-sm font-semibold text-violet-200 transition-colors hover:border-violet-300/60 hover:bg-violet-500/20 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {modelExportBusy === "fbx" ? tt.modelExportingBtn : tt.downloadFbxPackageBtn}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleModelExport("textures")}
+                  disabled={modelExportBusy !== null || videoDownloadBusy}
+                  className="inline-flex min-h-11 items-center rounded-xl border border-sky-400/35 bg-sky-500/10 px-4 py-2 text-sm font-semibold text-sky-200 transition-colors hover:border-sky-300/60 hover:bg-sky-500/20 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {modelExportBusy === "textures" ? tt.modelExportingBtn : tt.downloadTexturesBtn}
+                </button>
+              </>
+            )}
             {onRegenerate && (
               <button
                 type="button"
@@ -525,7 +566,15 @@ function SuccessLayer({
             </Badge>
           )}
           {mediaType === "model" && (
-            <p className="text-xs leading-relaxed text-amber-300/90">{tt.modelDownloadHint}</p>
+            <div className="space-y-2">
+              <p className="text-xs leading-relaxed text-amber-300/90">{tt.modelDownloadHint}</p>
+              <p className="text-xs leading-relaxed text-slate-400">{tt.modelExportHint}</p>
+              {modelExportError && (
+                <p role="alert" className="rounded-lg border border-red-500/25 bg-red-950/30 px-3 py-2 text-xs leading-relaxed text-red-300">
+                  {modelExportError}
+                </p>
+              )}
+            </div>
           )}
         </div>
 
