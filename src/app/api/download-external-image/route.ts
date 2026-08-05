@@ -7,6 +7,8 @@ export const dynamic = "force-dynamic";
 const MAX_BYTES_IMAGE = 25 * 1024 * 1024;
 /** 视频结果通常大于单张图；仍由服务端一次性缓冲，超大文件可后续改为流式透传。 */
 const MAX_BYTES_VIDEO = 200 * 1024 * 1024;
+/** H3.1 高精度 GLB 可能明显大于普通视频结果，模型预览与下载使用独立上限。 */
+const MAX_BYTES_MODEL = 350 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 45_000;
 const IMAGE_PREVIEW_CACHE_CONTROL = "private, max-age=604800, stale-while-revalidate=86400, immutable";
 const NO_STORE_CACHE_CONTROL = "private, no-store";
@@ -45,12 +47,12 @@ export async function GET(req: Request) {
   }
 
   const mediaKindRaw = searchParams.get("mediaKind")?.trim().toLowerCase() ?? "image";
-  return proxyExternalMedia(url, mediaKindRaw, { cachePreview: mediaKindRaw !== "video" });
+  return proxyExternalMedia(url, mediaKindRaw, { cachePreview: mediaKindRaw !== "video" && mediaKindRaw !== "model" });
 }
 
 /**
  * 登录用户代理拉取公网媒体字节：默认按「图片」校验大小与 Accept；
- * `body.mediaKind === "video"` 时用于 MP4/WebM 等结果下载（同源 Blob + `a.download`）。
+ * `body.mediaKind === "video" | "model"` 时用于视频或 GLB 结果下载（同源 Blob + `a.download`）。
  * 支持 `data:` URI（Base64 图片，如 GPT-image-2 返回的 b64_json 结果）直接解码返回。
  */
 export async function POST(req: Request) {
@@ -82,8 +84,9 @@ async function proxyExternalMedia(
   options: { cachePreview: boolean },
 ) {
   const isVideo = mediaKindRaw === "video";
-  const maxBytes = isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
-  const cacheControl = options.cachePreview && !isVideo
+  const isModel = mediaKindRaw === "model";
+  const maxBytes = isModel ? MAX_BYTES_MODEL : isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
+  const cacheControl = options.cachePreview && !isVideo && !isModel
     ? IMAGE_PREVIEW_CACHE_CONTROL
     : NO_STORE_CACHE_CONTROL;
 
@@ -134,16 +137,16 @@ async function proxyExternalMedia(
   }
 
   const controller = new AbortController();
-  const timeoutMs = isVideo ? 120_000 : FETCH_TIMEOUT_MS;
+  const timeoutMs = isVideo || isModel ? 120_000 : FETCH_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const upstream = await fetchExternalMediaWithRetry(url, {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        Accept: isVideo ? "video/*,*/*;q=0.9" : "image/*,*/*;q=0.8",
+        Accept: isModel ? "model/gltf-binary,model/gltf+json,*/*;q=0.8" : isVideo ? "video/*,*/*;q=0.9" : "image/*,*/*;q=0.8",
       },
-    }, isVideo ? 2 : 3);
+    }, isVideo || isModel ? 2 : 3);
 
     if (!upstream.ok) {
       return NextResponse.json(

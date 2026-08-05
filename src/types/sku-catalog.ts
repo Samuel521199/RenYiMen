@@ -1,7 +1,7 @@
 import type { WorkflowFormSchema } from "@/types/workflow";
 
 /** SKU 鎵€灞炵殑鍒涗綔鍔熻兘澶х被 */
-export type SkuCategory = "prompt" | "image" | "video";
+export type SkuCategory = "prompt" | "image" | "video" | "model";
 
 /** 澶у巺鍙敭 SKU锛堝惈鍔ㄦ€佽〃鍗?Schema锛?*/
 export interface SkuDefinition {

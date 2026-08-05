@@ -5,12 +5,14 @@ import { FormErrorBoundary } from "@/components/WorkflowForm/FormErrorBoundary";
 import type { MediaUploadFieldKind, WorkflowField, WorkflowFormSchema } from "@/types/workflow";
 import { isGroupField, isMediaUploadField } from "@/types/workflow";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
+import { isWorkflowFieldVisible } from "@/lib/workflow-utils";
 import { ImageUploadControl } from "@/components/WorkflowForm/controls/ImageUploadControl";
 import { VideoUploadControl } from "@/components/WorkflowForm/controls/VideoUploadControl";
 import { AudioUploadControl } from "@/components/WorkflowForm/controls/AudioUploadControl";
 import { MultiImageUploadWidget } from "@/components/WorkflowForm/controls/MultiImageUploadWidget";
 import { TextInputControl } from "@/components/WorkflowForm/controls/TextInputControl";
 import { NumberSliderControl } from "@/components/WorkflowForm/controls/NumberSliderControl";
+import { NumberInputControl } from "@/components/WorkflowForm/controls/NumberInputControl";
 import { SelectControl } from "@/components/WorkflowForm/controls/SelectControl";
 
 /** Locale context shared across all nested field renderers */
@@ -65,6 +67,9 @@ function uploadConstraintHelp(field: WorkflowField, locale: "zh" | "en", existin
   if (validation.minDimension && !new RegExp(`${validation.minDimension}(?:px|像素)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `Width and height at least ${validation.minDimension}px` : `宽高均不小于 ${validation.minDimension}px`);
   }
+  if (validation.maxDimension && !new RegExp(`${validation.maxDimension}(?:px|像素)`, "i").test(normalized)) {
+    parts.push(locale === "en" ? `Width and height up to ${validation.maxDimension}px` : `宽高均不超过 ${validation.maxDimension}px`);
+  }
   if (validation.minDurationSec && !new RegExp(`${validation.minDurationSec}(?:s|sec|seconds?|秒)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `At least ${validation.minDurationSec}s` : `时长不少于 ${validation.minDurationSec} 秒`);
   }
@@ -73,6 +78,9 @@ function uploadConstraintHelp(field: WorkflowField, locale: "zh" | "en", existin
   }
   if (field.kind === "multiImageUpload" && field.maxItems && !new RegExp(`${field.maxItems}(?:images?|files?|张)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `Up to ${field.maxItems} images` : `最多 ${field.maxItems} 张`);
+  }
+  if (field.kind === "multiImageUpload" && field.minItems && field.minItems > 1 && !new RegExp(`${field.minItems}(?:images?|files?|张)`, "i").test(normalized)) {
+    parts.push(locale === "en" ? `At least ${field.minItems} images` : `至少 ${field.minItems} 张`);
   }
   if (parts.length === 0) return null;
   return locale === "en"
@@ -197,6 +205,10 @@ function FieldBranch({
 }) {
   const locale = useContext(LocaleContext);
   const fieldHelpId = useId();
+  const parameters = useWorkflowStore((s) => s.parameters);
+  const fieldPaths = useWorkflowStore((s) => s.fieldPaths);
+
+  if (!isWorkflowFieldVisible(field, parameters, fieldPaths)) return null;
 
   if (isGroupField(field)) {
     const groupDescription = field.description
@@ -312,6 +324,10 @@ const widgets = {
   numberSlider: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
     if (isGroupField(field) || field.kind !== "numberSlider") return null;
     return <NumberSliderControl field={field} error={error} locale={locale} />;
+  },
+  numberInput: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
+    if (isGroupField(field) || field.kind !== "numberInput") return null;
+    return <NumberInputControl field={field} error={error} locale={locale} />;
   },
   select: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
     if (isGroupField(field) || field.kind !== "select") return null;

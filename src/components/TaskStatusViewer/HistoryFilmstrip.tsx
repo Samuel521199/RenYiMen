@@ -1,7 +1,7 @@
 "use client";
 
 import type { GenerationHistory } from "@prisma/client";
-import { Film, Trash2 } from "lucide-react";
+import { Box, Film, Trash2 } from "lucide-react";
 import { inferMediaTypeFromResultUrl } from "@/lib/task-status-view";
 import { cn } from "@/lib/utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
@@ -35,7 +35,7 @@ export function HistoryFilmstrip({ history, activeId, onSelect }: HistoryFilmstr
         const selected = item.taskId === activeId;
         const url = item.resultUrl?.trim() ?? "";
         const resolvedMedia =
-          item.mediaType === "image" || item.mediaType === "video"
+          item.mediaType === "image" || item.mediaType === "video" || item.mediaType === "model"
             ? item.mediaType
             : url
               ? inferMediaTypeFromResultUrl(url)
@@ -70,6 +70,10 @@ export function HistoryFilmstrip({ history, activeId, onSelect }: HistoryFilmstr
                   <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35">
                     <Film className="h-6 w-6 text-white/95 drop-shadow" strokeWidth={1.5} aria-hidden />
                   </div>
+                </div>
+              ) : resolvedMedia === "model" ? (
+                <div className="flex h-full w-full items-center justify-center bg-violet-950/40">
+                  <Box className="h-8 w-8 text-violet-300" strokeWidth={1.25} aria-hidden />
                 </div>
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element -- 历史外链缩略图

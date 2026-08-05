@@ -19,7 +19,7 @@ test("authenticated image previews are browser-cacheable across page remounts", 
   );
   assert.match(
     routeSource,
-    /proxyExternalMedia\(url, mediaKindRaw, \{ cachePreview: mediaKindRaw !== "video" \}\)/,
+    /proxyExternalMedia\(url, mediaKindRaw, \{ cachePreview: mediaKindRaw !== "video" && mediaKindRaw !== "model" \}\)/,
   );
 });
 
@@ -29,12 +29,12 @@ test("POST downloads and video proxying keep no-store semantics", () => {
     routeSource,
     /proxyExternalMedia\(url, mediaKindRaw, \{ cachePreview: false \}\)/,
   );
-  assert.match(routeSource, /options\.cachePreview && !isVideo/);
+  assert.match(routeSource, /options\.cachePreview && !isVideo && !isModel/);
 });
 
 test("preview proxy retries transient origin failures before showing a broken image", () => {
   assert.match(routeSource, /fetchExternalMediaWithRetry\(url/);
-  assert.match(routeSource, /isVideo \? 2 : 3/);
+  assert.match(routeSource, /isVideo \|\| isModel \? 2 : 3/);
   assert.match(routeSource, /if \(response\.ok \|\| response\.status < 500 \|\| attempt === maxAttempts\)/);
 });
 

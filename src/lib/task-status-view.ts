@@ -1,9 +1,10 @@
 import type { TaskStatusPollData, TaskStatusViewModel } from "@/types/task-status";
 
 /** 根据结果 URL 路径推断媒体类型；无明确图片后缀时视为视频。 */
-export function inferMediaTypeFromResultUrl(url: string): "image" | "video" {
+export function inferMediaTypeFromResultUrl(url: string): "image" | "video" | "model" {
   const path = url.trim().split(/[?#]/)[0] ?? "";
   if (/\.(png|jpe?g|webp)$/i.test(path)) return "image";
+  if (/\.(glb|gltf)$/i.test(path)) return "model";
   return "video";
 }
 
@@ -43,6 +44,7 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   BAILIAN_WAN22_ANIMATE_MOVE: 377_000,
   BAILIAN_WAN22_S2V: 450_000,
   BAILIAN_WANX_I2V: 180_000,
+  BAILIAN_TRIPO_3D: 300_000,
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
   RH_TXT2IMG_SHORTDRAMA: 30_000,
@@ -105,8 +107,8 @@ export function buildTaskViewerModel(
         : undefined;
     const resultUrl = data.resultUrl?.trim() ? String(data.resultUrl).trim() : undefined;
     // resultMediaType 由适配器明确设置时优先使用，避免 CDN 无后缀 URL 被误判为 video
-    const mediaType: "image" | "video" | "text" | undefined =
-      data.resultMediaType === "image" || data.resultMediaType === "video" || data.resultMediaType === "text"
+    const mediaType: "image" | "video" | "text" | "model" | undefined =
+      data.resultMediaType === "image" || data.resultMediaType === "video" || data.resultMediaType === "text" || data.resultMediaType === "model"
         ? data.resultMediaType
         : resultUrl
           ? inferMediaTypeFromResultUrl(resultUrl)
@@ -124,6 +126,7 @@ export function buildTaskViewerModel(
       ...(mediaType !== undefined ? { mediaType } : {}),
       ...(resultUrls !== undefined ? { resultUrls } : {}),
       ...(resultText !== undefined ? { resultText } : {}),
+      ...(typeof data.resultPreviewUrl === "string" && data.resultPreviewUrl ? { previewUrl: data.resultPreviewUrl } : {}),
       hints: resolveLoadingHints(ctx.skuId),
       ...(sellPrice !== undefined ? { sellPrice } : {}),
     };

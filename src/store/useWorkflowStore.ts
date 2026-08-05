@@ -16,7 +16,9 @@ import {
   buildInitialParameters,
   emptyImageValue,
   getAtPath,
+  isWorkflowFieldVisible,
   iterateLeafFields,
+  resolveNumberInputMax,
   type ValuePath,
 } from "@/lib/workflow-utils";
 import { uploadImageToOSS } from "@/services/oss-upload";
@@ -116,6 +118,14 @@ function mapLeafToApiValue(field: WorkflowField, raw: unknown): unknown {
     }
     case "multiImageUpload": {
       const v = raw as MultiImageFieldValue | undefined;
+      if (field.slots?.length) {
+        return field.slots.map((slot) => {
+          const item = v?.items?.find((candidate) => candidate.slotId === slot.id);
+          return item?.status === "ready" && typeof item.remoteUrl === "string" && item.remoteUrl.length > 0
+            ? item.remoteUrl
+            : null;
+        });
+      }
       const urls =
         v?.items
           ?.filter((it) => it.status === "ready" && typeof it.remoteUrl === "string" && it.remoteUrl.length > 0)
@@ -126,11 +136,31 @@ function mapLeafToApiValue(field: WorkflowField, raw: unknown): unknown {
       return typeof raw === "string" ? raw : "";
     case "numberSlider":
       return typeof raw === "number" ? raw : field.validation.min;
+    case "numberInput":
+      return typeof raw === "number" ? raw : undefined;
     case "select":
       return typeof raw === "string" ? raw : "";
     default:
       return raw;
   }
+}
+
+function readImageDimensions(file: File): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    const cleanup = () => URL.revokeObjectURL(objectUrl);
+    image.onload = () => {
+      const result = { width: image.naturalWidth, height: image.naturalHeight };
+      cleanup();
+      resolve(result);
+    };
+    image.onerror = () => {
+      cleanup();
+      reject(new Error("无法读取图片尺寸"));
+    };
+    image.src = objectUrl;
+  });
 }
 
 export const useWorkflowStore = create<WorkflowStoreState>()(
@@ -185,6 +215,16 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       )) return;
 
       const maxMb = field.validation?.maxSizeMB;
+      if (field.kind === "imageUpload" && field.validation?.accept?.length && !field.validation.accept.includes(file.type)) {
+        set((draft) => {
+          setAtPathDraft(draft.parameters, path, {
+            status: "error",
+            fileName: file.name,
+            errorMessage: "图片格式不受支持",
+          } satisfies ImageFieldValue);
+        });
+        return;
+      }
       if (maxMb != null && file.size > maxMb * 1024 * 1024) {
         set((draft) => {
           setAtPathDraft(draft.parameters, path, {
@@ -194,6 +234,33 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
           } satisfies ImageFieldValue);
         });
         return;
+      }
+
+      if (field.kind === "imageUpload" && (field.validation?.minDimension != null || field.validation?.maxDimension != null)) {
+        const dimensions = await readImageDimensions(file).catch(() => null);
+        if (!dimensions) {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: "无法读取图片尺寸",
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+        const min = field.validation.minDimension;
+        const max = field.validation.maxDimension;
+        if ((min != null && (dimensions.width < min || dimensions.height < min))
+          || (max != null && (dimensions.width > max || dimensions.height > max))) {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: `图片尺寸 ${dimensions.width}×${dimensions.height}px 不符合要求（${min ?? 1}–${max ?? "不限"}px）`,
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
       }
 
       if (field.kind === "audioUpload" && field.validation?.accept?.length) {
@@ -356,6 +423,32 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
           } satisfies MultiImageItemValue);
           continue;
         }
+        if (field.validation?.accept?.length && !field.validation.accept.includes(file.type)) {
+          newSlotRows.push({
+            id: slotId,
+            status: "error",
+            fileName: file.name,
+            errorMessage: "图片格式不受支持",
+          } satisfies MultiImageItemValue);
+          continue;
+        }
+        const min = field.validation?.minDimension;
+        const max = field.validation?.maxDimension;
+        if (min != null || max != null) {
+          const dimensions = await readImageDimensions(file).catch(() => null);
+          if (!dimensions || (min != null && (dimensions.width < min || dimensions.height < min))
+            || (max != null && (dimensions.width > max || dimensions.height > max))) {
+            newSlotRows.push({
+              id: slotId,
+              status: "error",
+              fileName: file.name,
+              errorMessage: dimensions
+                ? `图片尺寸 ${dimensions.width}×${dimensions.height}px 不符合要求（${min ?? 1}–${max ?? "不限"}px）`
+                : "无法读取图片尺寸",
+            } satisfies MultiImageItemValue);
+            continue;
+          }
+        }
         const previewUrl = URL.createObjectURL(file);
         newSlotRows.push({
           id: slotId,
@@ -465,6 +558,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
 
       for (const field of iterateLeafFields(schema.fields)) {
         if (isGroupField(field)) continue;
+        if (!isWorkflowFieldVisible(field, parameters, fieldPaths)) continue;
         const path = fieldPaths[field.id];
         const raw = path ? getAtPath(parameters, path) : undefined;
 
@@ -500,7 +594,8 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             }
             if (field.validation?.required) {
               const readyCount = items.filter((it) => it.status === "ready" && it.remoteUrl).length;
-              if (readyCount < 1) errors[field.id] = "请至少上传一张参考图";
+              const minItems = Math.max(1, field.minItems ?? 1);
+              if (readyCount < minItems) errors[field.id] = `请至少上传 ${minItems} 张参考图`;
             }
             break;
           }
@@ -521,6 +616,19 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             const { min, max } = field.validation;
             if (Number.isNaN(n) || n < min || n > max) {
               errors[field.id] = `需在 ${min} ~ ${max} 之间`;
+            } else if (field.validation.integer && !Number.isInteger(n)) {
+              errors[field.id] = "请输入整数";
+            }
+            break;
+          }
+          case "numberInput": {
+            const n = typeof raw === "number" ? raw : Number.NaN;
+            const min = field.validation.min;
+            const max = resolveNumberInputMax(field, parameters, fieldPaths);
+            if (Number.isNaN(n) || n < min || n > max) {
+              errors[field.id] = `需在 ${min.toLocaleString("zh-CN")} ~ ${max.toLocaleString("zh-CN")} 之间`;
+            } else if (field.validation.integer && !Number.isInteger(n)) {
+              errors[field.id] = "请输入整数";
             }
             break;
           }
@@ -541,6 +649,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       const { schema, parameters, fieldPaths } = get();
       if (schema) {
         for (const field of iterateLeafFields(schema.fields)) {
+          if (!isWorkflowFieldVisible(field, parameters, fieldPaths)) continue;
           const p = fieldPaths[field.id];
           const raw = p ? getAtPath(parameters, p) : undefined;
           if (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload") {
@@ -559,6 +668,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
 
       for (const field of iterateLeafFields(schema.fields)) {
         if (isGroupField(field)) continue;
+        if (!isWorkflowFieldVisible(field, parameters, fieldPaths)) continue;
         const path = fieldPaths[field.id];
         const raw = path ? getAtPath(parameters, path) : undefined;
         const mapped = mapLeafToApiValue(field, raw);

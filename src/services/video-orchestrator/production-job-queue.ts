@@ -280,6 +280,21 @@ export async function retryFailedVideoProductionJobById(input: {
   if (!current || current.recoveryAction === "REPAIR_CONTRACT") return false;
   const requiredWorkerVersion = resolveVideoProductionRuntimeVersion();
   const updated = await prisma.$transaction(async (tx) => {
+    const isSubmissionJob = current.kind === "image_prepare_submit"
+      || current.kind === "micro_shot_prepare_submit"
+      || current.kind === "clip_prepare_submit";
+    const persistedCandidate = isSubmissionJob
+      ? await tx.videoGenerationCandidate.findFirst({
+          where: {
+            projectId: input.projectId,
+            ...(current.artifactId
+              ? { artifactId: current.artifactId }
+              : { targetId: current.targetId }),
+            status: { in: ["pending", "running", "evaluating", "quality_retry", "selected"] },
+          },
+          select: { id: true },
+        })
+      : null;
     const result = await tx.videoProductionJob.updateMany({
       where: {
         id: current.id,
@@ -289,6 +304,7 @@ export async function retryFailedVideoProductionJobById(input: {
       },
       data: {
         status: "queued",
+        ...(isSubmissionJob && !persistedCandidate ? { stage: "provider_submission" } : {}),
         payload: versionedPayload(current.payload as Prisma.InputJsonValue, requiredWorkerVersion),
         requiredWorkerVersion,
         claimedWorkerVersion: null,

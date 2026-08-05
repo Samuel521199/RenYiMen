@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import type { TaskStatusViewModel } from "@/types/task-status";
 import { StoryboardResultGrid } from "./StoryboardResultGrid";
 import { TextResultDisplay } from "./TextResultDisplay";
+import { Model3DViewer } from "./Model3DViewer";
 import { useT } from "@/i18n";
 
 /** 与成功态画板一致的 20px 正交细线网格（#060a10 底） */
@@ -61,7 +62,7 @@ export function TaskStatusViewer({
       <section
         className={cn(
           compact
-            ? "relative isolate h-full min-h-[510px] overflow-hidden border-0 shadow-none lg:min-h-0"
+            ? "relative isolate h-full min-h-0 overflow-hidden border-0 shadow-none"
             : "relative isolate min-h-[600px] overflow-hidden rounded-2xl border border-zinc-700/45 shadow-md lg:min-h-[calc(100vh-10rem)]",
           className
         )}
@@ -81,7 +82,7 @@ export function TaskStatusViewer({
     <section
       className={cn(
         compact
-          ? "relative isolate flex h-full min-h-[510px] flex-1 flex-col overflow-hidden border-0 bg-[#07111d] shadow-none lg:min-h-0"
+          ? "relative isolate flex h-full min-h-0 flex-1 flex-col overflow-hidden border-0 bg-[#07111d] shadow-none"
           : "relative isolate flex min-h-[600px] flex-1 flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-sm lg:min-h-[calc(100vh-10rem)]",
         className
       )}
@@ -92,7 +93,7 @@ export function TaskStatusViewer({
         使用与视口相关的 min-height，保证成功态图片有足够纵向空间做 object-contain 预览。
       */}
       <div className={compact
-        ? "relative min-h-[510px] w-full flex-1 p-4 lg:min-h-0"
+        ? "relative min-h-0 w-full flex-1"
         : "relative min-h-[min(64vh,640px)] w-full flex-1 p-6 lg:min-h-[calc(100vh-11rem)]"
       }>
         <LoadingLayer
@@ -122,7 +123,7 @@ function IdleArtboard({ compact = false }: { compact?: boolean }) {
   const t = useT();
   return (
     <div className={compact
-      ? "relative flex h-full min-h-[510px] flex-1 flex-col lg:min-h-0"
+      ? "relative flex h-full min-h-0 flex-1 flex-col"
       : "relative flex min-h-[600px] flex-1 flex-col lg:min-h-[calc(100vh-10rem)]"
     }>
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(145deg,#050b13_0%,#07111d_48%,#06101a_100%)]" aria-hidden />
@@ -160,7 +161,7 @@ function IdleArtboard({ compact = false }: { compact?: boolean }) {
 
 function layerClass(active: boolean) {
   return cn(
-    "absolute inset-0 flex flex-col p-6 transition-all duration-500 ease-out",
+    "subtle-scrollbar absolute inset-0 flex min-h-0 flex-col overflow-y-auto overscroll-contain p-4 transition-all duration-500 ease-out sm:p-6",
     active ? "z-10 translate-y-0 scale-100 opacity-100" : "pointer-events-none z-0 translate-y-2 scale-[0.995] opacity-0"
   );
 }
@@ -210,7 +211,7 @@ function LoadingLayer({
 
   return (
     <div className={layerClass(active)} aria-hidden={!active}>
-      <div className="flex flex-1 flex-col gap-5">
+      <div className="flex min-h-min w-full flex-1 flex-col gap-4 sm:gap-5">
         <header>
           <p className="text-xs font-medium uppercase tracking-widest text-slate-500">{title}</p>
           {subtitle && <h3 className="mt-1 text-base font-semibold text-slate-300">{subtitle}</h3>}
@@ -222,7 +223,7 @@ function LoadingLayer({
           </p>
         )}
 
-        <div className="relative aspect-video w-full max-w-xl overflow-hidden rounded-xl bg-[#1a2840]">
+        <div className="relative h-[clamp(160px,32vh,320px)] w-full max-w-xl shrink-0 overflow-hidden rounded-xl bg-[#1a2840]">
           <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-[#1a2840] via-[#1e3050]/80 to-[#1a2840]" />
           <div className="absolute inset-4 flex flex-col justify-end gap-3">
             <div className="space-y-2">
@@ -280,8 +281,9 @@ function SuccessLayer({
   const [videoDownloadBusy, setVideoDownloadBusy] = useState(false);
 
   const mediaUrl = model.videoUrl;
-  const mediaType: "image" | "video" | "text" | undefined =
+  const mediaType: "image" | "video" | "text" | "model" | undefined =
     model.mediaType ?? (mediaUrl ? "video" : undefined);
+  const previewUrl = model.previewUrl;
 
   const isTextResult = mediaType === "text" || (typeof model.resultText === "string" && model.resultText.trim().length > 0);
   const isMultiImage = !isTextResult && Array.isArray(model.resultUrls) && model.resultUrls.length > 1;
@@ -291,7 +293,9 @@ function SuccessLayer({
   const resolvedDownloadName =
     model.mediaType === "image" && /\.mp4$/i.test(downloadFileName)
       ? "generated-image.png"
-      : downloadFileName;
+      : model.mediaType === "model" && !/\.glb$/i.test(downloadFileName)
+        ? "generated-model.glb"
+        : downloadFileName;
 
   const handleDownload = useCallback(async () => {
     if (onDownload) {
@@ -328,7 +332,8 @@ function SuccessLayer({
   const resultHeadline =
     mediaType === "text" ? tt.successPrompt :
     !mediaUrl ? tt.successNoPreview :
-    mediaType === "image" ? tt.successImage : tt.successVideo;
+    mediaType === "image" ? tt.successImage :
+    mediaType === "model" ? tt.successModel : tt.successVideo;
 
   const openImageLightbox = useCallback(() => {
     if (mediaType === "image" && mediaUrl) setLightboxOpen(true);
@@ -399,7 +404,7 @@ function SuccessLayer({
         <div
           className={cn(
             "relative isolate min-h-0 overflow-hidden rounded-xl border border-zinc-700/50 shadow-inner ring-1 ring-white/[0.06]",
-            mediaType === "image"
+            mediaType === "image" || mediaType === "model"
               ? "flex w-full flex-1 flex-col"
               : "max-w-2xl shrink-0"
           )}
@@ -417,7 +422,7 @@ function SuccessLayer({
           <div
             className={cn(
               "relative z-10",
-              mediaType === "image"
+              mediaType === "image" || mediaType === "model"
                 ? "flex min-h-[min(52vh,520px)] flex-1 items-center justify-center p-3 sm:p-5 lg:min-h-[min(58vh,620px)]"
                 : "p-2 sm:p-3"
             )}
@@ -439,6 +444,8 @@ function SuccessLayer({
                   }}
                   className="mx-auto block max-h-[min(78vh,920px)] w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-lg ring-1 ring-white/10 transition-opacity hover:opacity-95"
                 />
+              ) : mediaType === "model" ? (
+                <Model3DViewer src={mediaUrl} posterUrl={previewUrl} />
               ) : (
                 <video
                   className="aspect-video w-full rounded-lg object-contain shadow-lg ring-1 ring-white/10"
@@ -486,6 +493,9 @@ function SuccessLayer({
             >
               {tt.billingDone(model.sellPrice!)}
             </Badge>
+          )}
+          {mediaType === "model" && (
+            <p className="text-xs leading-relaxed text-amber-300/90">{tt.modelDownloadHint}</p>
           )}
         </div>
       </div>

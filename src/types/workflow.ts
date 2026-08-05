@@ -39,6 +39,8 @@ export interface ImageValidation {
   accept?: string[];
   /** 图片最小边长（宽和高均须 ≥ 此值，单位 px）；上传前在浏览器端校验 */
   minDimension?: number;
+  /** 图片最大边界：宽和高均不得超过此值，单位 px。 */
+  maxDimension?: number;
   /** 音视频最短时长（秒）；上传前在浏览器端校验。 */
   minDurationSec?: number;
   /** 音视频最长时长（秒）；上传前在浏览器端校验。 */
@@ -78,6 +80,11 @@ interface WorkflowFieldBase {
   /** English description — shown when locale is "en" */
   descriptionEn?: string;
   mapping: NodeInputMapping;
+  /** 仅当另一个叶子字段等于指定值时显示、校验并提交当前字段。 */
+  visibleWhen?: {
+    fieldId: string;
+    equals: string | number | boolean;
+  };
 }
 
 /** 双图首尾帧等场景 */
@@ -110,6 +117,8 @@ export interface AudioUploadField extends WorkflowFieldBase {
 /** 多图槽位：每张独立上传状态，成功后写入 `remoteUrl` */
 export interface MultiImageItemValue {
   id: string;
+  /** Optional semantic slot identifier, such as front/left/back/right. */
+  slotId?: string;
   status: ImageFieldStatus;
   previewUrl?: string;
   remoteUrl?: string;
@@ -122,10 +131,24 @@ export interface MultiImageFieldValue {
   items: MultiImageItemValue[];
 }
 
+export interface MultiImageSlotDefinition {
+  id: string;
+  label: string;
+  /** English label — shown when locale is "en" */
+  labelEn?: string;
+  description?: string;
+  /** English description — shown when locale is "en" */
+  descriptionEn?: string;
+}
+
 export interface MultiImageUploadField extends WorkflowFieldBase {
   kind: "multiImageUpload";
   /** 默认可传 9 张 */
   maxItems?: number;
+  /** 最少需要上传的图片数量；默认沿用 required 的 1 张。 */
+  minItems?: number;
+  /** Fixed semantic slots. Their authored order is preserved in the API payload. */
+  slots?: MultiImageSlotDefinition[];
   validation?: ImageValidation;
 }
 
@@ -164,6 +187,28 @@ export interface NumberSliderField extends WorkflowFieldBase {
   validation: SliderValidation;
 }
 
+export interface NumberInputPreset {
+  value: number;
+  label: string;
+  /** English label — shown when locale is "en" */
+  labelEn?: string;
+}
+
+export interface NumberInputField extends WorkflowFieldBase {
+  kind: "numberInput";
+  defaultValue?: number;
+  placeholder?: string;
+  /** English placeholder — shown when locale is "en" */
+  placeholderEn?: string;
+  presets?: NumberInputPreset[];
+  validation: SliderValidation;
+  /** Optionally lower the maximum according to another field's current value. */
+  maxByFieldValue?: {
+    fieldId: string;
+    values: Record<string, number>;
+  };
+}
+
 export interface SelectField extends WorkflowFieldBase {
   kind: "select";
   defaultValue?: string;
@@ -191,6 +236,7 @@ export type WorkflowField =
   | MediaUploadField
   | TextInputField
   | NumberSliderField
+  | NumberInputField
   | SelectField
   | GroupField;
 

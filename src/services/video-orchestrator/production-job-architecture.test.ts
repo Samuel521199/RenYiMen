@@ -160,6 +160,7 @@ test("image submission jobs are target-scoped and capacity denial cannot complet
   assert.doesNotMatch(serviceSource, /"image\.resume"/);
   assert.match(serviceSource, /retryFailedVideoProductionJobById/);
   assert.match(queueSource, /input\.reactivateFailed\s*&&\s*existing\.status\s*===\s*"failed"/);
+  assert.match(queueSource, /isSubmissionJob && !persistedCandidate \? \{ stage: "provider_submission" \} : \{\}/);
   assert.match(queueBody, /generationRevision/);
   assert.doesNotMatch(queueBody, /videoProductionRevision\(projectId\)/);
   assert.match(queueBody, /MAX_BOUNDARY_IMAGE_CONCURRENCY_WHILE_ASSETS_PENDING\s*-\s*activeBoundaryCount/);

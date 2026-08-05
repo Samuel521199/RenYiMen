@@ -407,6 +407,10 @@ const DEMO_PROJECT_PROMPT = "Create a 30s game ad with strong visual polish and 
 const DEMO_PROJECT_FINAL_VIDEO_URL = "/demo/tongits/final.mp4";
 const ONE_PROMPT_VIDEO_COST_CREDITS = 5000;
 const CHARACTER_TURNAROUND_STYLE_PRESET = "character-turnaround";
+const CHARACTER_TURNAROUND_T_POSE_EN = "MANDATORY BODY POSE: strict symmetrical 3D-modeling T-pose, standing upright with both arms fully extended horizontally at shoulder height, forming a straight fingertip-to-fingertip line, elbows straight, wrists neutral, fingers together, legs straight and slightly apart, and both feet fully visible. Preserve this exact T-pose in every view.";
+const CHARACTER_TURNAROUND_T_POSE_ZH = "强制身体姿势：严格对称的 3D 建模 T 字姿势，人物直立，双臂在肩部高度完全水平伸展，指尖到指尖形成直线，肘部伸直，手腕保持中立，手指并拢，双腿伸直并略微分开，双脚完整可见。所有视角必须保持完全一致的 T 字姿势。";
+const CHARACTER_TURNAROUND_T_POSE_NEGATIVE_EN = "A-pose, arms lowered, arms down, bent elbows, hands on hips, crossed arms, action pose, asymmetrical arm height, cropped hands, cropped feet";
+const CHARACTER_TURNAROUND_T_POSE_NEGATIVE_ZH = "A 字姿势，手臂下垂，手臂放下，肘部弯曲，双手叉腰，双臂交叉，动作姿势，双臂高度不对称，手部裁切，脚部裁切";
 const MANUAL_STOP_MESSAGE = "Generation stopped by user";
 const CLIP_CONTINUITY_REPORT_MISSING_ERROR = "Clip has no passed end-frame continuity report; visual continuity evaluation is required.";
 
@@ -5155,6 +5159,7 @@ export async function createCharacterTurnaroundProject(
   const aspectRatio = input.aspectRatio === "1:1" || input.aspectRatio === "16:9"
     ? input.aspectRatio
     : "9:16";
+  const pose = input.pose === "t_pose" ? "t_pose" : "neutral";
   const anchor: VideoConsistencyAnchor = normalizeAnchorSemantics({
     id: "turnaround-character",
     type: "person",
@@ -5191,6 +5196,7 @@ export async function createCharacterTurnaroundProject(
   });
   const basePlan: OnePromptVideoPlan = {
     workflowKind: "character_turnaround",
+    characterPose: pose,
     title,
     logline: characterDescription,
     durationSeconds: 0,
@@ -5211,13 +5217,14 @@ export async function createCharacterTurnaroundProject(
     keyframes: [],
     segments: [],
   };
-  const plan = ensureProjectAssetLibrary(basePlan, {
+  const assetPlan = ensureProjectAssetLibrary(basePlan, {
     userPrompt: characterDescription,
     aspectRatio,
     durationSeconds: 0,
     stylePreset: CHARACTER_TURNAROUND_STYLE_PRESET,
     referenceImageUrls: [referenceImageUrl],
   });
+  const plan = applyCharacterTurnaroundPoseContract(assetPlan, pose);
   ensurePlanArtifactMetadata(plan as unknown as Record<string, unknown>);
   const references = plan.consistencyReferences ?? [];
   const frontReference = references.find((reference) => reference.assetView === "front");
@@ -5257,6 +5264,44 @@ export async function createCharacterTurnaroundProject(
   await commitArtifactPlan(created.id, plan as unknown as Prisma.JsonValue);
   await queueNextImageTask(userId, created.id, "character_turnaround.front");
   return requireVideoProject(userId, created.id);
+}
+
+export function applyCharacterTurnaroundPoseContract(
+  plan: OnePromptVideoPlan,
+  pose: "neutral" | "t_pose",
+): OnePromptVideoPlan {
+  if (pose !== "t_pose") return { ...plan, characterPose: "neutral" };
+  const replaceNeutralPose = (value: string | undefined, lang: "zh" | "en") => {
+    const instruction = lang === "zh" ? CHARACTER_TURNAROUND_T_POSE_ZH : CHARACTER_TURNAROUND_T_POSE_EN;
+    const neutralPattern = lang === "zh" ? /中性站姿/g : /standing neutral pose/gi;
+    const normalized = String(value ?? "").replace(neutralPattern, instruction).trim();
+    return normalized.includes(instruction)
+      ? normalized
+      : [normalized, instruction].filter(Boolean).join("\n");
+  };
+  return {
+    ...plan,
+    characterPose: "t_pose",
+    styleBible: {
+      ...plan.styleBible,
+      negativePrompt: mergeNegativePrompt(plan.styleBible.negativePrompt, CHARACTER_TURNAROUND_T_POSE_NEGATIVE_EN, "en"),
+      negativePromptEn: mergeNegativePrompt(plan.styleBible.negativePromptEn ?? plan.styleBible.negativePrompt, CHARACTER_TURNAROUND_T_POSE_NEGATIVE_EN, "en"),
+      negativePromptZh: mergeNegativePrompt(plan.styleBible.negativePromptZh ?? "", CHARACTER_TURNAROUND_T_POSE_NEGATIVE_ZH, "zh"),
+    },
+    consistencyReferences: (plan.consistencyReferences ?? []).map((reference) => {
+      if (reference.assetCategory !== "person") return reference;
+      return {
+        ...reference,
+        characterState: replaceNeutralPose(reference.characterState, "en"),
+        imagePrompt: replaceNeutralPose(reference.imagePrompt, "en"),
+        imagePromptEn: replaceNeutralPose(reference.imagePromptEn ?? reference.imagePrompt, "en"),
+        imagePromptZh: replaceNeutralPose(reference.imagePromptZh, "zh"),
+        negativePrompt: mergeNegativePrompt(reference.negativePrompt, CHARACTER_TURNAROUND_T_POSE_NEGATIVE_EN, "en"),
+        negativePromptEn: mergeNegativePrompt(reference.negativePromptEn ?? reference.negativePrompt, CHARACTER_TURNAROUND_T_POSE_NEGATIVE_EN, "en"),
+        negativePromptZh: mergeNegativePrompt(reference.negativePromptZh ?? "", CHARACTER_TURNAROUND_T_POSE_NEGATIVE_ZH, "zh"),
+      };
+    }),
+  };
 }
 
 export async function getVideoProject(
@@ -6469,14 +6514,20 @@ async function updateVideoEntity(
         await prisma.videoKeyframe.update({ where: { id: shotId, projectId }, data });
         updatedFields.push(...Object.keys(data));
       }
-      await syncCanonicalPlanFromEntities(projectId, {
-        shotId,
-        locale: input.locale,
-        purposeUpdated: typeof input.purpose === "string",
-        imagePromptUpdated: Boolean(compiledProviderImagePrompt) || typeof input.imagePrompt === "string",
-        imagePromptEditContract,
-        negativePromptUpdated: typeof input.negativePrompt === "string",
-      });
+      const canonicalPlanChanged = typeof input.purpose === "string"
+        || Boolean(compiledProviderImagePrompt)
+        || typeof input.imagePrompt === "string"
+        || typeof input.negativePrompt === "string";
+      if (canonicalPlanChanged) {
+        await syncCanonicalPlanFromEntities(projectId, {
+          shotId,
+          locale: input.locale,
+          purposeUpdated: typeof input.purpose === "string",
+          imagePromptUpdated: Boolean(compiledProviderImagePrompt) || typeof input.imagePrompt === "string",
+          imagePromptEditContract,
+          negativePromptUpdated: typeof input.negativePrompt === "string",
+        });
+      }
     } else {
       throw new Error(entityKind === "segment" ? "Video segment not found" : "Video keyframe not found");
     }
@@ -7332,6 +7383,7 @@ async function regenerateKeyframeImageInternal(
       imagePrompt: keyframe.imagePrompt,
       negativePrompt: keyframe.negativePrompt,
       previousImageUrl: keyframe.imageUrl,
+      keyframeVersion: keyframe.updatedAt.toISOString(),
     }));
     await prisma.videoKeyframe.update({
       where: { id: keyframe.id },
@@ -8752,7 +8804,22 @@ async function runImageQualityWorker(userId: string, projectId: string): Promise
     break;
   }
 
-  const latest = await requireVideoProject(userId, projectId);
+  let latest = await requireVideoProject(userId, projectId);
+  if (isCharacterTurnaroundProject(latest.planJson)) {
+    const nextReadyView = [...latest.keyframes]
+      .filter((keyframe) => keyframe.keyframeNo < 0)
+      .sort((a, b) => assetGenerationPriority(latest.planJson, a.keyframeNo) - assetGenerationPriority(latest.planJson, b.keyframeNo))
+      .find((keyframe) => keyframe.imageUrl && !isApprovedConsistencyReference(keyframe));
+    if (nextReadyView) {
+      latest = await updateVideoKeyframe(userId, projectId, nextReadyView.id, { locked: true });
+      await logOnePromptVideo("character_turnaround.auto_advance", {
+        userId,
+        projectId,
+        keyframeId: nextReadyView.id,
+        keyframeNo: nextReadyView.keyframeNo,
+      });
+    }
+  }
   if (
     latest.status === VideoProjectStatus.IMAGE_GENERATING
     && latest.keyframes.some((keyframe) => keyframe.status === VideoShotStatus.IMAGE_PENDING)
@@ -12961,7 +13028,13 @@ async function submitNextImageTaskWork(params: {
       where: {
         id: keyframe.id,
         imageUrl: null,
-        status: { in: [VideoShotStatus.IMAGE_PENDING, VideoShotStatus.IMAGE_RUNNING] },
+        status: {
+          in: [
+            VideoShotStatus.SCRIPT_READY,
+            VideoShotStatus.IMAGE_PENDING,
+            VideoShotStatus.IMAGE_RUNNING,
+          ],
+        },
       },
       data: {
         status: VideoShotStatus.IMAGE_RUNNING,

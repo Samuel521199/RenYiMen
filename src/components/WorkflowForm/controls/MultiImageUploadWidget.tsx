@@ -9,13 +9,15 @@ import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
 import { useT } from "@/i18n";
 import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
+import { DirectionalMultiImageUploadWidget } from "@/components/WorkflowForm/controls/DirectionalMultiImageUploadWidget";
 
 const HARD_MAX_IMAGES = 9;
 
 /** 在浏览器端校验图片尺寸，解析失败时放行（让上游报错）。 */
 function checkImageDimension(
   file: File,
-  minDimension: number
+  minDimension?: number,
+  maxDimension?: number,
 ): Promise<{ ok: boolean; width: number; height: number }> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
@@ -23,7 +25,9 @@ function checkImageDimension(
     img.onload = () => {
       URL.revokeObjectURL(url);
       resolve({
-        ok: img.naturalWidth >= minDimension && img.naturalHeight >= minDimension,
+        ok:
+          (minDimension == null || (img.naturalWidth >= minDimension && img.naturalHeight >= minDimension))
+          && (maxDimension == null || (img.naturalWidth <= maxDimension && img.naturalHeight <= maxDimension)),
         width: img.naturalWidth,
         height: img.naturalHeight,
       });
@@ -52,6 +56,13 @@ export interface MultiImageUploadWidgetProps {
   locale?: "zh" | "en";
 }
 
+export function MultiImageUploadWidget(props: MultiImageUploadWidgetProps) {
+  if (props.field.slots?.length) {
+    return <DirectionalMultiImageUploadWidget field={props.field} error={props.error} locale={props.locale} />;
+  }
+  return <UnorderedMultiImageUploadWidget {...props} />;
+}
+
 function thumbUrl(item: MultiImageItemValue): string | null {
   if (item.previewUrl && (item.status === "uploading" || item.status === "ready" || item.status === "error")) {
     return item.previewUrl;
@@ -67,7 +78,7 @@ const addTileBase =
  * 多图参考上传：原生嵌套 `<label>` + `hidden` 的 `type=file"`；
  * 上传与 `uploadImageToOSS` 同源：`POST /api/upload/presign` + `PUT` 直传（本组件内联以便显式 `return publicUrl`）。
  */
-export function MultiImageUploadWidget({ field, error, value, onChange }: MultiImageUploadWidgetProps) {
+function UnorderedMultiImageUploadWidget({ field, error, value, onChange }: MultiImageUploadWidgetProps) {
   const [localUploading, setLocalUploading] = useState(false);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   const t = useT();
@@ -116,17 +127,22 @@ export function MultiImageUploadWidget({ field, error, value, onChange }: MultiI
 
       const maxMb = field.validation?.maxSizeMB;
       const minDim = field.validation?.minDimension;
+      const maxDim = field.validation?.maxDimension;
       for (const file of list) {
+        if (field.validation?.accept?.length && !field.validation.accept.includes(file.type)) {
+          alert(`「${file.name}」格式不受支持。`);
+          return;
+        }
         if (maxMb != null && file.size > maxMb * 1024 * 1024) {
           alert(`「${file.name}」超过 ${maxMb}MB，已中止本次上传。`);
           return;
         }
-        if (minDim != null) {
-          const dim = await checkImageDimension(file, minDim);
+        if (minDim != null || maxDim != null) {
+          const dim = await checkImageDimension(file, minDim, maxDim);
           if (!dim.ok) {
             alert(
-              `「${file.name}」尺寸过小（${dim.width}×${dim.height} px），\n` +
-              `要求宽和高均不小于 ${minDim} px，请替换为更高分辨率的图片后重试。`
+              `「${file.name}」尺寸不符合要求（${dim.width}×${dim.height} px），\n` +
+              `要求宽和高均在 ${minDim ?? 1}–${maxDim ?? "不限"} px 范围内。`
             );
             return;
           }
@@ -230,7 +246,7 @@ export function MultiImageUploadWidget({ field, error, value, onChange }: MultiI
         setLocalUploading(false);
       }
     },
-    [field.id, field.validation?.maxSizeMB, field.validation?.minDimension, maxItems, onChange, value]
+    [field.id, field.validation?.accept, field.validation?.maxSizeMB, field.validation?.minDimension, field.validation?.maxDimension, maxItems, onChange, value]
   );
 
   const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {

@@ -43,9 +43,13 @@ test("upload constraints live in field help instead of persistent group copy", (
 });
 
 test("embedded task viewer can shrink to the parent panel", () => {
-  const source = readFileSync("src/components/TaskStatusViewer/TaskStatusViewer.tsx", "utf8");
+  const viewerSource = readFileSync("src/components/TaskStatusViewer/TaskStatusViewer.tsx", "utf8");
+  const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
 
-  assert.match(source, /compact\?: boolean/);
-  assert.match(source, /h-full min-h-\[510px\]/);
-  assert.match(source, /lg:min-h-0/);
+  assert.match(viewerSource, /compact\?: boolean/);
+  assert.match(viewerSource, /h-full min-h-0/);
+  assert.doesNotMatch(viewerSource, /compact[\s\S]{0,120}min-h-\[510px\]/);
+  assert.match(viewerSource, /overflow-y-auto overscroll-contain/);
+  assert.match(studioSource, /min-h-0 flex-1 overflow-hidden/);
+  assert.match(studioSource, /100dvh-7rem/);
 });

@@ -2,6 +2,7 @@ import type {
   ImageFieldValue,
   ImageUploadField,
   MultiImageFieldValue,
+  NumberInputField,
   NumberSliderField,
   SelectField,
   WorkflowField,
@@ -81,6 +82,10 @@ function defaultValueForField(f: WorkflowField): unknown {
       const s = f as NumberSliderField;
       return s.defaultValue ?? s.validation.min;
     }
+    case "numberInput": {
+      const n = f as NumberInputField;
+      return n.defaultValue ?? n.validation.min;
+    }
     case "select":
       return (f as SelectField).defaultValue ?? (f as SelectField).options[0]?.value ?? "";
     default:
@@ -111,6 +116,35 @@ export function getAtPath(root: unknown, path: ValuePath): unknown {
     cur = (cur as Record<string | number, unknown>)[String(seg)];
   }
   return cur;
+}
+
+/** 条件字段统一判定：隐藏字段不渲染、不校验，也不会进入网关 payload。 */
+export function isWorkflowFieldVisible(
+  field: WorkflowField,
+  parameters: Record<string, unknown>,
+  fieldPaths: FieldPathMap,
+): boolean {
+  if (isGroupField(field) || !field.visibleWhen) return true;
+  const dependencyPath = fieldPaths[field.visibleWhen.fieldId];
+  if (!dependencyPath) return false;
+  return getAtPath(parameters, dependencyPath) === field.visibleWhen.equals;
+}
+
+/** Resolve a numeric input's current maximum, including model-dependent limits. */
+export function resolveNumberInputMax(
+  field: NumberInputField,
+  parameters: Record<string, unknown>,
+  fieldPaths: FieldPathMap,
+): number {
+  const dynamic = field.maxByFieldValue;
+  if (!dynamic) return field.validation.max;
+  const dependencyPath = fieldPaths[dynamic.fieldId];
+  if (!dependencyPath) return field.validation.max;
+  const dependencyValue = getAtPath(parameters, dependencyPath);
+  const dynamicMax = dynamic.values[String(dependencyValue)];
+  return typeof dynamicMax === "number" && Number.isFinite(dynamicMax)
+    ? Math.min(field.validation.max, dynamicMax)
+    : field.validation.max;
 }
 
 /**

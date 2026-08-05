@@ -5,6 +5,7 @@ import {
   S2V_LOADING_HINTS,
   buildTaskViewerModel,
   computePseudoProgressPercent,
+  inferMediaTypeFromResultUrl,
   resolveExpectedDurationMsForSku,
 } from "./task-status-view.ts";
 
@@ -54,4 +55,9 @@ test("pseudo progress follows elapsed time instead of jumping ahead with ease-ou
   assert.ok(overtime > 95);
   assert.ok(overtime < 99);
   assert.equal(computePseudoProgressPercent(-1, expectedMs), 0);
+});
+
+test("GLB and GLTF result URLs are recognized as downloadable 3D models", () => {
+  assert.equal(inferMediaTypeFromResultUrl("https://cdn.example.com/asset.glb?expires=123"), "model");
+  assert.equal(inferMediaTypeFromResultUrl("https://cdn.example.com/asset.gltf"), "model");
 });

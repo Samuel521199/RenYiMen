@@ -63,6 +63,7 @@ function mapPollDataToGatewayBody(d: TaskStatusPollData): GatewayTaskPollBody {
       progress: d.progress != null ? Math.round(Number(d.progress)) : 100,
       ...(Array.isArray(d.resultUrls) && d.resultUrls.length > 1 ? { resultUrls: d.resultUrls } : {}),
       ...(d.resultMediaType ? { resultMediaType: d.resultMediaType } : {}),
+      ...(typeof d.resultPreviewUrl === "string" && d.resultPreviewUrl ? { previewUrl: d.resultPreviewUrl } : {}),
       ...(typeof d.resultText === "string" && d.resultText ? { resultText: d.resultText } : {}),
       ...(typeof d.providerCost === "number" && Number.isFinite(d.providerCost)
         ? { providerCost: d.providerCost }

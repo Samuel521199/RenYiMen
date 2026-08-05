@@ -45,6 +45,7 @@ export async function POST(req: Request) {
       title: typeof body.title === "string" ? body.title : undefined,
       characterDescription: typeof body.characterDescription === "string" ? body.characterDescription : undefined,
       aspectRatio: body.aspectRatio === "1:1" || body.aspectRatio === "16:9" ? body.aspectRatio : "9:16",
+      pose: body.pose === "t_pose" ? "t_pose" : "neutral",
     });
     return NextResponse.json({ ok: true, project: serializeVideoProject(project) }, { status: 201 });
   } catch (error) {

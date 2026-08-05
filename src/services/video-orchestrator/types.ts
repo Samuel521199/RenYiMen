@@ -1555,6 +1555,7 @@ export interface PromptDebugArtifact {
 
 export interface OnePromptVideoPlan {
   workflowKind?: "one_prompt_video" | "character_turnaround";
+  characterPose?: CharacterTurnaroundPose;
   title: string;
   logline: string;
   durationSeconds: number;
@@ -1603,6 +1604,8 @@ export interface OnePromptVideoPlan {
   segments: VideoPlanSegment[];
 }
 
+export type CharacterTurnaroundPose = "neutral" | "t_pose";
+
 export interface CreateVideoProjectInput {
   userPrompt: string;
   aspectRatio?: VideoAspectRatio;
@@ -1617,6 +1620,7 @@ export interface CreateCharacterTurnaroundInput {
   characterDescription?: string;
   referenceImageUrl: string;
   aspectRatio?: VideoAspectRatio;
+  pose?: CharacterTurnaroundPose;
 }
 
 export interface PlanVideoProjectInput {

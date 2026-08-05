@@ -3,6 +3,7 @@ import { bailianMultiRefWorkflowMock } from "@/mocks/bailian-multi-ref-workflow"
 import { bailianDanceMoveWorkflowMock } from "@/mocks/bailian-dance-move-workflow";
 import { bailianWan22S2vWorkflowMock } from "@/mocks/bailian-wan22-s2v-workflow";
 import { bailianWanxI2vWorkflowMock } from "@/mocks/bailian-wanx-i2v-workflow";
+import { bailianTripo3dWorkflowMock } from "@/mocks/bailian-tripo-3d-workflow";
 import { bgReplaceWorkflowMock } from "@/mocks/bg-replace-workflow";
 import { videoEnhanceWorkflowMock } from "@/mocks/video-enhance-workflow";
 import { faceSwapWorkflowMock } from "@/mocks/face-swap-workflow";
@@ -153,6 +154,18 @@ const CATALOG: SkuDefinition[] = [
     uiSchema: textToImageWorkflowMock,
   },
   // ── 视频 / Video ─────────────────────────────────────────────────
+  {
+    skuId: "BAILIAN_TRIPO_3D",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "model",
+    cover: "/covers/tripo-3d.webp",
+    displayName: "Tripo 3D 模型生成",
+    displayNameEn: "Tripo 3D Model Generation",
+    description: "支持文生 3D、单图生 3D 和 2–4 张多视角图生 3D，可选择快速 P1.0 或高精度 H3.1，并控制贴图、PBR 与几何精度。",
+    descriptionEn: "Generate 3D assets from text, one image, or 2–4 multi-view images. Choose fast P1.0 or high-fidelity H3.1 with texture, PBR, and geometry controls.",
+    sellCredits: 700,
+    uiSchema: bailianTripo3dWorkflowMock,
+  },
   {
     skuId: "ONE_PROMPT_30S_VIDEO",
     providerCode: "VIDEO_ORCHESTRATOR",

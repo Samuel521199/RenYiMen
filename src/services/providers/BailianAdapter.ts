@@ -11,8 +11,12 @@ import type { VideoProviderInputCapabilities } from "./video-input-contract";
 const DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
 const IMAGE_TO_VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/image2video/video-synthesis";
+const TRIPO_3D_GENERATION_PATH = "/api/v1/services/aigc/video-generation/3d-generation";
 const WAN_ANIMATE_MOVE_MODEL = "wan2.2-animate-move";
 const WAN_S2V_MODEL = "wan2.2-s2v";
+const TRIPO_P1_MODEL = "Tripo/Tripo-P1.0";
+const TRIPO_H31_MODEL = "Tripo/Tripo-H3.1";
+const TRIPO_TASK_PREFIX = "tripo_";
 
 /** 网关轮询单次 GET `/api/v1/tasks/{id}` 超时上限（DashScope 排队可能较久） */
 export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
@@ -74,6 +78,27 @@ function extractBailianCredentials(credentials: unknown): { apiKey: string; base
     );
   }
   return { apiKey, baseUrl, signal };
+}
+
+function resolveTripoBaseUrl(credentials: unknown): string {
+  if (isRecord(credentials) && typeof credentials.tripoBaseUrl === "string" && credentials.tripoBaseUrl.trim()) {
+    return credentials.tripoBaseUrl.trim().replace(/\/$/, "");
+  }
+  const explicit = process.env.BAILIAN_TRIPO_BASE_URL?.trim();
+  if (explicit) return explicit.replace(/\/$/, "");
+  const workspaceId =
+    (isRecord(credentials) && typeof credentials.workspaceId === "string" ? credentials.workspaceId.trim() : "")
+    || process.env.BAILIAN_WORKSPACE_ID?.trim()
+    || process.env.DASHSCOPE_WORKSPACE_ID?.trim()
+    || "";
+  if (!workspaceId || !/^[a-zA-Z0-9-]+$/.test(workspaceId)) {
+    throw new ProviderError(
+      "Tripo 3D 需要华北2（北京）百炼业务空间，请配置 BAILIAN_WORKSPACE_ID 或 BAILIAN_TRIPO_BASE_URL",
+      "BAILIAN_TRIPO_MISSING_WORKSPACE",
+      400,
+    );
+  }
+  return `https://${workspaceId}.cn-beijing.maas.aliyuncs.com`;
 }
 
 function readStringFlag(flags: Record<string, unknown> | undefined, keys: string[]): string | undefined {
@@ -158,6 +183,16 @@ function normalizeHttpImageUrlArray(raw: unknown): string[] {
     if (/^https?:\/\//i.test(t)) out.push(t);
   }
   return out;
+}
+
+/** Preserve Tripo's fixed front/left/back/right slot positions, including empty directions. */
+function normalizeTripoImageSlots(raw: unknown): Array<string | undefined> {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 4).map((item) => {
+    if (typeof item !== "string") return undefined;
+    const value = item.trim();
+    return /^https?:\/\//i.test(value) ? value : undefined;
+  });
 }
 
 function findFirstImageHttpUrl(nodeInputs: StandardPayload["nodeInputs"]): string | undefined {
@@ -375,7 +410,26 @@ export type BailianS2vInput = {
   audio_url: string;
 };
 
+type TripoGenerationMode = "text" | "single_image" | "multi_image";
+type TripoImageInput = { type: "jpeg" | "png"; file_token: string };
+
+export type BailianTripo3dRequestBody = {
+  model: typeof TRIPO_P1_MODEL | typeof TRIPO_H31_MODEL;
+  input:
+    | { prompt: string }
+    | { image: string }
+    | { images: Array<TripoImageInput | Record<string, never>> };
+  parameters: {
+    face_limit?: number;
+    texture_quality?: "standard" | "detailed";
+    geometry_quality?: "standard" | "ultra";
+    texture?: false;
+    pbr?: false;
+  };
+};
+
 export type BailianVideoSynthesisRequestBody =
+  | BailianTripo3dRequestBody
   | {
       model: typeof WAN_ANIMATE_MOVE_MODEL;
       input: BailianAnimateMoveInput;
@@ -399,6 +453,144 @@ export type BailianVideoSynthesisRequestBody =
       input: BailianVideoSynthesisInputLegacy;
       parameters?: Record<string, unknown>;
     };
+
+function normalizeTripoModel(model: string): typeof TRIPO_P1_MODEL | typeof TRIPO_H31_MODEL | undefined {
+  const normalized = model.trim().toLowerCase();
+  if (normalized === TRIPO_P1_MODEL.toLowerCase()) return TRIPO_P1_MODEL;
+  if (normalized === TRIPO_H31_MODEL.toLowerCase()) return TRIPO_H31_MODEL;
+  return undefined;
+}
+
+function resolveTripoGenerationMode(inputNode: Record<string, unknown> | undefined): TripoGenerationMode {
+  const raw = readStringFromNode(inputNode, ["generation_mode", "generationMode"]);
+  if (raw === "single_image" || raw === "multi_image") return raw;
+  return "text";
+}
+
+function inferTripoImageType(url: string): "jpeg" | "png" {
+  try {
+    return /\.png$/i.test(new URL(url).pathname) ? "png" : "jpeg";
+  } catch {
+    return /\.png(?:$|[?#])/i.test(url) ? "png" : "jpeg";
+  }
+}
+
+function buildTripo3dPayload(
+  payload: StandardPayload,
+  model: typeof TRIPO_P1_MODEL | typeof TRIPO_H31_MODEL,
+): BailianTripo3dRequestBody {
+  const inputNode = isRecord(payload.nodeInputs.input) ? payload.nodeInputs.input : undefined;
+  const mode = resolveTripoGenerationMode(inputNode);
+  let input: BailianTripo3dRequestBody["input"];
+
+  if (mode === "text") {
+    const prompt = readStringFromNode(inputNode, ["prompt", "text"])?.trim() ?? "";
+    if (!prompt || prompt.length > 1024) {
+      throw new ProviderError("文生 3D 提示词长度必须为 1–1024 个字符", "BAILIAN_TRIPO_INVALID_PROMPT", 400);
+    }
+    input = { prompt };
+  } else if (mode === "single_image") {
+    const image = readStringFromNode(inputNode, ["image_url", "imageUrl"]);
+    if (!image || !/^https?:\/\//i.test(image)) {
+      throw new ProviderError("单图生 3D 需要一张已上传的公网 JPEG/PNG 图片", "BAILIAN_TRIPO_MISSING_IMAGE", 400);
+    }
+    input = { image };
+  } else {
+    const slots = normalizeTripoImageSlots(inputNode?.image_urls);
+    const validImageCount = slots.filter((url): url is string => typeof url === "string").length;
+    if (validImageCount < 2 || validImageCount > 4) {
+      throw new ProviderError("多图生 3D 需要按前、左、后、右顺序上传 2–4 张图片", "BAILIAN_TRIPO_INVALID_IMAGE_COUNT", 400);
+    }
+    input = {
+      images: Array.from({ length: 4 }, (_, index): TripoImageInput | Record<string, never> => {
+        const url = slots[index];
+        return url
+          ? { type: inferTripoImageType(url), file_token: url } satisfies TripoImageInput
+          : {};
+      }),
+    };
+  }
+
+  const textureOutput = readStringFromNode(inputNode, ["texture_output", "textureOutput"]);
+  const faceLimit = readNumberFromNode(inputNode, ["face_limit", "faceLimit"]);
+  const parameters: BailianTripo3dRequestBody["parameters"] = {};
+  if (faceLimit != null) {
+    const maximum = model === TRIPO_P1_MODEL ? 20_000 : 2_000_000;
+    if (!Number.isInteger(faceLimit) || faceLimit < 48 || faceLimit > maximum) {
+      throw new ProviderError(
+        `${model === TRIPO_P1_MODEL ? "Tripo P1.0" : "Tripo H3.1"} 面数必须为 48–${maximum.toLocaleString("zh-CN")} 之间的整数`,
+        "BAILIAN_TRIPO_INVALID_FACE_LIMIT",
+        400,
+      );
+    }
+    parameters.face_limit = faceLimit;
+  }
+  if (textureOutput === "base") {
+    parameters.texture = false;
+    parameters.pbr = false;
+  } else {
+    parameters.texture_quality =
+      readStringFromNode(inputNode, ["texture_quality", "textureQuality"]) === "detailed"
+        ? "detailed"
+        : "standard";
+  }
+  if (model === TRIPO_H31_MODEL) {
+    parameters.geometry_quality = faceLimit != null
+      ? faceLimit > 1_500_000 ? "ultra" : "standard"
+      : readStringFromNode(inputNode, ["geometry_quality", "geometryQuality"]) === "ultra"
+        ? "ultra"
+        : "standard";
+  }
+  return { model, input, parameters };
+}
+
+export function estimateBailianTripoCredits(options: {
+  model: string;
+  generationMode: string;
+  textureOutput: string;
+  textureQuality?: string;
+  geometryQuality?: string;
+  faceLimit?: number;
+}): number {
+  const model = normalizeTripoModel(options.model) ?? TRIPO_P1_MODEL;
+  const isImageMode = options.generationMode !== "text";
+  let priceCny: number;
+  if (model === TRIPO_P1_MODEL) {
+    const base = isImageMode ? 2.8 : 2.1;
+    priceCny = options.textureOutput === "base" ? base : base + (options.textureQuality === "detailed" ? 1.4 : 0.7);
+  } else {
+    const standardBase = isImageMode ? 1.4 : 0.7;
+    const geometryPremium = (options.faceLimit != null ? options.faceLimit > 1_500_000 : options.geometryQuality === "ultra") ? 1.4 : 0;
+    const texturePremium = options.textureOutput === "base" ? 0 : options.textureQuality === "detailed" ? 1.4 : 0.7;
+    priceCny = standardBase + geometryPremium + texturePremium;
+  }
+  return Math.round(priceCny * BAILIAN_CREDITS_PER_CNY);
+}
+
+function calculateTripoCredits(payload: StandardPayload, model: typeof TRIPO_P1_MODEL | typeof TRIPO_H31_MODEL): number {
+  const inputNode = isRecord(payload.nodeInputs.input) ? payload.nodeInputs.input : undefined;
+  return estimateBailianTripoCredits({
+    model,
+    generationMode: resolveTripoGenerationMode(inputNode),
+    textureOutput: readStringFromNode(inputNode, ["texture_output", "textureOutput"]) ?? "pbr",
+    textureQuality: readStringFromNode(inputNode, ["texture_quality", "textureQuality"]),
+    geometryQuality: readStringFromNode(inputNode, ["geometry_quality", "geometryQuality"]),
+    faceLimit: readNumberFromNode(inputNode, ["face_limit", "faceLimit"]),
+  });
+}
+
+function encodeTripoTaskId(upstreamTaskId: string, credits: number): string {
+  return `${TRIPO_TASK_PREFIX}${credits}__${upstreamTaskId}`;
+}
+
+function parseTripoTaskId(taskId: string): { upstreamTaskId: string; credits: number } | null {
+  const match = /^tripo_(\d+)__(.+)$/.exec(taskId);
+  if (!match) return null;
+  const credits = Number(match[1]);
+  return Number.isFinite(credits) && credits > 0
+    ? { upstreamTaskId: match[2], credits }
+    : null;
+}
 
 /**
  * 阿里云百炼 / DashScope 图生视频（异步任务）适配器。
@@ -476,7 +668,13 @@ export class BailianAdapter implements IProviderAdapter {
 
   calculateCost(payload: StandardPayload): ProviderCostResult {
     const f = payload.flags;
-    const requestedModel = resolveDashScopeModel(payload).toLowerCase();
+    const resolvedModel = resolveDashScopeModel(payload);
+    const tripoModel = normalizeTripoModel(resolvedModel);
+    if (tripoModel) {
+      const credits = calculateTripoCredits(payload, tripoModel);
+      return { cost: credits, sellPrice: credits };
+    }
+    const requestedModel = resolvedModel.toLowerCase();
     const secs = requestedModel === WAN_ANIMATE_MOVE_MODEL
       ? resolveRequestedVideoDurationSec(payload, 2, 30)
       : requestedModel === WAN_S2V_MODEL
@@ -516,6 +714,9 @@ export class BailianAdapter implements IProviderAdapter {
   buildPayload(payload: StandardPayload): BailianVideoSynthesisRequestBody {
     const flags = isRecord(payload.flags) ? payload.flags : undefined;
     const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
+    const requestedModel = resolveDashScopeModel(payload);
+    const tripoModel = normalizeTripoModel(requestedModel);
+    if (tripoModel) return buildTripo3dPayload(payload, tripoModel);
     const imageUrls = payload.inputs?.image_urls || [];
     const refFromInputs = normalizeHttpImageUrlArray(Array.isArray(imageUrls) ? imageUrls : []);
     const refImageUrls =
@@ -540,7 +741,6 @@ export class BailianAdapter implements IProviderAdapter {
       readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
       extractPromptFromNodeInputs(payload.nodeInputs);
     const prompt = promptRaw?.trim() ?? "";
-    const requestedModel = resolveDashScopeModel(payload);
     const requestedLc = requestedModel.toLowerCase();
     const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
       ? requestedLc
@@ -712,10 +912,13 @@ export class BailianAdapter implements IProviderAdapter {
   ): Promise<{ taskId: string; raw: unknown }> {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
     const bodyModel = body.model.toLowerCase();
-    const path = bodyModel === WAN_ANIMATE_MOVE_MODEL || bodyModel === WAN_S2V_MODEL
-      ? IMAGE_TO_VIDEO_SYNTHESIS_PATH
-      : VIDEO_SYNTHESIS_PATH;
-    const url = `${baseUrl}${path}`;
+    const isTripo = normalizeTripoModel(body.model) != null;
+    const path = isTripo
+      ? TRIPO_3D_GENERATION_PATH
+      : bodyModel === WAN_ANIMATE_MOVE_MODEL || bodyModel === WAN_S2V_MODEL
+        ? IMAGE_TO_VIDEO_SYNTHESIS_PATH
+        : VIDEO_SYNTHESIS_PATH;
+    const url = `${isTripo ? resolveTripoBaseUrl(credentials) : baseUrl}${path}`;
     let res: Response;
     try {
       res = await fetch(url, {
@@ -756,12 +959,18 @@ export class BailianAdapter implements IProviderAdapter {
   async generate(payload: StandardPayload, credentials: unknown): Promise<ProviderResponse> {
     const body = this.buildPayload(payload);
     const { taskId, raw } = await this.submitTask(body, credentials);
-    return { taskId, raw };
+    const tripoModel = normalizeTripoModel(body.model);
+    return {
+      taskId: tripoModel ? encodeTripoTaskId(taskId, calculateTripoCredits(payload, tripoModel)) : taskId,
+      raw,
+    };
   }
 
   async queryTask(taskId: string, credentials: unknown): Promise<TaskStatusPollData> {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
-    const url = `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`;
+    const tripoTask = parseTripoTaskId(taskId);
+    const upstreamTaskId = tripoTask?.upstreamTaskId ?? taskId;
+    const url = `${tripoTask ? resolveTripoBaseUrl(credentials) : baseUrl}/api/v1/tasks/${encodeURIComponent(upstreamTaskId)}`;
     let res: Response;
     try {
       res = await fetch(url, {
@@ -789,7 +998,7 @@ export class BailianAdapter implements IProviderAdapter {
       const msg = extractDashScopeErrorMessage(raw) || `HTTP ${res.status}`;
       return { status: "failed", errorMessage: msg };
     }
-    return mapDashScopeTaskToPollData(raw);
+    return mapDashScopeTaskToPollData(raw, tripoTask?.credits);
   }
 }
 
@@ -854,6 +1063,21 @@ function extractResultVideoUrl(raw: unknown): string | undefined {
   return undefined;
 }
 
+function extractTripoResult(raw: unknown): { modelUrl?: string; previewUrl?: string } {
+  if (!isRecord(raw) || !isRecord(raw.output) || !Array.isArray(raw.output.results)) return {};
+  const first = raw.output.results.find(isRecord);
+  if (!first) return {};
+  const modelUrl =
+    (typeof first.pbr_model_url === "string" && first.pbr_model_url.trim())
+    || (typeof first.base_model_url === "string" && first.base_model_url.trim())
+    || undefined;
+  const previewUrl =
+    typeof first.rendered_image_url === "string" && first.rendered_image_url.trim()
+      ? first.rendered_image_url.trim()
+      : undefined;
+  return { modelUrl, previewUrl };
+}
+
 /** 从 DashScope 任务查询结果解析生成视频时长（秒），缺省按 5 秒参与计费估算 */
 function extractDashScopeUsageDurationSec(raw: unknown): number {
   if (!isRecord(raw)) return BAILIAN_DEFAULT_USAGE_DURATION_SEC;
@@ -881,9 +1105,9 @@ function extractDashScopeUsageResolution(raw: unknown): number | undefined {
   return Number.isFinite(resolution) ? resolution : undefined;
 }
 
-function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
+function mapDashScopeTaskToPollData(raw: unknown, tripoCredits?: number): TaskStatusPollData {
   const st = readTaskStatus(raw);
-  if (st === "FAILED" || st === "FAILURE" || st === "ERROR") {
+  if (st === "FAILED" || st === "FAILURE" || st === "ERROR" || st === "CANCELED" || st === "UNKNOWN") {
     const err =
       extractDashScopeErrorMessage(raw) ||
       (isRecord(raw) && isRecord(raw.output) && typeof raw.output.message === "string"
@@ -893,6 +1117,20 @@ function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
     return { status: "failed", errorMessage: err };
   }
   if (st === "SUCCEEDED" || st === "SUCCESS" || st === "COMPLETED") {
+    if (tripoCredits != null) {
+      const result = extractTripoResult(raw);
+      if (!result.modelUrl) {
+        return { status: "failed", errorMessage: "Tripo 任务成功但未返回 pbr_model_url 或 base_model_url" };
+      }
+      return {
+        status: "succeeded",
+        resultUrl: result.modelUrl,
+        resultPreviewUrl: result.previewUrl,
+        resultMediaType: "model",
+        progress: 100,
+        flatFeeCredits: tripoCredits,
+      };
+    }
     const url = extractResultVideoUrl(raw);
     if (!url) {
       return { status: "failed", errorMessage: "任务成功但未解析到 output.video_url" };

@@ -27,13 +27,15 @@ import {
   resolveExpectedDurationMsForSku,
 } from "@/lib/task-status-view";
 import { autoSaveGeneratedResultsToWorkbenchAssets } from "@/lib/workbench-asset-autosave";
-import { getAtPath, iterateLeafFields } from "@/lib/workflow-utils";
+import { cn } from "@/lib/utils";
+import { getAtPath, isWorkflowFieldVisible, iterateLeafFields } from "@/lib/workflow-utils";
 import {
   BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND,
   BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND,
   BAILIAN_S2V_480P_CREDITS_PER_SECOND,
   BAILIAN_S2V_720P_CREDITS_PER_SECOND,
   BAILIAN_VIDEO_CREDITS_PER_SECOND,
+  estimateBailianTripoCredits,
 } from "@/services/providers/BailianAdapter";
 import type { TaskStatusViewModel } from "@/types/task-status";
 import type { ImageFieldValue, MultiImageFieldValue } from "@/types/workflow";
@@ -62,12 +64,14 @@ const CATEGORY_ICON: Record<SkuCategory, string> = {
   prompt: "✦",
   image: "◈",
   video: "▶",
+  model: "◇",
 };
 
 const CATEGORY_BG: Record<SkuCategory, string> = {
   prompt: "from-violet-950/80 via-indigo-950/60 to-[#0a0f1e]",
   image: "from-teal-950/80 via-cyan-950/50 to-[#0a0f1e]",
   video: "from-rose-950/80 via-orange-950/50 to-[#0a0f1e]",
+  model: "from-violet-950/80 via-fuchsia-950/50 to-[#0a0f1e]",
 };
 
 // ─── WorkflowStudio ──────────────────────────────────────────────────────────
@@ -193,6 +197,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const hasImageUploadInFlight = useMemo(() => {
     if (!schema) return false;
     for (const field of iterateLeafFields(schema.fields)) {
+      if (!isWorkflowFieldVisible(field, parameters, fieldPaths)) continue;
       const p = fieldPaths[field.id];
       const raw = p ? getAtPath(parameters, p) : undefined;
       if (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload") {
@@ -349,7 +354,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       const url = item.resultUrl?.trim();
       if (url) {
         const mediaType =
-          item.mediaType === "image" || item.mediaType === "video"
+          item.mediaType === "image" || item.mediaType === "video" || item.mediaType === "model"
             ? item.mediaType
             : inferMediaTypeFromResultUrl(url);
         return { phase: "success", videoUrl: url, mediaType, hints: [] };
@@ -504,6 +509,25 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     return { sec, credits };
   }, [selectedSku, schema, fieldPaths, parameters]);
 
+  const tripoEstimate = useMemo(() => {
+    if (!selectedSku || selectedSku.skuId !== "BAILIAN_TRIPO_3D" || !schema) return null;
+    const readValue = (fieldId: string) => {
+      const valuePath = fieldPaths[fieldId];
+      return valuePath ? getAtPath(parameters, valuePath) : undefined;
+    };
+    const model = String(readValue("modelName") ?? "Tripo/Tripo-P1.0");
+    const generationMode = String(readValue("generationMode") ?? "text");
+    const textureOutput = String(readValue("textureOutput") ?? "pbr");
+    const textureQuality = String(readValue("textureQuality") ?? "standard");
+    const rawFaceLimit = readValue("faceLimit");
+    const faceLimit = typeof rawFaceLimit === "number" && Number.isFinite(rawFaceLimit) ? rawFaceLimit : 20_000;
+    const geometryQuality = faceLimit > 1_500_000 ? "ultra" : "standard";
+    return {
+      credits: estimateBailianTripoCredits({ model, generationMode, textureOutput, textureQuality, faceLimit }),
+      detail: `${model.replace("Tripo/Tripo-", "Tripo ")} · ${generationMode} · ${faceLimit.toLocaleString()} faces · ${textureOutput === "base" ? "base mesh" : textureQuality}${model.endsWith("H3.1") ? ` · ${geometryQuality}` : ""}`,
+    };
+  }, [selectedSku, schema, fieldPaths, parameters]);
+
   const submitPrimaryLabel = hasImageUploadInFlight
     ? t.submitBtnUploading
     : isSubmitting
@@ -516,6 +540,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     { key: "prompt", label: t.categoryPrompt },
     { key: "image", label: t.categoryImage },
     { key: "video", label: t.categoryVideo },
+    { key: "model", label: t.categoryModel },
   ];
 
   const visibleSkus = skus.filter((s) => s.category === activeCategory);
@@ -740,6 +765,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       sku={selectedSku}
                       locale={locale}
                       bailianEstimate={bailianEstimate}
+                      tripoEstimate={tripoEstimate}
                     />
                   ) : null}
                   formFooter={
@@ -763,17 +789,19 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                         </div>
                       )}
 
-                      <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] px-3.5 py-3 transition-colors hover:bg-white/[0.04]">
-                        <label className="flex cursor-pointer items-center gap-3 text-sm text-slate-300">
-                          <input
-                            type="checkbox"
-                            checked={autoSaveToAssetLibrary}
-                            onChange={(e) => setAutoSaveToAssetLibrary(e.target.checked)}
-                            className="h-4 w-4 rounded border-[#3a5070] bg-[#0f1728] text-emerald-500 focus:ring-2 focus:ring-emerald-500/30 focus:ring-offset-0"
-                          />
-                          {t.autoSaveToAssetToggle}
-                        </label>
-                      </div>
+                      {selectedSku?.category !== "model" && (
+                        <div className="rounded-xl border border-white/[0.07] bg-white/[0.025] px-3.5 py-3 transition-colors hover:bg-white/[0.04]">
+                          <label className="flex cursor-pointer items-center gap-3 text-sm text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={autoSaveToAssetLibrary}
+                              onChange={(e) => setAutoSaveToAssetLibrary(e.target.checked)}
+                              className="h-4 w-4 rounded border-[#3a5070] bg-[#0f1728] text-emerald-500 focus:ring-2 focus:ring-emerald-500/30 focus:ring-offset-0"
+                            />
+                            {t.autoSaveToAssetToggle}
+                          </label>
+                        </div>
+                      )}
 
                       {(isAutoSaving || autoSaveNotice) && (
                         <div className="rounded-xl border border-[#2a3d5e] bg-[#13253f] px-3.5 py-2.5 text-xs text-slate-300">
@@ -862,7 +890,14 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
           </div>
 
           {/* ── Right: viewer + history ── */}
-          <div className="wf-panel-enter flex min-h-[560px] w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1 lg:max-h-[calc(100vh-2.5rem)]">
+          <div
+            className={cn(
+              "wf-panel-enter flex w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1",
+              embedded
+                ? "min-h-[480px] lg:h-[calc(100dvh-7rem)] lg:min-h-[360px] lg:max-h-[calc(100dvh-7rem)]"
+                : "min-h-[560px] lg:max-h-[calc(100vh-2.5rem)]"
+            )}
+          >
             <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
               <div className="flex items-center gap-2.5">
                 <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />
@@ -874,7 +909,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                 {activeTaskId ? (locale === "en" ? "LIVE" : "任务中") : (locale === "en" ? "READY" : "待命")}
               </span>
             </div>
-            <div className="flex-1">
+            <div className="min-h-0 flex-1 overflow-hidden">
               <TaskStatusViewer
                 model={displayViewerModel}
                 onRegenerate={handleRegenerate}
@@ -920,10 +955,12 @@ function WorkflowPricing({
   sku,
   locale,
   bailianEstimate,
+  tripoEstimate,
 }: {
   sku: SkuDefinition;
   locale: "zh" | "en";
   bailianEstimate: { sec: number; credits: number } | null;
+  tripoEstimate: { credits: number; detail: string } | null;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -942,7 +979,7 @@ function WorkflowPricing({
 
   const name = locale === "en" && sku.displayNameEn ? sku.displayNameEn : sku.displayName;
   const isS2v = sku.skuId === "BAILIAN_WAN22_S2V";
-  if (!isS2v && !bailianEstimate) {
+  if (!isS2v && !bailianEstimate && !tripoEstimate) {
     return <FixedWorkflowPricing name={name} credits={sku.sellCredits} locale={locale} />;
   }
   const dialogTitle = locale === "en" ? `${name} pricing` : `${name}价格明细`;
@@ -987,6 +1024,14 @@ function WorkflowPricing({
                 <span className="block text-xs text-slate-400">720P</span>
                 <strong className="mt-1 block text-base">{BAILIAN_S2V_720P_CREDITS_PER_SECOND} {perSecondUnit}</strong>
               </div>
+            </div>
+          ) : tripoEstimate ? (
+            <div className="rounded-lg border border-violet-500/20 bg-violet-950/20 px-4 py-4 text-violet-200">
+              <span className="block text-xs text-slate-400">{locale === "en" ? "Current estimate" : "当前预计价格"}</span>
+              <strong className="mt-1 block text-lg">
+                {tripoEstimate.credits.toLocaleString(locale === "en" ? "en-US" : "zh-CN")} {creditsUnit}
+              </strong>
+              <span className="mt-1 block text-xs text-slate-500">{tripoEstimate.detail}</span>
             </div>
           ) : bailianEstimate ? (
             <>
