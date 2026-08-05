@@ -1,6 +1,7 @@
 import type {
   ImageFieldValue,
   ImageUploadField,
+  BooleanToggleField,
   MultiImageFieldValue,
   NumberInputField,
   NumberSliderField,
@@ -88,6 +89,8 @@ function defaultValueForField(f: WorkflowField): unknown {
     }
     case "select":
       return (f as SelectField).defaultValue ?? (f as SelectField).options[0]?.value ?? "";
+    case "booleanToggle":
+      return (f as BooleanToggleField).defaultValue ?? false;
     default:
       return null;
   }

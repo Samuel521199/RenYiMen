@@ -89,7 +89,7 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.045]">
               <Video className="h-5 w-5 text-slate-400" strokeWidth={1.5} />
             </span>
-            <span className="text-center text-xs font-medium text-slate-500">{t.uploadDropHint}</span>
+            <span className="text-center text-xs font-medium text-slate-500">{t.uploadNoPreview}</span>
           </button>
         )}
       </div>

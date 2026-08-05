@@ -41,6 +41,9 @@ export const translations = {
     categoryVideo: "视频",
     categoryModel: "模型",
     categoryEmpty: "该分类暂无可用功能",
+    favoritesEmpty: "还没有收藏任何功能，点击工具卡片上的五角星即可添加。",
+    favoriteAdd: "添加到我的收藏",
+    favoriteRemove: "取消收藏",
     credits: "积分",
 
     // ── 表单操作 ──
@@ -105,11 +108,12 @@ export const translations = {
     modelPreviewError: "模型预览加载失败",
     modelPreviewErrorHint: "模型链接可能已过期，或浏览器暂时无法加载该 GLB 文件。可以重试预览或直接下载。",
     modelPreviewRetry: "重新加载预览",
+    successAudio: "音色试听已就绪",
     noPreviewUrl: "未提供预览地址",
     downloadBtn: "下载",
     downloadingBtn: "正在准备下载…",
     regenerateBtn: "重新生成",
-    retryBtn: "使用相同参数重试",
+    retryBtn: "返回修改后重试",
     billingDone: (credits: number) => `✅ 任务完成，实扣 ${credits} 积分`,
     failureLabel: "生成失败",
     failureTitle: "未能完成本次任务",
@@ -122,6 +126,8 @@ export const translations = {
 
     // ── ImageUploadControl ──
     uploadNoPreview: "暂无预览",
+    uploadDropHint: "拖拽文件到此处，或点击选择",
+    uploadDropActive: "松开即可上传",
     uploadSelectBtn: "选择图片",
     uploadChangeBtn: "更换图片",
     uploadClearBtn: "清除",
@@ -133,8 +139,6 @@ export const translations = {
     uploadFileName: (name: string) => `已选：${name}`,
     uploadRemoteUrl: (url: string) => `远端：${url}`,
     uploadZoomHint: "点击放大观看",
-    uploadDropHint: "拖拽文件到此处，或点击选择",
-    uploadDropActive: "松开即可上传",
 
     // ── TextResultDisplay ──
     textResultTitle: "生成的提示词",
@@ -192,6 +196,9 @@ export const translations = {
     categoryVideo: "Video",
     categoryModel: "Model",
     categoryEmpty: "No workflows in this category",
+    favoritesEmpty: "No favorites yet. Select the star on a workflow card to add one.",
+    favoriteAdd: "Add to favorites",
+    favoriteRemove: "Remove from favorites",
     credits: "Credits",
 
     // ── Form Actions ──
@@ -256,11 +263,12 @@ export const translations = {
     modelPreviewError: "Model preview failed to load",
     modelPreviewErrorHint: "The model link may have expired, or the browser could not load this GLB file. Retry the preview or download it directly.",
     modelPreviewRetry: "Reload preview",
+    successAudio: "Voice preview ready",
     noPreviewUrl: "No preview URL provided",
     downloadBtn: "Download",
     downloadingBtn: "Preparing download…",
     regenerateBtn: "Regenerate",
-    retryBtn: "Retry with same parameters",
+    retryBtn: "Review, edit, and retry",
     billingDone: (credits: number) => `✅ Task complete — ${credits} credits charged`,
     failureLabel: "Failed",
     failureTitle: "Task could not be completed",
@@ -273,6 +281,8 @@ export const translations = {
 
     // ── ImageUploadControl ──
     uploadNoPreview: "No preview",
+    uploadDropHint: "Drop a file here, or click to choose",
+    uploadDropActive: "Release to upload",
     uploadSelectBtn: "Choose Image",
     uploadChangeBtn: "Change Image",
     uploadClearBtn: "Remove",
@@ -284,8 +294,6 @@ export const translations = {
     uploadFileName: (name: string) => `Selected: ${name}`,
     uploadRemoteUrl: (url: string) => `Remote: ${url}`,
     uploadZoomHint: "Click to zoom",
-    uploadDropHint: "Drop a file here, or click to choose",
-    uploadDropActive: "Release to upload",
 
     // ── TextResultDisplay ──
     textResultTitle: "Generated Prompt",

@@ -59,6 +59,27 @@ export async function POST(req: Request) {
     const bodyRecord =
       rawBody !== null && typeof rawBody === "object" ? (rawBody as Record<string, unknown>) : null;
     const skuId = extractSkuId(bodyRecord);
+    const requestedToolProjectId = typeof bodyRecord?.toolProjectId === "string"
+      ? bodyRecord.toolProjectId.trim()
+      : "";
+    let toolProjectId: string | undefined;
+    if (requestedToolProjectId) {
+      const project = await prisma.toolProject.findFirst({
+        where: {
+          id: requestedToolProjectId,
+          userId: session.user.id,
+          skuId,
+        },
+        select: { id: true },
+      });
+      if (!project) {
+        return NextResponse.json(
+          { ok: false, error: "项目不存在或与当前工具不匹配", code: "INVALID_TOOL_PROJECT" },
+          { status: 400 },
+        );
+      }
+      toolProjectId = project.id;
+    }
 
     let providerCode: string;
     try {
@@ -220,6 +241,13 @@ export async function POST(req: Request) {
         resultUrlsRaw.length > 1
           ? JSON.stringify(resultUrlsRaw)
           : (resultUrlsRaw[0] ?? null);
+      const directMediaType =
+        rawDirect.resultMediaType === "audio" ||
+        rawDirect.resultMediaType === "video" ||
+        rawDirect.resultMediaType === "image" ||
+        rawDirect.resultMediaType === "text"
+          ? rawDirect.resultMediaType
+          : "image";
 
       const directCost =
         typeof rawDirect.providerCost === "number" && Number.isFinite(rawDirect.providerCost)
@@ -244,17 +272,30 @@ export async function POST(req: Request) {
                   providerCode,
                   cost: directCost,
                   resultUrl,
-                  mediaType: "image",
+                  mediaType: directMediaType,
                   durationInt: durationIntSec,
+                  ...(toolProjectId ? { toolProjectId } : {}),
                   ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
                 },
               });
+              if (toolProjectId) {
+                await tx.toolProject.update({
+                  where: { id: toolProjectId },
+                  data: { activeTaskId: upstream.taskId, providerCode },
+                });
+              }
               if (directCost > 0) {
                 await consumeUserBalanceInTransaction(
                   tx,
                   session.user.id,
                   directCost,
-                  "GPT图片生成",
+                  skuId === "BAILIAN_COSYVOICE_VOICE_DESIGN"
+                    ? "文字设计新音色"
+                    : skuId === "BAILIAN_VOICE_CLONE"
+                      ? "声音克隆"
+                      : skuId === "BAILIAN_EMOTIONAL_TTS"
+                        ? "情绪化配音"
+                      : "同步内容生成",
                   upstream.taskId
                 );
               }
@@ -276,7 +317,7 @@ export async function POST(req: Request) {
         return NextResponse.json(
           {
             ok: false,
-            error: "图片已生成但记录保存失败，请联系管理员并提供任务ID",
+            error: "内容已生成但记录保存失败，请联系管理员并提供任务ID",
             code: "DB_WRITE_FAILED",
             taskId: upstream.taskId,
           },
@@ -312,6 +353,7 @@ export async function POST(req: Request) {
       providerCode,
       cost: Number.isFinite(cost) ? Math.round(Number(cost)) : 0,
       mediaType: "",
+      ...(toolProjectId ? { toolProjectId } : {}),
       ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
     };
 
@@ -319,7 +361,15 @@ export async function POST(req: Request) {
     let dbWriteOk = false;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        await prisma.generationHistory.create({ data: historyData });
+        await prisma.$transaction(async (tx) => {
+          await tx.generationHistory.create({ data: historyData });
+          if (toolProjectId) {
+            await tx.toolProject.update({
+              where: { id: toolProjectId },
+              data: { activeTaskId: upstream.taskId, providerCode },
+            });
+          }
+        });
         dbWriteOk = true;
         break;
       } catch (dbErr) {

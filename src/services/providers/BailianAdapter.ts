@@ -17,6 +17,13 @@ const WAN_S2V_MODEL = "wan2.2-s2v";
 const TRIPO_P1_MODEL = "Tripo/Tripo-P1.0";
 const TRIPO_H31_MODEL = "Tripo/Tripo-H3.1";
 const TRIPO_TASK_PREFIX = "tripo_";
+const HAPPYHORSE_VIDEO_EDIT_MODEL = "happyhorse-1.0-video-edit";
+const WAN_VIDEO_EDIT_MODEL = "wan2.7-videoedit";
+const WAN27_I2V_MODEL = "wan2.7-i2v-2026-04-25";
+const WAN27_VIDEO_CONTINUATION_TEMPLATE = "bailian-wan2.7-video-continuation";
+const WAN27_VIDEO_EDIT_MODEL = "wan2.7-videoedit";
+const WAN27_CAMERA_REPLICATION_TEMPLATE = "bailian-wan2.7-camera-replication";
+const WAN27_EFFECT_REPLICATION_TEMPLATE = "bailian-wan2.7-effect-replication";
 
 /** 网关轮询单次 GET `/api/v1/tasks/{id}` 超时上限（DashScope 排队可能较久） */
 export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
@@ -36,6 +43,20 @@ export const BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND = Math.round(0.6 * BAIL
 /** wan2.2-s2v 华北 2 官方原价：480P 0.5 元/秒、720P 0.9 元/秒。 */
 export const BAILIAN_S2V_480P_CREDITS_PER_SECOND = Math.round(0.5 * BAILIAN_CREDITS_PER_CNY);
 export const BAILIAN_S2V_720P_CREDITS_PER_SECOND = Math.round(0.9 * BAILIAN_CREDITS_PER_CNY);
+/** happyhorse-1.0-video-edit 华北 2 官方原价：720P 0.9 元/秒、1080P 1.6 元/秒。 */
+export const BAILIAN_VIDEO_EDIT_720P_CREDITS_PER_SECOND = Math.round(0.9 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_VIDEO_EDIT_1080P_CREDITS_PER_SECOND = Math.round(1.6 * BAILIAN_CREDITS_PER_CNY);
+/** wan2.7-videoedit 华北 2 官方原价；usage.duration 已包含输入与输出视频时长。 */
+export const BAILIAN_WAN_VIDEO_EDIT_720P_CREDITS_PER_BILLABLE_SECOND = Math.round(0.6 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_WAN_VIDEO_EDIT_1080P_CREDITS_PER_BILLABLE_SECOND = Math.round(1 * BAILIAN_CREDITS_PER_CNY);
+/** 输入与输出通常等长，目录按每秒原视频展示预计积分。 */
+export const BAILIAN_WAN_VIDEO_EDIT_720P_CREDITS_PER_SOURCE_SECOND =
+  BAILIAN_WAN_VIDEO_EDIT_720P_CREDITS_PER_BILLABLE_SECOND * 2;
+export const BAILIAN_WAN_VIDEO_EDIT_1080P_CREDITS_PER_SOURCE_SECOND =
+  BAILIAN_WAN_VIDEO_EDIT_1080P_CREDITS_PER_BILLABLE_SECOND * 2;
+/** wan2.7-videoedit 华北 2 官方原价：720P 0.6 元/秒、1080P 1 元/秒。 */
+export const BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND = Math.round(0.6 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND = Math.round(1 * BAILIAN_CREDITS_PER_CNY);
 
 const BAILIAN_DEFAULT_USAGE_DURATION_SEC = 5;
 
@@ -195,6 +216,12 @@ function normalizeTripoImageSlots(raw: unknown): Array<string | undefined> {
   });
 }
 
+function normalizeHttpUrl(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const value = raw.trim();
+  return /^https?:\/\//i.test(value) ? value : undefined;
+}
+
 function findFirstImageHttpUrl(nodeInputs: StandardPayload["nodeInputs"]): string | undefined {
   const stack: unknown[] = [];
   for (const n of Object.values(nodeInputs)) stack.push(n);
@@ -240,6 +267,10 @@ function extractPromptFromNodeInputs(nodeInputs: StandardPayload["nodeInputs"]):
 
 function resolveDashScopeModel(payload: StandardPayload): string {
   const templateId = payload.templateId.trim().toLowerCase();
+  if (
+    templateId === WAN27_CAMERA_REPLICATION_TEMPLATE
+    || templateId === WAN27_EFFECT_REPLICATION_TEMPLATE
+  ) return WAN27_VIDEO_EDIT_MODEL;
   if (templateId.includes(WAN_ANIMATE_MOVE_MODEL)) return WAN_ANIMATE_MOVE_MODEL;
   if (templateId.includes(WAN_S2V_MODEL)) return WAN_S2V_MODEL;
   const input = payload.nodeInputs["input"];
@@ -262,7 +293,7 @@ function resolveDashScopeModel(payload: StandardPayload): string {
   if (fromFlag) return fromFlag;
   const tid = payload.templateId?.trim() ?? "";
   if (/^(?:wan|happyhorse|pixverse|kling|vidu)[a-z0-9._/-]*$/i.test(tid)) return tid;
-  return "wan2.7-i2v-2026-04-25";
+  return WAN27_I2V_MODEL;
 }
 
 function forceHappyHorseModel(requestedModel: string, payload: StandardPayload): string {
@@ -314,7 +345,7 @@ function resolveRequestedVideoDurationSec(
       : Number.isFinite(fromInputNode)
         ? fromInputNode
         : readNumberFlag(flags, ["duration", "videoDuration", "seconds"]) ??
-          readNumberFromNode(inputNode, ["duration", "videoDuration", "seconds"]);
+          readNumberFromNode(inputNode, ["duration", "videoDuration", "video_duration", "seconds"]);
   const n = typeof raw === "number" && Number.isFinite(raw) ? raw : BAILIAN_DEFAULT_USAGE_DURATION_SEC;
   return Math.min(maxSeconds, Math.max(minSeconds, Math.round(n)));
 }
@@ -428,6 +459,15 @@ export type BailianTripo3dRequestBody = {
   };
 };
 
+export type BailianVideoEditInput = {
+  prompt: string;
+  negative_prompt?: string;
+  media: Array<
+    | { type: "video"; url: string }
+    | { type: "reference_image"; url: string }
+  >;
+};
+
 export type BailianVideoSynthesisRequestBody =
   | BailianTripo3dRequestBody
   | {
@@ -442,6 +482,16 @@ export type BailianVideoSynthesisRequestBody =
       model: typeof WAN_S2V_MODEL;
       input: BailianS2vInput;
       parameters: { resolution: "480P" | "720P" };
+    }
+  | {
+      model: typeof HAPPYHORSE_VIDEO_EDIT_MODEL | typeof WAN_VIDEO_EDIT_MODEL;
+      input: BailianVideoEditInput;
+      parameters: {
+        resolution: "720P" | "1080P";
+        watermark: boolean;
+        audio_setting: "auto" | "origin";
+        prompt_extend?: boolean;
+      };
     }
   | {
       model: string;
@@ -603,14 +653,18 @@ export class BailianAdapter implements IProviderAdapter {
   getVideoInputCapabilities(payload: StandardPayload): VideoProviderInputCapabilities {
     const requestedModel = resolveDashScopeModel(payload);
     const requestedLc = requestedModel.toLowerCase();
-    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
+    const isWan27Replication = payload.templateId.trim().toLowerCase() === WAN27_CAMERA_REPLICATION_TEMPLATE
+      || payload.templateId.trim().toLowerCase() === WAN27_EFFECT_REPLICATION_TEMPLATE;
+    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL
+      || requestedLc === WAN_S2V_MODEL
+      || requestedLc === HAPPYHORSE_VIDEO_EDIT_MODEL
+      || requestedLc === WAN_VIDEO_EDIT_MODEL
       ? requestedLc
       : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
     const modelLc = targetModel.toLowerCase();
-    const isR2v = modelLc.includes("r2v");
-    if (isR2v) {
+    if ((modelLc === HAPPYHORSE_VIDEO_EDIT_MODEL || modelLc === WAN_VIDEO_EDIT_MODEL) && !isWan27Replication) {
       const referenceBinding = {
         transportRole: "reference_image",
         nativeBoundaryControl: false,
@@ -619,7 +673,31 @@ export class BailianAdapter implements IProviderAdapter {
         providerId: "ALIYUN_BAILIAN",
         modelId: targetModel,
         transportSchema: "dashscope_media",
-        maxImages: R2V_MAX_IMAGES,
+        maxImages: modelLc === WAN_VIDEO_EDIT_MODEL ? 4 : 5,
+        maxPromptCharacters: modelLc === WAN_VIDEO_EDIT_MODEL ? 5000 : 2500,
+        supportsSemanticEndFramePrompt: false,
+        promptCanAddressInputOrder: true,
+        roleBindings: {
+          character_identity: referenceBinding,
+          product_identity: referenceBinding,
+          scene_layout: referenceBinding,
+          style_reference: referenceBinding,
+          custom_reference: referenceBinding,
+        },
+      };
+    }
+    const isR2v = modelLc.includes("r2v");
+    const isVideoEdit = modelLc === WAN27_VIDEO_EDIT_MODEL;
+    if (isR2v || isVideoEdit) {
+      const referenceBinding = {
+        transportRole: "reference_image",
+        nativeBoundaryControl: false,
+      };
+      return {
+        providerId: "ALIYUN_BAILIAN",
+        modelId: targetModel,
+        transportSchema: "dashscope_media",
+        maxImages: isVideoEdit ? 4 : R2V_MAX_IMAGES,
         maxPromptCharacters: 5000,
         supportsSemanticEndFramePrompt: true,
         promptCanAddressInputOrder: true,
@@ -675,10 +753,14 @@ export class BailianAdapter implements IProviderAdapter {
       return { cost: credits, sellPrice: credits };
     }
     const requestedModel = resolvedModel.toLowerCase();
+    const isWan27Replication = payload.templateId.trim().toLowerCase() === WAN27_CAMERA_REPLICATION_TEMPLATE
+      || payload.templateId.trim().toLowerCase() === WAN27_EFFECT_REPLICATION_TEMPLATE;
     const secs = requestedModel === WAN_ANIMATE_MOVE_MODEL
       ? resolveRequestedVideoDurationSec(payload, 2, 30)
       : requestedModel === WAN_S2V_MODEL
         ? resolveRequestedVideoDurationSec(payload, 1, 20)
+        : requestedModel === WAN_VIDEO_EDIT_MODEL
+          ? resolveRequestedVideoDurationSec(payload, 2, 10)
         : resolveRequestedVideoDurationSec(payload);
     const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
     const requestedMode =
@@ -687,6 +769,21 @@ export class BailianAdapter implements IProviderAdapter {
     const requestedResolution =
       readStringFlag(isRecord(f) ? f : undefined, ["resolution", "videoResolution"]) ??
       readStringFromNode(inputNode, ["resolution", "videoResolution"]);
+    if (requestedModel === HAPPYHORSE_VIDEO_EDIT_MODEL) {
+      const creditsPerSecond = requestedResolution?.toUpperCase() === "1080P"
+        ? BAILIAN_VIDEO_EDIT_1080P_CREDITS_PER_SECOND
+        : BAILIAN_VIDEO_EDIT_720P_CREDITS_PER_SECOND;
+      const billableSeconds = Math.min(15, Math.max(3, secs));
+      const cost = billableSeconds * creditsPerSecond;
+      return { cost, sellPrice: cost };
+    }
+    if (requestedModel === WAN_VIDEO_EDIT_MODEL && !isWan27Replication) {
+      const creditsPerSourceSecond = requestedResolution?.toUpperCase() === "1080P"
+        ? BAILIAN_WAN_VIDEO_EDIT_1080P_CREDITS_PER_SOURCE_SECOND
+        : BAILIAN_WAN_VIDEO_EDIT_720P_CREDITS_PER_SOURCE_SECOND;
+      const cost = Math.min(10, Math.max(2, secs)) * creditsPerSourceSecond;
+      return { cost, sellPrice: cost };
+    }
     const creditsPerSecond = requestedModel === WAN_ANIMATE_MOVE_MODEL
       ? requestedMode === "wan-pro"
         ? BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND
@@ -695,6 +792,10 @@ export class BailianAdapter implements IProviderAdapter {
         ? requestedResolution?.toUpperCase() === "720P"
           ? BAILIAN_S2V_720P_CREDITS_PER_SECOND
           : BAILIAN_S2V_480P_CREDITS_PER_SECOND
+      : requestedModel === WAN27_VIDEO_EDIT_MODEL
+        ? requestedResolution?.toUpperCase() === "1080P"
+          ? BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND
+          : BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND
       : BAILIAN_VIDEO_CREDITS_PER_SECOND;
     let cost = secs * creditsPerSecond;
     if (isRecord(f) && typeof f.catalogBaseCost === "number" && Number.isFinite(f.catalogBaseCost)) {
@@ -717,6 +818,89 @@ export class BailianAdapter implements IProviderAdapter {
     const requestedModel = resolveDashScopeModel(payload);
     const tripoModel = normalizeTripoModel(requestedModel);
     if (tripoModel) return buildTripo3dPayload(payload, tripoModel);
+    const requestedLc = requestedModel.toLowerCase();
+    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL
+      || requestedLc === WAN_S2V_MODEL
+      || requestedLc === HAPPYHORSE_VIDEO_EDIT_MODEL
+      || requestedLc === WAN_VIDEO_EDIT_MODEL
+      ? requestedLc
+      : shouldForceHappyHorseModel()
+        ? forceHappyHorseModel(requestedModel, payload)
+        : requestedModel;
+    const modelLc = targetModel.toLowerCase();
+    const isWan27Replication = payload.templateId.trim().toLowerCase() === WAN27_CAMERA_REPLICATION_TEMPLATE
+      || payload.templateId.trim().toLowerCase() === WAN27_EFFECT_REPLICATION_TEMPLATE;
+    const explicitPrompt =
+      readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
+      readStringFromNode(inputNode, ["prompt", "positivePrompt", "text"]);
+    const promptRaw = explicitPrompt ?? extractPromptFromNodeInputs(payload.nodeInputs);
+    const stylePrompt = readStringFromNode(inputNode, ["style_prompt", "stylePrompt"])?.trim() ?? "";
+    const prompt = [stylePrompt, (stylePrompt ? explicitPrompt : promptRaw)?.trim() ?? ""]
+      .filter(Boolean)
+      .join("\n");
+
+    if ((modelLc === HAPPYHORSE_VIDEO_EDIT_MODEL || modelLc === WAN_VIDEO_EDIT_MODEL) && !isWan27Replication) {
+      const videoUrl =
+        readStringFlag(flags, ["videoUrl", "video_url", "sourceVideoUrl", "source_video_url"]) ??
+        readStringFromNode(inputNode, ["video_url", "videoUrl", "source_video_url", "sourceVideoUrl"]);
+      const normalizedVideoUrl = normalizeHttpUrl(videoUrl);
+      if (!normalizedVideoUrl) {
+        throw new ProviderError(
+          "缺少待编辑视频的公网 URL（请提供 input.video_url）",
+          "BAILIAN_MISSING_VIDEO_URL",
+          400,
+        );
+      }
+      if (!prompt) {
+        throw new ProviderError("缺少视频修改要求", "BAILIAN_MISSING_PROMPT", 400);
+      }
+      const referenceImages = normalizeHttpImageUrlArray(
+        inputNode?.reference_image_urls ?? inputNode?.image_urls ?? payload.inputs?.image_urls,
+      );
+      const maxReferenceImages = modelLc === WAN_VIDEO_EDIT_MODEL ? 4 : 5;
+      if (referenceImages.length > maxReferenceImages) {
+        throw new ProviderError(`视频编辑最多支持 ${maxReferenceImages} 张参考图`, "BAILIAN_TOO_MANY_IMAGES", 400);
+      }
+      const resolutionRaw =
+        readStringFlag(flags, ["resolution", "videoResolution"]) ??
+        readStringFromNode(inputNode, ["resolution", "videoResolution"]);
+      const audioSettingRaw =
+        readStringFlag(flags, ["audioSetting", "audio_setting"]) ??
+        readStringFromNode(inputNode, ["audioSetting", "audio_setting"]);
+      const negativePrompt =
+        readStringFlag(flags, ["negativePrompt", "negative_prompt"]) ??
+        readStringFromNode(inputNode, ["negativePrompt", "negative_prompt"]);
+      return {
+        model: modelLc === WAN_VIDEO_EDIT_MODEL ? WAN_VIDEO_EDIT_MODEL : HAPPYHORSE_VIDEO_EDIT_MODEL,
+        input: {
+          prompt,
+          ...(modelLc === WAN_VIDEO_EDIT_MODEL && negativePrompt
+            ? { negative_prompt: negativePrompt.slice(0, 500) }
+            : {}),
+          media: [
+            { type: "video", url: normalizedVideoUrl },
+            ...referenceImages.map((url) => ({ type: "reference_image" as const, url })),
+          ],
+        },
+        parameters: {
+          resolution: resolutionRaw?.toUpperCase() === "1080P" ? "1080P" : "720P",
+          watermark:
+            readBooleanFlag(flags, ["watermark", "showWatermark"]) ??
+            readBooleanFromNode(inputNode, ["watermark", "showWatermark"]) ??
+            false,
+          audio_setting: audioSettingRaw === "auto" ? "auto" : "origin",
+          ...(modelLc === WAN_VIDEO_EDIT_MODEL
+            ? {
+                prompt_extend:
+                  readBooleanFlag(flags, ["prompt_extend", "promptExtend"]) ??
+                  readBooleanFromNode(inputNode, ["prompt_extend", "promptExtend"]) ??
+                  true,
+              }
+            : {}),
+        },
+      };
+    }
+
     const imageUrls = payload.inputs?.image_urls || [];
     const refFromInputs = normalizeHttpImageUrlArray(Array.isArray(imageUrls) ? imageUrls : []);
     const refImageUrls =
@@ -728,6 +912,156 @@ export class BailianAdapter implements IProviderAdapter {
     const lastFrameUrl =
       readStringFlag(flags, ["lastFrameUrl", "last_frame_url", "endFrameUrl", "end_frame_url"]) ??
       readStringFromNode(inputNode, ["last_frame_url", "lastFrameUrl", "end_frame_url", "endFrameUrl"]);
+    const firstClipUrl =
+      readStringFlag(flags, ["firstClipUrl", "first_clip_url"]) ??
+      readStringFromNode(inputNode, ["first_clip_url", "firstClipUrl"]);
+    const isVideoContinuation =
+      payload.templateId.trim().toLowerCase() === WAN27_VIDEO_CONTINUATION_TEMPLATE
+      || Boolean(firstClipUrl);
+
+    if (isVideoContinuation) {
+      if (!firstClipUrl || !/^https?:\/\//i.test(firstClipUrl)) {
+        throw new ProviderError(
+          "缺少待续写视频的公网 URL（请提供 input.first_clip_url）",
+          "BAILIAN_MISSING_FIRST_CLIP_URL",
+          400,
+        );
+      }
+      const requestedContinuationMode =
+        readStringFlag(flags, ["continuationMode", "continuation_mode"]) ??
+        readStringFromNode(inputNode, ["continuation_mode", "continuationMode"]) ??
+        "natural";
+      // Backward compatibility for tasks created before the three modes were split.
+      const continuationMode = requestedContinuationMode === "standard"
+        ? "natural"
+        : requestedContinuationMode;
+      if (!["natural", "instruction", "last_frame"].includes(continuationMode)) {
+        throw new ProviderError(
+          `不支持的视频续写模式：${requestedContinuationMode}`,
+          "BAILIAN_INVALID_CONTINUATION_MODE",
+          400,
+        );
+      }
+      const useLastFrame = continuationMode === "last_frame";
+      if (useLastFrame && (!lastFrameUrl || !/^https?:\/\//i.test(lastFrameUrl))) {
+        throw new ProviderError(
+          "尾帧控制模式必须上传目标尾帧",
+          "BAILIAN_MISSING_LAST_FRAME_URL",
+          400,
+        );
+      }
+      const promptRaw =
+        readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
+        readStringFromNode(inputNode, ["prompt", "positivePrompt", "text"]);
+      if (continuationMode === "instruction" && !promptRaw?.trim()) {
+        throw new ProviderError(
+          "指令续写模式必须填写后续动作、剧情或运镜描述",
+          "BAILIAN_MISSING_CONTINUATION_PROMPT",
+          400,
+        );
+      }
+      const continuationPrompt = continuationMode === "natural"
+        ? ""
+        : (promptRaw?.trim() ?? "").slice(0, 5000);
+      const negativePrompt =
+        readStringFlag(flags, ["negativePrompt", "negative_prompt"]) ??
+        readStringFromNode(inputNode, ["negativePrompt", "negative_prompt"]);
+      const parameters: Record<string, unknown> = {
+        resolution:
+          readStringFlag(flags, ["resolution", "videoResolution"]) ??
+          readStringFromNode(inputNode, ["resolution", "videoResolution"]) ??
+          "720P",
+        duration: resolveRequestedVideoDurationSec(payload, 2, 15),
+        prompt_extend:
+          readBooleanFlag(flags, ["prompt_extend", "promptExtend"]) ??
+          readBooleanFromNode(inputNode, ["prompt_extend", "promptExtend"]) ??
+          false,
+        watermark:
+          readBooleanFlag(flags, ["watermark", "showWatermark"]) ??
+          readBooleanFromNode(inputNode, ["watermark", "showWatermark"]) ??
+          false,
+      };
+      const extraParams = flags?.bailianParameters ?? flags?.dashscopeParameters;
+      if (isRecord(extraParams)) Object.assign(parameters, extraParams);
+
+      return {
+        model: WAN27_I2V_MODEL,
+        input: {
+          prompt: continuationPrompt,
+          ...(negativePrompt ? { negative_prompt: negativePrompt.slice(0, 500) } : {}),
+          media: [
+            { type: "first_clip", url: firstClipUrl.trim() },
+            ...(useLastFrame && lastFrameUrl
+              ? [{ type: "last_frame", url: lastFrameUrl.trim() }]
+              : []),
+          ],
+        },
+        parameters,
+      };
+    }
+    if (modelLc === WAN27_VIDEO_EDIT_MODEL) {
+      const videoUrl =
+        readStringFlag(flags, ["videoUrl", "video_url"]) ??
+        readStringFromNode(inputNode, ["video_url", "videoUrl"]);
+      if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
+        throw new ProviderError(
+          "缺少待编辑视频的公网 URL（请提供 input.video_url）",
+          "BAILIAN_MISSING_VIDEO_URL",
+          400,
+        );
+      }
+      if (!prompt) {
+        throw new ProviderError("请输入视频修改指令", "BAILIAN_MISSING_PROMPT", 400);
+      }
+      const videoEditReferenceUrls = refImageUrls.length > 0
+        ? refImageUrls
+        : typeof imageUrl === "string"
+          && /^https?:\/\//i.test(imageUrl.trim())
+          && imageUrl.trim() !== videoUrl.trim()
+          ? [imageUrl.trim()]
+          : [];
+      const maxReferenceImages = 4;
+      if (videoEditReferenceUrls.length > maxReferenceImages) {
+        throw new ProviderError(`参考图片最多 ${maxReferenceImages} 张`, "BAILIAN_TOO_MANY_IMAGES", 400);
+      }
+      if (videoEditReferenceUrls.length === 0) {
+        const isCameraReplication =
+          payload.templateId.trim().toLowerCase() === WAN27_CAMERA_REPLICATION_TEMPLATE;
+        throw new ProviderError(
+          isCameraReplication
+            ? "运镜复刻至少需要上传一张目标画面参考图"
+            : "特效复刻至少需要上传一张目标人物参考图",
+          "BAILIAN_MISSING_REFERENCE_IMAGE",
+          400,
+        );
+      }
+      const requestedResolution =
+        readStringFlag(flags, ["resolution", "videoResolution"]) ??
+        readStringFromNode(inputNode, ["resolution", "videoResolution"]);
+      const requestedAudioSetting =
+        readStringFlag(flags, ["audioSetting", "audio_setting"]) ??
+        readStringFromNode(inputNode, ["audioSetting", "audio_setting"]);
+
+      return {
+        model: modelLc,
+        input: {
+          prompt: prompt.slice(0, 5000),
+          media: [
+            { type: "video", url: videoUrl.trim() },
+            ...videoEditReferenceUrls.map((url) => ({ type: "reference_image", url })),
+          ],
+        },
+        parameters: {
+          resolution: requestedResolution?.toUpperCase() === "1080P" ? "1080P" : "720P",
+          watermark:
+            readBooleanFlag(flags, ["watermark", "showWatermark"]) ??
+            readBooleanFromNode(inputNode, ["watermark", "showWatermark"]) ??
+            false,
+          audio_setting: requestedAudioSetting === "origin" ? "origin" : "auto",
+          prompt_extend: true,
+        },
+      };
+    }
     const hasRefArray = refImageUrls.length > 0;
     const hasSingle = typeof imageUrl === "string" && imageUrl.trim() && /^https?:\/\//i.test(imageUrl.trim());
     if (!hasSingle && !hasRefArray) {
@@ -737,17 +1071,6 @@ export class BailianAdapter implements IProviderAdapter {
         400
       );
     }
-    const promptRaw =
-      readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
-      extractPromptFromNodeInputs(payload.nodeInputs);
-    const prompt = promptRaw?.trim() ?? "";
-    const requestedLc = requestedModel.toLowerCase();
-    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
-      ? requestedLc
-      : shouldForceHappyHorseModel()
-      ? forceHappyHorseModel(requestedModel, payload)
-      : requestedModel;
-    const modelLc = targetModel.toLowerCase();
     if (modelLc === WAN_ANIMATE_MOVE_MODEL) {
       const videoUrl =
         readStringFlag(flags, ["videoUrl", "video_url", "referenceVideoUrl", "reference_video_url"]) ??
@@ -947,7 +1270,7 @@ export class BailianAdapter implements IProviderAdapter {
     }
     if (!res.ok) {
       const msg = extractDashScopeErrorMessage(raw) || `HTTP ${res.status}`;
-      throw new ProviderError(msg, "BAILIAN_HTTP", res.status, raw);
+      throw new ProviderError(normalizeDashScopeUserErrorMessage(msg), "BAILIAN_HTTP", res.status, raw);
     }
     const taskId = extractCreateTaskId(raw);
     if (!taskId) {
@@ -970,6 +1293,9 @@ export class BailianAdapter implements IProviderAdapter {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
     const tripoTask = parseTripoTaskId(taskId);
     const upstreamTaskId = tripoTask?.upstreamTaskId ?? taskId;
+    const skuId = isRecord(credentials) && typeof credentials.skuId === "string"
+      ? credentials.skuId.trim().toUpperCase()
+      : "";
     const url = `${tripoTask ? resolveTripoBaseUrl(credentials) : baseUrl}/api/v1/tasks/${encodeURIComponent(upstreamTaskId)}`;
     let res: Response;
     try {
@@ -996,9 +1322,9 @@ export class BailianAdapter implements IProviderAdapter {
     }
     if (!res.ok) {
       const msg = extractDashScopeErrorMessage(raw) || `HTTP ${res.status}`;
-      return { status: "failed", errorMessage: msg };
+      return { status: "failed", errorMessage: normalizeDashScopeUserErrorMessage(msg) };
     }
-    return mapDashScopeTaskToPollData(raw, tripoTask?.credits);
+    return mapDashScopeTaskToPollData(raw, tripoTask?.credits, skuId);
   }
 }
 
@@ -1026,6 +1352,19 @@ function extractDashScopeErrorMessage(raw: unknown): string | undefined {
   const out = raw.output;
   if (isRecord(out) && typeof out.message === "string" && out.message.trim()) return out.message.trim();
   return undefined;
+}
+
+/** 将上游版权风控英文提示转换为面向用户的可操作说明。 */
+function normalizeDashScopeUserErrorMessage(message: string): string {
+  const normalized = message.trim();
+  if (
+    /\bIP infringement\b/i.test(normalized)
+    || /intellectual property (?:infringement|violation)/i.test(normalized)
+    || /(?:涉嫌|涉及|侵犯).{0,12}(?:知识产权|版权)/i.test(normalized)
+  ) {
+    return "输入素材或提示词触发版权/IP 风控，无法生成。请改用你拥有权利的原创或已获授权素材，并移除知名影视、动漫角色、品牌或作品名称后重试。";
+  }
+  return normalized;
 }
 
 function readTaskStatus(raw: unknown): string {
@@ -1105,7 +1444,7 @@ function extractDashScopeUsageResolution(raw: unknown): number | undefined {
   return Number.isFinite(resolution) ? resolution : undefined;
 }
 
-function mapDashScopeTaskToPollData(raw: unknown, tripoCredits?: number): TaskStatusPollData {
+function mapDashScopeTaskToPollData(raw: unknown, tripoCredits?: number, skuId = ""): TaskStatusPollData {
   const st = readTaskStatus(raw);
   if (st === "FAILED" || st === "FAILURE" || st === "ERROR" || st === "CANCELED" || st === "UNKNOWN") {
     const err =
@@ -1114,7 +1453,7 @@ function mapDashScopeTaskToPollData(raw: unknown, tripoCredits?: number): TaskSt
         ? raw.output.message.trim()
         : "") ||
       "DashScope 任务失败";
-    return { status: "failed", errorMessage: err };
+    return { status: "failed", errorMessage: normalizeDashScopeUserErrorMessage(err) };
   }
   if (st === "SUCCEEDED" || st === "SUCCESS" || st === "COMPLETED") {
     if (tripoCredits != null) {
@@ -1138,7 +1477,23 @@ function mapDashScopeTaskToPollData(raw: unknown, tripoCredits?: number): TaskSt
     const durationSec = extractDashScopeUsageDurationSec(raw);
     const videoRatio = extractDashScopeUsageVideoRatio(raw);
     const resolution = extractDashScopeUsageResolution(raw);
-    const creditsPerSecond = resolution === 720
+    const isWan27VideoEdit = skuId === "BAILIAN_WAN27_CAMERA_REPLICATION"
+      || skuId === "BAILIAN_WAN27_EFFECT_REPLICATION";
+    const creditsPerSecond = skuId === "BAILIAN_HIGH_DYNAMIC_REDRAW"
+      ? resolution === 1080
+        ? BAILIAN_WAN_VIDEO_EDIT_1080P_CREDITS_PER_BILLABLE_SECOND
+        : BAILIAN_WAN_VIDEO_EDIT_720P_CREDITS_PER_BILLABLE_SECOND
+      : skuId === "BAILIAN_HAPPYHORSE_VIDEO_EDIT"
+      || skuId === "BAILIAN_SCENE_LIGHT_VIDEO_EDIT"
+      || skuId === "BAILIAN_OVERALL_STYLE_TRANSFER"
+      ? resolution === 1080
+        ? BAILIAN_VIDEO_EDIT_1080P_CREDITS_PER_SECOND
+        : BAILIAN_VIDEO_EDIT_720P_CREDITS_PER_SECOND
+      : isWan27VideoEdit
+      ? resolution === 1080
+        ? BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND
+        : BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND
+      : resolution === 720
       ? BAILIAN_S2V_720P_CREDITS_PER_SECOND
       : resolution === 480
         ? BAILIAN_S2V_480P_CREDITS_PER_SECOND
@@ -1157,10 +1512,10 @@ function mapDashScopeTaskToPollData(raw: unknown, tripoCredits?: number): TaskSt
     };
   }
   if (st === "PENDING" || st === "QUEUED" || st === "SUBMITTED") {
-    return { status: "queued", progress: 22 };
+    return { status: "queued" };
   }
   if (st === "RUNNING" || st === "PROCESSING") {
-    return { status: "running", progress: 68 };
+    return { status: "running" };
   }
-  return { status: "running", progress: 45 };
+  return { status: "running" };
 }

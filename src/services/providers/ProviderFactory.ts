@@ -2,6 +2,9 @@ import type { IProviderAdapter, StandardPayload } from "./types";
 import type { VideoProviderInputCapabilities } from "./video-input-contract";
 import { ProviderError } from "./types";
 import { BailianAdapter } from "./BailianAdapter";
+import { BailianVoiceDesignAdapter } from "./BailianVoiceDesignAdapter";
+import { BailianVoiceCloneAdapter } from "./BailianVoiceCloneAdapter";
+import { BailianEmotionalTtsAdapter } from "./BailianEmotionalTtsAdapter";
 import { GptImage2Adapter } from "./GptImage2Adapter";
 import { KlingAdapter } from "./KlingAdapter";
 import { RunningHubAdapter } from "./RunningHubAdapter";
@@ -21,10 +24,20 @@ const SKU_TO_PROVIDER: Record<string, string> = {
   KLING_PRO_I2V: "KLING_PRO",
   /** 阿里云百炼 DashScope 图生视频（异步），网关 `providerCode` 为 ALIYUN_BAILIAN */
   BAILIAN_WANX_I2V: "ALIYUN_BAILIAN",
+  BAILIAN_HAPPYHORSE_VIDEO_EDIT: "ALIYUN_BAILIAN",
+  BAILIAN_SCENE_LIGHT_VIDEO_EDIT: "ALIYUN_BAILIAN",
+  BAILIAN_OVERALL_STYLE_TRANSFER: "ALIYUN_BAILIAN",
+  BAILIAN_HIGH_DYNAMIC_REDRAW: "ALIYUN_BAILIAN",
+  BAILIAN_WAN27_CAMERA_REPLICATION: "ALIYUN_BAILIAN",
+  BAILIAN_WAN27_EFFECT_REPLICATION: "ALIYUN_BAILIAN",
+  BAILIAN_WAN27_VIDEO_CONTINUATION: "ALIYUN_BAILIAN",
   BAILIAN_MULTI_REF_I2V: "ALIYUN_BAILIAN",
   BAILIAN_WAN22_ANIMATE_MOVE: "ALIYUN_BAILIAN",
   BAILIAN_WAN22_S2V: "ALIYUN_BAILIAN",
   BAILIAN_TRIPO_3D: "ALIYUN_BAILIAN",
+  BAILIAN_COSYVOICE_VOICE_DESIGN: "ALIYUN_BAILIAN_VOICE_DESIGN",
+  BAILIAN_VOICE_CLONE: "ALIYUN_BAILIAN_VOICE_CLONE",
+  BAILIAN_EMOTIONAL_TTS: "ALIYUN_BAILIAN_EMOTIONAL_TTS",
   /** 分镜生成出图（多图输出） */
   RH_STORYBOARD: "RUNNINGHUB_STORYBOARD",
   /** 提示词反推（图生文，Qwen3 VQA） */
@@ -86,6 +99,12 @@ export function getProviderAdapter(providerCode: string): IProviderAdapter {
     case "DASHSCOPE_I2V":
     case "DASHSCOPE_VIDEO":
       return new BailianAdapter();
+    case "ALIYUN_BAILIAN_VOICE_DESIGN":
+      return new BailianVoiceDesignAdapter();
+    case "ALIYUN_BAILIAN_VOICE_CLONE":
+      return new BailianVoiceCloneAdapter();
+    case "ALIYUN_BAILIAN_EMOTIONAL_TTS":
+      return new BailianEmotionalTtsAdapter();
     case "GPT_IMAGE2":
       return new GptImage2Adapter();
     default:

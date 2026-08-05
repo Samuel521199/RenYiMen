@@ -41,6 +41,13 @@ export interface TaskStatusViewerProps {
   className?: string;
   /** 嵌入工作台时由父容器控制高度，避免重复叠加视口最小高度。 */
   compact?: boolean;
+  /** 后处理视频显示在原始结果下方，不替换原视频。 */
+  supplementaryVideo?: {
+    status: "processing" | "success" | "error";
+    url?: string;
+    title: string;
+    message?: string;
+  } | null;
 }
 
 /**
@@ -56,6 +63,7 @@ export function TaskStatusViewer({
   downloadFileName = "generated-video.mp4",
   className = "",
   compact = false,
+  supplementaryVideo = null,
 }: TaskStatusViewerProps) {
   if (model == null) {
     return (
@@ -107,6 +115,7 @@ export function TaskStatusViewer({
           onDownload={onDownload}
           onRegenerate={onRegenerate}
           downloadFileName={downloadFileName}
+          supplementaryVideo={supplementaryVideo}
         />
         <FailureLayer
           active={failureActive}
@@ -159,9 +168,10 @@ function IdleArtboard({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function layerClass(active: boolean) {
+function layerClass(active: boolean, scrollable = true) {
   return cn(
-    "subtle-scrollbar absolute inset-0 flex min-h-0 flex-col overflow-y-auto overscroll-contain p-4 transition-all duration-500 ease-out sm:p-6",
+    "subtle-scrollbar absolute inset-0 flex min-h-0 flex-col overflow-x-hidden overscroll-contain p-4 transition-all duration-500 ease-out sm:p-6",
+    scrollable ? "overflow-y-auto" : "overflow-y-hidden",
     active ? "z-10 translate-y-0 scale-100 opacity-100" : "pointer-events-none z-0 translate-y-2 scale-[0.995] opacity-0"
   );
 }
@@ -207,10 +217,12 @@ function LoadingLayer({
 
   const elapsed = model.elapsedMs ?? 0;
   const expected = expectedProp ?? model.expectedDurationMs ?? 150_000;
-  const barPct = computePseudoProgressPercent(elapsed, expected);
+  const barPct = typeof model.progress === "number" && Number.isFinite(model.progress)
+    ? Math.max(0, Math.min(99, model.progress))
+    : computePseudoProgressPercent(elapsed, expected);
 
   return (
-    <div className={layerClass(active)} aria-hidden={!active}>
+    <div className={layerClass(active, false)} aria-hidden={!active}>
       <div className="flex min-h-min w-full flex-1 flex-col gap-4 sm:gap-5">
         <header>
           <p className="text-xs font-medium uppercase tracking-widest text-slate-500">{title}</p>
@@ -267,12 +279,14 @@ function SuccessLayer({
   onDownload,
   onRegenerate,
   downloadFileName,
+  supplementaryVideo,
 }: {
   active: boolean;
   model: TaskStatusViewModel;
   onDownload?: () => void;
   onRegenerate?: () => void;
   downloadFileName: string;
+  supplementaryVideo: TaskStatusViewerProps["supplementaryVideo"];
 }) {
   // ── 所有 hooks 必须无条件置顶，不可在任何 return 之后 ──
   const tt = useT();
@@ -281,11 +295,11 @@ function SuccessLayer({
   const [videoDownloadBusy, setVideoDownloadBusy] = useState(false);
 
   const mediaUrl = model.videoUrl;
-  const mediaType: "image" | "video" | "text" | "model" | undefined =
+  const mediaType: "image" | "video" | "audio" | "text" | "model" | undefined =
     model.mediaType ?? (mediaUrl ? "video" : undefined);
   const previewUrl = model.previewUrl;
 
-  const isTextResult = mediaType === "text" || (typeof model.resultText === "string" && model.resultText.trim().length > 0);
+  const isTextResult = mediaType === "text" || (!mediaUrl && typeof model.resultText === "string" && model.resultText.trim().length > 0);
   const isMultiImage = !isTextResult && Array.isArray(model.resultUrls) && model.resultUrls.length > 1;
   const showBilling =
     typeof model.sellPrice === "number" && Number.isFinite(model.sellPrice) && model.sellPrice >= 0;
@@ -295,7 +309,9 @@ function SuccessLayer({
       ? "generated-image.png"
       : model.mediaType === "model" && !/\.glb$/i.test(downloadFileName)
         ? "generated-model.glb"
-        : downloadFileName;
+      : model.mediaType === "audio" && /\.mp4$/i.test(downloadFileName)
+        ? (mediaUrl?.toLowerCase().includes(".mp3") ? "voice-preview.mp3" : "voice-preview.wav")
+      : downloadFileName;
 
   const handleDownload = useCallback(async () => {
     if (onDownload) {
@@ -333,7 +349,8 @@ function SuccessLayer({
     mediaType === "text" ? tt.successPrompt :
     !mediaUrl ? tt.successNoPreview :
     mediaType === "image" ? tt.successImage :
-    mediaType === "model" ? tt.successModel : tt.successVideo;
+    mediaType === "model" ? tt.successModel :
+    mediaType === "audio" ? tt.successAudio : tt.successVideo;
 
   const openImageLightbox = useCallback(() => {
     if (mediaType === "image" && mediaUrl) setLightboxOpen(true);
@@ -446,6 +463,13 @@ function SuccessLayer({
                 />
               ) : mediaType === "model" ? (
                 <Model3DViewer src={mediaUrl} posterUrl={previewUrl} />
+              ) : mediaType === "audio" ? (
+                <div className="flex min-h-40 flex-col items-center justify-center gap-5 rounded-lg bg-gradient-to-br from-violet-950/70 via-slate-950 to-cyan-950/70 p-6 shadow-lg ring-1 ring-white/10">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full border border-cyan-300/25 bg-cyan-300/10 text-3xl" aria-hidden>
+                    ♪
+                  </div>
+                  <audio className="w-full max-w-xl" src={mediaUrl} controls preload="metadata" />
+                </div>
               ) : (
                 <video
                   className="aspect-video w-full rounded-lg object-contain shadow-lg ring-1 ring-white/10"
@@ -465,6 +489,12 @@ function SuccessLayer({
             )}
           </div>
         </div>
+
+        {mediaType === "audio" && model.resultText && (
+          <div className="max-w-2xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-3">
+            <p className="select-all break-all font-mono text-sm text-cyan-100">{model.resultText}</p>
+          </div>
+        )}
 
         <div className="flex max-w-2xl shrink-0 flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -498,6 +528,36 @@ function SuccessLayer({
             <p className="text-xs leading-relaxed text-amber-300/90">{tt.modelDownloadHint}</p>
           )}
         </div>
+
+        {supplementaryVideo && (
+          <section className="mt-2 max-w-2xl shrink-0 rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.05] p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h4 className="text-sm font-semibold text-slate-200">{supplementaryVideo.title}</h4>
+              <span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[10px] font-medium text-slate-400">
+                {supplementaryVideo.status === "processing" ? "处理中" : supplementaryVideo.status === "success" ? "已完成" : "处理失败"}
+              </span>
+            </div>
+            {supplementaryVideo.status === "processing" ? (
+              <div className="flex aspect-video items-center justify-center rounded-xl border border-white/[0.06] bg-black/25">
+                <div className="flex flex-col items-center gap-3 text-center">
+                  <span className="h-7 w-7 animate-spin rounded-full border-2 border-cyan-300/25 border-t-cyan-300" />
+                  <p className="text-xs text-slate-400">{supplementaryVideo.message ?? "正在识别人声并合成字幕…"}</p>
+                </div>
+              </div>
+            ) : supplementaryVideo.status === "success" && supplementaryVideo.url ? (
+              <div className="space-y-3">
+                <video className="aspect-video w-full rounded-xl bg-black object-contain ring-1 ring-white/10" src={supplementaryVideo.url} controls playsInline preload="metadata" />
+                <a href={supplementaryVideo.url} download="captioned-video.mp4" className="inline-flex min-h-10 items-center rounded-xl border border-cyan-300/25 bg-cyan-300/[0.08] px-4 text-sm font-medium text-cyan-100 transition-colors hover:bg-cyan-300/[0.13]">
+                  下载字幕版视频
+                </a>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-red-400/15 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
+                {supplementaryVideo.message ?? "字幕处理失败，请重试。"}
+              </div>
+            )}
+          </section>
+        )}
       </div>
 
       {mediaType === "image" && mediaUrl && (

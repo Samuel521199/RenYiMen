@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { Loader2, Upload, ZoomIn } from "lucide-react";
+import { Crop, Loader2, Upload, ZoomIn } from "lucide-react";
 import type { ImageFieldValue, ImageUploadField } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
 import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
 import { useT } from "@/i18n";
+import { ImageCropModal } from "@/components/WorkflowForm/ImageCropModal";
 import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
 
 /**
@@ -24,7 +25,7 @@ export interface ImageUploadControlProps {
   locale?: "zh" | "en";
 }
 
-export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
+export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadControlProps) {
   const t = useT();
   const inputRef = useRef<HTMLInputElement>(null);
   const path = useWorkflowStore((s) => s.fieldPaths[field.id]);
@@ -37,6 +38,7 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const [cropOpen, setCropOpen] = useState(false);
 
   const accept = field.validation?.accept?.join(",") ?? "image/*";
   const v = value ?? ({ status: "empty" } satisfies ImageFieldValue);
@@ -81,6 +83,18 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
     },
     [applyImageFromAsset, field.id],
   );
+
+  const handleCropConfirm = useCallback(async (file: File) => {
+    await applyImageFile(field.id, file);
+    const latest = useWorkflowStore.getState();
+    const latestPath = latest.fieldPaths[field.id];
+    const result = latestPath
+      ? getAtPath(latest.parameters, latestPath) as ImageFieldValue | undefined
+      : undefined;
+    if (result?.status !== "ready") {
+      throw new Error(result?.errorMessage || (locale === "en" ? "Upload failed" : "裁剪图片上传失败"));
+    }
+  }, [applyImageFile, field.id, locale]);
 
   const dashedFrameClass = `relative flex h-[176px] w-full max-w-full shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 ${
     isDragging ? "border-emerald-400 bg-emerald-400/10" : error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:shadow-[0_0_0_1px_rgba(52,211,153,0.05),0_18px_45px_-30px_rgba(16,185,129,0.65)]"
@@ -183,7 +197,7 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
               <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.045] shadow-inner">
                 <Upload className="h-5 w-5 text-slate-400" strokeWidth={1.5} aria-hidden />
               </span>
-              <span className="text-center text-xs font-medium text-slate-500">{t.uploadDropHint}</span>
+              <span className="text-center text-xs font-medium text-slate-500">{t.uploadNoPreview}</span>
             </div>
           )}
         </div>
@@ -209,6 +223,17 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
             >
               {v.status === "ready" ? t.uploadChangeBtn : t.uploadSelectBtn}
             </button>
+            {displayUrl && (field.validation?.minDimension || field.validation?.maxDimension) && (
+              <button
+                type="button"
+                disabled={v.status === "uploading"}
+                onClick={() => setCropOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-3.5 py-2 text-xs font-medium text-emerald-200 transition-all hover:border-emerald-300/40 hover:bg-emerald-400/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Crop className="h-3.5 w-3.5" />
+                {locale === "en" ? "Crop" : "裁剪图片"}
+              </button>
+            )}
             <button
               type="button"
               disabled={v.status === "uploading"}
@@ -230,6 +255,16 @@ export function ImageUploadControl({ field, error }: ImageUploadControlProps) {
         open={assetPickerOpen}
         onClose={() => setAssetPickerOpen(false)}
         onSelect={handleAssetSelect}
+      />
+      <ImageCropModal
+        open={cropOpen}
+        imageUrl={displayUrl}
+        fileName={v.fileName}
+        minDimension={field.validation?.minDimension}
+        maxDimension={field.validation?.maxDimension}
+        maxSizeMB={field.validation?.maxSizeMB}
+        onClose={() => setCropOpen(false)}
+        onConfirm={handleCropConfirm}
       />
     </div>
   );

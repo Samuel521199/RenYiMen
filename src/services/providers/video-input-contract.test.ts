@@ -457,6 +457,144 @@ test("Bailian wan2.2-s2v result prices actual duration using the returned resolu
   }
 });
 
+test("Bailian HappyHorse video edit uses one video plus optional reference images", () => {
+  const adapter = new BailianAdapter();
+  const payload: StandardPayload = {
+    templateId: "happyhorse-1.0-video-edit",
+    nodeInputs: {
+      input: {
+        video_url: "https://example.com/source.mp4",
+        reference_image_urls: [
+          "https://example.com/product.png",
+          "https://example.com/outfit.webp",
+        ],
+        prompt: "把人物的衣服变成参考图中的红色外套，删除背景路人。",
+        resolution: "1080P",
+        audio_setting: "origin",
+        duration: 8.4,
+      },
+    },
+  };
+
+  assert.deepEqual(adapter.buildPayload(payload), {
+    model: "happyhorse-1.0-video-edit",
+    input: {
+      prompt: "把人物的衣服变成参考图中的红色外套，删除背景路人。",
+      media: [
+        { type: "video", url: "https://example.com/source.mp4" },
+        { type: "reference_image", url: "https://example.com/product.png" },
+        { type: "reference_image", url: "https://example.com/outfit.webp" },
+      ],
+    },
+    parameters: {
+      resolution: "1080P",
+      watermark: false,
+      audio_setting: "origin",
+    },
+  });
+  assert.deepEqual(adapter.calculateCost(payload), { cost: 3200, sellPrice: 3200 });
+  const capabilities = adapter.getVideoInputCapabilities(payload);
+  assert.equal(capabilities.modelId, "happyhorse-1.0-video-edit");
+  assert.equal(capabilities.maxImages, 5);
+});
+
+test("Bailian HappyHorse video edit rejects a missing source video or too many references", () => {
+  const adapter = new BailianAdapter();
+  assert.throws(() => adapter.buildPayload({
+    templateId: "happyhorse-1.0-video-edit",
+    nodeInputs: { input: { prompt: "删除路人" } },
+  }), /缺少待编辑视频/);
+
+  assert.throws(() => adapter.buildPayload({
+    templateId: "happyhorse-1.0-video-edit",
+    nodeInputs: {
+      input: {
+        video_url: "https://example.com/source.mp4",
+        prompt: "替换产品",
+        reference_image_urls: Array.from({ length: 6 }, (_, index) => `https://example.com/ref-${index}.png`),
+      },
+    },
+  }), /最多支持 5 张参考图/);
+});
+
+test("Bailian HappyHorse video edit settles actual 1080P duration with its own rate", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      output: {
+        task_status: "SUCCEEDED",
+        video_url: "https://example.com/edited.mp4",
+      },
+      usage: { duration: 8.25, SR: 1080 },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+    const result = await new BailianAdapter().queryTask("video-edit-task", {
+      apiKey: "test-key",
+      baseUrl: "https://dashscope.example.com",
+      skuId: "BAILIAN_HAPPYHORSE_VIDEO_EDIT",
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.providerDurationSec, 8.25);
+    assert.equal(result.providerCost, 3300);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("Bailian scene and lighting edit settles with the HappyHorse video-edit rate", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      output: {
+        task_status: "SUCCEEDED",
+        video_url: "https://example.com/night-scene.mp4",
+      },
+      usage: { duration: 6, SR: 720 },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+    const result = await new BailianAdapter().queryTask("scene-light-task", {
+      apiKey: "test-key",
+      baseUrl: "https://dashscope.example.com",
+      skuId: "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+    });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.providerDurationSec, 6);
+    assert.equal(result.providerCost, 1350);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("Bailian explains an upstream IP infringement rejection in actionable Chinese", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      output: {
+        task_status: "FAILED",
+        message: "Input data is suspected of being involved in IP infringement",
+      },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+    const result = await new BailianAdapter().queryTask("ip-rejected-task", {
+      apiKey: "test-key",
+      baseUrl: "https://dashscope.example.com",
+      skuId: "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+    });
+    assert.equal(result.status, "failed");
+    assert.match(result.errorMessage ?? "", /触发版权\/IP 风控/);
+    assert.match(result.errorMessage ?? "", /原创或已获授权素材/);
+    assert.doesNotMatch(result.errorMessage ?? "", /suspected of being involved/i);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("smart selection preserves required active entities and a motion checkpoint before optional references", () => {
   const referenceBinding = {
     transportRole: "reference_image",

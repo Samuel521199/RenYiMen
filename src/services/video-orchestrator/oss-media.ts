@@ -77,6 +77,17 @@ export async function persistRemoteMediaToOss(params: {
   return buildPublicUrl(cfg.publicDomain, resolvedKey);
 }
 
+/** Upload a locally produced media buffer to the configured public OSS bucket. */
+export async function uploadMediaBufferToOss(params: {
+  key: string;
+  body: Buffer;
+  contentType: string;
+}): Promise<string> {
+  const cfg = readOssConfig();
+  await uploadMediaObject(cfg, params.key, params.body, params.contentType);
+  return buildPublicUrl(cfg.publicDomain, params.key);
+}
+
 export async function rewriteOwnOssVideoForStreaming(url: string): Promise<string> {
   if (!isOwnOssUrl(url)) throw new Error("Video URL is not hosted by the configured OSS media origins");
   const cfg = readOssConfig();

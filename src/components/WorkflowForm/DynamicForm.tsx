@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useEffect, useId, type FormEventHandler, type ReactNode } from "react";
 import { FormErrorBoundary } from "@/components/WorkflowForm/FormErrorBoundary";
-import type { MediaUploadFieldKind, WorkflowField, WorkflowFormSchema } from "@/types/workflow";
-import { isGroupField, isMediaUploadField } from "@/types/workflow";
+import type { WorkflowField, WorkflowFormSchema } from "@/types/workflow";
+import { isGroupField } from "@/types/workflow";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { isWorkflowFieldVisible } from "@/lib/workflow-utils";
 import { ImageUploadControl } from "@/components/WorkflowForm/controls/ImageUploadControl";
@@ -14,6 +14,8 @@ import { TextInputControl } from "@/components/WorkflowForm/controls/TextInputCo
 import { NumberSliderControl } from "@/components/WorkflowForm/controls/NumberSliderControl";
 import { NumberInputControl } from "@/components/WorkflowForm/controls/NumberInputControl";
 import { SelectControl } from "@/components/WorkflowForm/controls/SelectControl";
+import { BooleanToggleControl } from "@/components/WorkflowForm/controls/BooleanToggleControl";
+import { getAtPath } from "@/lib/workflow-utils";
 
 /** Locale context shared across all nested field renderers */
 const LocaleContext = createContext<"zh" | "en">("zh");
@@ -68,7 +70,7 @@ function uploadConstraintHelp(field: WorkflowField, locale: "zh" | "en", existin
     parts.push(locale === "en" ? `Width and height at least ${validation.minDimension}px` : `宽高均不小于 ${validation.minDimension}px`);
   }
   if (validation.maxDimension && !new RegExp(`${validation.maxDimension}(?:px|像素)`, "i").test(normalized)) {
-    parts.push(locale === "en" ? `Width and height up to ${validation.maxDimension}px` : `宽高均不超过 ${validation.maxDimension}px`);
+    parts.push(locale === "en" ? `Width and height at most ${validation.maxDimension}px` : `宽高均不大于 ${validation.maxDimension}px`);
   }
   if (validation.minDurationSec && !new RegExp(`${validation.minDurationSec}(?:s|sec|seconds?|秒)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `At least ${validation.minDurationSec}s` : `时长不少于 ${validation.minDurationSec} 秒`);
@@ -100,6 +102,8 @@ export interface DynamicFormProps {
   formFooter?: ReactNode;
   /** 标题右侧的可选操作（如价格明细按钮） */
   headerAction?: ReactNode;
+  /** Rendered between the workflow heading and its fields. */
+  beforeFields?: ReactNode;
   /** 传给 `<form>` 的 className */
   formClassName?: string;
   /** Current locale — controls which *En fields are displayed */
@@ -113,7 +117,7 @@ export interface DynamicFormProps {
  * 叶子控件通过 `widgets` 映射解析：`field.kind` 为主键；`uiSchema[fieldId]["ui:widget"]` 可覆盖为
  * `multiImageUploader`（须配合 `kind: "multiImageUpload"` 与 store 中的数组形态值）。
  */
-export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, headerAction, formClassName, locale = "zh" }: DynamicFormProps) {
+export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, headerAction, beforeFields, formClassName, locale = "zh" }: DynamicFormProps) {
   const hydrateSchema = useWorkflowStore((s) => s.hydrateSchema);
   const descriptionTooltipId = useId();
   const description = schema.description
@@ -162,6 +166,7 @@ export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, headerA
           <div className="shrink-0 pt-1">{headerAction}</div>
         </div>
       )}
+      {beforeFields}
       <div className="grid min-w-0 max-w-full grid-cols-1 gap-5 overflow-visible xl:grid-cols-2 [&>fieldset]:col-span-full">
         {schema.fields.map((field) => (
           <FieldBranch key={field.id} field={field} schema={schema} errors={errors} />
@@ -243,7 +248,7 @@ function FieldBranch({
   }
 
   const err = errors[field.id];
-  const useSpanLabel = isMediaUploadField(field);
+  const useSpanLabel = field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload" || field.kind === "multiImageUpload";
   const displayLabel = loc(field.label, field.labelEn, locale);
   const authoredDescription = field.description
     ? loc(field.description, field.descriptionEn, locale)
@@ -333,17 +338,13 @@ const widgets = {
     if (isGroupField(field) || field.kind !== "select") return null;
     return <SelectControl field={field} error={error} locale={locale} />;
   },
+  booleanToggle: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
+    if (isGroupField(field) || field.kind !== "booleanToggle") return null;
+    return <BooleanToggleControl field={field} error={error} locale={locale} />;
+  },
 } as const;
 
 type WidgetKey = keyof typeof widgets;
-
-/** 新增媒体字段 kind 时，TypeScript 会要求在此注册一个拖拽上传控件。 */
-const mediaUploadWidgetByFieldKind = {
-  imageUpload: "imageUpload",
-  videoUpload: "videoUpload",
-  audioUpload: "audioUpload",
-  multiImageUpload: "multiImageUploader",
-} as const satisfies Record<MediaUploadFieldKind, WidgetKey>;
 
 function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, unknown>): WidgetKey | null {
   if (isGroupField(field)) return null;
@@ -352,7 +353,9 @@ function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, un
     const w = (entry as Record<string, unknown>)["ui:widget"];
     if (w === "multiImageUploader") return "multiImageUploader";
   }
-  if (isMediaUploadField(field)) return mediaUploadWidgetByFieldKind[field.kind];
+  if (field.kind === "multiImageUpload") return "multiImageUploader";
+  if (field.kind === "videoUpload") return "videoUpload";
+  if (field.kind === "audioUpload") return "audioUpload";
   if (field.kind in widgets) return field.kind as WidgetKey;
   return null;
 }

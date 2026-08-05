@@ -169,5 +169,5 @@ export const NAV_GROUPS = [
       { label: "调用统计", href: "/workbench/admin/usage-stats" },
     ],
   },
-  { href: "/workbench/tools", label: "工具", single: true },
+  { href: "/workbench/tools", label: "首页推荐", single: true },
 ] satisfies NavItem[];

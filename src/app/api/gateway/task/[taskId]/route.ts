@@ -307,6 +307,11 @@ export async function GET(
   const providerParam = url.searchParams.get("providerCode")?.trim();
   const providerCode = (providerParam || DEFAULT_PROVIDER_CODE).toUpperCase();
 
+  const taskRecord = await prisma.generationHistory.findUnique({
+    where: { taskId },
+    select: { skuId: true },
+  });
+
   let adapter: IProviderAdapter;
   try {
     adapter = getProviderAdapter(providerCode);
@@ -327,7 +332,10 @@ export async function GET(
 
   const t0 = Date.now();
   try {
-    const pollData = await adapter.queryTask(taskId, { signal: controller.signal });
+    const pollData = await adapter.queryTask(taskId, {
+      signal: controller.signal,
+      skuId: taskRecord?.skuId,
+    });
     let billCredits: number | null = null;
     try {
       billCredits = await persistGenerationHistoryTerminal(session.user.id, taskId, pollData);

@@ -104,12 +104,13 @@ function UnorderedMultiImageUploadWidget({ field, error, value, onChange }: Mult
         ? "sm:grid-cols-[repeat(3,minmax(0,10.5rem))]"
         : "sm:grid-cols-[repeat(3,minmax(0,10.5rem))] lg:grid-cols-[repeat(4,minmax(0,10.5rem))]";
 
-  const handleFiles = useCallback(
-    async (selectedFiles: FileList | File[]) => {
-      console.log("[MultiUpload] 获取到的文件:", selectedFiles);
-      if (!selectedFiles.length) return;
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      console.log("[MultiUpload] 触发文件选择，获取到的文件:", e.target.files);
+      if (!e.target.files?.length) return;
 
-      const filesArray = Array.from(selectedFiles);
+      const filesArray = Array.from(e.target.files);
+      e.target.value = "";
 
       const { parameters, fieldPaths, setFieldValue } = useWorkflowStore.getState();
       const path = fieldPaths[field.id];
@@ -249,17 +250,6 @@ function UnorderedMultiImageUploadWidget({ field, error, value, onChange }: Mult
     [field.id, field.validation?.accept, field.validation?.maxSizeMB, field.validation?.minDimension, field.validation?.maxDimension, maxItems, onChange, value]
   );
 
-  const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    event.target.value = "";
-    if (files?.length) void handleFiles(files);
-  }, [handleFiles]);
-  const { isDragging, dropZoneProps } = useFileDrop({
-    disabled: isBusy || !canAddMore,
-    multiple: true,
-    onFiles: handleFiles,
-  });
-
   const handleAssetSelect = useCallback(
     (asset: PickedAsset) => {
       void appendMultiImageFromAsset(field.id, asset.url, asset.fileName);
@@ -327,14 +317,9 @@ function UnorderedMultiImageUploadWidget({ field, error, value, onChange }: Mult
             <label
               className={[
                 addTileBase,
-                isDragging
-                  ? "cursor-copy border-emerald-400 bg-emerald-50 text-emerald-700"
-                  : isBusy
-                    ? "cursor-wait opacity-70 pointer-events-none"
-                    : "cursor-pointer",
+                isBusy ? "cursor-wait opacity-70 pointer-events-none" : "cursor-pointer",
               ].join(" ")}
               aria-busy={isBusy}
-              {...dropZoneProps}
             >
               {/* 始终保留 input，避免元素类型切换引发 React insertBefore 错误 */}
               <input
@@ -345,12 +330,7 @@ function UnorderedMultiImageUploadWidget({ field, error, value, onChange }: Mult
                 onChange={handleFileChange}
                 disabled={isBusy}
               />
-              {isDragging ? (
-                <div className="flex flex-col items-center justify-center gap-1 px-1">
-                  <Upload className="h-6 w-6 shrink-0" strokeWidth={1.5} aria-hidden />
-                  <span className="text-center text-[10px] font-medium">{t.uploadDropActive}</span>
-                </div>
-              ) : isBusy ? (
+              {isBusy ? (
                 <div className="flex flex-col items-center justify-center gap-1 px-1">
                   <Loader2 className="h-6 w-6 shrink-0 animate-spin text-neutral-700" strokeWidth={2} aria-hidden />
                   <span className="text-center text-[10px] font-medium text-neutral-800">上传中…</span>
@@ -358,7 +338,7 @@ function UnorderedMultiImageUploadWidget({ field, error, value, onChange }: Mult
               ) : (
                 <div className="flex flex-col items-center justify-center gap-1 px-1">
                   <Upload className="h-6 w-6 shrink-0" strokeWidth={1.5} aria-hidden />
-                  <span className="text-center text-[10px] font-medium">{t.uploadDropHint}</span>
+                  <span className="text-center text-[10px] font-medium">添加图片</span>
                   <span className="text-[9px] text-neutral-400">
                     {items.length}/{maxItems}
                   </span>

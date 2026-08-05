@@ -72,6 +72,7 @@ model User {
   transactions        Transaction[]
   apiLogs             ApiLog[]
   generationHistories GenerationHistory[]
+  toolProjects        ToolProject[]
   videoProjects       VideoProject[]
   providerVideoLeases VideoProviderTaskLease[]
   videoPlanningRuns   VideoPlanningRunMetric[]
@@ -81,6 +82,26 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("users")
+}
+
+model ToolProject {
+  id           String  @id @default(cuid())
+  userId       String  @map("user_id")
+  skuId        String  @map("sku_id")
+  name         String
+  formState    Json    @default("{}") @map("form_state")
+  outputState  Json    @default("{}") @map("output_state")
+  activeTaskId String? @map("active_task_id")
+  providerCode String  @default("") @map("provider_code")
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generations GenerationHistory[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId, skuId, updatedAt])
+  @@map("tool_projects")
 }
 
 model VideoProject {
@@ -150,42 +171,42 @@ model VideoProviderTaskLease {
 }
 
 model VideoProductionJob {
-  id                    String    @id @default(cuid())
-  projectId             String    @map("project_id")
-  userId                String    @map("user_id")
-  artifactId            String?   @map("artifact_id")
-  targetId              String    @map("target_id")
-  kind                  String
-  stage                 String
-  status                String    @default("queued")
-  priority              Int       @default(0)
-  payload               Json      @default("{}")
-  idempotencyKey        String    @unique @map("idempotency_key")
-  leaseToken            String?   @unique @map("lease_token")
-  workerId              String?   @map("worker_id")
-  requiredWorkerVersion String    @map("required_worker_version")
-  claimedWorkerVersion  String?   @map("claimed_worker_version")
-  leaseExpiresAt        DateTime? @map("lease_expires_at")
-  availableAt           DateTime  @default(now()) @map("available_at")
-  attempt               Int       @default(0)
-  maxAttempts           Int       @default(5) @map("max_attempts")
-  lastError             String?   @map("last_error") @db.Text
-  errorCategory         String?   @map("error_category")
-  errorCode             String?   @map("error_code")
-  recoveryAction        String?   @map("recovery_action")
-  progressAt            DateTime  @default(now()) @map("progress_at")
-  startedAt             DateTime? @map("started_at")
-  completedAt           DateTime? @map("completed_at")
-  modelAttempt          Int       @default(0) @map("model_attempt")
-  maxModelAttempts      Int       @default(3) @map("max_model_attempts")
-  stageRepairAttempt    Int       @default(0) @map("stage_repair_attempt")
-  maxStageRepairAttempts Int      @default(3) @map("max_stage_repair_attempts")
-  infrastructureAttempt Int       @default(0) @map("infrastructure_attempt")
-  maxInfrastructureAttempts Int   @default(50) @map("max_infrastructure_attempts")
-  leaseLossCount        Int       @default(0) @map("lease_loss_count")
-  userRetryCount        Int       @default(0) @map("user_retry_count")
-  lastInterruptionReason String?  @map("last_interruption_reason") @db.Text
-  deploymentGraceUntil DateTime? @map("deployment_grace_until")
+  id                        String    @id @default(cuid())
+  projectId                 String    @map("project_id")
+  userId                    String    @map("user_id")
+  artifactId                String?   @map("artifact_id")
+  targetId                  String    @map("target_id")
+  kind                      String
+  stage                     String
+  status                    String    @default("queued")
+  priority                  Int       @default(0)
+  payload                   Json      @default("{}")
+  idempotencyKey            String    @unique @map("idempotency_key")
+  leaseToken                String?   @unique @map("lease_token")
+  workerId                  String?   @map("worker_id")
+  requiredWorkerVersion     String    @map("required_worker_version")
+  claimedWorkerVersion      String?   @map("claimed_worker_version")
+  leaseExpiresAt            DateTime? @map("lease_expires_at")
+  availableAt               DateTime  @default(now()) @map("available_at")
+  attempt                   Int       @default(0)
+  maxAttempts               Int       @default(5) @map("max_attempts")
+  lastError                 String?   @map("last_error") @db.Text
+  errorCategory             String?   @map("error_category")
+  errorCode                 String?   @map("error_code")
+  recoveryAction            String?   @map("recovery_action")
+  progressAt                DateTime  @default(now()) @map("progress_at")
+  startedAt                 DateTime? @map("started_at")
+  completedAt               DateTime? @map("completed_at")
+  modelAttempt              Int       @default(0) @map("model_attempt")
+  maxModelAttempts          Int       @default(3) @map("max_model_attempts")
+  stageRepairAttempt        Int       @default(0) @map("stage_repair_attempt")
+  maxStageRepairAttempts    Int       @default(3) @map("max_stage_repair_attempts")
+  infrastructureAttempt     Int       @default(0) @map("infrastructure_attempt")
+  maxInfrastructureAttempts Int       @default(50) @map("max_infrastructure_attempts")
+  leaseLossCount            Int       @default(0) @map("lease_loss_count")
+  userRetryCount            Int       @default(0) @map("user_retry_count")
+  lastInterruptionReason    String?   @map("last_interruption_reason") @db.Text
+  deploymentGraceUntil      DateTime? @map("deployment_grace_until")
 
   project VideoProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -237,20 +258,20 @@ model VideoArchitectureMigrationAudit {
 }
 
 model VideoSpecialProjectRecoveryRecord {
-  projectId               String   @id @map("project_id")
-  sourceBackup            String   @map("source_backup")
-  sourceBackupSha256      String   @map("source_backup_sha256")
-  originalStatus          String   @map("original_status")
-  resultingState          String   @map("resulting_state")
-  disposition             String
-  recoveryActions         Json     @map("recovery_actions")
-  orphanLeaseDisposition  String   @map("orphan_lease_disposition")
-  planningRestarted       Boolean  @default(false) @map("planning_restarted")
-  planningJobCountBefore  Int      @map("planning_job_count_before")
-  planningJobCountAfter   Int      @map("planning_job_count_after")
-  evidence                Json
-  recordedAt              DateTime @default(now()) @map("recorded_at")
-  updatedAt               DateTime @updatedAt @map("updated_at")
+  projectId              String   @id @map("project_id")
+  sourceBackup           String   @map("source_backup")
+  sourceBackupSha256     String   @map("source_backup_sha256")
+  originalStatus         String   @map("original_status")
+  resultingState         String   @map("resulting_state")
+  disposition            String
+  recoveryActions        Json     @map("recovery_actions")
+  orphanLeaseDisposition String   @map("orphan_lease_disposition")
+  planningRestarted      Boolean  @default(false) @map("planning_restarted")
+  planningJobCountBefore Int      @map("planning_job_count_before")
+  planningJobCountAfter  Int      @map("planning_job_count_after")
+  evidence               Json
+  recordedAt             DateTime @default(now()) @map("recorded_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
 
   @@index([resultingState, disposition])
   @@map("video_special_project_recovery_records")
@@ -725,12 +746,15 @@ model GenerationHistory {
   durationInt      Int                     @default(0) @map("duration_int")
   /// 缁堟€佷负 FAILED 鏃剁殑閿欒鍘熷洜锛堟潵鑷笂娓告垨缃戝叧锛夛紱PENDING/SUCCESS 涓虹┖
   errorMessage     String?                 @map("error_message") @db.Text
+  toolProjectId    String?                 @map("tool_project_id")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  toolProject ToolProject? @relation(fields: [toolProjectId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([userId, createdAt])
+  @@index([toolProjectId, createdAt])
   @@map("generation_histories")
 }

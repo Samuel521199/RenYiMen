@@ -9,6 +9,7 @@ const MAX_BYTES_IMAGE = 25 * 1024 * 1024;
 const MAX_BYTES_VIDEO = 200 * 1024 * 1024;
 /** H3.1 高精度 GLB 可能明显大于普通视频结果，模型预览与下载使用独立上限。 */
 const MAX_BYTES_MODEL = 350 * 1024 * 1024;
+const MAX_BYTES_AUDIO = 80 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 45_000;
 const IMAGE_PREVIEW_CACHE_CONTROL = "private, max-age=604800, stale-while-revalidate=86400, immutable";
 const NO_STORE_CACHE_CONTROL = "private, no-store";
@@ -85,8 +86,15 @@ async function proxyExternalMedia(
 ) {
   const isVideo = mediaKindRaw === "video";
   const isModel = mediaKindRaw === "model";
-  const maxBytes = isModel ? MAX_BYTES_MODEL : isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
-  const cacheControl = options.cachePreview && !isVideo && !isModel
+  const isAudio = mediaKindRaw === "audio";
+  const maxBytes = isModel
+    ? MAX_BYTES_MODEL
+    : isVideo
+      ? MAX_BYTES_VIDEO
+      : isAudio
+        ? MAX_BYTES_AUDIO
+        : MAX_BYTES_IMAGE;
+  const cacheControl = options.cachePreview && !isVideo && !isModel && !isAudio
     ? IMAGE_PREVIEW_CACHE_CONTROL
     : NO_STORE_CACHE_CONTROL;
 
@@ -144,7 +152,13 @@ async function proxyExternalMedia(
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        Accept: isModel ? "model/gltf-binary,model/gltf+json,*/*;q=0.8" : isVideo ? "video/*,*/*;q=0.9" : "image/*,*/*;q=0.8",
+        Accept: isModel
+          ? "model/gltf-binary,model/gltf+json,*/*;q=0.8"
+          : isVideo
+            ? "video/*,*/*;q=0.9"
+            : isAudio
+              ? "audio/*,*/*;q=0.9"
+              : "image/*,*/*;q=0.8",
       },
     }, isVideo || isModel ? 2 : 3);
 

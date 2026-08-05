@@ -23,6 +23,7 @@ import {
 } from "@/lib/workflow-utils";
 import { uploadImageToOSS } from "@/services/oss-upload";
 import { fetchWorkbenchAssetAsFile } from "@/lib/workbench-asset-import";
+import { isImageSizeWithinBounds } from "@/lib/image-crop";
 
 export interface WorkflowStoreState {
   schema: WorkflowFormSchema | null;
@@ -41,7 +42,7 @@ export interface WorkflowStoreState {
   viewingHistoryId: string | null;
 
   /** 用 Schema 重置路径映射与默认值 */
-  hydrateSchema: (schema: WorkflowFormSchema) => void;
+  hydrateSchema: (schema: WorkflowFormSchema, restoredParameters?: Record<string, unknown>) => void;
   /** 切换 SKU 时写入 skuId / providerCode（应在 hydrateSchema 前或后立刻调用） */
   setGatewaySelection: (skuId: string, providerCode: string) => void;
   /** 任意深度写入（Immer） */
@@ -66,7 +67,7 @@ export interface WorkflowStoreState {
 
   setViewingHistoryId: (id: string | null) => void;
   /** 拉取 `/api/user/history` 并写入 `cloudHistory` */
-  fetchCloudHistory: () => Promise<void>;
+  fetchCloudHistory: (toolProjectId?: string | null) => Promise<void>;
   /** 乐观删除一条云端历史并异步请求 DELETE */
   deleteCloudHistoryItem: (taskId: string) => Promise<void>;
 }
@@ -140,6 +141,8 @@ function mapLeafToApiValue(field: WorkflowField, raw: unknown): unknown {
       return typeof raw === "number" ? raw : undefined;
     case "select":
       return typeof raw === "string" ? raw : "";
+    case "booleanToggle":
+      return typeof raw === "boolean" ? raw : field.defaultValue ?? false;
     default:
       return raw;
   }
@@ -175,12 +178,12 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
     cloudHistory: [],
     viewingHistoryId: null,
 
-    hydrateSchema: (schema) =>
+    hydrateSchema: (schema, restoredParameters) =>
       set((draft) => {
         revokeAllPreviewUrls(draft.parameters);
         draft.schema = schema;
         draft.fieldPaths = buildFieldPathMap(schema.fields);
-        draft.parameters = buildInitialParameters(schema);
+        draft.parameters = restoredParameters ?? buildInitialParameters(schema);
       }),
 
     setGatewaySelection: (skuId, providerCode) =>
@@ -280,22 +283,78 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         }
       }
 
+      if (
+        field.kind === "imageUpload"
+        && (field.validation?.minDimension != null || field.validation?.maxDimension != null)
+      ) {
+        const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+          const objectUrl = URL.createObjectURL(file);
+          const image = new Image();
+          image.onload = () => {
+            const result = { width: image.naturalWidth, height: image.naturalHeight };
+            URL.revokeObjectURL(objectUrl);
+            resolve(result);
+          };
+          image.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error("无法读取图片尺寸"));
+          };
+          image.src = objectUrl;
+        }).catch((error: unknown) => {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: error instanceof Error ? error.message : "无法读取图片尺寸",
+            } satisfies ImageFieldValue);
+          });
+          return null;
+        });
+        if (!dimensions) return;
+
+        if (!isImageSizeWithinBounds(
+          dimensions.width,
+          dimensions.height,
+          field.validation.minDimension,
+          field.validation.maxDimension,
+        )) {
+          const previewUrl = URL.createObjectURL(file);
+          const minText = field.validation.minDimension ? `不小于 ${field.validation.minDimension}px` : "";
+          const maxText = field.validation.maxDimension ? `不大于 ${field.validation.maxDimension}px` : "";
+          set((draft) => {
+            const prev = getAtPath(draft.parameters, path) as ImageFieldValue | undefined;
+            if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              previewUrl,
+              fileName: file.name,
+              errorMessage: `当前图片为 ${dimensions.width}×${dimensions.height}px，宽高需${[minText, maxText].filter(Boolean).join("且")}。请裁剪后继续。`,
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+      }
+
       let mediaDurationSec: number | undefined;
-      if (field.kind === "audioUpload" && field.validation?.maxDurationSec != null) {
+      const shouldReadMediaDuration =
+        (field.kind === "audioUpload" || field.kind === "videoUpload")
+        && (field.validation?.minDurationSec != null || field.validation?.maxDurationSec != null);
+      if (shouldReadMediaDuration) {
         const durationSec = await new Promise<number>((resolve, reject) => {
           const objectUrl = URL.createObjectURL(file);
-          const audio = new Audio();
+          const media = document.createElement(field.kind === "videoUpload" ? "video" : "audio");
           const cleanup = () => URL.revokeObjectURL(objectUrl);
-          audio.onloadedmetadata = () => {
-            const duration = audio.duration;
+          media.onloadedmetadata = () => {
+            const duration = media.duration;
             cleanup();
-            Number.isFinite(duration) ? resolve(duration) : reject(new Error("无法读取音频时长"));
+            Number.isFinite(duration) ? resolve(duration) : reject(new Error("无法读取媒体时长"));
           };
-          audio.onerror = () => {
+          media.onerror = () => {
             cleanup();
-            reject(new Error("无法读取音频文件"));
+            reject(new Error(field.kind === "videoUpload" ? "无法读取视频文件" : "无法读取音频文件"));
           };
-          audio.src = objectUrl;
+          media.preload = "metadata";
+          media.src = objectUrl;
         }).catch((error: unknown) => {
           set((draft) => {
             setAtPathDraft(draft.parameters, path, {
@@ -308,12 +367,31 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         });
         if (durationSec == null) return;
         mediaDurationSec = durationSec;
-        if (durationSec >= field.validation.maxDurationSec) {
+        const minDurationSec = field.validation?.minDurationSec;
+        const maxDurationSec = field.validation?.maxDurationSec;
+        if (minDurationSec != null && durationSec < minDurationSec) {
           set((draft) => {
             setAtPathDraft(draft.parameters, path, {
               status: "error",
               fileName: file.name,
-              errorMessage: `音频时长须小于 ${field.validation?.maxDurationSec} 秒`,
+              errorMessage: `${field.kind === "videoUpload" ? "视频" : "音频"}时长不得少于 ${minDurationSec} 秒`,
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+        const exceedsMaximum = maxDurationSec != null && (
+          field.kind === "audioUpload"
+            ? durationSec >= maxDurationSec
+            : durationSec > maxDurationSec
+        );
+        if (exceedsMaximum) {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: field.kind === "videoUpload"
+                ? `视频时长不得超过 ${maxDurationSec} 秒`
+                : `音频时长须小于 ${maxDurationSec} 秒`,
             } satisfies ImageFieldValue);
           });
           return;
@@ -619,6 +697,17 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             } else if (field.validation.integer && !Number.isInteger(n)) {
               errors[field.id] = "请输入整数";
             }
+            const mediaFieldId = field.validation.greaterThanMediaDurationFieldId;
+            if (!errors[field.id] && mediaFieldId) {
+              const mediaPath = fieldPaths[mediaFieldId];
+              const mediaValue = mediaPath
+                ? getAtPath(parameters, mediaPath) as ImageFieldValue | undefined
+                : undefined;
+              const mediaDuration = mediaValue?.durationSec;
+              if (typeof mediaDuration === "number" && Number.isFinite(mediaDuration) && n <= mediaDuration) {
+                errors[field.id] = `最终总时长必须大于原视频时长（${mediaDuration.toFixed(1)} 秒）`;
+              }
+            }
             break;
           }
           case "numberInput": {
@@ -630,6 +719,17 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             } else if (field.validation.integer && !Number.isInteger(n)) {
               errors[field.id] = "请输入整数";
             }
+            const mediaFieldId = field.validation.greaterThanMediaDurationFieldId;
+            if (!errors[field.id] && mediaFieldId) {
+              const mediaPath = fieldPaths[mediaFieldId];
+              const mediaValue = mediaPath
+                ? getAtPath(parameters, mediaPath) as ImageFieldValue | undefined
+                : undefined;
+              const mediaDuration = mediaValue?.durationSec;
+              if (typeof mediaDuration === "number" && Number.isFinite(mediaDuration) && n <= mediaDuration) {
+                errors[field.id] = `最终总时长必须大于原视频时长（${mediaDuration.toFixed(1)} 秒）`;
+              }
+            }
             break;
           }
           case "select": {
@@ -637,6 +737,8 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             if (field.validation?.required && !s) errors[field.id] = "请选择一项";
             break;
           }
+          case "booleanToggle":
+            break;
           default:
             break;
         }
@@ -678,7 +780,7 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         if (!nodeInputs[nodeId]) nodeInputs[nodeId] = {};
         deepAssignInput(nodeInputs[nodeId], inputPath, mapped);
         if (
-          field.kind === "audioUpload"
+          (field.kind === "audioUpload" || field.kind === "videoUpload")
           && field.durationMapping
           && typeof (raw as ImageFieldValue | undefined)?.durationSec === "number"
         ) {
@@ -707,9 +809,10 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         draft.viewingHistoryId = id;
       }),
 
-    fetchCloudHistory: async () => {
+    fetchCloudHistory: async (toolProjectId) => {
       try {
-        const res = await fetch("/api/user/history", {
+        const query = toolProjectId ? `?toolProjectId=${encodeURIComponent(toolProjectId)}` : "";
+        const res = await fetch(`/api/user/history${query}`, {
           method: "GET",
           credentials: "same-origin",
           headers: { Accept: "application/json" },
@@ -807,6 +910,9 @@ function parseGenerationHistoryArray(json: unknown): GenerationHistory[] {
       sourceAssetBytes,
       durationInt,
       errorMessage,
+      toolProjectId: typeof o.toolProjectId === "string" && o.toolProjectId.trim()
+        ? o.toolProjectId.trim()
+        : null,
       createdAt: new Date(o.createdAt as string | number | Date),
       updatedAt: new Date(o.updatedAt as string | number | Date),
     });

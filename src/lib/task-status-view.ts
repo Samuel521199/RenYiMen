@@ -1,10 +1,11 @@
 import type { TaskStatusPollData, TaskStatusViewModel } from "@/types/task-status";
 
 /** 根据结果 URL 路径推断媒体类型；无明确图片后缀时视为视频。 */
-export function inferMediaTypeFromResultUrl(url: string): "image" | "video" | "model" {
+export function inferMediaTypeFromResultUrl(url: string): "image" | "video" | "audio" | "model" {
   const path = url.trim().split(/[?#]/)[0] ?? "";
   if (/\.(png|jpe?g|webp)$/i.test(path)) return "image";
   if (/\.(glb|gltf)$/i.test(path)) return "model";
+  if (/\.(mp3|wav|m4a|aac|ogg|opus|flac)$/i.test(path)) return "audio";
   return "video";
 }
 
@@ -33,9 +34,55 @@ export const S2V_LOADING_HINTS = [
   "正在渲染有声视频，通常约需 5–10 分钟，请耐心等待…",
 ];
 
+export const VIDEO_CONTINUATION_LOADING_HINTS = [
+  "正在分析原视频的主体、动作与镜头趋势…",
+  "正在从原视频结尾生成后续画面…",
+  "正在保持前后片段的画面与动作连贯性…",
+  "正在渲染续写视频，通常需要数分钟，请耐心等待…",
+];
+
+export const CAMERA_REPLICATION_LOADING_HINTS = [
+  "正在分析参考视频的镜头轨迹、速度与节奏…",
+  "正在识别目标图片中的主体与场景结构…",
+  "正在复刻推拉、环绕、升降或跟拍运镜…",
+  "正在渲染运镜复刻视频，通常需要数分钟，请耐心等待…",
+];
+
+export const EFFECT_REPLICATION_LOADING_HINTS = [
+  "正在分析参考视频中的火焰、变身、粒子等动态特效…",
+  "正在识别目标图片中的人物外观与场景结构…",
+  "正在将参考特效迁移到目标人物并保持主体一致性…",
+  "正在渲染特效复刻视频，通常需要数分钟，请耐心等待…",
+];
+
+export const VOICE_DESIGN_LOADING_HINTS = [
+  "正在理解音色年龄、气质与声音质感…",
+  "正在设计全新的品牌声音特征…",
+  "正在生成试听音频与专属音色 ID…",
+];
+
+export const VOICE_CLONE_LOADING_HINTS = [
+  "正在分析参考录音的音色、节奏与发音特征…",
+  "正在注册并审核克隆音色…",
+  "正在使用克隆音色合成试听文本…",
+  "正在保存生成的音频，请稍候…",
+];
+
+export const EMOTIONAL_TTS_LOADING_HINTS = [
+  "正在理解台词语义与情绪节奏…",
+  "正在调整角色语气、语速与音量…",
+  "正在合成自然、有表现力的短剧配音…",
+];
+
 function resolveLoadingHints(skuId?: string): string[] {
   if (skuId === "BAILIAN_WAN22_ANIMATE_MOVE") return DANCE_MOVE_LOADING_HINTS;
   if (skuId === "BAILIAN_WAN22_S2V") return S2V_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN27_VIDEO_CONTINUATION") return VIDEO_CONTINUATION_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN27_CAMERA_REPLICATION") return CAMERA_REPLICATION_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN27_EFFECT_REPLICATION") return EFFECT_REPLICATION_LOADING_HINTS;
+  if (skuId === "BAILIAN_COSYVOICE_VOICE_DESIGN") return VOICE_DESIGN_LOADING_HINTS;
+  if (skuId === "BAILIAN_VOICE_CLONE") return VOICE_CLONE_LOADING_HINTS;
+  if (skuId === "BAILIAN_EMOTIONAL_TTS") return EMOTIONAL_TTS_LOADING_HINTS;
   return DEFAULT_TASK_LOADING_HINTS;
 }
 
@@ -45,6 +92,12 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   BAILIAN_WAN22_S2V: 450_000,
   BAILIAN_WANX_I2V: 180_000,
   BAILIAN_TRIPO_3D: 300_000,
+  BAILIAN_WAN27_VIDEO_CONTINUATION: 240_000,
+  BAILIAN_WAN27_CAMERA_REPLICATION: 240_000,
+  BAILIAN_WAN27_EFFECT_REPLICATION: 240_000,
+  BAILIAN_COSYVOICE_VOICE_DESIGN: 30_000,
+  BAILIAN_VOICE_CLONE: 45_000,
+  BAILIAN_EMOTIONAL_TTS: 30_000,
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
   RH_TXT2IMG_SHORTDRAMA: 30_000,
@@ -107,8 +160,8 @@ export function buildTaskViewerModel(
         : undefined;
     const resultUrl = data.resultUrl?.trim() ? String(data.resultUrl).trim() : undefined;
     // resultMediaType 由适配器明确设置时优先使用，避免 CDN 无后缀 URL 被误判为 video
-    const mediaType: "image" | "video" | "text" | "model" | undefined =
-      data.resultMediaType === "image" || data.resultMediaType === "video" || data.resultMediaType === "text" || data.resultMediaType === "model"
+    const mediaType: "image" | "video" | "audio" | "text" | "model" | undefined =
+      data.resultMediaType === "image" || data.resultMediaType === "video" || data.resultMediaType === "audio" || data.resultMediaType === "text" || data.resultMediaType === "model"
         ? data.resultMediaType
         : resultUrl
           ? inferMediaTypeFromResultUrl(resultUrl)
@@ -154,6 +207,10 @@ export function buildTaskViewerModel(
   return {
     phase: "loading",
     subPhase,
+    progress:
+      typeof data?.progress === "number" && Number.isFinite(data.progress)
+        ? Math.max(0, Math.min(99, data.progress))
+        : null,
     elapsedMs: elapsed,
     expectedDurationMs: expectedMs,
     hints: resolveLoadingHints(ctx.skuId),

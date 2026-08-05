@@ -4,7 +4,7 @@
 export interface TaskHistoryItem {
   taskId: string;
   resultUrl: string;
-  mediaType: "image" | "video" | "model";
+  mediaType: "image" | "video" | "audio" | "model";
   skuId?: string;
   timestamp: number;
 }
@@ -45,7 +45,7 @@ export interface TaskStatusPollData {
    * 用于 CDN URL 无标准后缀时避免被错误判为 video。
    * "text" 表示纯文本输出（如提示词反推），此时 resultText 有值。
    */
-  resultMediaType?: "image" | "video" | "text" | "model" | null;
+  resultMediaType?: "image" | "video" | "audio" | "text" | "model" | null;
   /** 3D 模型等不可直接嵌入结果的渲染预览图。 */
   resultPreviewUrl?: string | null;
   /**
@@ -73,7 +73,7 @@ export interface TaskStatusViewModel {
   hints?: string[];
   videoUrl?: string;
   /** 成功态下根据 `resultUrl` 推断的展示类型（图片 / 视频 / 纯文本） */
-  mediaType?: "image" | "video" | "text" | "model";
+  mediaType?: "image" | "video" | "audio" | "text" | "model";
   /** 3D 模型的渲染预览图 URL。 */
   previewUrl?: string;
   /**

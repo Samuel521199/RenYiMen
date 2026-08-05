@@ -68,7 +68,7 @@ export function AudioUploadControl({ field, error, locale = "zh" }: AudioUploadC
               <AudioLines className="h-5 w-5 text-slate-400" strokeWidth={1.5} />
             </span>
             <span className="text-center text-xs text-slate-500">
-              {t.uploadDropHint}
+              {locale === "en" ? "No audio selected" : "暂未选择音频"}
             </span>
           </button>
         )}
@@ -92,9 +92,7 @@ export function AudioUploadControl({ field, error, locale = "zh" }: AudioUploadC
           onClick={triggerFilePick}
           className="rounded-xl bg-emerald-500/90 px-3.5 py-2 text-xs font-semibold text-white transition-all hover:-translate-y-0.5 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {v.status === "ready"
-            ? locale === "en" ? "Replace audio" : "更换音频"
-            : locale === "en" ? "Select audio" : "选择音频"}
+          {v.status === "ready" ? t.uploadChangeBtn : locale === "en" ? "Select audio" : "选择音频"}
         </button>
       </div>
 
