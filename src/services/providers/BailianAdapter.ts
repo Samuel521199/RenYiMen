@@ -13,6 +13,11 @@ const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synth
 const IMAGE_TO_VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/image2video/video-synthesis";
 const WAN_ANIMATE_MOVE_MODEL = "wan2.2-animate-move";
 const WAN_S2V_MODEL = "wan2.2-s2v";
+const WAN27_I2V_MODEL = "wan2.7-i2v-2026-04-25";
+const WAN27_VIDEO_CONTINUATION_TEMPLATE = "bailian-wan2.7-video-continuation";
+const WAN27_VIDEO_EDIT_MODEL = "wan2.7-videoedit";
+const WAN27_CAMERA_REPLICATION_TEMPLATE = "bailian-wan2.7-camera-replication";
+const WAN27_EFFECT_REPLICATION_TEMPLATE = "bailian-wan2.7-effect-replication";
 
 /** 网关轮询单次 GET `/api/v1/tasks/{id}` 超时上限（DashScope 排队可能较久） */
 export const BAILIAN_GATEWAY_POLL_DEADLINE_MS = 60_000;
@@ -32,6 +37,9 @@ export const BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND = Math.round(0.6 * BAIL
 /** wan2.2-s2v 华北 2 官方原价：480P 0.5 元/秒、720P 0.9 元/秒。 */
 export const BAILIAN_S2V_480P_CREDITS_PER_SECOND = Math.round(0.5 * BAILIAN_CREDITS_PER_CNY);
 export const BAILIAN_S2V_720P_CREDITS_PER_SECOND = Math.round(0.9 * BAILIAN_CREDITS_PER_CNY);
+/** wan2.7-videoedit 华北 2 官方原价：720P 0.6 元/秒、1080P 1 元/秒。 */
+export const BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND = Math.round(0.6 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND = Math.round(1 * BAILIAN_CREDITS_PER_CNY);
 
 const BAILIAN_DEFAULT_USAGE_DURATION_SEC = 5;
 
@@ -205,6 +213,10 @@ function extractPromptFromNodeInputs(nodeInputs: StandardPayload["nodeInputs"]):
 
 function resolveDashScopeModel(payload: StandardPayload): string {
   const templateId = payload.templateId.trim().toLowerCase();
+  if (
+    templateId === WAN27_CAMERA_REPLICATION_TEMPLATE
+    || templateId === WAN27_EFFECT_REPLICATION_TEMPLATE
+  ) return WAN27_VIDEO_EDIT_MODEL;
   if (templateId.includes(WAN_ANIMATE_MOVE_MODEL)) return WAN_ANIMATE_MOVE_MODEL;
   if (templateId.includes(WAN_S2V_MODEL)) return WAN_S2V_MODEL;
   const input = payload.nodeInputs["input"];
@@ -227,7 +239,7 @@ function resolveDashScopeModel(payload: StandardPayload): string {
   if (fromFlag) return fromFlag;
   const tid = payload.templateId?.trim() ?? "";
   if (/^(?:wan|happyhorse|pixverse|kling|vidu)[a-z0-9._/-]*$/i.test(tid)) return tid;
-  return "wan2.7-i2v-2026-04-25";
+  return WAN27_I2V_MODEL;
 }
 
 function forceHappyHorseModel(requestedModel: string, payload: StandardPayload): string {
@@ -279,7 +291,7 @@ function resolveRequestedVideoDurationSec(
       : Number.isFinite(fromInputNode)
         ? fromInputNode
         : readNumberFlag(flags, ["duration", "videoDuration", "seconds"]) ??
-          readNumberFromNode(inputNode, ["duration", "videoDuration", "seconds"]);
+          readNumberFromNode(inputNode, ["duration", "videoDuration", "video_duration", "seconds"]);
   const n = typeof raw === "number" && Number.isFinite(raw) ? raw : BAILIAN_DEFAULT_USAGE_DURATION_SEC;
   return Math.min(maxSeconds, Math.max(minSeconds, Math.round(n)));
 }
@@ -411,14 +423,17 @@ export class BailianAdapter implements IProviderAdapter {
   getVideoInputCapabilities(payload: StandardPayload): VideoProviderInputCapabilities {
     const requestedModel = resolveDashScopeModel(payload);
     const requestedLc = requestedModel.toLowerCase();
-    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
+    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL
+      || requestedLc === WAN_S2V_MODEL
+      || requestedLc === WAN27_VIDEO_EDIT_MODEL
       ? requestedLc
       : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
       : requestedModel;
     const modelLc = targetModel.toLowerCase();
     const isR2v = modelLc.includes("r2v");
-    if (isR2v) {
+    const isVideoEdit = modelLc === WAN27_VIDEO_EDIT_MODEL;
+    if (isR2v || isVideoEdit) {
       const referenceBinding = {
         transportRole: "reference_image",
         nativeBoundaryControl: false,
@@ -427,7 +442,7 @@ export class BailianAdapter implements IProviderAdapter {
         providerId: "ALIYUN_BAILIAN",
         modelId: targetModel,
         transportSchema: "dashscope_media",
-        maxImages: R2V_MAX_IMAGES,
+        maxImages: isVideoEdit ? 4 : R2V_MAX_IMAGES,
         maxPromptCharacters: 5000,
         supportsSemanticEndFramePrompt: true,
         promptCanAddressInputOrder: true,
@@ -481,6 +496,8 @@ export class BailianAdapter implements IProviderAdapter {
       ? resolveRequestedVideoDurationSec(payload, 2, 30)
       : requestedModel === WAN_S2V_MODEL
         ? resolveRequestedVideoDurationSec(payload, 1, 20)
+        : requestedModel === WAN27_VIDEO_EDIT_MODEL
+          ? resolveRequestedVideoDurationSec(payload, 2, 10)
         : resolveRequestedVideoDurationSec(payload);
     const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
     const requestedMode =
@@ -497,6 +514,10 @@ export class BailianAdapter implements IProviderAdapter {
         ? requestedResolution?.toUpperCase() === "720P"
           ? BAILIAN_S2V_720P_CREDITS_PER_SECOND
           : BAILIAN_S2V_480P_CREDITS_PER_SECOND
+      : requestedModel === WAN27_VIDEO_EDIT_MODEL
+        ? requestedResolution?.toUpperCase() === "1080P"
+          ? BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND
+          : BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND
       : BAILIAN_VIDEO_CREDITS_PER_SECOND;
     let cost = secs * creditsPerSecond;
     if (isRecord(f) && typeof f.catalogBaseCost === "number" && Number.isFinite(f.catalogBaseCost)) {
@@ -527,6 +548,171 @@ export class BailianAdapter implements IProviderAdapter {
     const lastFrameUrl =
       readStringFlag(flags, ["lastFrameUrl", "last_frame_url", "endFrameUrl", "end_frame_url"]) ??
       readStringFromNode(inputNode, ["last_frame_url", "lastFrameUrl", "end_frame_url", "endFrameUrl"]);
+    const firstClipUrl =
+      readStringFlag(flags, ["firstClipUrl", "first_clip_url"]) ??
+      readStringFromNode(inputNode, ["first_clip_url", "firstClipUrl"]);
+    const isVideoContinuation =
+      payload.templateId.trim().toLowerCase() === WAN27_VIDEO_CONTINUATION_TEMPLATE
+      || Boolean(firstClipUrl);
+
+    if (isVideoContinuation) {
+      if (!firstClipUrl || !/^https?:\/\//i.test(firstClipUrl)) {
+        throw new ProviderError(
+          "缺少待续写视频的公网 URL（请提供 input.first_clip_url）",
+          "BAILIAN_MISSING_FIRST_CLIP_URL",
+          400,
+        );
+      }
+      const requestedContinuationMode =
+        readStringFlag(flags, ["continuationMode", "continuation_mode"]) ??
+        readStringFromNode(inputNode, ["continuation_mode", "continuationMode"]) ??
+        "natural";
+      // Backward compatibility for tasks created before the three modes were split.
+      const continuationMode = requestedContinuationMode === "standard"
+        ? "natural"
+        : requestedContinuationMode;
+      if (!["natural", "instruction", "last_frame"].includes(continuationMode)) {
+        throw new ProviderError(
+          `不支持的视频续写模式：${requestedContinuationMode}`,
+          "BAILIAN_INVALID_CONTINUATION_MODE",
+          400,
+        );
+      }
+      const useLastFrame = continuationMode === "last_frame";
+      if (useLastFrame && (!lastFrameUrl || !/^https?:\/\//i.test(lastFrameUrl))) {
+        throw new ProviderError(
+          "尾帧控制模式必须上传目标尾帧",
+          "BAILIAN_MISSING_LAST_FRAME_URL",
+          400,
+        );
+      }
+      const promptRaw =
+        readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
+        readStringFromNode(inputNode, ["prompt", "positivePrompt", "text"]);
+      if (continuationMode === "instruction" && !promptRaw?.trim()) {
+        throw new ProviderError(
+          "指令续写模式必须填写后续动作、剧情或运镜描述",
+          "BAILIAN_MISSING_CONTINUATION_PROMPT",
+          400,
+        );
+      }
+      const continuationPrompt = continuationMode === "natural"
+        ? ""
+        : (promptRaw?.trim() ?? "").slice(0, 5000);
+      const negativePrompt =
+        readStringFlag(flags, ["negativePrompt", "negative_prompt"]) ??
+        readStringFromNode(inputNode, ["negativePrompt", "negative_prompt"]);
+      const parameters: Record<string, unknown> = {
+        resolution:
+          readStringFlag(flags, ["resolution", "videoResolution"]) ??
+          readStringFromNode(inputNode, ["resolution", "videoResolution"]) ??
+          "720P",
+        duration: resolveRequestedVideoDurationSec(payload, 2, 15),
+        prompt_extend:
+          readBooleanFlag(flags, ["prompt_extend", "promptExtend"]) ??
+          readBooleanFromNode(inputNode, ["prompt_extend", "promptExtend"]) ??
+          false,
+        watermark:
+          readBooleanFlag(flags, ["watermark", "showWatermark"]) ??
+          readBooleanFromNode(inputNode, ["watermark", "showWatermark"]) ??
+          false,
+      };
+      const extraParams = flags?.bailianParameters ?? flags?.dashscopeParameters;
+      if (isRecord(extraParams)) Object.assign(parameters, extraParams);
+
+      return {
+        model: WAN27_I2V_MODEL,
+        input: {
+          prompt: continuationPrompt,
+          ...(negativePrompt ? { negative_prompt: negativePrompt.slice(0, 500) } : {}),
+          media: [
+            { type: "first_clip", url: firstClipUrl.trim() },
+            ...(useLastFrame && lastFrameUrl
+              ? [{ type: "last_frame", url: lastFrameUrl.trim() }]
+              : []),
+          ],
+        },
+        parameters,
+      };
+    }
+    const promptRaw =
+      readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
+      extractPromptFromNodeInputs(payload.nodeInputs);
+    const prompt = promptRaw?.trim() ?? "";
+    const requestedModel = resolveDashScopeModel(payload);
+    const requestedLc = requestedModel.toLowerCase();
+    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL
+      || requestedLc === WAN_S2V_MODEL
+      || requestedLc === WAN27_VIDEO_EDIT_MODEL
+      ? requestedLc
+      : shouldForceHappyHorseModel()
+      ? forceHappyHorseModel(requestedModel, payload)
+      : requestedModel;
+    const modelLc = targetModel.toLowerCase();
+
+    if (modelLc === WAN27_VIDEO_EDIT_MODEL) {
+      const videoUrl =
+        readStringFlag(flags, ["videoUrl", "video_url"]) ??
+        readStringFromNode(inputNode, ["video_url", "videoUrl"]);
+      if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
+        throw new ProviderError(
+          "缺少待编辑视频的公网 URL（请提供 input.video_url）",
+          "BAILIAN_MISSING_VIDEO_URL",
+          400,
+        );
+      }
+      if (!prompt) {
+        throw new ProviderError("请输入视频修改指令", "BAILIAN_MISSING_PROMPT", 400);
+      }
+      const videoEditReferenceUrls = refImageUrls.length > 0
+        ? refImageUrls
+        : typeof imageUrl === "string"
+          && /^https?:\/\//i.test(imageUrl.trim())
+          && imageUrl.trim() !== videoUrl.trim()
+          ? [imageUrl.trim()]
+          : [];
+      const maxReferenceImages = 4;
+      if (videoEditReferenceUrls.length > maxReferenceImages) {
+        throw new ProviderError(`参考图片最多 ${maxReferenceImages} 张`, "BAILIAN_TOO_MANY_IMAGES", 400);
+      }
+      if (videoEditReferenceUrls.length === 0) {
+        const isCameraReplication =
+          payload.templateId.trim().toLowerCase() === WAN27_CAMERA_REPLICATION_TEMPLATE;
+        throw new ProviderError(
+          isCameraReplication
+            ? "运镜复刻至少需要上传一张目标画面参考图"
+            : "特效复刻至少需要上传一张目标人物参考图",
+          "BAILIAN_MISSING_REFERENCE_IMAGE",
+          400,
+        );
+      }
+      const requestedResolution =
+        readStringFlag(flags, ["resolution", "videoResolution"]) ??
+        readStringFromNode(inputNode, ["resolution", "videoResolution"]);
+      const requestedAudioSetting =
+        readStringFlag(flags, ["audioSetting", "audio_setting"]) ??
+        readStringFromNode(inputNode, ["audioSetting", "audio_setting"]);
+
+      return {
+        model: modelLc,
+        input: {
+          prompt: prompt.slice(0, 5000),
+          media: [
+            { type: "video", url: videoUrl.trim() },
+            ...videoEditReferenceUrls.map((url) => ({ type: "reference_image", url })),
+          ],
+        },
+        parameters: {
+          resolution: requestedResolution?.toUpperCase() === "1080P" ? "1080P" : "720P",
+          watermark:
+            readBooleanFlag(flags, ["watermark", "showWatermark"]) ??
+            readBooleanFromNode(inputNode, ["watermark", "showWatermark"]) ??
+            false,
+          audio_setting: requestedAudioSetting === "origin" ? "origin" : "auto",
+          prompt_extend: true,
+        },
+      };
+    }
     const hasRefArray = refImageUrls.length > 0;
     const hasSingle = typeof imageUrl === "string" && imageUrl.trim() && /^https?:\/\//i.test(imageUrl.trim());
     if (!hasSingle && !hasRefArray) {
@@ -536,18 +722,6 @@ export class BailianAdapter implements IProviderAdapter {
         400
       );
     }
-    const promptRaw =
-      readStringFlag(flags, ["prompt", "positivePrompt", "text"]) ??
-      extractPromptFromNodeInputs(payload.nodeInputs);
-    const prompt = promptRaw?.trim() ?? "";
-    const requestedModel = resolveDashScopeModel(payload);
-    const requestedLc = requestedModel.toLowerCase();
-    const targetModel = requestedLc === WAN_ANIMATE_MOVE_MODEL || requestedLc === WAN_S2V_MODEL
-      ? requestedLc
-      : shouldForceHappyHorseModel()
-      ? forceHappyHorseModel(requestedModel, payload)
-      : requestedModel;
-    const modelLc = targetModel.toLowerCase();
     if (modelLc === WAN_ANIMATE_MOVE_MODEL) {
       const videoUrl =
         readStringFlag(flags, ["videoUrl", "video_url", "referenceVideoUrl", "reference_video_url"]) ??
@@ -761,6 +935,9 @@ export class BailianAdapter implements IProviderAdapter {
 
   async queryTask(taskId: string, credentials: unknown): Promise<TaskStatusPollData> {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
+    const skuId = isRecord(credentials) && typeof credentials.skuId === "string"
+      ? credentials.skuId.trim().toUpperCase()
+      : "";
     const url = `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`;
     let res: Response;
     try {
@@ -789,7 +966,7 @@ export class BailianAdapter implements IProviderAdapter {
       const msg = extractDashScopeErrorMessage(raw) || `HTTP ${res.status}`;
       return { status: "failed", errorMessage: msg };
     }
-    return mapDashScopeTaskToPollData(raw);
+    return mapDashScopeTaskToPollData(raw, skuId);
   }
 }
 
@@ -881,7 +1058,7 @@ function extractDashScopeUsageResolution(raw: unknown): number | undefined {
   return Number.isFinite(resolution) ? resolution : undefined;
 }
 
-function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
+function mapDashScopeTaskToPollData(raw: unknown, skuId = ""): TaskStatusPollData {
   const st = readTaskStatus(raw);
   if (st === "FAILED" || st === "FAILURE" || st === "ERROR") {
     const err =
@@ -900,7 +1077,13 @@ function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
     const durationSec = extractDashScopeUsageDurationSec(raw);
     const videoRatio = extractDashScopeUsageVideoRatio(raw);
     const resolution = extractDashScopeUsageResolution(raw);
-    const creditsPerSecond = resolution === 720
+    const isWan27VideoEdit = skuId === "BAILIAN_WAN27_CAMERA_REPLICATION"
+      || skuId === "BAILIAN_WAN27_EFFECT_REPLICATION";
+    const creditsPerSecond = isWan27VideoEdit
+      ? resolution === 1080
+        ? BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND
+        : BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND
+      : resolution === 720
       ? BAILIAN_S2V_720P_CREDITS_PER_SECOND
       : resolution === 480
         ? BAILIAN_S2V_480P_CREDITS_PER_SECOND
@@ -919,9 +1102,6 @@ function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
     };
   }
   if (st === "PENDING" || st === "QUEUED" || st === "SUBMITTED") {
-    // DashScope only exposes a coarse task state for these video jobs.  Do not
-    // present a made-up percentage as provider progress; the viewer will use
-    // elapsed time and the SKU's expected duration for a truthful estimate.
     return { status: "queued" };
   }
   if (st === "RUNNING" || st === "PROCESSING") {

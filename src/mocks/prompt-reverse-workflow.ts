@@ -12,9 +12,9 @@ export const promptReverseWorkflowMock: WorkflowFormSchema = {
   title: "提示词反推",
   titleEn: "Prompt Reverse Engineering",
   description:
-    "上传任意一张图片，自动分析人物、场景、风格、光线与构图等关键要素，并生成可用于图像创作的详细中文提示词。",
+    "上传任意一张图片，AI 将用 Qwen3-VL 视觉模型（llama.cpp 量化版）分析图片内容，自动反推出适合 AI 绘画的中文提示词，涵盖人物、场景、风格、光线等关键要素。",
   descriptionEn:
-    "Upload any image to analyze its subjects, scene, style, lighting, and composition, then generate a detailed prompt for image creation.",
+    "Upload any image and the AI will use the Qwen3-VL vision model (llama.cpp quantized) to analyze its contents and automatically reverse-engineer a detailed AI-painting prompt covering subject, scene, style, lighting, and more.",
   fields: [
     {
       kind: "group",

@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
 import { downloadResultImageAsPng } from "@/lib/download-result-image-png";
@@ -64,21 +64,12 @@ export function TaskStatusViewer({
   compact = false,
   supplementaryVideo = null,
 }: TaskStatusViewerProps) {
-  const viewerRef = useRef<HTMLElement>(null);
-  const activePhase = model?.phase;
-  const activeSubPhase = model?.subPhase;
-
-  useEffect(() => {
-    const activeLayer = viewerRef.current?.querySelector<HTMLElement>('[aria-hidden="false"]');
-    if (activeLayer) activeLayer.scrollTop = 0;
-  }, [activePhase, activeSubPhase]);
-
   if (model == null) {
     return (
       <section
         className={cn(
           compact
-            ? "relative isolate h-full min-h-[510px] overflow-hidden border-0 shadow-none lg:min-h-0"
+            ? "relative isolate h-full min-h-[510px] w-full flex-1 overflow-hidden border-0 shadow-none"
             : "relative isolate min-h-[600px] overflow-hidden rounded-2xl border border-zinc-700/45 shadow-md lg:min-h-[calc(100vh-10rem)]",
           className
         )}
@@ -96,10 +87,9 @@ export function TaskStatusViewer({
 
   return (
     <section
-      ref={viewerRef}
       className={cn(
         compact
-          ? "relative isolate flex h-full min-h-[510px] flex-1 flex-col overflow-hidden border-0 bg-[#07111d] shadow-none lg:min-h-0"
+          ? "relative isolate flex h-full min-h-[510px] w-full flex-1 flex-col overflow-hidden border-0 bg-[#07111d] shadow-none"
           : "relative isolate flex min-h-[600px] flex-1 flex-col overflow-hidden rounded-2xl border border-[#1e2d4a] bg-[#0d1a2e] shadow-sm lg:min-h-[calc(100vh-10rem)]",
         className
       )}
@@ -110,7 +100,7 @@ export function TaskStatusViewer({
         使用与视口相关的 min-height，保证成功态图片有足够纵向空间做 object-contain 预览。
       */}
       <div className={compact
-        ? "relative min-h-[510px] w-full flex-1 p-4 lg:min-h-0"
+        ? "relative min-h-[510px] w-full flex-1 p-4"
         : "relative min-h-[min(64vh,640px)] w-full flex-1 p-6 lg:min-h-[calc(100vh-11rem)]"
       }>
         <LoadingLayer
@@ -141,7 +131,7 @@ function IdleArtboard({ compact = false }: { compact?: boolean }) {
   const t = useT();
   return (
     <div className={compact
-      ? "relative flex h-full min-h-[510px] flex-1 flex-col lg:min-h-0"
+      ? "relative flex h-full min-h-[510px] flex-1 flex-col"
       : "relative flex min-h-[600px] flex-1 flex-col lg:min-h-[calc(100vh-10rem)]"
     }>
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(145deg,#050b13_0%,#07111d_48%,#06101a_100%)]" aria-hidden />
@@ -179,7 +169,7 @@ function IdleArtboard({ compact = false }: { compact?: boolean }) {
 
 function layerClass(active: boolean) {
   return cn(
-    "hover-reveal-scrollbar absolute inset-0 min-h-0 overflow-y-auto transition-all duration-500 ease-out",
+    "absolute inset-0 flex flex-col overflow-x-hidden overflow-y-auto p-6 transition-all duration-500 ease-out",
     active ? "z-10 translate-y-0 scale-100 opacity-100" : "pointer-events-none z-0 translate-y-2 scale-[0.995] opacity-0"
   );
 }
@@ -221,68 +211,61 @@ function LoadingLayer({
   }, [active, hints.length]);
 
   const title = model.subPhase === "queued" ? tt.statusQueued : tt.statusGenerating;
-  const subtitle = model.subPhase === "queued" ? tt.subtitleQueued : tt.subtitleGenerating;
+  const subtitle = model.subPhase === "queued" ? tt.subtitleQueued : null;
 
   const elapsed = model.elapsedMs ?? 0;
   const expected = expectedProp ?? model.expectedDurationMs ?? 150_000;
-  const hasProviderProgress = typeof model.progress === "number" && Number.isFinite(model.progress);
-  const barPct = hasProviderProgress
-    ? Math.max(0, Math.min(99, model.progress!))
+  const barPct = typeof model.progress === "number" && Number.isFinite(model.progress)
+    ? Math.max(0, Math.min(99, model.progress))
     : computePseudoProgressPercent(elapsed, expected);
-  const visibleBarPct = Math.max(2, barPct);
 
   return (
     <div className={layerClass(active)} aria-hidden={!active}>
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_30%,rgba(16,185,129,0.09),transparent_36%),linear-gradient(145deg,#050b13_0%,#07111d_55%,#06101a_100%)]" aria-hidden />
-      <div className="relative z-10 mx-auto flex min-h-full w-full max-w-2xl flex-col gap-6 px-5 py-8 [justify-content:safe_center] sm:px-8">
-        <header className="flex flex-col items-center text-center">
-          <div className="relative mb-5 flex h-20 w-20 items-center justify-center rounded-full border border-emerald-300/15 bg-emerald-400/[0.045] shadow-[0_0_55px_rgba(16,185,129,0.15)]">
-            <span className="absolute inset-2 animate-spin rounded-full border border-dashed border-cyan-300/25 [animation-duration:7s]" />
-            <span className="absolute inset-4 animate-pulse rounded-full border border-white/[0.07]" />
-            <LoaderCircle className="h-7 w-7 animate-spin text-emerald-300" strokeWidth={1.5} />
-          </div>
-          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/15 bg-emerald-400/[0.06] px-3 py-1 text-[11px] font-semibold tracking-[0.14em] text-emerald-200">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(110,231,183,0.9)]" />
-            {title}
-          </span>
-          {subtitle && <h3 className="mt-3 text-base font-semibold text-slate-200">{subtitle}</h3>}
+      <div className="flex flex-1 flex-col gap-5">
+        <header>
+          <p className="text-xs font-medium uppercase tracking-widest text-slate-500">{title}</p>
+          {subtitle && <h3 className="mt-1 text-base font-semibold text-slate-300">{subtitle}</h3>}
         </header>
 
-        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4 shadow-[0_20px_50px_-32px_rgba(0,0,0,0.85)] backdrop-blur-sm sm:p-5">
-          <div className="mb-3 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <Clock3 className="h-3.5 w-3.5 text-cyan-300/70" />
-              <span className="tabular-nums">{tt.progressElapsed} {formatClockMmSs(elapsed)}</span>
-              <span className="text-slate-700">/</span>
-              <span className="tabular-nums">{tt.progressEstimated} {formatClockMmSs(expected)}</span>
-            </div>
-            <span className="shrink-0 text-sm font-semibold tabular-nums text-emerald-300">
-              {hasProviderProgress ? `${Math.round(barPct)}%` : tt.progressPct(barPct)}
-            </span>
-          </div>
-          <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-[#13233b] ring-1 ring-white/[0.05]">
-            <div
-              className="relative h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 shadow-[0_0_18px_rgba(45,212,191,0.35)] transition-[width] duration-500 ease-out"
-              style={{ width: `${visibleBarPct}%` }}
-            >
-              <span className="wf-shimmer-bar absolute inset-y-0 w-24 bg-gradient-to-r from-transparent via-white/35 to-transparent" />
-            </div>
-          </div>
-          <div className="mt-3 flex items-start justify-between gap-4 text-xs text-slate-500">
-            <p key={hintIndex} className="min-w-0 leading-relaxed transition-opacity duration-500">
-              {hints[hintIndex]}
-            </p>
-            <span className="shrink-0 rounded-full border border-white/[0.07] bg-black/10 px-2 py-0.5 text-[10px] text-slate-500">
-              {hasProviderProgress ? tt.progressLiveLabel : tt.progressEstimateLabel}
-            </span>
-          </div>
-        </div>
-
         {model.transportMessage && (
-          <p className="rounded-xl border border-amber-500/25 bg-amber-900/20 px-3 py-2 text-xs leading-relaxed text-amber-400">
+          <p className="rounded-lg border border-amber-500/25 bg-amber-900/20 px-3 py-2 text-xs text-amber-400">
             {model.transportMessage}
           </p>
         )}
+
+        <div className="relative aspect-video w-full max-w-xl overflow-hidden rounded-xl bg-[#1a2840]">
+          <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-[#1a2840] via-[#1e3050]/80 to-[#1a2840]" />
+          <div className="absolute inset-4 flex flex-col justify-end gap-3">
+            <div className="space-y-2">
+              <div className="h-3 w-4/5 rounded bg-[#2a3d5e]/90" />
+              <div className="h-3 w-3/5 rounded bg-[#2a3d5e]/70" />
+              <div className="h-3 w-2/5 rounded bg-[#2a3d5e]/50" />
+            </div>
+          </div>
+          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+            <div className="wf-shimmer-bar absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/5 to-transparent" />
+          </div>
+        </div>
+
+        <div className="max-w-xl space-y-2">
+          <p className="text-sm tabular-nums tracking-tight text-slate-400">
+            {tt.progressElapsed}: {formatClockMmSs(elapsed)} / {tt.progressEstimated}: {formatClockMmSs(expected)}
+          </p>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#1e2d4a]">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-[width] duration-300 ease-out"
+              style={{ width: `${barPct}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 text-xs text-slate-500">
+            <p key={hintIndex} className="min-w-0 truncate transition-opacity duration-500">
+              {hints[hintIndex]}
+            </p>
+            <p className="shrink-0 text-right tabular-nums">
+              {tt.progressPct(barPct)}
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -355,6 +338,11 @@ function SuccessLayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onDownload, mediaUrl, resolvedDownloadName, mediaType]);
 
+  const resultHeadline =
+    mediaType === "text" ? tt.successPrompt :
+    !mediaUrl ? tt.successNoPreview :
+    mediaType === "image" ? tt.successImage : tt.successVideo;
+
   const openImageLightbox = useCallback(() => {
     if (mediaType === "image" && mediaUrl) setLightboxOpen(true);
   }, [mediaType, mediaUrl]);
@@ -416,6 +404,11 @@ function SuccessLayer({
   return (
     <div className={layerClass(active)} aria-hidden={!active}>
       <div className="flex h-full min-h-0 flex-1 flex-col gap-4">
+        <header className="shrink-0">
+          <p className="text-xs font-medium uppercase tracking-widest text-emerald-400">{tt.successLabel}</p>
+          <h3 className="mt-1 text-base font-semibold text-slate-200">{resultHeadline}</h3>
+        </header>
+
         <div
           className={cn(
             "relative isolate min-h-0 overflow-hidden rounded-xl border border-zinc-700/50 shadow-inner ring-1 ring-white/[0.06]",
@@ -510,18 +503,9 @@ function SuccessLayer({
         </div>
 
         {supplementaryVideo && (
-          <section className="relative mt-2 max-w-2xl shrink-0 overflow-hidden rounded-2xl border border-cyan-400/20 bg-gradient-to-br from-cyan-400/[0.07] via-[#0a1727] to-emerald-400/[0.05] p-4 shadow-[0_24px_60px_-36px_rgba(34,211,238,0.55)]">
-            <div className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/60 to-transparent" />
+          <section className="mt-2 max-w-2xl shrink-0 rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.05] p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className={cn(
-                  "h-2 w-2 rounded-full",
-                  supplementaryVideo.status === "processing" && "animate-pulse bg-amber-300 shadow-[0_0_12px_rgba(252,211,77,0.8)]",
-                  supplementaryVideo.status === "success" && "bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.8)]",
-                  supplementaryVideo.status === "error" && "bg-red-400",
-                )} />
-                <h4 className="text-sm font-semibold text-slate-200">{supplementaryVideo.title}</h4>
-              </div>
+              <h4 className="text-sm font-semibold text-slate-200">{supplementaryVideo.title}</h4>
               <span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[10px] font-medium text-slate-400">
                 {supplementaryVideo.status === "processing" ? "处理中" : supplementaryVideo.status === "success" ? "已完成" : "处理失败"}
               </span>
@@ -529,19 +513,19 @@ function SuccessLayer({
             {supplementaryVideo.status === "processing" ? (
               <div className="flex aspect-video items-center justify-center rounded-xl border border-white/[0.06] bg-black/25">
                 <div className="flex flex-col items-center gap-3 text-center">
-                  <LoaderCircle className="h-7 w-7 animate-spin text-cyan-300" strokeWidth={1.5} />
+                  <span className="h-7 w-7 animate-spin rounded-full border-2 border-cyan-300/25 border-t-cyan-300" />
                   <p className="text-xs text-slate-400">{supplementaryVideo.message ?? "正在识别人声并合成字幕…"}</p>
                 </div>
               </div>
             ) : supplementaryVideo.status === "success" && supplementaryVideo.url ? (
               <div className="space-y-3">
-                <video className="aspect-video w-full rounded-xl bg-black object-contain shadow-lg ring-1 ring-white/10" src={supplementaryVideo.url} controls playsInline preload="metadata" />
-                <a href={supplementaryVideo.url} download="captioned-video.mp4" className="inline-flex min-h-10 items-center rounded-xl border border-cyan-300/25 bg-cyan-300/[0.08] px-4 text-sm font-medium text-cyan-100 transition-colors hover:border-cyan-200/45 hover:bg-cyan-300/[0.13]">
+                <video className="aspect-video w-full rounded-xl bg-black object-contain ring-1 ring-white/10" src={supplementaryVideo.url} controls playsInline preload="metadata" />
+                <a href={supplementaryVideo.url} download="captioned-video.mp4" className="inline-flex min-h-10 items-center rounded-xl border border-cyan-300/25 bg-cyan-300/[0.08] px-4 text-sm font-medium text-cyan-100 transition-colors hover:bg-cyan-300/[0.13]">
                   下载字幕版视频
                 </a>
               </div>
             ) : (
-              <div className="rounded-xl border border-red-400/15 bg-red-500/[0.06] px-4 py-3 text-sm leading-relaxed text-red-300">
+              <div className="rounded-xl border border-red-400/15 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
                 {supplementaryVideo.message ?? "字幕处理失败，请重试。"}
               </div>
             )}

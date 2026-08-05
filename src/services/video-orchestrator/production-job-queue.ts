@@ -778,37 +778,18 @@ export async function heartbeatVideoProductionJob(
   const heartbeatExpiry = new Date(
     now.getTime() + Math.max(30_000, leaseMs),
   );
-  // Prisma maps DateTime to PostgreSQL timestamp without time zone. Keep the
-  // comparison in Prisma so a raw timestamptz parameter cannot shift it twice.
-  for (let raceAttempt = 0; raceAttempt < 2; raceAttempt += 1) {
-    const current = await prisma.videoProductionJob.findFirst({
-      where: {
-        id,
-        leaseToken,
-        status: { in: ["claimed", "running"] },
-        leaseExpiresAt: { gt: now },
-      },
-      select: { leaseExpiresAt: true, deploymentGraceUntil: true },
-    });
-    if (!current?.leaseExpiresAt) return false;
-    const protectedExpiry = new Date(Math.max(
-      heartbeatExpiry.getTime(),
-      current.leaseExpiresAt.getTime(),
-      current.deploymentGraceUntil?.getTime() ?? 0,
-    ));
-    const updated = await prisma.videoProductionJob.updateMany({
-      where: {
-        id,
-        leaseToken,
-        status: { in: ["claimed", "running"] },
-        leaseExpiresAt: current.leaseExpiresAt,
-        deploymentGraceUntil: current.deploymentGraceUntil,
-      },
-      data: { leaseExpiresAt: protectedExpiry },
-    });
-    if (updated.count === 1) return true;
-  }
-  return false;
+  const updated = await prisma.$executeRaw`
+    UPDATE "video_production_jobs"
+    SET "lease_expires_at" = GREATEST(
+      ${heartbeatExpiry},
+      COALESCE("deployment_grace_until", ${heartbeatExpiry})
+    )
+    WHERE "id" = ${id}
+      AND "lease_token" = ${leaseToken}
+      AND "status" IN ('claimed', 'running')
+      AND "lease_expires_at" > ${now}
+  `;
+  return updated === 1;
 }
 
 export async function assertVideoProductionJobLease(

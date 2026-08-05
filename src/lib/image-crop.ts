@@ -11,11 +11,7 @@ export interface CropOutputSize {
   scale: number;
 }
 
-/**
- * Canvas cannot export an image fetched from a third-party origin unless that
- * origin opts into CORS. Route remote images through our authenticated,
- * same-origin media proxy so cropping also works against persisted OSS URLs.
- */
+/** Route cross-origin images through the authenticated media proxy for Canvas use. */
 export function resolveCropImageSource(imageUrl: string, currentOrigin: string): string {
   if (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:")) return imageUrl;
 
@@ -32,10 +28,7 @@ export function resolveCropImageSource(imageUrl: string, currentOrigin: string):
   return imageUrl;
 }
 
-/**
- * Keep the crop's aspect ratio while fitting both the minimum and maximum
- * model dimensions. Throws when an extremely narrow crop cannot satisfy both.
- */
+/** Keep the crop's aspect ratio while fitting the model's dimension bounds. */
 export function getCropOutputSize(
   crop: Pick<PixelCrop, "width" | "height">,
   minDimension?: number,

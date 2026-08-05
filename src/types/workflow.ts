@@ -39,7 +39,7 @@ export interface ImageValidation {
   accept?: string[];
   /** 图片最小边长（宽和高均须 ≥ 此值，单位 px）；上传前在浏览器端校验 */
   minDimension?: number;
-  /** 图片最大边长（宽和高均须 <= 此值，单位 px）；上传前在浏览器端校验。 */
+  /** 图片最大边长（宽和高均须 ≤ 此值，单位 px）；上传前在浏览器端校验。 */
   maxDimension?: number;
   /** 音视频最短时长（秒）；上传前在浏览器端校验。 */
   minDurationSec?: number;
@@ -58,6 +58,8 @@ export interface SliderValidation {
   max: number;
   step?: number;
   integer?: boolean;
+  /** 若设置，滑块值必须大于指定音视频上传字段读取到的素材时长。 */
+  greaterThanMediaDurationFieldId?: string;
 }
 
 export interface SelectValidation {
@@ -80,6 +82,11 @@ interface WorkflowFieldBase {
   /** English description — shown when locale is "en" */
   descriptionEn?: string;
   mapping: NodeInputMapping;
+  /** 仅当依赖字段等于指定值时展示、校验并提交该字段。 */
+  visibleWhen?: {
+    fieldId: string;
+    equals: string | number | boolean;
+  };
 }
 
 /** 双图首尾帧等场景 */
@@ -98,6 +105,8 @@ export interface VideoUploadField extends WorkflowFieldBase {
   kind: "videoUpload";
   defaultValue?: Partial<ImageFieldValue>;
   validation?: ImageValidation;
+  /** 可选：把浏览器读取到的视频时长映射到标准负载，供计费或上游参数使用。 */
+  durationMapping?: NodeInputMapping;
 }
 
 /** 音频上传字段，运行时状态与图片/视频上传一致。 */
@@ -130,19 +139,6 @@ export interface MultiImageUploadField extends WorkflowFieldBase {
   maxItems?: number;
   validation?: ImageValidation;
 }
-
-/**
- * 通用型工作流的媒体上传字段。
- * 新工作流应优先复用这些 kind，以自动获得统一的点击选择、键盘入口和拖拽上传能力。
- * 若未来新增媒体 kind，请加入此联合类型；DynamicForm 的穷尽映射会强制注册对应拖拽控件。
- */
-export type MediaUploadField =
-  | ImageUploadField
-  | VideoUploadField
-  | AudioUploadField
-  | MultiImageUploadField;
-
-export type MediaUploadFieldKind = MediaUploadField["kind"];
 
 export interface TextInputField extends WorkflowFieldBase {
   kind: "textInput";
@@ -190,7 +186,10 @@ export interface GroupField {
 }
 
 export type WorkflowField =
-  | MediaUploadField
+  | ImageUploadField
+  | VideoUploadField
+  | AudioUploadField
+  | MultiImageUploadField
   | TextInputField
   | NumberSliderField
   | SelectField
@@ -198,13 +197,6 @@ export type WorkflowField =
 
 export function isGroupField(f: WorkflowField): f is GroupField {
   return f.kind === "group";
-}
-
-export function isMediaUploadField(f: WorkflowField): f is MediaUploadField {
-  return f.kind === "imageUpload"
-    || f.kind === "videoUpload"
-    || f.kind === "audioUpload"
-    || f.kind === "multiImageUpload";
 }
 
 export interface WorkflowFormSchema {

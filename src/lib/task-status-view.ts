@@ -32,9 +32,33 @@ export const S2V_LOADING_HINTS = [
   "正在渲染有声视频，通常约需 5–10 分钟，请耐心等待…",
 ];
 
+export const VIDEO_CONTINUATION_LOADING_HINTS = [
+  "正在分析原视频的主体、动作与镜头趋势…",
+  "正在从原视频结尾生成后续画面…",
+  "正在保持前后片段的画面与动作连贯性…",
+  "正在渲染续写视频，通常需要数分钟，请耐心等待…",
+];
+
+export const CAMERA_REPLICATION_LOADING_HINTS = [
+  "正在分析参考视频的镜头轨迹、速度与节奏…",
+  "正在识别目标图片中的主体与场景结构…",
+  "正在复刻推拉、环绕、升降或跟拍运镜…",
+  "正在渲染运镜复刻视频，通常需要数分钟，请耐心等待…",
+];
+
+export const EFFECT_REPLICATION_LOADING_HINTS = [
+  "正在分析参考视频中的火焰、变身、粒子等动态特效…",
+  "正在识别目标图片中的人物外观与场景结构…",
+  "正在将参考特效迁移到目标人物并保持主体一致性…",
+  "正在渲染特效复刻视频，通常需要数分钟，请耐心等待…",
+];
+
 function resolveLoadingHints(skuId?: string): string[] {
   if (skuId === "BAILIAN_WAN22_ANIMATE_MOVE") return DANCE_MOVE_LOADING_HINTS;
   if (skuId === "BAILIAN_WAN22_S2V") return S2V_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN27_VIDEO_CONTINUATION") return VIDEO_CONTINUATION_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN27_CAMERA_REPLICATION") return CAMERA_REPLICATION_LOADING_HINTS;
+  if (skuId === "BAILIAN_WAN27_EFFECT_REPLICATION") return EFFECT_REPLICATION_LOADING_HINTS;
   return DEFAULT_TASK_LOADING_HINTS;
 }
 
@@ -43,6 +67,9 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   BAILIAN_WAN22_ANIMATE_MOVE: 377_000,
   BAILIAN_WAN22_S2V: 450_000,
   BAILIAN_WANX_I2V: 180_000,
+  BAILIAN_WAN27_VIDEO_CONTINUATION: 240_000,
+  BAILIAN_WAN27_CAMERA_REPLICATION: 240_000,
+  BAILIAN_WAN27_EFFECT_REPLICATION: 240_000,
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
   RH_TXT2IMG_SHORTDRAMA: 30_000,

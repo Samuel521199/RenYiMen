@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useEffect, useId, type FormEventHandler, type ReactNode } from "react";
 import { FormErrorBoundary } from "@/components/WorkflowForm/FormErrorBoundary";
-import type { MediaUploadFieldKind, WorkflowField, WorkflowFormSchema } from "@/types/workflow";
-import { isGroupField, isMediaUploadField } from "@/types/workflow";
+import type { WorkflowField, WorkflowFormSchema } from "@/types/workflow";
+import { isGroupField } from "@/types/workflow";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { ImageUploadControl } from "@/components/WorkflowForm/controls/ImageUploadControl";
 import { VideoUploadControl } from "@/components/WorkflowForm/controls/VideoUploadControl";
@@ -12,6 +12,7 @@ import { MultiImageUploadWidget } from "@/components/WorkflowForm/controls/Multi
 import { TextInputControl } from "@/components/WorkflowForm/controls/TextInputControl";
 import { NumberSliderControl } from "@/components/WorkflowForm/controls/NumberSliderControl";
 import { SelectControl } from "@/components/WorkflowForm/controls/SelectControl";
+import { getAtPath } from "@/lib/workflow-utils";
 
 /** Locale context shared across all nested field renderers */
 const LocaleContext = createContext<"zh" | "en">("zh");
@@ -95,6 +96,8 @@ export interface DynamicFormProps {
   formFooter?: ReactNode;
   /** 标题右侧的可选操作（如价格明细按钮） */
   headerAction?: ReactNode;
+  /** Rendered between the workflow heading and its fields. */
+  beforeFields?: ReactNode;
   /** 传给 `<form>` 的 className */
   formClassName?: string;
   /** Current locale — controls which *En fields are displayed */
@@ -108,7 +111,7 @@ export interface DynamicFormProps {
  * 叶子控件通过 `widgets` 映射解析：`field.kind` 为主键；`uiSchema[fieldId]["ui:widget"]` 可覆盖为
  * `multiImageUploader`（须配合 `kind: "multiImageUpload"` 与 store 中的数组形态值）。
  */
-export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, headerAction, formClassName, locale = "zh" }: DynamicFormProps) {
+export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, headerAction, beforeFields, formClassName, locale = "zh" }: DynamicFormProps) {
   const hydrateSchema = useWorkflowStore((s) => s.hydrateSchema);
   const descriptionTooltipId = useId();
   const description = schema.description
@@ -157,6 +160,7 @@ export function DynamicForm({ schema, errors = {}, onSubmit, formFooter, headerA
           <div className="shrink-0 pt-1">{headerAction}</div>
         </div>
       )}
+      {beforeFields}
       <div className="grid min-w-0 max-w-full grid-cols-1 gap-5 overflow-visible xl:grid-cols-2 [&>fieldset]:col-span-full">
         {schema.fields.map((field) => (
           <FieldBranch key={field.id} field={field} schema={schema} errors={errors} />
@@ -200,6 +204,14 @@ function FieldBranch({
 }) {
   const locale = useContext(LocaleContext);
   const fieldHelpId = useId();
+  const parameters = useWorkflowStore((s) => s.parameters);
+  const fieldPaths = useWorkflowStore((s) => s.fieldPaths);
+
+  if (!isGroupField(field) && field.visibleWhen) {
+    const dependencyPath = fieldPaths[field.visibleWhen.fieldId];
+    const dependencyValue = dependencyPath ? getAtPath(parameters, dependencyPath) : undefined;
+    if (dependencyValue !== field.visibleWhen.equals) return null;
+  }
 
   if (isGroupField(field)) {
     const groupDescription = field.description
@@ -234,7 +246,7 @@ function FieldBranch({
   }
 
   const err = errors[field.id];
-  const useSpanLabel = isMediaUploadField(field);
+  const useSpanLabel = field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload" || field.kind === "multiImageUpload";
   const displayLabel = loc(field.label, field.labelEn, locale);
   const authoredDescription = field.description
     ? loc(field.description, field.descriptionEn, locale)
@@ -324,14 +336,6 @@ const widgets = {
 
 type WidgetKey = keyof typeof widgets;
 
-/** 新增媒体字段 kind 时，TypeScript 会要求在此注册一个拖拽上传控件。 */
-const mediaUploadWidgetByFieldKind = {
-  imageUpload: "imageUpload",
-  videoUpload: "videoUpload",
-  audioUpload: "audioUpload",
-  multiImageUpload: "multiImageUploader",
-} as const satisfies Record<MediaUploadFieldKind, WidgetKey>;
-
 function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, unknown>): WidgetKey | null {
   if (isGroupField(field)) return null;
   const entry = uiSchema?.[field.id];
@@ -339,7 +343,9 @@ function resolveLeafWidgetKey(field: WorkflowField, uiSchema?: Record<string, un
     const w = (entry as Record<string, unknown>)["ui:widget"];
     if (w === "multiImageUploader") return "multiImageUploader";
   }
-  if (isMediaUploadField(field)) return mediaUploadWidgetByFieldKind[field.kind];
+  if (field.kind === "multiImageUpload") return "multiImageUploader";
+  if (field.kind === "videoUpload") return "videoUpload";
+  if (field.kind === "audioUpload") return "audioUpload";
   if (field.kind in widgets) return field.kind as WidgetKey;
   return null;
 }

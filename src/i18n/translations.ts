@@ -88,8 +88,6 @@ export const translations = {
     progressElapsed: "已耗时",
     progressEstimated: "预计",
     progressPct: (pct: number) => `约 ${Math.round(pct)}%`,
-    progressLiveLabel: "实时进度",
-    progressEstimateLabel: "预计进度",
     progressRendering: "正在渲染光影帧…",
     successLabel: "生成成功",
     successPrompt: "提示词已生成",
@@ -113,6 +111,8 @@ export const translations = {
 
     // ── ImageUploadControl ──
     uploadNoPreview: "暂无预览",
+    uploadDropHint: "拖拽文件到此处，或点击选择",
+    uploadDropActive: "松开即可上传",
     uploadSelectBtn: "选择图片",
     uploadChangeBtn: "更换图片",
     uploadClearBtn: "清除",
@@ -124,8 +124,6 @@ export const translations = {
     uploadFileName: (name: string) => `已选：${name}`,
     uploadRemoteUrl: (url: string) => `远端：${url}`,
     uploadZoomHint: "点击放大观看",
-    uploadDropHint: "拖拽文件到此处，或点击选择",
-    uploadDropActive: "松开即可上传",
 
     // ── TextResultDisplay ──
     textResultTitle: "生成的提示词",
@@ -230,8 +228,6 @@ export const translations = {
     progressElapsed: "Elapsed",
     progressEstimated: "Est.",
     progressPct: (pct: number) => `~${Math.round(pct)}%`,
-    progressLiveLabel: "Live progress",
-    progressEstimateLabel: "Estimated progress",
     progressRendering: "Rendering frames…",
     successLabel: "Success",
     successPrompt: "Prompt generated",
@@ -255,6 +251,8 @@ export const translations = {
 
     // ── ImageUploadControl ──
     uploadNoPreview: "No preview",
+    uploadDropHint: "Drop a file here, or click to choose",
+    uploadDropActive: "Release to upload",
     uploadSelectBtn: "Choose Image",
     uploadChangeBtn: "Change Image",
     uploadClearBtn: "Remove",
@@ -266,8 +264,6 @@ export const translations = {
     uploadFileName: (name: string) => `Selected: ${name}`,
     uploadRemoteUrl: (url: string) => `Remote: ${url}`,
     uploadZoomHint: "Click to zoom",
-    uploadDropHint: "Drop a file here, or click to choose",
-    uploadDropActive: "Release to upload",
 
     // ── TextResultDisplay ──
     textResultTitle: "Generated Prompt",

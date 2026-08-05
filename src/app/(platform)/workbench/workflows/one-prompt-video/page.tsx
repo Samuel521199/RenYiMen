@@ -6801,15 +6801,8 @@ function consistencyFrameShortLabel(frame: VideoKeyframe, lang: PageLang): strin
 }
 
 function personDerivedViewWaitReason(frame: VideoKeyframe, assetFrames: VideoKeyframe[], lang: PageLang): string {
-  const derived = frame.viewGenerationMode === "derived_from_front" || frame.viewGenerationMode === "derived_from_side" || frame.assetView === "side" || frame.assetView === "back";
+  const derived = frame.viewGenerationMode === "derived_from_front" || frame.assetView === "side" || frame.assetView === "back";
   if (!derived || !frame.anchorId) return "";
-  if (frame.assetView === "back") {
-    const side = assetFrames.find((candidate) => candidate.anchorId === frame.anchorId && candidate.assetView === "side");
-    if (side?.imageUrl && (side.locked || side.status === "IMAGE_APPROVED")) return "";
-    return lang === "en"
-      ? "Waiting for the side view to be generated, approved, and locked. The approved side revision and original identity reference will guide the back view."
-      : "请先生成、批准并锁定侧面图；背面图将以批准的侧面版本和原始身份参考共同约束。";
-  }
   const front = assetFrames.find((candidate) => candidate.anchorId === frame.anchorId && candidate.assetView === "front");
   if (front?.imageUrl && (front.locked || front.status === "IMAGE_APPROVED")) return "";
   return lang === "en"

@@ -375,10 +375,10 @@ export interface VideoAssetLibraryItem {
   descriptionZh?: string;
   descriptionEn?: string;
   required: boolean;
-  sourceView?: "front" | "side";
+  sourceView?: "front";
   sourceArtifactId?: string;
   orientation?: "front" | "side" | "back" | "unknown";
-  viewGenerationMode?: "primary" | "derived_from_front" | "derived_from_side";
+  viewGenerationMode?: "primary" | "derived_from_front";
 }
 
 export interface VideoAssetLibrary {
@@ -394,10 +394,10 @@ export interface VideoConsistencyReference {
   assetId?: string;
   assetCategory?: VideoAssetCategory;
   assetView?: VideoAssetView;
-  sourceView?: "front" | "side";
+  sourceView?: "front";
   sourceArtifactId?: string;
   orientation?: "front" | "side" | "back" | "unknown";
-  viewGenerationMode?: "primary" | "derived_from_front" | "derived_from_side";
+  viewGenerationMode?: "primary" | "derived_from_front";
   purpose: string;
   purposeZh?: string;
   purposeEn?: string;
@@ -1554,7 +1554,6 @@ export interface PromptDebugArtifact {
 }
 
 export interface OnePromptVideoPlan {
-  workflowKind?: "one_prompt_video" | "character_turnaround";
   title: string;
   logline: string;
   durationSeconds: number;
@@ -1610,13 +1609,6 @@ export interface CreateVideoProjectInput {
   shotCount?: number;
   stylePreset?: string;
   referenceImageUrls?: string[];
-}
-
-export interface CreateCharacterTurnaroundInput {
-  title?: string;
-  characterDescription?: string;
-  referenceImageUrl: string;
-  aspectRatio?: VideoAspectRatio;
 }
 
 export interface PlanVideoProjectInput {

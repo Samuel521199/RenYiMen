@@ -10,9 +10,9 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
   title: "多模态图生视频",
   titleEn: "Multimodal Image-to-Video",
   description:
-    "上传参考图并描述想要的动作或场景，生成流畅生动的动画视频，可设置画面比例、清晰度与时长。",
+    "上传一张参考图，用文字描述您想要的动作或场景，即可生成流畅生动的动画视频。可在下方选择生成风格与视频时长；计费按所选秒数动态估算（150 积分/秒）。",
   descriptionEn:
-    "Upload a reference image and describe the desired motion or scene to generate a smooth animated video with adjustable aspect ratio, quality, and duration.",
+    "Upload a reference image and describe the desired motion or scene in text to generate a smooth, vivid animated video. Choose the generation style and duration below. Billing is dynamically estimated at 150 credits per second.",
   schema: {
     type: "object",
     properties: {

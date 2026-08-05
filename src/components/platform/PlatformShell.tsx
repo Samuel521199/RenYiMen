@@ -32,16 +32,6 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
           {isWorkbench && (
             <nav aria-label={t.workspaceSwitchLabel} className="flex items-center gap-2">
               <Link
-                href="/workbench/operations"
-                className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                  !isGeneralWorkspace
-                    ? "border-indigo-400/50 bg-indigo-500/20 text-indigo-100"
-                    : "border-white/10 text-slate-400 hover:bg-white/5 hover:text-slate-200"
-                }`}
-              >
-                {t.workspaceOperations}
-              </Link>
-              <Link
                 href="/workbench/tools"
                 className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
                   isGeneralWorkspace
@@ -50,6 +40,16 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
                 }`}
               >
                 {t.workspaceGeneral}
+              </Link>
+              <Link
+                href="/workbench/operations"
+                className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  !isGeneralWorkspace
+                    ? "border-indigo-400/50 bg-indigo-500/20 text-indigo-100"
+                    : "border-white/10 text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                }`}
+              >
+                {t.workspaceOperations}
               </Link>
             </nav>
           )}

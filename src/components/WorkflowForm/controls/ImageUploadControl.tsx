@@ -8,8 +8,8 @@ import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { LightboxModal } from "@/components/WorkflowForm/LightboxModal";
 import { AssetLibraryPicker, type PickedAsset } from "@/components/AssetLibraryPicker";
 import { useT } from "@/i18n";
-import { uploadPickerButtonClass } from "@/components/WorkflowForm/controls/upload-control-styles";
 import { ImageCropModal } from "@/components/WorkflowForm/ImageCropModal";
+import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
 
 /**
  * 首帧 / 尾帧等「图片上传」控件（原虚线预览 + 选择图片区域，语义上即 ImageUploadPreview）。
@@ -46,6 +46,15 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
   const triggerFilePick = useCallback(() => {
     inputRef.current?.click();
   }, []);
+
+  const handleFiles = useCallback((files: File[]) => {
+    const file = files[0];
+    if (file) void applyImageFile(field.id, file);
+  }, [applyImageFile, field.id]);
+  const { isDragging, dropZoneProps } = useFileDrop({
+    disabled: v.status === "uploading",
+    onFiles: handleFiles,
+  });
 
   /** 优先使用本地 blob（`previewUrl`），不把下游用的 `remoteUrl` 当作缩略图，避免与所选文件不一致。 */
   const displayUrl =
@@ -88,7 +97,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
   }, [applyImageFile, field.id, locale]);
 
   const dashedFrameClass = `relative flex h-[176px] w-full max-w-full shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 ${
-    error ? "border-amber-400/45" : "border-white/[0.14] hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:shadow-[0_0_0_1px_rgba(52,211,153,0.05),0_18px_45px_-30px_rgba(16,185,129,0.65)]"
+    isDragging ? "border-emerald-400 bg-emerald-400/10" : error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45 hover:bg-[#0b1a2d] hover:shadow-[0_0_0_1px_rgba(52,211,153,0.05),0_18px_45px_-30px_rgba(16,185,129,0.65)]"
   }`;
 
   /** 虚线框的点击行为随状态而变，但元素本身始终是 div，避免 div↔button 切换引发 insertBefore */
@@ -119,17 +128,25 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
           ].join(" ")}
           onClick={handleFrameClick}
           onKeyDown={handleFrameKeyDown}
+          {...dropZoneProps}
           role="button"
           tabIndex={v.status !== "uploading" ? 0 : -1}
           aria-label={
-            v.status === "uploading"
+            isDragging
+              ? t.uploadDropActive
+              : v.status === "uploading"
               ? t.uploadUploading
               : displayUrl && v.status !== "error"
               ? t.uploadZoomHint
               : t.uploadSelectBtn
           }
         >
-          {displayUrl && v.status === "uploading" ? (
+          {isDragging ? (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-emerald-400/10 px-3 text-emerald-300">
+              <Upload className="h-9 w-9" strokeWidth={1.5} aria-hidden />
+              <span className="text-center text-sm font-medium">{t.uploadDropActive}</span>
+            </div>
+          ) : displayUrl && v.status === "uploading" ? (
             <div className="relative flex h-full w-full items-center justify-center">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
@@ -157,7 +174,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
                 className="h-full w-full object-contain opacity-75 saturate-90"
                 draggable={false}
               />
-              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-amber-950/20 px-3 backdrop-blur-[6px] transition-opacity group-hover:bg-amber-950/30">
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-red-950/25 px-3 backdrop-blur-[6px] transition-opacity group-hover:bg-red-950/35">
                 <Upload className="h-7 w-7 text-white drop-shadow" strokeWidth={1.5} aria-hidden />
                 <span className="text-center text-xs font-semibold text-white drop-shadow">
                   {t.uploadFailed}
@@ -194,7 +211,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
-              if (file) void applyImageFile(field.id, file);
+              if (file) handleFiles([file]);
             }}
           />
           <div className="flex min-w-0 max-w-full flex-wrap gap-2">
@@ -202,7 +219,7 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
               type="button"
               disabled={v.status === "uploading"}
               onClick={triggerFilePick}
-              className={uploadPickerButtonClass}
+              className="rounded-xl bg-emerald-500/90 px-3.5 py-2 text-xs font-semibold text-white shadow-[0_8px_22px_-12px_rgba(16,185,129,0.8)] transition-all hover:-translate-y-0.5 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {v.status === "ready" ? t.uploadChangeBtn : t.uploadSelectBtn}
             </button>
@@ -227,17 +244,11 @@ export function ImageUploadControl({ field, error, locale = "zh" }: ImageUploadC
             </button>
           </div>
           {v.status === "error" && (
-            <p className="rounded-lg border border-amber-300/15 bg-amber-400/[0.06] px-3 py-2 text-xs leading-relaxed text-amber-200/90">
-              {v.errorMessage ?? t.uploadFailedRetry}
-            </p>
+            <p className="text-xs text-red-600">{v.errorMessage ?? t.uploadFailedRetry}</p>
           )}
         </div>
       </div>
-      {error && (
-        <p className="rounded-lg border border-amber-300/15 bg-amber-400/[0.06] px-3 py-2 text-xs leading-relaxed text-amber-200/90">
-          {error}
-        </p>
-      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
 
       <LightboxModal open={lightboxOpen} imageUrl={lightboxUrl} onClose={closeLightbox} />
       <AssetLibraryPicker

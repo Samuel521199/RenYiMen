@@ -2,18 +2,24 @@
 
 // frontend/components/layout/Sidebar.tsx
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { NAV_GROUPS } from "@workbench/lib/constants";
+import { usePathname, useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { NAV_GROUPS, type NavItem } from "@workbench/lib/constants";
 import { useLanguage } from "@workbench/lib/LanguageContext";
 import { usePermission } from "@workbench/lib/PermissionContext";
 import { getSidebarChildLinkClasses, isSidebarItemActive } from "@workbench/lib/sidebar-nav";
+import { navigateWorkbenchToolSection } from "@workbench/lib/tool-section-navigation";
 
 const TEMPLATE_CENTER_EXTRA_CHILD = { label: "日常互动图模版", href: "/workbench/admin/daily-post-templates" };
 const TASK_CENTER_EXTRA_CHILD = { label: "热点借势图", href: "/workbench/workflows/trending" };
 const TASK_CENTER_NEWS_EXTRA_CHILD = { label: "热点借势·新闻", href: "/workbench/workflows/trending-news" };
 const TASK_CENTER_LOGO_CHILD = { href: "/workbench/workflows/logo", label: "Logo水印" };
 const ADMIN_HOTSPOT_IMPORT_CHILD = { label: "热点导入管理", href: "/workbench/admin/hotspot-import" };
+const TOOL_SECTION_NAV_ITEMS: NavItem[] = [
+  { href: "/workbench/tools?group=video-generation", label: "视频生成", single: true },
+  { href: "/workbench/tools?group=video-editing", label: "视频编辑", single: true },
+  { href: "/workbench/tools?group=audio-post", label: "音频后期", single: true },
+] satisfies NavItem[];
 const DEFAULT_SIDEBAR_WIDTH = 224;
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 420;
@@ -106,8 +112,13 @@ const SIDEBAR_NAV_GROUPS = (Array.isArray(NAV_GROUPS) ? NAV_GROUPS : []).map((it
   return item;
 });
 
+function getNavItemHref(item: NavItem): string | undefined {
+  return "href" in item ? item.href : undefined;
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { t } = useLanguage();
   const { canView, canViewWorkflow, canViewTemplate, canViewAdmin } = usePermission();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
@@ -116,11 +127,19 @@ export default function Sidebar() {
   const resizeStartRef = useRef<{ pointerX: number; width: number } | null>(null);
   const previousBodyStylesRef = useRef<{ cursor: string; userSelect: string } | null>(null);
   const isGeneralWorkspace = pathname.startsWith("/workbench/tools");
-  const workspaceNavGroups = SIDEBAR_NAV_GROUPS.filter((item) =>
-    isGeneralWorkspace
-      ? item.href === "/workbench/tools"
-      : item.href !== "/workbench/tools",
-  );
+  const toolHomeNavItem = SIDEBAR_NAV_GROUPS.find((item) => getNavItemHref(item) === "/workbench/tools");
+  const workspaceNavGroups: NavItem[] = isGeneralWorkspace
+    ? [
+        ...(toolHomeNavItem ? [toolHomeNavItem] : []),
+        ...TOOL_SECTION_NAV_ITEMS,
+      ]
+    : SIDEBAR_NAV_GROUPS.filter((item) => getNavItemHref(item) !== "/workbench/tools");
+  const routeToolGroup = searchParams.get("group") ?? "";
+  const [currentToolGroup, setCurrentToolGroup] = useState(routeToolGroup);
+
+  useEffect(() => {
+    setCurrentToolGroup(routeToolGroup);
+  }, [routeToolGroup]);
 
   const applySidebarWidth = (width: number, persist = false) => {
     const nextWidth = clampSidebarWidth(width);
@@ -192,6 +211,13 @@ export default function Sidebar() {
     applySidebarWidth(nextWidth, true);
   };
 
+  const handleToolSectionClick = (event: ReactMouseEvent<HTMLAnchorElement>, href: string) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    setCurrentToolGroup(new URL(href, window.location.href).searchParams.get("group") ?? "");
+    navigateWorkbenchToolSection(href);
+  };
+
   return (
     <aside
       className="relative z-30 flex h-full min-h-[calc(100vh-3.5rem)] shrink-0 flex-col border-r border-white/10 bg-[#0f1728]"
@@ -200,7 +226,8 @@ export default function Sidebar() {
       <nav className="flex-1 overflow-y-auto px-3 py-4">
         <ul className="space-y-1">
           {workspaceNavGroups.map((item) => {
-            const rawChildren = Array.isArray(item.children) ? item.children : [];
+            const itemHref = getNavItemHref(item);
+            const rawChildren = "children" in item && Array.isArray(item.children) ? item.children : [];
             let children = rawChildren;
             if (item.label === "任务中心") {
               if (!canView("tasks")) return null;
@@ -223,13 +250,24 @@ export default function Sidebar() {
                 return key ? canViewAdmin(key) : false;
               });
               if (children.length === 0) return null;
-            } else if (item.href) {
-              const key = MODULE_PERMISSION_BY_HREF[item.href];
+            } else if (itemHref) {
+              const itemHrefPath = itemHref.split("?")[0];
+              const key = MODULE_PERMISSION_BY_HREF[itemHrefPath];
               if (key && !canView(key)) return null;
             }
             const hasChildren = children.length > 0;
             const childActive = children.some((child) => isSidebarItemActive(pathname, child.href));
-            const isActive = item.href ? isSidebarItemActive(pathname, item.href) || childActive : childActive;
+            const isToolSection = Boolean(itemHref?.startsWith("/workbench/tools"));
+            const itemToolGroup = isToolSection && itemHref
+              ? (new URL(itemHref, "http://localhost").searchParams.get("group") ?? "")
+              : "";
+            const isActive = itemHref
+              ? (
+                  isToolSection
+                    ? pathname.startsWith("/workbench/tools") && currentToolGroup === itemToolGroup
+                    : isSidebarItemActive(pathname, itemHref) || childActive
+                )
+              : childActive;
             const isOpen = Boolean(openGroups[item.label] || childActive);
 
             if (hasChildren) {
@@ -273,22 +311,32 @@ export default function Sidebar() {
               );
             }
 
-            if (!item.href) {
+            if (!itemHref) {
               return null;
             }
 
+            const linkClassName = `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+              isActive
+                ? "bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-400/30"
+                : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+            }`;
+
             return (
-              <li key={item.href}>
-                <Link
-                  href={item.href}
-                  className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
-                    isActive
-                      ? "bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-400/30"
-                      : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
-                  }`}
-                >
-                  {t(item.label)}
-                </Link>
+              <li key={itemHref}>
+                {isToolSection ? (
+                  <a
+                    href={itemHref}
+                    className={linkClassName}
+                    data-tool-section-link
+                    onClick={(event) => handleToolSectionClick(event, itemHref)}
+                  >
+                    {t(item.label)}
+                  </a>
+                ) : (
+                  <Link href={itemHref} className={linkClassName}>
+                    {t(item.label)}
+                  </Link>
+                )}
               </li>
             );
           })}

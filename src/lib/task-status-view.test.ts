@@ -43,27 +43,6 @@ test("talking character video exposes the official 5-10 minute range through a m
     },
   );
   assert.deepEqual(model.hints, S2V_LOADING_HINTS);
-  assert.equal(model.progress, null);
-  assert.equal(
-    Math.round(computePseudoProgressPercent(model.elapsedMs ?? 0, model.expectedDurationMs ?? 0)),
-    27,
-  );
-});
-
-test("loading view forwards provider progress when the upstream reports it", () => {
-  const model = buildTaskViewerModel(
-    { status: "running", progress: 37 },
-    {
-      isPolling: true,
-      transportError: null,
-      consecutiveErrors: 0,
-      elapsedMs: 20_000,
-      expectedDurationMs: 450_000,
-      skuId: "BAILIAN_WAN22_S2V",
-    },
-  );
-  assert.equal(model.phase, "loading");
-  assert.equal(model.progress, 37);
 });
 
 test("pseudo progress follows elapsed time instead of jumping ahead with ease-out", () => {

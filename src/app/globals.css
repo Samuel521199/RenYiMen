@@ -30,41 +30,6 @@
     animation: wf-shimmer 2.2s ease-in-out infinite;
   }
 
-  .hover-reveal-scrollbar {
-    scrollbar-width: thin;
-    scrollbar-color: transparent transparent;
-  }
-
-  .hover-reveal-scrollbar:hover {
-    scrollbar-color: rgb(100 116 139 / 0.62) transparent;
-  }
-
-  .hover-reveal-scrollbar::-webkit-scrollbar {
-    width: 7px;
-    height: 7px;
-  }
-
-  .hover-reveal-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .hover-reveal-scrollbar::-webkit-scrollbar-thumb {
-    border: 2px solid transparent;
-    border-radius: 999px;
-    background: transparent;
-    background-clip: padding-box;
-  }
-
-  .hover-reveal-scrollbar:hover::-webkit-scrollbar-thumb {
-    background: rgb(100 116 139 / 0.62);
-    background-clip: padding-box;
-  }
-
-  .hover-reveal-scrollbar:hover::-webkit-scrollbar-thumb:hover {
-    background: rgb(148 163 184 / 0.82);
-    background-clip: padding-box;
-  }
-
   .subtle-scrollbar,
   .one-prompt-video-workbench,
   .one-prompt-video-workbench * {

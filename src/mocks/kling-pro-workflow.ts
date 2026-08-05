@@ -11,9 +11,9 @@ export const klingProWorkflowMock: WorkflowFormSchema = {
   title: "Kling 高级版",
   titleEn: "Kling Pro",
   description:
-    "上传参考图并描述动作与镜头，生成动作流畅、细节清晰的高质量短视频，适合精品内容制作。",
+    "上传一张参考图，填写镜头描述，即可生成高质量短视频。高级版采用 O3-pro 模型，动作流畅度与细节质量更佳，适合精品内容制作。计费：600 积分/次。",
   descriptionEn:
-    "Upload a reference image and describe the motion and camera direction to generate a smooth, detailed video clip for premium content.",
+    "Upload a reference image and describe the motion to generate a high-quality video clip. The Pro version uses the O3-pro model for smoother motion and superior detail, ideal for premium content. Billing: 600 credits/generation.",
   fields: [
     {
       kind: "group",

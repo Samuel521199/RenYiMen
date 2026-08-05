@@ -37,6 +37,8 @@ const SKU_DISPLAY_NAMES: Record<string, string> = {
   RH_VIDEO_ENHANCE: "视频模糊修复",
   KLING_CINEMA_PRO: "单图生成短视频",
   BAILIAN_WANX_I2V: "多模态图生视频",
+  BAILIAN_WAN27_VIDEO_CONTINUATION: "视频续写",
+  BAILIAN_WAN27_EFFECT_REPLICATION: "特效复刻",
   RH_IMG2VIDEO_FIRSTLAST: "首尾帧生成视频",
   BAILIAN_MULTI_REF: "多参考图融合",
   RH_TEXT_TO_IMAGE: "文生图",

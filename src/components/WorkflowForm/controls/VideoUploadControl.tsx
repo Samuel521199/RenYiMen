@@ -7,7 +7,7 @@ import type { VideoUploadField } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { useT } from "@/i18n";
-import { uploadPickerButtonClass } from "@/components/WorkflowForm/controls/upload-control-styles";
+import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
 
 export interface VideoUploadControlProps {
   field: VideoUploadField;
@@ -32,16 +32,30 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
     inputRef.current?.click();
   }, []);
 
+  const handleFiles = useCallback((files: File[]) => {
+    const file = files[0];
+    if (file) void applyImageFile(field.id, file);
+  }, [applyImageFile, field.id]);
+  const { isDragging, dropZoneProps } = useFileDrop({
+    disabled: v.status === "uploading",
+    onFiles: handleFiles,
+  });
+
   const dashedFrameClass = [
     "relative flex h-[176px] w-full min-w-0 max-w-full items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-[#091526]/75 transition-all duration-300 hover:bg-[#0b1a2d]",
-    error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45",
+    isDragging ? "border-emerald-400 bg-emerald-400/10" : error ? "border-red-500/50" : "border-white/[0.14] hover:border-emerald-400/45",
   ].join(" ");
 
   return (
     <div className="min-w-0 max-w-full space-y-3 overflow-hidden">
       {/* Preview / drop zone */}
-      <div className={dashedFrameClass}>
-        {v.status === "uploading" ? (
+      <div className={dashedFrameClass} {...dropZoneProps}>
+        {isDragging ? (
+          <div className="flex flex-col items-center gap-2 px-4 text-emerald-300">
+            <Upload className="h-9 w-9" strokeWidth={1.5} aria-hidden />
+            <span className="text-sm font-medium">{t.uploadDropActive}</span>
+          </div>
+        ) : v.status === "uploading" ? (
           <div className="flex flex-col items-center gap-2 px-4">
             <Loader2 className="h-8 w-8 animate-spin text-emerald-400" strokeWidth={2} />
             <span className="text-sm font-medium text-slate-300">{t.uploadUploading}</span>
@@ -90,14 +104,14 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
           onChange={(e) => {
             const file = e.target.files?.[0];
             e.target.value = "";
-            if (file) void applyImageFile(field.id, file);
+            if (file) handleFiles([file]);
           }}
         />
         <button
           type="button"
           disabled={v.status === "uploading"}
           onClick={triggerFilePick}
-          className={uploadPickerButtonClass}
+          className="rounded-xl bg-emerald-500/90 px-3.5 py-2 text-xs font-semibold text-white transition-all hover:-translate-y-0.5 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {v.status === "ready"
             ? locale === "en" ? "Change video" : "更换视频"

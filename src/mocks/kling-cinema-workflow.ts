@@ -9,8 +9,8 @@ export const klingCinemaWorkflowMock: WorkflowFormSchema = {
   version: "1.0.0",
   title: "图生视频",
   titleEn: "Image-to-Video",
-  description: "上传参考图并填写主题与镜头描述，生成画面连贯、运动自然的短视频。",
-  descriptionEn: "Upload a reference image and provide a theme and camera description to generate a cohesive video with natural motion.",
+  description: "上传参考图，填写主题与镜头描述；与 LU 图生视频工作流节点对齐。",
+  descriptionEn: "Upload a reference image and provide a theme and camera description; aligned with LU image-to-video workflow nodes.",
   fields: [
     {
       kind: "group",

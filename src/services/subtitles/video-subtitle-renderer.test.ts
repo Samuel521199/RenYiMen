@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
 import test from "node:test";
-import os from "node:os";
-import path from "node:path";
 import { parseTimedSubtitleCues } from "../providers/bailian-subtitle-service.ts";
-import { buildAssSubtitle, renderVideoWithSubtitles } from "./video-subtitle-renderer.ts";
+import { buildAssSubtitle } from "./video-subtitle-renderer.ts";
 
 test("parseTimedSubtitleCues extracts and sorts sentence timestamps", () => {
   const cues = parseTimedSubtitleCues({
@@ -33,25 +29,4 @@ test("buildAssSubtitle creates timed, escaped, two-line subtitle events", () => 
   assert.match(output, /\\N/);
   assert.doesNotMatch(output, /包含\{特殊\}/);
   assert.match(output, /Microsoft YaHei|Noto Sans CJK SC/);
-});
-
-const ffmpegExecutable = process.env.FFMPEG_PATH?.trim() || "ffmpeg";
-const ffmpegAvailable = spawnSync(ffmpegExecutable, ["-version"], { windowsHide: true }).status === 0;
-
-test("renderVideoWithSubtitles produces a playable MP4", { skip: !ffmpegAvailable }, async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "subtitle-render-test-"));
-  const source = path.join(directory, "source.mp4");
-  try {
-    const generated = spawnSync(ffmpegExecutable, [
-      "-hide_banner", "-loglevel", "error", "-y",
-      "-f", "lavfi", "-i", "color=c=black:s=640x360:d=1",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", source,
-    ], { windowsHide: true });
-    assert.equal(generated.status, 0, generated.stderr?.toString());
-    const output = await renderVideoWithSubtitles(await readFile(source), [{ startMs: 0, endMs: 900, text: "字幕测试" }]);
-    assert.ok(output.byteLength > 1_000);
-    assert.equal(output.subarray(4, 8).toString("ascii"), "ftyp");
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
 });

@@ -14,12 +14,14 @@ import {
 import { createPortal } from "react-dom";
 import type { Session } from "next-auth";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
 import { HistoryFilmstrip } from "@/components/TaskStatusViewer/HistoryFilmstrip";
 import { TaskStatusViewer } from "@/components/TaskStatusViewer/TaskStatusViewer";
 import { UserCredits } from "@/components/Sidebar/UserCredits";
 import { DynamicForm } from "@/components/WorkflowForm/DynamicForm";
 import { FixedWorkflowPricing } from "@/components/WorkflowForm/FixedWorkflowPricing";
+import { ToolProjectSelector } from "@/components/WorkflowForm/ToolProjectSelector";
 import { useTaskPolling } from "@/hooks/useTaskPolling";
 import {
   buildTaskViewerModel,
@@ -27,12 +29,20 @@ import {
   resolveExpectedDurationMsForSku,
 } from "@/lib/task-status-view";
 import { autoSaveGeneratedResultsToWorkbenchAssets } from "@/lib/workbench-asset-autosave";
+import {
+  clearWorkflowDraft,
+  loadWorkflowDraft,
+  saveWorkflowDraft,
+  sanitizeWorkflowDraftParameters,
+} from "@/lib/workflow-draft-storage";
 import { getAtPath, iterateLeafFields } from "@/lib/workflow-utils";
 import {
   BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND,
   BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND,
   BAILIAN_S2V_480P_CREDITS_PER_SECOND,
   BAILIAN_S2V_720P_CREDITS_PER_SECOND,
+  BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND,
+  BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND,
   BAILIAN_VIDEO_CREDITS_PER_SECOND,
 } from "@/services/providers/BailianAdapter";
 import type { TaskStatusViewModel } from "@/types/task-status";
@@ -40,14 +50,23 @@ import type { ImageFieldValue, MultiImageFieldValue } from "@/types/workflow";
 import { fetchSkus } from "@/services/sku-api";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import type { SkuCategory, SkuDefinition } from "@/types/sku-catalog";
+import type { ToolProjectOutputState, ToolProjectRecord } from "@/types/tool-project";
 import { useLanguage, useT } from "@/i18n";
+import {
+  readWorkbenchToolGroup,
+  WORKBENCH_TOOL_SECTION_EVENT,
+  WORKFLOW_STUDIO_HISTORY_STATE_KEY,
+  type WorkbenchToolGroup as ToolGroup,
+  type WorkbenchToolSectionEventDetail,
+} from "@workbench/lib/tool-section-navigation";
 
 // ─── View type ──────────────────────────────────────────────────────────────
 
 type View = "gallery" | "studio";
+type VideoEditingTab = "ai-video-edit" | "motion-replica";
 type SubtitleProcessState = "idle" | "processing" | "success" | "error";
 
-const WORKFLOW_STUDIO_HISTORY_KEY = "__workflowStudioSkuId";
+const WORKFLOW_STUDIO_HISTORY_KEY = WORKFLOW_STUDIO_HISTORY_STATE_KEY;
 const STUDIO_SPLIT_STORAGE_KEY = "workflow-studio-split-percent";
 const DEFAULT_STUDIO_SPLIT_PERCENT = 58;
 const MIN_STUDIO_SPLIT_PERCENT = 32;
@@ -71,6 +90,54 @@ const CATEGORY_BG: Record<SkuCategory, string> = {
   video: "from-rose-950/80 via-orange-950/50 to-[#0a0f1e]",
 };
 
+const TOOL_GROUP_LABELS: Record<ToolGroup, { zh: string; en: string }> = {
+  "video-generation": { zh: "视频生成", en: "Video Generation" },
+  "video-editing": { zh: "视频编辑", en: "Video Editing" },
+  "audio-post": { zh: "音频后期", en: "Audio Post" },
+};
+
+const AI_VIDEO_EDITING_SKU_IDS = new Set([
+  "RH_VIDEO_ENHANCE",
+  "BAILIAN_WAN27_VIDEO_CONTINUATION",
+]);
+
+const WAN27_VIDEO_EDIT_SKU_IDS = new Set([
+  "BAILIAN_WAN27_CAMERA_REPLICATION",
+  "BAILIAN_WAN27_EFFECT_REPLICATION",
+]);
+
+const MOTION_REPLICA_SKU_IDS = new Set([
+  "BAILIAN_WAN22_ANIMATE_MOVE",
+  ...WAN27_VIDEO_EDIT_SKU_IDS,
+]);
+
+const VIDEO_EDITING_SKU_IDS = new Set([
+  ...AI_VIDEO_EDITING_SKU_IDS,
+  ...MOTION_REPLICA_SKU_IDS,
+]);
+
+const AUDIO_POST_SKU_IDS = new Set([
+  "BAILIAN_WAN22_S2V",
+  "LOCAL_AUTO_SUBTITLES",
+]);
+
+const VIDEO_EDITING_TABS: { key: VideoEditingTab; label: string; labelEn: string }[] = [
+  { key: "ai-video-edit", label: "AI视频编辑微调", labelEn: "AI Video Editing" },
+  { key: "motion-replica", label: "动态复刻", labelEn: "Motion Replica" },
+];
+
+function isSkuInToolGroup(sku: SkuDefinition, group: ToolGroup): boolean {
+  if (sku.category !== "video") return false;
+  if (group === "audio-post") return AUDIO_POST_SKU_IDS.has(sku.skuId);
+  if (group === "video-editing") return VIDEO_EDITING_SKU_IDS.has(sku.skuId);
+  return !AUDIO_POST_SKU_IDS.has(sku.skuId) && !VIDEO_EDITING_SKU_IDS.has(sku.skuId);
+}
+
+function isSkuInVideoEditingTab(sku: SkuDefinition, tab: VideoEditingTab): boolean {
+  if (tab === "motion-replica") return MOTION_REPLICA_SKU_IDS.has(sku.skuId);
+  return AI_VIDEO_EDITING_SKU_IDS.has(sku.skuId);
+}
+
 // ─── WorkflowStudio ──────────────────────────────────────────────────────────
 
 /**
@@ -78,6 +145,7 @@ const CATEGORY_BG: Record<SkuCategory, string> = {
  */
 export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}) {
   const { data: session, status: sessionStatus } = useSession();
+  const searchParams = useSearchParams();
   const t = useT();
   const { locale, toggleLocale } = useLanguage();
 
@@ -100,11 +168,23 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
 
   const [skus, setSkus] = useState<SkuDefinition[]>([]);
   const [selectedSkuId, setSelectedSkuId] = useState<string | null>(null);
+  const [toolProjects, setToolProjects] = useState<ToolProjectRecord[]>([]);
+  const [selectedToolProjectId, setSelectedToolProjectId] = useState<string | null>(null);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectLoadRevision, setProjectLoadRevision] = useState(0);
+  const [projectSaving, setProjectSaving] = useState(false);
+  const [projectError, setProjectError] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<SkuCategory>("prompt");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [profileRefreshKey, setProfileRefreshKey] = useState(0);
   const historyViewRestoredRef = useRef(false);
+  const suppressedDraftSaveRef = useRef<string | null>(null);
+  const suppressedProjectSaveRef = useRef<string | null>(null);
+  const projectRequestSequenceRef = useRef(0);
+  const routeToolGroup = readWorkbenchToolGroup(searchParams.get("group"));
+  const [activeToolGroup, setActiveToolGroup] = useState<ToolGroup | null>(routeToolGroup);
+  const [activeVideoEditingTab, setActiveVideoEditingTab] = useState<VideoEditingTab>("ai-video-edit");
 
   const applyStudioSplit = (percent: number, persist = false) => {
     const nextPercent = clampStudioSplit(percent);
@@ -193,6 +273,42 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     () => skus.find((s) => s.skuId === selectedSkuId) ?? null,
     [skus, selectedSkuId]
   );
+  const selectedToolProject = useMemo(
+    () => toolProjects.find((project) => project.id === selectedToolProjectId) ?? null,
+    [toolProjects, selectedToolProjectId],
+  );
+
+  const updateToolProject = useCallback(async (
+    projectId: string,
+    changes: Record<string, unknown>,
+    showSaving = true,
+  ): Promise<ToolProjectRecord | null> => {
+    if (showSaving) setProjectSaving(true);
+    try {
+      const response = await fetch(`/api/tool-projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(changes),
+      });
+      const payload: unknown = await response.json().catch(() => null);
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+      if (!response.ok || record?.ok !== true || !record.project || typeof record.project !== "object") {
+        throw new Error(typeof record?.error === "string" ? record.error : "项目保存失败");
+      }
+      const project = record.project as ToolProjectRecord;
+      setToolProjects((current) => current
+        .map((item) => item.id === project.id ? project : item)
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+      setProjectError(null);
+      return project;
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "项目保存失败");
+      return null;
+    } finally {
+      if (showSaving) setProjectSaving(false);
+    }
+  }, []);
   const isTalkingVideo = selectedSku?.skuId === "BAILIAN_WAN22_S2V";
   const isAutoSubtitleTool = selectedSku?.skuId === "LOCAL_AUTO_SUBTITLES";
   const voiceAudioUrl = useMemo(() => {
@@ -207,10 +323,27 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     const value = path ? getAtPath(parameters, path) as ImageFieldValue | undefined : undefined;
     return value?.status === "ready" && typeof value.remoteUrl === "string" ? value.remoteUrl : null;
   }, [isAutoSubtitleTool, fieldPaths, parameters]);
+  const draftOwnerId = session?.user?.id ?? null;
 
   useEffect(() => {
     if (isAutoSubtitleTool && standaloneSourceVideoUrl) setSubmitError(null);
   }, [isAutoSubtitleTool, standaloneSourceVideoUrl]);
+
+  useEffect(() => {
+    if (!draftOwnerId || !selectedSkuId || !schema) return;
+    const identity = `${draftOwnerId}:${selectedSkuId}`;
+    if (suppressedDraftSaveRef.current === identity) {
+      suppressedDraftSaveRef.current = null;
+      return;
+    }
+    saveWorkflowDraft(
+      window.localStorage,
+      draftOwnerId,
+      selectedSkuId,
+      schema,
+      parameters,
+    );
+  }, [draftOwnerId, selectedSkuId, schema, parameters]);
 
   const hasImageUploadInFlight = useMemo(() => {
     if (!schema) return false;
@@ -226,6 +359,39 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     }
     return false;
   }, [schema, parameters, fieldPaths]);
+
+  useEffect(() => {
+    if (!selectedToolProjectId || !schema || hasImageUploadInFlight) return;
+    if (suppressedProjectSaveRef.current === selectedToolProjectId) {
+      suppressedProjectSaveRef.current = null;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const outputState: ToolProjectOutputState = {
+        subtitleState: subtitleState === "processing" ? "idle" : subtitleState,
+        ...(captionedVideoUrl ? { captionedVideoUrl } : {}),
+        ...(subtitleError ? { subtitleError } : {}),
+      };
+      void updateToolProject(selectedToolProjectId, {
+        formState: sanitizeWorkflowDraftParameters(schema, parameters),
+        outputState,
+        activeTaskId,
+        providerCode: gatewayProviderCode ?? "",
+      });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    selectedToolProjectId,
+    schema,
+    parameters,
+    activeTaskId,
+    gatewayProviderCode,
+    subtitleState,
+    captionedVideoUrl,
+    subtitleError,
+    hasImageUploadInFlight,
+    updateToolProject,
+  ]);
 
   // ── Load SKU catalog ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -273,23 +439,246 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     onTerminal: bumpProfileBalance,
   });
 
+  const applyToolProject = useCallback((project: ToolProjectRecord, sku: SkuDefinition) => {
+    resetPoll();
+    suppressedProjectSaveRef.current = project.id;
+    setSelectedToolProjectId(project.id);
+    setActiveTaskId(project.activeTaskId ?? null);
+    setViewingHistoryId(null);
+    setGatewaySelection(sku.skuId, project.providerCode || sku.providerCode);
+    hydrateSchema(sku.uiSchema, sanitizeWorkflowDraftParameters(sku.uiSchema, project.formState));
+
+    const output = project.outputState && typeof project.outputState === "object" && !Array.isArray(project.outputState)
+      ? project.outputState as ToolProjectOutputState
+      : {};
+    const restoredCaptionedUrl = typeof output.captionedVideoUrl === "string" ? output.captionedVideoUrl : null;
+    setCaptionedVideoUrl(restoredCaptionedUrl);
+    setSubtitleError(typeof output.subtitleError === "string" ? output.subtitleError : null);
+    setSubtitleState(output.subtitleState === "success" && restoredCaptionedUrl
+      ? "success"
+      : output.subtitleState === "error" ? "error" : "idle");
+    setShowErrors(false);
+    setSubmitError(null);
+    setProjectError(null);
+    void fetchCloudHistory(project.id);
+  }, [fetchCloudHistory, hydrateSchema, resetPoll, setGatewaySelection, setViewingHistoryId]);
+
   // ── SKU switch ───────────────────────────────────────────────────────────
   const applySku = useCallback(
     (sku: SkuDefinition) => {
+      const canResumeExistingProject = selectedSkuId === sku.skuId
+        && selectedToolProjectId !== null
+        && toolProjects.some((project) => project.id === selectedToolProjectId);
+      if (canResumeExistingProject) {
+        setGatewaySelection(sku.skuId, selectedToolProject?.providerCode || sku.providerCode);
+        setShowErrors(false);
+        setSubmitError(null);
+        setProjectError(null);
+        return;
+      }
+
+      projectRequestSequenceRef.current += 1;
+      setProjectLoadRevision((revision) => revision + 1);
+      setProjectsLoading(true);
       resetPoll();
       setActiveTaskId(null);
       setViewingHistoryId(null);
+      setSelectedToolProjectId(null);
+      setToolProjects([]);
+      setProjectError(null);
       setSelectedSkuId(sku.skuId);
       setGatewaySelection(sku.skuId, sku.providerCode);
-      hydrateSchema(sku.uiSchema);
+      const restoredParameters = draftOwnerId
+        ? loadWorkflowDraft(window.localStorage, draftOwnerId, sku.skuId, sku.uiSchema)
+        : null;
+      hydrateSchema(sku.uiSchema, restoredParameters ?? undefined);
       setShowErrors(false);
       setSubmitError(null);
       setSubtitleState("idle");
       setCaptionedVideoUrl(null);
       setSubtitleError(null);
     },
-    [hydrateSchema, setGatewaySelection, setViewingHistoryId, resetPoll]
+    [draftOwnerId, hydrateSchema, resetPoll, selectedSkuId, selectedToolProject, selectedToolProjectId, setGatewaySelection, setViewingHistoryId, toolProjects]
   );
+
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || !selectedSku || schema !== selectedSku.uiSchema) return;
+    const sequence = ++projectRequestSequenceRef.current;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 8_000);
+    setProjectsLoading(true);
+    setProjectError(null);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/tool-projects?skuId=${encodeURIComponent(selectedSku.skuId)}`, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        const payload: unknown = await response.json().catch(() => null);
+        const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+        if (!response.ok || record?.ok !== true || !Array.isArray(record.projects)) {
+          throw new Error(typeof record?.error === "string" ? record.error : "项目加载失败");
+        }
+        let projects = record.projects as ToolProjectRecord[];
+        if (projects.length === 0) {
+          const createResponse = await fetch("/api/tool-projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            credentials: "same-origin",
+            signal: controller.signal,
+            body: JSON.stringify({
+              skuId: selectedSku.skuId,
+              providerCode: selectedSku.providerCode,
+              name: `${selectedSku.displayName}项目 1`,
+              formState: sanitizeWorkflowDraftParameters(
+                selectedSku.uiSchema,
+                useWorkflowStore.getState().parameters,
+              ),
+            }),
+          });
+          const createdPayload: unknown = await createResponse.json().catch(() => null);
+          const createdRecord = createdPayload && typeof createdPayload === "object"
+            ? createdPayload as Record<string, unknown>
+            : null;
+          if (!createResponse.ok || createdRecord?.ok !== true || !createdRecord.project) {
+            throw new Error(typeof createdRecord?.error === "string" ? createdRecord.error : "项目创建失败");
+          }
+          projects = [createdRecord.project as ToolProjectRecord];
+        }
+        if (sequence !== projectRequestSequenceRef.current) return;
+        setToolProjects(projects);
+        applyToolProject(projects[0], selectedSku);
+      } catch (error) {
+        if (sequence === projectRequestSequenceRef.current) {
+          setProjectError(controller.signal.aborted
+            ? (locale === "en" ? "Project loading timed out. Please retry." : "项目加载超时，请重试。")
+            : error instanceof Error ? error.message : "项目加载失败");
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (sequence === projectRequestSequenceRef.current) setProjectsLoading(false);
+      }
+    })();
+    return () => {
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [applyToolProject, locale, projectLoadRevision, schema, selectedSku, sessionStatus]);
+
+  const handleRetryToolProjects = useCallback(() => {
+    projectRequestSequenceRef.current += 1;
+    setProjectLoadRevision((revision) => revision + 1);
+  }, []);
+
+  const persistCurrentProject = useCallback(async () => {
+    if (!selectedToolProjectId || !schema || hasImageUploadInFlight) return;
+    await updateToolProject(selectedToolProjectId, {
+      formState: sanitizeWorkflowDraftParameters(schema, useWorkflowStore.getState().parameters),
+      outputState: {
+        subtitleState: subtitleState === "processing" ? "idle" : subtitleState,
+        ...(captionedVideoUrl ? { captionedVideoUrl } : {}),
+        ...(subtitleError ? { subtitleError } : {}),
+      },
+      activeTaskId,
+      providerCode: gatewayProviderCode ?? "",
+    });
+  }, [activeTaskId, captionedVideoUrl, gatewayProviderCode, hasImageUploadInFlight, schema, selectedToolProjectId, subtitleError, subtitleState, updateToolProject]);
+
+  useEffect(() => {
+    setActiveToolGroup(routeToolGroup);
+  }, [routeToolGroup]);
+
+  useEffect(() => {
+    const handleToolSectionChange = (event: Event) => {
+      const detail = (event as CustomEvent<WorkbenchToolSectionEventDetail>).detail;
+      void persistCurrentProject();
+      setActiveToolGroup(detail.group);
+      setView("gallery");
+    };
+
+    window.addEventListener(WORKBENCH_TOOL_SECTION_EVENT, handleToolSectionChange);
+    return () => window.removeEventListener(WORKBENCH_TOOL_SECTION_EVENT, handleToolSectionChange);
+  }, [persistCurrentProject]);
+
+  const handleSelectToolProject = useCallback(async (projectId: string) => {
+    if (!selectedSku || projectId === selectedToolProjectId) return;
+    await persistCurrentProject();
+    const project = toolProjects.find((item) => item.id === projectId);
+    if (project) applyToolProject(project, selectedSku);
+  }, [applyToolProject, persistCurrentProject, selectedSku, selectedToolProjectId, toolProjects]);
+
+  const handleCreateToolProject = useCallback(async () => {
+    if (!selectedSku || !schema) return;
+    await persistCurrentProject();
+    setProjectsLoading(true);
+    try {
+      const response = await fetch("/api/tool-projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          skuId: selectedSku.skuId,
+          providerCode: selectedSku.providerCode,
+          name: `${selectedSku.displayName}项目 ${toolProjects.length + 1}`,
+          formState: sanitizeWorkflowDraftParameters(schema, {}),
+        }),
+      });
+      const payload: unknown = await response.json().catch(() => null);
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+      if (!response.ok || record?.ok !== true || !record.project) {
+        throw new Error(typeof record?.error === "string" ? record.error : "项目创建失败");
+      }
+      const project = record.project as ToolProjectRecord;
+      setToolProjects((current) => [project, ...current]);
+      applyToolProject(project, selectedSku);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "项目创建失败");
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, [applyToolProject, persistCurrentProject, schema, selectedSku, toolProjects.length]);
+
+  const handleRenameToolProject = useCallback(async () => {
+    if (!selectedToolProject) return;
+    const name = window.prompt(locale === "en" ? "Project name" : "请输入项目名称", selectedToolProject.name)?.trim();
+    if (!name || name === selectedToolProject.name) return;
+    await updateToolProject(selectedToolProject.id, { name });
+  }, [locale, selectedToolProject, updateToolProject]);
+
+  const handleDeleteToolProject = useCallback(async () => {
+    if (!selectedToolProject || !selectedSku) return;
+    if (toolProjects.length <= 1) {
+      window.alert(locale === "en" ? "Keep at least one project for this tool." : "每个工具至少需要保留一个项目。你可以重命名或清空当前项目。");
+      return;
+    }
+    if (!window.confirm(locale === "en" ? `Delete “${selectedToolProject.name}”?` : `确定删除“${selectedToolProject.name}”吗？`)) return;
+    const response = await fetch(`/api/tool-projects/${encodeURIComponent(selectedToolProject.id)}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      setProjectError(locale === "en" ? "Failed to delete project" : "项目删除失败");
+      return;
+    }
+    const remaining = toolProjects.filter((item) => item.id !== selectedToolProject.id);
+    setToolProjects(remaining);
+    applyToolProject(remaining[0], selectedSku);
+  }, [applyToolProject, locale, selectedSku, selectedToolProject, toolProjects]);
+
+  const handleResetForm = useCallback(() => {
+    setShowErrors(false);
+    setSubmitError(null);
+    setSubtitleState("idle");
+    setCaptionedVideoUrl(null);
+    setSubtitleError(null);
+    if (draftOwnerId && selectedSkuId) {
+      suppressedDraftSaveRef.current = `${draftOwnerId}:${selectedSkuId}`;
+      clearWorkflowDraft(window.localStorage, draftOwnerId, selectedSkuId);
+    }
+    reset();
+  }, [draftOwnerId, reset, selectedSkuId]);
 
   const enterStudio = useCallback(
     (sku: SkuDefinition) => {
@@ -313,13 +702,19 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   );
 
   const backToGallery = useCallback(() => {
+    void persistCurrentProject();
     const currentState = window.history.state;
     if (currentState?.[WORKFLOW_STUDIO_HISTORY_KEY]) {
       window.history.back();
       return;
     }
     setView("gallery");
-  }, []);
+  }, [persistCurrentProject]);
+
+  const handleSignOut = useCallback(async () => {
+    await persistCurrentProject();
+    await signOut({ callbackUrl: "/" });
+  }, [persistCurrentProject]);
 
   useEffect(() => {
     const syncViewFromHistory = (state: unknown) => {
@@ -356,7 +751,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   );
 
   const viewerModel = useMemo(() => {
-    if (!activeTaskId && !isSubmitting) return null;
+    if (!activeTaskId) return null;
     return buildTaskViewerModel(pollData, {
       isPolling,
       transportError,
@@ -365,7 +760,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       expectedDurationMs,
       skuId: selectedSku?.skuId,
     });
-  }, [activeTaskId, isSubmitting, pollData, isPolling, transportError, consecutiveErrors, elapsedMs, expectedDurationMs, selectedSku?.skuId]);
+  }, [activeTaskId, pollData, isPolling, transportError, consecutiveErrors, elapsedMs, expectedDurationMs, selectedSku?.skuId]);
 
   const displayViewerModel = useMemo((): TaskStatusViewModel | null => {
     if (viewingHistoryId) {
@@ -386,7 +781,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const effectiveViewerModel = useMemo((): TaskStatusViewModel | null => {
     if (!isAutoSubtitleTool) return displayViewerModel;
     if (subtitleState === "processing") {
-      return viewerModel ?? {
+      return {
         phase: "loading",
         subPhase: "running",
         elapsedMs: 0,
@@ -401,11 +796,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       return { phase: "failure", errorMessage: subtitleError ?? "字幕处理失败，请重试", hints: [] };
     }
     return null;
-  }, [isAutoSubtitleTool, displayViewerModel, subtitleState, viewerModel, captionedVideoUrl, subtitleError, locale]);
-
-  useEffect(() => {
-    void useWorkflowStore.getState().fetchCloudHistory();
-  }, []);
+  }, [isAutoSubtitleTool, displayViewerModel, subtitleState, captionedVideoUrl, subtitleError, locale]);
 
   const lastSyncedSucceededTask = useRef<string | null>(null);
   const autoSavedTaskIdsRef = useRef<Set<string>>(new Set());
@@ -418,8 +809,8 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     if (pollData?.status !== "succeeded" || !activeTaskId) return;
     if (lastSyncedSucceededTask.current === activeTaskId) return;
     lastSyncedSucceededTask.current = activeTaskId;
-    void fetchCloudHistory();
-  }, [viewingHistoryId, pollData?.status, activeTaskId, fetchCloudHistory]);
+    void fetchCloudHistory(selectedToolProjectId);
+  }, [viewingHistoryId, pollData?.status, activeTaskId, fetchCloudHistory, selectedToolProjectId]);
 
   useEffect(() => {
     if (!autoSaveToAssetLibrary || !selectedSku || !activeTaskId) return;
@@ -473,6 +864,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const handleSubmitToGateway = useCallback(async () => {
     setViewingHistoryId(null);
     if (!selectedSku) { setSubmitError(t.errSelectSku); return; }
+    if (!selectedToolProjectId) {
+      setSubmitError(locale === "en" ? "Please wait for a project to load." : "请等待项目加载完成后再提交。");
+      return;
+    }
     // 轮询进行中或已有提交在途，禁止重复提交
     if (isSubmitting || isPolling) return;
 
@@ -481,8 +876,12 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     if (Object.keys(errs).length > 0) { setSubmitError(null); return; }
 
     if (isAutoSubtitleTool) {
-      if (!standaloneSourceVideoUrl) { setSubmitError(locale === "en" ? "Please upload a source video first." : "请先上传原视频"); return; }
+      if (!standaloneSourceVideoUrl) {
+        setSubmitError(locale === "en" ? "Please upload a source video first." : "请先上传原视频");
+        return;
+      }
       setSubmitError(null);
+      setAutoSaveNotice(null);
       setSubtitleError(null);
       setCaptionedVideoUrl(null);
       setSubtitleState("processing");
@@ -501,6 +900,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         }
         setCaptionedVideoUrl(result.captionedVideoUrl);
         setSubtitleState("success");
+        bumpProfileBalance();
       } catch (error) {
         setSubtitleError(error instanceof Error ? error.message : "字幕处理失败，请稍后重试");
         setSubtitleState("error");
@@ -527,7 +927,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify(built),
+        body: JSON.stringify({ ...built, toolProjectId: selectedToolProjectId }),
       });
       let json: unknown;
       try { json = await res.json(); } catch { setSubmitError(t.errServerAbnormal); return; }
@@ -550,7 +950,14 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       }
       const tid = rec.taskId;
       if (typeof tid !== "string" || !tid.trim()) { setSubmitError(t.errNoTaskId); return; }
-      setActiveTaskId(tid.trim());
+      const nextTaskId = tid.trim();
+      setActiveTaskId(nextTaskId);
+      if (selectedToolProjectId) {
+        void updateToolProject(selectedToolProjectId, {
+          activeTaskId: nextTaskId,
+          providerCode: built.providerCode,
+        }, false);
+      }
     } catch (e) {
       console.error("[WorkflowStudio] 提单网络异常", e);
       setSubmitError(e instanceof Error ? e.message : t.errNetwork);
@@ -558,7 +965,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       setIsSubmitting(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSku, validate, buildPayload, resetPoll, setViewingHistoryId, isAutoSubtitleTool, standaloneSourceVideoUrl, locale]);
+  }, [selectedSku, validate, buildPayload, resetPoll, setViewingHistoryId, isAutoSubtitleTool, standaloneSourceVideoUrl, locale, bumpProfileBalance, selectedToolProjectId, updateToolProject]);
 
   const onStudioFormSubmit = useCallback<FormEventHandler<HTMLFormElement>>(
     (e) => { e.preventDefault(); void handleSubmitToGateway(); },
@@ -573,7 +980,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     setSubtitleState("idle");
     setCaptionedVideoUrl(null);
     setSubtitleError(null);
-  }, [resetPoll]);
+    if (selectedToolProjectId) {
+      void updateToolProject(selectedToolProjectId, { activeTaskId: null }, false);
+    }
+  }, [resetPoll, selectedToolProjectId, updateToolProject]);
 
   const talkingVideoReady = Boolean(
     isTalkingVideo
@@ -602,13 +1012,14 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       }
       setCaptionedVideoUrl(result.captionedVideoUrl);
       setSubtitleState("success");
+      bumpProfileBalance();
     } catch (error) {
       setSubtitleError(error instanceof Error ? error.message : "字幕处理失败，请稍后重试");
       setSubtitleState("error");
     }
-  }, [talkingVideoReady, activeTaskId, voiceAudioUrl, subtitleState]);
+  }, [talkingVideoReady, activeTaskId, voiceAudioUrl, subtitleState, bumpProfileBalance]);
 
-  const supplementaryVideo = isTalkingVideo && subtitleState !== "idle"
+  const supplementaryVideo = isTalkingVideo && !viewingHistoryId && subtitleState !== "idle"
     ? {
         status: subtitleState === "success" ? "success" as const : subtitleState === "error" ? "error" as const : "processing" as const,
         url: captionedVideoUrl ?? undefined,
@@ -622,11 +1033,16 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     : null;
 
   const bailianEstimate = useMemo(() => {
-    if (!selectedSku || selectedSku.skuId !== "BAILIAN_WANX_I2V" || !schema) return null;
+    if (
+      !selectedSku
+      || !["BAILIAN_WANX_I2V", "BAILIAN_WAN27_VIDEO_CONTINUATION"].includes(selectedSku.skuId)
+      || !schema
+    ) return null;
     const p = fieldPaths.duration;
     const raw = p ? getAtPath(parameters, p) : undefined;
     let sec = typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : 5;
-    sec = Math.min(15, Math.max(3, sec));
+    const minDuration = selectedSku.skuId === "BAILIAN_WAN27_VIDEO_CONTINUATION" ? 2 : 3;
+    sec = Math.min(15, Math.max(minDuration, sec));
     const credits = sec * BAILIAN_VIDEO_CREDITS_PER_SECOND;
     return { sec, credits };
   }, [selectedSku, schema, fieldPaths, parameters]);
@@ -644,8 +1060,22 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     { key: "image", label: t.categoryImage },
     { key: "video", label: t.categoryVideo },
   ];
+  const visibleCategoryTabs = activeToolGroup
+    ? CATEGORY_TABS.filter((tab) => tab.key === "video")
+    : CATEGORY_TABS;
 
-  const visibleSkus = skus.filter((s) => s.category === activeCategory);
+  useEffect(() => {
+    if (activeToolGroup) setActiveCategory("video");
+  }, [activeToolGroup]);
+
+  const visibleSkus = activeToolGroup === "video-editing"
+    ? skus.filter((s) => isSkuInVideoEditingTab(s, activeVideoEditingTab))
+    : activeToolGroup
+      ? skus.filter((s) => isSkuInToolGroup(s, activeToolGroup))
+      : skus.filter((s) => s.category === activeCategory);
+  const activeToolGroupLabel = activeToolGroup
+    ? TOOL_GROUP_LABELS[activeToolGroup][locale]
+    : "";
   const selectedSkuName = selectedSku
     ? (locale === "en" && selectedSku.displayNameEn ? selectedSku.displayNameEn : selectedSku.displayName)
     : "";
@@ -713,7 +1143,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
             sessionStatus={sessionStatus}
             profileRefreshKey={profileRefreshKey}
             onSignIn={() => void signIn(undefined, { callbackUrl: "/" })}
-            onSignOut={() => void signOut({ callbackUrl: "/" })}
+            onSignOut={() => void handleSignOut()}
           />
         </div>
       </div>
@@ -740,8 +1170,36 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
 
             {/* Category tabs */}
             <div className="mt-6 flex flex-wrap items-center gap-2">
-              {CATEGORY_TABS.map((tab) => {
-                const count = skus.filter((s) => s.category === tab.key).length;
+              {activeToolGroup === "video-editing" ? VIDEO_EDITING_TABS.map((tab) => {
+                const count = skus.filter((s) => isSkuInVideoEditingTab(s, tab.key)).length;
+                const isActive = activeVideoEditingTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setActiveVideoEditingTab(tab.key)}
+                    className={[
+                      "flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all duration-200",
+                      isActive
+                        ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/30"
+                        : "bg-[#1a2844] text-slate-400 hover:bg-[#243560] hover:text-slate-200",
+                    ].join(" ")}
+                  >
+                    <span>{locale === "en" ? tab.labelEn : tab.label}</span>
+                    {!catalogLoading && (
+                      <span className={[
+                        "rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-none tabular-nums",
+                        isActive ? "bg-white/20 text-white" : "bg-[#0d1929] text-slate-500",
+                      ].join(" ")}>
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                );
+              }) : visibleCategoryTabs.map((tab) => {
+                const count = activeToolGroup
+                  ? visibleSkus.length
+                  : skus.filter((s) => s.category === tab.key).length;
                 const isActive = activeCategory === tab.key;
                 return (
                   <button
@@ -775,6 +1233,13 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         {/* Card grid */}
         <div className="flex-1 px-4 py-8 sm:px-6">
           <div className="mx-auto max-w-[1400px]">
+            {activeToolGroupLabel && (
+              <div className="mb-5 flex items-center justify-between">
+                <h2 className="text-xl font-semibold tracking-tight text-white">
+                  {activeToolGroupLabel}
+                </h2>
+              </div>
+            )}
 
             {/* Loading skeletons */}
             {catalogLoading && (
@@ -869,6 +1334,34 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       bailianEstimate={bailianEstimate}
                     />
                   ) : null}
+                  beforeFields={
+                    <div className="space-y-2">
+                      <ToolProjectSelector
+                        projects={toolProjects}
+                        selectedProjectId={selectedToolProjectId}
+                        loading={projectsLoading}
+                        saving={projectSaving}
+                        locale={locale}
+                        onSelect={(projectId) => void handleSelectToolProject(projectId)}
+                        onCreate={() => void handleCreateToolProject()}
+                        onRename={() => void handleRenameToolProject()}
+                        onDelete={() => void handleDeleteToolProject()}
+                      />
+                      {projectError && (
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                          <span>{projectError}</span>
+                          <button
+                            type="button"
+                            onClick={handleRetryToolProjects}
+                            disabled={projectsLoading}
+                            className="shrink-0 rounded-lg border border-amber-300/25 bg-amber-300/10 px-2.5 py-1.5 font-medium text-amber-100 transition hover:bg-amber-300/20 disabled:opacity-50"
+                          >
+                            {locale === "en" ? "Retry" : "重新加载"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  }
                   formFooter={
                     <div className="-mx-5 -mb-5 space-y-3 border-t border-white/[0.07] bg-[#0b1628]/75 px-5 pb-5 pt-4 lg:-mx-6 lg:-mb-6 lg:px-6 lg:pb-6">
                       {showErrors && Object.keys(errors).length > 0 && (
@@ -911,7 +1404,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       <div className="flex flex-wrap items-center gap-2.5 pt-1">
                         <button
                           type="submit"
-                          disabled={isSubmitting || isPolling || hasImageUploadInFlight || !selectedSku || sessionStatus !== "authenticated"}
+                          disabled={isSubmitting || isPolling || hasImageUploadInFlight || !selectedSku || !selectedToolProjectId || sessionStatus !== "authenticated"}
                           className="group relative inline-flex min-h-11 items-center gap-2 overflow-hidden rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 px-6 py-2.5 text-sm font-semibold text-white shadow-[0_12px_30px_-12px_rgba(16,185,129,0.7)] transition-all duration-300 hover:-translate-y-0.5 hover:brightness-110 hover:shadow-[0_16px_36px_-12px_rgba(16,185,129,0.8)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
                         >
                           {isSubmitting ? (
@@ -935,7 +1428,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                         </button>
                         <button
                           type="button"
-                          onClick={() => { setShowErrors(false); setSubmitError(null); setSubtitleState("idle"); setCaptionedVideoUrl(null); setSubtitleError(null); reset(); }}
+                          onClick={handleResetForm}
                           className="min-h-11 rounded-xl border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-slate-300 transition-all duration-200 hover:border-white/[0.18] hover:bg-white/[0.075] hover:text-white active:scale-[0.98]"
                         >
                           {t.resetBtn}
@@ -948,7 +1441,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                             title={!talkingVideoReady
                               ? (locale === "en" ? "Available after the talking video is generated" : "有声视频生成完成后即可使用")
                               : undefined}
-                            className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-cyan-300/30 bg-gradient-to-r from-cyan-500/20 to-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-cyan-100 shadow-[0_10px_26px_-16px_rgba(34,211,238,0.75)] transition-all duration-200 hover:-translate-y-0.5 hover:border-cyan-200/50 hover:from-cyan-500/30 hover:to-emerald-500/30 disabled:translate-y-0 disabled:cursor-not-allowed disabled:border-white/[0.07] disabled:bg-none disabled:bg-white/[0.035] disabled:text-slate-600 disabled:shadow-none"
+                            className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-cyan-300/30 bg-gradient-to-r from-cyan-500/20 to-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition-all duration-200 hover:border-cyan-200/50 hover:from-cyan-500/30 hover:to-emerald-500/30 disabled:cursor-not-allowed disabled:border-white/[0.07] disabled:bg-none disabled:bg-white/[0.035] disabled:text-slate-600"
                           >
                             {subtitleState === "processing" && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current/25 border-t-current" />}
                             {subtitleState === "processing"
@@ -1007,7 +1500,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
           </div>
 
           {/* ── Right: viewer + history ── */}
-          <div className="wf-panel-enter flex min-h-[560px] w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:h-full lg:flex-1 lg:max-h-[calc(100vh-2.5rem)]">
+          <div className="wf-panel-enter flex min-h-[560px] w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1">
             <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
               <div className="flex items-center gap-2.5">
                 <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />
@@ -1019,7 +1512,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                 {activeTaskId || isSubmitting ? (locale === "en" ? "LIVE" : "任务中") : (locale === "en" ? "READY" : "待命")}
               </span>
             </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex min-h-[510px] flex-1 flex-col">
               <TaskStatusViewer
                 model={effectiveViewerModel}
                 onRegenerate={handleRegenerate}
@@ -1088,7 +1581,8 @@ function WorkflowPricing({
 
   const name = locale === "en" && sku.displayNameEn ? sku.displayNameEn : sku.displayName;
   const isS2v = sku.skuId === "BAILIAN_WAN22_S2V";
-  if (!isS2v && !bailianEstimate) {
+  const isVideoEdit = WAN27_VIDEO_EDIT_SKU_IDS.has(sku.skuId);
+  if (!isS2v && !isVideoEdit && !bailianEstimate) {
     return <FixedWorkflowPricing name={name} credits={sku.sellCredits} locale={locale} />;
   }
   const dialogTitle = locale === "en" ? `${name} pricing` : `${name}价格明细`;
@@ -1123,15 +1617,19 @@ function WorkflowPricing({
         </header>
 
         <div className="space-y-3 bg-[#0c1729] p-5 text-sm">
-          {isS2v ? (
+          {isS2v || isVideoEdit ? (
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-lg border border-emerald-500/20 bg-emerald-950/20 px-3 py-3 text-emerald-300">
-                <span className="block text-xs text-slate-400">480P</span>
-                <strong className="mt-1 block text-base">{BAILIAN_S2V_480P_CREDITS_PER_SECOND} {perSecondUnit}</strong>
+                <span className="block text-xs text-slate-400">{isVideoEdit ? "720P" : "480P"}</span>
+                <strong className="mt-1 block text-base">
+                  {isVideoEdit ? BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND : BAILIAN_S2V_480P_CREDITS_PER_SECOND} {perSecondUnit}
+                </strong>
               </div>
               <div className="rounded-lg border border-sky-500/20 bg-sky-950/20 px-3 py-3 text-sky-300">
-                <span className="block text-xs text-slate-400">720P</span>
-                <strong className="mt-1 block text-base">{BAILIAN_S2V_720P_CREDITS_PER_SECOND} {perSecondUnit}</strong>
+                <span className="block text-xs text-slate-400">{isVideoEdit ? "1080P" : "720P"}</span>
+                <strong className="mt-1 block text-base">
+                  {isVideoEdit ? BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND : BAILIAN_S2V_720P_CREDITS_PER_SECOND} {perSecondUnit}
+                </strong>
               </div>
             </div>
           ) : bailianEstimate ? (
@@ -1278,7 +1776,7 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
   const desc = locale === "en" && sku.descriptionEn ? sku.descriptionEn : sku.description;
   const isDanceMove = sku.skuId === "BAILIAN_WAN22_ANIMATE_MOVE";
   const isS2v = sku.skuId === "BAILIAN_WAN22_S2V";
-  const isAutoSubtitle = sku.skuId === "LOCAL_AUTO_SUBTITLES";
+  const isVideoEdit = WAN27_VIDEO_EDIT_SKU_IDS.has(sku.skuId);
 
   return (
     <button
@@ -1296,8 +1794,6 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
             loading="lazy"
             className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.06]"
           />
-        ) : isAutoSubtitle ? (
-          <div className="h-full w-full bg-[#07101f]" aria-label={locale === "en" ? "Cover image reserved" : "封面图片预留"} />
         ) : (
           <div className={`h-full w-full bg-gradient-to-br ${CATEGORY_BG[sku.category]}`}>
             <div className="flex h-full items-center justify-center">
@@ -1319,6 +1815,8 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
               ? `${BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND}–${BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
               : isS2v
                 ? `${BAILIAN_S2V_480P_CREDITS_PER_SECOND}–${BAILIAN_S2V_720P_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
+              : isVideoEdit
+                ? `${BAILIAN_WAN27_VIDEO_EDIT_720P_CREDITS_PER_SECOND}–${BAILIAN_WAN27_VIDEO_EDIT_1080P_CREDITS_PER_SECOND} ${creditsLabel}/${locale === "en" ? "sec" : "秒"}`
               : `${sku.sellCredits} ${creditsLabel}`}
           </span>
         </div>

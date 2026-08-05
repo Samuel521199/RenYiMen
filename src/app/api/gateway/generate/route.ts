@@ -59,6 +59,27 @@ export async function POST(req: Request) {
     const bodyRecord =
       rawBody !== null && typeof rawBody === "object" ? (rawBody as Record<string, unknown>) : null;
     const skuId = extractSkuId(bodyRecord);
+    const requestedToolProjectId = typeof bodyRecord?.toolProjectId === "string"
+      ? bodyRecord.toolProjectId.trim()
+      : "";
+    let toolProjectId: string | undefined;
+    if (requestedToolProjectId) {
+      const project = await prisma.toolProject.findFirst({
+        where: {
+          id: requestedToolProjectId,
+          userId: session.user.id,
+          skuId,
+        },
+        select: { id: true },
+      });
+      if (!project) {
+        return NextResponse.json(
+          { ok: false, error: "项目不存在或与当前工具不匹配", code: "INVALID_TOOL_PROJECT" },
+          { status: 400 },
+        );
+      }
+      toolProjectId = project.id;
+    }
 
     let providerCode: string;
     try {
@@ -246,9 +267,16 @@ export async function POST(req: Request) {
                   resultUrl,
                   mediaType: "image",
                   durationInt: durationIntSec,
+                  ...(toolProjectId ? { toolProjectId } : {}),
                   ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
                 },
               });
+              if (toolProjectId) {
+                await tx.toolProject.update({
+                  where: { id: toolProjectId },
+                  data: { activeTaskId: upstream.taskId, providerCode },
+                });
+              }
               if (directCost > 0) {
                 await consumeUserBalanceInTransaction(
                   tx,
@@ -312,6 +340,7 @@ export async function POST(req: Request) {
       providerCode,
       cost: Number.isFinite(cost) ? Math.round(Number(cost)) : 0,
       mediaType: "",
+      ...(toolProjectId ? { toolProjectId } : {}),
       ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
     };
 
@@ -319,7 +348,15 @@ export async function POST(req: Request) {
     let dbWriteOk = false;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        await prisma.generationHistory.create({ data: historyData });
+        await prisma.$transaction(async (tx) => {
+          await tx.generationHistory.create({ data: historyData });
+          if (toolProjectId) {
+            await tx.toolProject.update({
+              where: { id: toolProjectId },
+              data: { activeTaskId: upstream.taskId, providerCode },
+            });
+          }
+        });
         dbWriteOk = true;
         break;
       } catch (dbErr) {
