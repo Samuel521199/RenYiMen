@@ -125,13 +125,13 @@ test("video continuation SKU resolves through the Bailian provider", () => {
   );
 });
 
-test("video continuation catalog card intentionally leaves its cover unset", async () => {
+test("video continuation catalog card uses its dedicated cover", async () => {
   const body = await (await getSkuCatalog()).json();
   const sku = body.skus.find((item: { skuId: string }) =>
     item.skuId === "BAILIAN_WAN27_VIDEO_CONTINUATION"
   );
   assert.ok(sku);
-  assert.equal(sku.cover, undefined);
+  assert.equal(sku.cover, "/covers/video-continuation.webp");
   assert.equal(sku.providerCode, "ALIYUN_BAILIAN");
   const mode = sku.uiSchema.fields[0].children.find(
     (field: { id: string }) => field.id === "continuationMode",

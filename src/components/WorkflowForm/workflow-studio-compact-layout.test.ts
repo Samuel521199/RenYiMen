@@ -42,14 +42,15 @@ test("upload constraints live in field help instead of persistent group copy", (
   assert.match(source, /group-hover\/help:visible/);
 });
 
-test("embedded task viewer keeps a usable stage height and scrolls oversized states", () => {
+test("embedded task viewer keeps a usable stage height and only scrolls oversized result states", () => {
   const viewerSource = readFileSync("src/components/TaskStatusViewer/TaskStatusViewer.tsx", "utf8");
   const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
 
   assert.match(viewerSource, /compact\?: boolean/);
   assert.match(viewerSource, /h-full min-h-\[510px\] w-full flex-1/);
   assert.doesNotMatch(viewerSource, /min-h-\[510px\][^"\n]*lg:min-h-0/);
-  assert.match(viewerSource, /overflow-x-hidden overflow-y-auto p-6/);
+  assert.match(viewerSource, /scrollable \? "overflow-y-auto" : "overflow-y-hidden"/);
+  assert.match(viewerSource, /layerClass\(active, false\)/);
   assert.match(studioSource, /flex min-h-\[510px\] flex-1 flex-col/);
   assert.doesNotMatch(studioSource, /lg:max-h-\[calc\(100vh-2\.5rem\)\]/);
 });
@@ -65,4 +66,43 @@ test("re-entering the same tool reuses its loaded project and project requests c
   assert.match(studioSource, /handleRetryToolProjects/);
   assert.match(selectorSource, /暂无可用项目/);
   assert.doesNotMatch(selectorSource, /正在创建项目/);
+});
+
+test("task elapsed time survives polling view reinitialization for the same task", () => {
+  const source = readFileSync("src/hooks/useTaskPolling.ts", "utf8");
+
+  assert.match(source, /const taskStartTimes = new Map<string, number>\(\)/);
+  assert.match(source, /getOrCreateTaskStartTime\(taskId\)/);
+  assert.match(source, /taskStartTimes\.delete\(currentTaskId\)/);
+  assert.doesNotMatch(source, /pollStartRef\.current = Date\.now\(\)/);
+});
+
+test("the four featured video-edit tools also appear under AI video editing", () => {
+  const source = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+  const setStart = source.indexOf("const AI_VIDEO_EDITING_SKU_IDS");
+  const setEnd = source.indexOf("]);", setStart);
+  const editingSet = source.slice(setStart, setEnd);
+
+  for (const skuId of [
+    "BAILIAN_HAPPYHORSE_VIDEO_EDIT",
+    "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+    "BAILIAN_OVERALL_STYLE_TRANSFER",
+    "BAILIAN_HIGH_DYNAMIC_REDRAW",
+  ]) {
+    assert.match(editingSet, new RegExp(skuId));
+  }
+  assert.match(source, /activeToolGroup === "video-editing"/);
+  assert.match(source, /isSkuInVideoEditingTab/);
+});
+
+test("video generation is split into image-to-video and continuation tabs", () => {
+  const source = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+
+  assert.match(source, /type VideoGenerationTab = "image-to-video" \| "video-continuation"/);
+  assert.match(source, /label: "图生视频"/);
+  assert.match(source, /label: "视频续写"/);
+  assert.match(source, /activeToolGroup === "video-generation"/);
+  assert.match(source, /isSkuInVideoGenerationTab/);
+  assert.match(source, /VIDEO_CONTINUATION_SKU_IDS/);
+  assert.match(source, /BAILIAN_WAN27_VIDEO_CONTINUATION/);
 });

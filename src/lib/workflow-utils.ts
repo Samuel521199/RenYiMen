@@ -1,6 +1,7 @@
 import type {
   ImageFieldValue,
   ImageUploadField,
+  BooleanToggleField,
   MultiImageFieldValue,
   NumberSliderField,
   SelectField,
@@ -83,6 +84,8 @@ function defaultValueForField(f: WorkflowField): unknown {
     }
     case "select":
       return (f as SelectField).defaultValue ?? (f as SelectField).options[0]?.value ?? "";
+    case "booleanToggle":
+      return (f as BooleanToggleField).defaultValue ?? false;
     default:
       return null;
   }
@@ -111,6 +114,18 @@ export function getAtPath(root: unknown, path: ValuePath): unknown {
     cur = (cur as Record<string | number, unknown>)[String(seg)];
   }
   return cur;
+}
+
+/** 条件字段在隐藏时不参与渲染、校验或请求组装。 */
+export function isWorkflowFieldVisible(
+  field: WorkflowField,
+  parameters: Record<string, unknown>,
+  fieldPaths: FieldPathMap,
+): boolean {
+  if (isGroupField(field) || !field.visibleWhen) return true;
+  const dependencyPath = fieldPaths[field.visibleWhen.fieldId];
+  if (!dependencyPath) return false;
+  return getAtPath(parameters, dependencyPath) === field.visibleWhen.equals;
 }
 
 /**

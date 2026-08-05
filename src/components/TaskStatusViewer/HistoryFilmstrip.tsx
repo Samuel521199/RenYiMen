@@ -1,7 +1,7 @@
 "use client";
 
 import type { GenerationHistory } from "@prisma/client";
-import { Film, Trash2 } from "lucide-react";
+import { Film, Music2, Trash2 } from "lucide-react";
 import { inferMediaTypeFromResultUrl } from "@/lib/task-status-view";
 import { cn } from "@/lib/utils";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
@@ -35,7 +35,7 @@ export function HistoryFilmstrip({ history, activeId, onSelect }: HistoryFilmstr
         const selected = item.taskId === activeId;
         const url = item.resultUrl?.trim() ?? "";
         const resolvedMedia =
-          item.mediaType === "image" || item.mediaType === "video"
+          item.mediaType === "image" || item.mediaType === "video" || item.mediaType === "audio"
             ? item.mediaType
             : url
               ? inferMediaTypeFromResultUrl(url)
@@ -55,6 +55,10 @@ export function HistoryFilmstrip({ history, activeId, onSelect }: HistoryFilmstr
               {!url ? (
                 <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-400">
                   无预览
+                </div>
+              ) : resolvedMedia === "audio" ? (
+                <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-violet-950 to-cyan-950">
+                  <Music2 className="h-7 w-7 text-cyan-200" strokeWidth={1.5} aria-hidden />
                 </div>
               ) : resolvedMedia === "video" ? (
                 <div className="relative h-full w-full">

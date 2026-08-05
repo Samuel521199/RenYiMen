@@ -169,6 +169,11 @@ export interface SelectField extends WorkflowFieldBase {
   validation?: SelectValidation;
 }
 
+export interface BooleanToggleField extends WorkflowFieldBase {
+  kind: "booleanToggle";
+  defaultValue?: boolean;
+}
+
 /**
  * 分组：用于 UI 分区与在 `parameters` 中形成嵌套对象（深度更新）。
  * 分组本身不产生 API 映射。
@@ -193,6 +198,7 @@ export type WorkflowField =
   | TextInputField
   | NumberSliderField
   | SelectField
+  | BooleanToggleField
   | GroupField;
 
 export function isGroupField(f: WorkflowField): f is GroupField {

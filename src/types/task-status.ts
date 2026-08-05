@@ -4,7 +4,7 @@
 export interface TaskHistoryItem {
   taskId: string;
   resultUrl: string;
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "audio";
   skuId?: string;
   timestamp: number;
 }
@@ -45,7 +45,7 @@ export interface TaskStatusPollData {
    * 用于 CDN URL 无标准后缀时避免被错误判为 video。
    * "text" 表示纯文本输出（如提示词反推），此时 resultText 有值。
    */
-  resultMediaType?: "image" | "video" | "text" | null;
+  resultMediaType?: "image" | "video" | "audio" | "text" | null;
   /**
    * 纯文本输出（如提示词反推）：直接包含生成的文本内容。
    * 存在时前端展示文本区域，支持复制与下载。
@@ -71,7 +71,7 @@ export interface TaskStatusViewModel {
   hints?: string[];
   videoUrl?: string;
   /** 成功态下根据 `resultUrl` 推断的展示类型（图片 / 视频 / 纯文本） */
-  mediaType?: "image" | "video" | "text";
+  mediaType?: "image" | "video" | "audio" | "text";
   /**
    * 多图输出（如分镜）：所有图片 URL；有此字段时前端以网格展示，每张可单独下载。
    * `videoUrl` 仍为第一张（向后兼容）。

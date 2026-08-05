@@ -1,4 +1,4 @@
-export type WorkbenchToolGroup = "video-generation" | "video-editing" | "audio-post";
+export type WorkbenchToolGroup = "favorites" | "video-generation" | "video-editing" | "audio-post";
 
 export const WORKBENCH_TOOL_SECTION_EVENT = "workbench:tool-section-change";
 export const WORKFLOW_STUDIO_HISTORY_STATE_KEY = "__workflowStudioSkuId";
@@ -8,7 +8,7 @@ export type WorkbenchToolSectionEventDetail = {
 };
 
 export function readWorkbenchToolGroup(value: string | null): WorkbenchToolGroup | null {
-  return value === "video-generation" || value === "video-editing" || value === "audio-post"
+  return value === "favorites" || value === "video-generation" || value === "video-editing" || value === "audio-post"
     ? value
     : null;
 }

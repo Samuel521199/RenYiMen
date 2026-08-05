@@ -99,6 +99,8 @@ function sanitizeLeafValue(field: WorkflowField, raw: unknown): unknown {
       return typeof raw === "string" && field.options.some((option) => option.value === raw)
         ? raw
         : undefined;
+    case "booleanToggle":
+      return typeof raw === "boolean" ? raw : undefined;
     default:
       return undefined;
   }

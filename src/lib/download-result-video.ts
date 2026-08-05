@@ -6,8 +6,9 @@ import { saveFileWithPicker } from "./save-file-with-picker";
  * 2. 调用 showSaveFilePicker 让用户自选保存路径（不支持时降级为 <a download>）
  */
 export async function downloadResultVideoAsFile(videoUrl: string, downloadFileName: string): Promise<void> {
-  const ext = /\.(webm|mov|gif)$/i.exec(downloadFileName.trim())?.[1]?.toLowerCase() ?? "mp4";
-  const base = /\.(mp4|webm|mov|gif)$/i.test(downloadFileName.trim())
+  const ext = /\.(mp4|webm|mov|gif|mp3|wav|m4a|aac|flac|ogg|opus)$/i.exec(downloadFileName.trim())?.[1]?.toLowerCase() ?? "mp4";
+  const isAudio = /^(mp3|wav|m4a|aac|flac|ogg|opus)$/.test(ext);
+  const base = /\.(mp4|webm|mov|gif|mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(downloadFileName.trim())
     ? downloadFileName.trim()
     : `${downloadFileName.replace(/\.[^./\\]+$/, "")}.${ext}`;
 
@@ -15,7 +16,7 @@ export async function downloadResultVideoAsFile(videoUrl: string, downloadFileNa
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "*/*" },
     credentials: "same-origin",
-    body: JSON.stringify({ url: videoUrl, mediaKind: "video" }),
+    body: JSON.stringify({ url: videoUrl, mediaKind: isAudio ? "audio" : "video" }),
   });
 
   if (!res.ok) {
@@ -36,8 +37,15 @@ export async function downloadResultVideoAsFile(videoUrl: string, downloadFileNa
     webm: "video/webm",
     mov: "video/quicktime",
     gif: "image/gif",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/mp4",
+    aac: "audio/aac",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    opus: "audio/opus",
   };
-  const mime = mimeMap[ext] ?? "video/mp4";
+  const mime = mimeMap[ext] ?? (isAudio ? "audio/mpeg" : "video/mp4");
 
   const saved = await saveFileWithPicker(blob, base, [
     { description: `${ext.toUpperCase()} 文件`, accept: { [mime]: [`.${ext}`] } },

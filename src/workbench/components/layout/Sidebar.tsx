@@ -16,6 +16,7 @@ const TASK_CENTER_NEWS_EXTRA_CHILD = { label: "热点借势·新闻", href: "/wo
 const TASK_CENTER_LOGO_CHILD = { href: "/workbench/workflows/logo", label: "Logo水印" };
 const ADMIN_HOTSPOT_IMPORT_CHILD = { label: "热点导入管理", href: "/workbench/admin/hotspot-import" };
 const TOOL_SECTION_NAV_ITEMS: NavItem[] = [
+  { href: "/workbench/tools?group=favorites", label: "我的收藏", single: true },
   { href: "/workbench/tools?group=video-generation", label: "视频生成", single: true },
   { href: "/workbench/tools?group=video-editing", label: "视频编辑", single: true },
   { href: "/workbench/tools?group=audio-post", label: "音频后期", single: true },

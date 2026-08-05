@@ -12,6 +12,7 @@ import { MultiImageUploadWidget } from "@/components/WorkflowForm/controls/Multi
 import { TextInputControl } from "@/components/WorkflowForm/controls/TextInputControl";
 import { NumberSliderControl } from "@/components/WorkflowForm/controls/NumberSliderControl";
 import { SelectControl } from "@/components/WorkflowForm/controls/SelectControl";
+import { BooleanToggleControl } from "@/components/WorkflowForm/controls/BooleanToggleControl";
 import { getAtPath } from "@/lib/workflow-utils";
 
 /** Locale context shared across all nested field renderers */
@@ -331,6 +332,10 @@ const widgets = {
   select: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
     if (isGroupField(field) || field.kind !== "select") return null;
     return <SelectControl field={field} error={error} locale={locale} />;
+  },
+  booleanToggle: (field: WorkflowField, error?: string, locale?: "zh" | "en") => {
+    if (isGroupField(field) || field.kind !== "booleanToggle") return null;
+    return <BooleanToggleControl field={field} error={error} locale={locale} />;
   },
 } as const;
 

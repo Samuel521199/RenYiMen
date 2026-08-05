@@ -4,6 +4,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchGatewayTaskPoll } from "@/lib/gateway-task-poll-client";
 import type { TaskStatusPollData } from "@/types/task-status";
 
+const MAX_REMEMBERED_TASK_STARTS = 100;
+const taskStartTimes = new Map<string, number>();
+
+function getOrCreateTaskStartTime(taskId: string): number {
+  const existing = taskStartTimes.get(taskId);
+  if (existing != null) return existing;
+
+  const startedAt = Date.now();
+  taskStartTimes.set(taskId, startedAt);
+  if (taskStartTimes.size > MAX_REMEMBERED_TASK_STARTS) {
+    const oldestTaskId = taskStartTimes.keys().next().value;
+    if (typeof oldestTaskId === "string") taskStartTimes.delete(oldestTaskId);
+  }
+  return startedAt;
+}
+
 export interface UseTaskPollingOptions {
   taskId: string | null;
   /** 为 false 时不发起轮询（可用于手动暂停） */
@@ -78,6 +94,8 @@ export function useTaskPolling(options: UseTaskPollingOptions): UseTaskPollingRe
   const [consecutiveErrors, setConsecutiveErrors] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
   const pollStartRef = useRef<number | null>(null);
+  const taskIdRef = useRef(taskId);
+  taskIdRef.current = taskId;
 
   const pollFnRef = useRef(resolvedPollFn);
   pollFnRef.current = resolvedPollFn;
@@ -107,6 +125,8 @@ export function useTaskPolling(options: UseTaskPollingOptions): UseTaskPollingRe
 
   const reset = useCallback(() => {
     cancel();
+    const currentTaskId = taskIdRef.current;
+    if (currentTaskId) taskStartTimes.delete(currentTaskId);
     setData(null);
     setTransportError(null);
     setConsecutiveErrors(0);
@@ -123,8 +143,7 @@ export function useTaskPolling(options: UseTaskPollingOptions): UseTaskPollingRe
       setElapsedMs(0);
       return;
     }
-    pollStartRef.current = Date.now();
-    setElapsedMs(0);
+    pollStartRef.current = getOrCreateTaskStartTime(taskId);
     const tick = () => {
       const t0 = pollStartRef.current;
       if (t0 == null) return;

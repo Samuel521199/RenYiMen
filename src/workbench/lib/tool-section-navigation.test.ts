@@ -9,6 +9,7 @@ import {
 } from "./tool-section-navigation.ts";
 
 test("reads supported workbench tool groups", () => {
+  assert.equal(readWorkbenchToolGroup("favorites"), "favorites");
   assert.equal(readWorkbenchToolGroup("video-generation"), "video-generation");
   assert.equal(readWorkbenchToolGroup("video-editing"), "video-editing");
   assert.equal(readWorkbenchToolGroup("audio-post"), "audio-post");

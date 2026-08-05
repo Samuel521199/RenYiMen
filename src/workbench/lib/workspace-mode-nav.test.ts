@@ -18,6 +18,10 @@ test("top navigation switches between isolated sidebar menus", () => {
   assert.match(headerSource, /href="\/workbench\/operations"/);
   assert.match(headerSource, /workspaceGeneral/);
   assert.match(headerSource, /workspaceOperations/);
+  assert.ok(
+    headerSource.indexOf("workspaceOperations") < headerSource.indexOf("workspaceGeneral"),
+    "operations workspace should be displayed before general workspace",
+  );
   assert.match(sidebarSource, /isGeneralWorkspace/);
   assert.match(sidebarSource, /TOOL_SECTION_NAV_ITEMS/);
   assert.match(sidebarSource, /getNavItemHref\(item\)/);
@@ -27,6 +31,7 @@ test("tool section sidebar entries use reliable document navigation", () => {
   const sidebarSource = readFileSync("src/workbench/components/layout/Sidebar.tsx", "utf8");
 
   assert.match(sidebarSource, /\/workbench\/tools\?group=video-generation/);
+  assert.match(sidebarSource, /\/workbench\/tools\?group=favorites/);
   assert.match(sidebarSource, /\/workbench\/tools\?group=video-editing/);
   assert.match(sidebarSource, /\/workbench\/tools\?group=audio-post/);
   assert.match(sidebarSource, /isToolSection\s*\?\s*\(/);

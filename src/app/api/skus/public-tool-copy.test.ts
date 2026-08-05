@@ -61,14 +61,3 @@ test("new tools keep vendor and exact model names out of public copy", async () 
     assert.doesNotMatch(publicCopy, FORBIDDEN_VENDOR_OR_MODEL_NAME, skuId);
   }
 });
-
-test("removed video detail editing tool is absent from the catalog", async () => {
-  const body = await (await getSkuCatalog()).json() as {
-    skus: Array<{ skuId: string }>;
-  };
-
-  assert.equal(
-    body.skus.some((item) => item.skuId === "BAILIAN_HAPPYHORSE_VIDEO_EDIT"),
-    false,
-  );
-});

@@ -93,6 +93,17 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
           validation: { required: true, maxSizeMB: 20, accept: ["image/jpeg", "image/png", "image/webp"], minDimension: 300 },
         },
         {
+          kind: "imageUpload",
+          id: "lastFrame",
+          label: "尾帧图",
+          labelEn: "Last Frame",
+          description: "仅通义万相 2.7 支持。上传视频结束时需要到达的画面；不上传则只使用首帧生成。",
+          descriptionEn: "Available for Tongyi Wanxiang 2.7 only. Upload the desired final frame, or leave it empty for first-frame-only generation.",
+          mapping: { nodeId: "input", inputPath: ["last_frame_url"] },
+          visibleWhen: { fieldId: "modelName", equals: "wan2.7-i2v-2026-04-25" },
+          validation: { required: false, maxSizeMB: 20, accept: ["image/jpeg", "image/png", "image/webp"], minDimension: 300 },
+        },
+        {
           kind: "textInput",
           id: "videoPrompt",
           label: "视频描述 / 运镜",

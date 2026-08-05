@@ -12,6 +12,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { Star } from "lucide-react";
 import type { Session } from "next-auth";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -29,6 +30,11 @@ import {
   resolveExpectedDurationMsForSku,
 } from "@/lib/task-status-view";
 import { autoSaveGeneratedResultsToWorkbenchAssets } from "@/lib/workbench-asset-autosave";
+import {
+  readWorkflowFavoriteIds,
+  workflowFavoritesStorageKey,
+  writeWorkflowFavoriteIds,
+} from "@/lib/workflow-favorites";
 import {
   clearWorkflowDraft,
   loadWorkflowDraft,
@@ -63,6 +69,7 @@ import {
 // ─── View type ──────────────────────────────────────────────────────────────
 
 type View = "gallery" | "studio";
+type VideoGenerationTab = "image-to-video" | "video-continuation";
 type VideoEditingTab = "ai-video-edit" | "motion-replica";
 type SubtitleProcessState = "idle" | "processing" | "success" | "error";
 
@@ -91,14 +98,31 @@ const CATEGORY_BG: Record<SkuCategory, string> = {
 };
 
 const TOOL_GROUP_LABELS: Record<ToolGroup, { zh: string; en: string }> = {
+  favorites: { zh: "我的收藏", en: "My Favorites" },
   "video-generation": { zh: "视频生成", en: "Video Generation" },
   "video-editing": { zh: "视频编辑", en: "Video Editing" },
   "audio-post": { zh: "音频后期", en: "Audio Post" },
 };
 
+const IMAGE_TO_VIDEO_SKU_IDS = new Set([
+  "KLING_CINEMA_PRO",
+  "KLING_STD_I2V",
+  "BAILIAN_WANX_I2V",
+  "BAILIAN_MULTI_REF_I2V",
+  "RH_SVD_IMG2VID",
+]);
+
+const VIDEO_CONTINUATION_SKU_IDS = new Set([
+  "BAILIAN_WAN27_VIDEO_CONTINUATION",
+]);
+
 const AI_VIDEO_EDITING_SKU_IDS = new Set([
   "RH_VIDEO_ENHANCE",
   "BAILIAN_WAN27_VIDEO_CONTINUATION",
+  "BAILIAN_HAPPYHORSE_VIDEO_EDIT",
+  "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+  "BAILIAN_OVERALL_STYLE_TRANSFER",
+  "BAILIAN_HIGH_DYNAMIC_REDRAW",
 ]);
 
 const WAN27_VIDEO_EDIT_SKU_IDS = new Set([
@@ -118,6 +142,9 @@ const VIDEO_EDITING_SKU_IDS = new Set([
 
 const AUDIO_POST_SKU_IDS = new Set([
   "BAILIAN_WAN22_S2V",
+  "BAILIAN_COSYVOICE_VOICE_DESIGN",
+  "BAILIAN_VOICE_CLONE",
+  "BAILIAN_EMOTIONAL_TTS",
   "LOCAL_AUTO_SUBTITLES",
 ]);
 
@@ -126,11 +153,21 @@ const VIDEO_EDITING_TABS: { key: VideoEditingTab; label: string; labelEn: string
   { key: "motion-replica", label: "动态复刻", labelEn: "Motion Replica" },
 ];
 
+const VIDEO_GENERATION_TABS: { key: VideoGenerationTab; label: string; labelEn: string }[] = [
+  { key: "image-to-video", label: "图生视频", labelEn: "Image to Video" },
+  { key: "video-continuation", label: "视频续写", labelEn: "Video Continuation" },
+];
+
 function isSkuInToolGroup(sku: SkuDefinition, group: ToolGroup): boolean {
   if (sku.category !== "video") return false;
   if (group === "audio-post") return AUDIO_POST_SKU_IDS.has(sku.skuId);
   if (group === "video-editing") return VIDEO_EDITING_SKU_IDS.has(sku.skuId);
-  return !AUDIO_POST_SKU_IDS.has(sku.skuId) && !VIDEO_EDITING_SKU_IDS.has(sku.skuId);
+  return IMAGE_TO_VIDEO_SKU_IDS.has(sku.skuId) || VIDEO_CONTINUATION_SKU_IDS.has(sku.skuId);
+}
+
+function isSkuInVideoGenerationTab(sku: SkuDefinition, tab: VideoGenerationTab): boolean {
+  if (tab === "video-continuation") return VIDEO_CONTINUATION_SKU_IDS.has(sku.skuId);
+  return IMAGE_TO_VIDEO_SKU_IDS.has(sku.skuId);
 }
 
 function isSkuInVideoEditingTab(sku: SkuDefinition, tab: VideoEditingTab): boolean {
@@ -167,6 +204,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const splitPreviousBodyStylesRef = useRef<{ cursor: string; userSelect: string } | null>(null);
 
   const [skus, setSkus] = useState<SkuDefinition[]>([]);
+  const [favoriteSkuIds, setFavoriteSkuIds] = useState<Set<string>>(() => new Set());
   const [selectedSkuId, setSelectedSkuId] = useState<string | null>(null);
   const [toolProjects, setToolProjects] = useState<ToolProjectRecord[]>([]);
   const [selectedToolProjectId, setSelectedToolProjectId] = useState<string | null>(null);
@@ -184,7 +222,31 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const projectRequestSequenceRef = useRef(0);
   const routeToolGroup = readWorkbenchToolGroup(searchParams.get("group"));
   const [activeToolGroup, setActiveToolGroup] = useState<ToolGroup | null>(routeToolGroup);
+  const [activeVideoGenerationTab, setActiveVideoGenerationTab] = useState<VideoGenerationTab>("image-to-video");
   const [activeVideoEditingTab, setActiveVideoEditingTab] = useState<VideoEditingTab>("ai-video-edit");
+  const favoritesOwnerId = session?.user?.id ?? session?.user?.email ?? null;
+
+  useEffect(() => {
+    if (sessionStatus === "loading") return;
+    const storageKey = workflowFavoritesStorageKey(favoritesOwnerId);
+    const syncFavorites = (event?: StorageEvent) => {
+      if (event && event.key !== storageKey) return;
+      setFavoriteSkuIds(readWorkflowFavoriteIds(favoritesOwnerId));
+    };
+    syncFavorites();
+    window.addEventListener("storage", syncFavorites);
+    return () => window.removeEventListener("storage", syncFavorites);
+  }, [favoritesOwnerId, sessionStatus]);
+
+  const toggleFavoriteSku = useCallback((skuId: string) => {
+    setFavoriteSkuIds((current) => {
+      const next = new Set(current);
+      if (next.has(skuId)) next.delete(skuId);
+      else next.add(skuId);
+      writeWorkflowFavoriteIds(favoritesOwnerId, next);
+      return next;
+    });
+  }, [favoritesOwnerId]);
 
   const applyStudioSplit = (percent: number, persist = false) => {
     const nextPercent = clampStudioSplit(percent);
@@ -769,7 +831,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       const url = item.resultUrl?.trim();
       if (url) {
         const mediaType =
-          item.mediaType === "image" || item.mediaType === "video"
+          item.mediaType === "image" || item.mediaType === "video" || item.mediaType === "audio"
             ? item.mediaType
             : inferMediaTypeFromResultUrl(url);
         return { phase: "success", videoUrl: url, mediaType, hints: [] };
@@ -1060,16 +1122,22 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     { key: "image", label: t.categoryImage },
     { key: "video", label: t.categoryVideo },
   ];
-  const visibleCategoryTabs = activeToolGroup
-    ? CATEGORY_TABS.filter((tab) => tab.key === "video")
-    : CATEGORY_TABS;
+  const visibleCategoryTabs = activeToolGroup === "favorites"
+    ? []
+    : activeToolGroup
+      ? CATEGORY_TABS.filter((tab) => tab.key === "video")
+      : CATEGORY_TABS;
 
   useEffect(() => {
-    if (activeToolGroup) setActiveCategory("video");
+    if (activeToolGroup && activeToolGroup !== "favorites") setActiveCategory("video");
   }, [activeToolGroup]);
 
-  const visibleSkus = activeToolGroup === "video-editing"
-    ? skus.filter((s) => isSkuInVideoEditingTab(s, activeVideoEditingTab))
+  const visibleSkus = activeToolGroup === "favorites"
+    ? skus.filter((s) => favoriteSkuIds.has(s.skuId))
+    : activeToolGroup === "video-generation"
+    ? skus.filter((s) => isSkuInVideoGenerationTab(s, activeVideoGenerationTab))
+    : activeToolGroup === "video-editing"
+      ? skus.filter((s) => isSkuInVideoEditingTab(s, activeVideoEditingTab))
     : activeToolGroup
       ? skus.filter((s) => isSkuInToolGroup(s, activeToolGroup))
       : skus.filter((s) => s.category === activeCategory);
@@ -1170,7 +1238,33 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
 
             {/* Category tabs */}
             <div className="mt-6 flex flex-wrap items-center gap-2">
-              {activeToolGroup === "video-editing" ? VIDEO_EDITING_TABS.map((tab) => {
+              {activeToolGroup === "video-generation" ? VIDEO_GENERATION_TABS.map((tab) => {
+                const count = skus.filter((s) => isSkuInVideoGenerationTab(s, tab.key)).length;
+                const isActive = activeVideoGenerationTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setActiveVideoGenerationTab(tab.key)}
+                    className={[
+                      "flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all duration-200",
+                      isActive
+                        ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/30"
+                        : "bg-[#1a2844] text-slate-400 hover:bg-[#243560] hover:text-slate-200",
+                    ].join(" ")}
+                  >
+                    <span>{locale === "en" ? tab.labelEn : tab.label}</span>
+                    {!catalogLoading && (
+                      <span className={[
+                        "rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-none tabular-nums",
+                        isActive ? "bg-white/20 text-white" : "bg-[#0d1929] text-slate-500",
+                      ].join(" ")}>
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                );
+              }) : activeToolGroup === "video-editing" ? VIDEO_EDITING_TABS.map((tab) => {
                 const count = skus.filter((s) => isSkuInVideoEditingTab(s, tab.key)).length;
                 const isActive = activeVideoEditingTab === tab.key;
                 return (
@@ -1271,7 +1365,9 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
             {/* Empty */}
             {!catalogLoading && !catalogError && visibleSkus.length === 0 && (
               <div className="flex flex-col items-center gap-3 py-20 text-center">
-                <p className="text-sm text-slate-500">{t.categoryEmpty}</p>
+                <p className="text-sm text-slate-500">
+                  {activeToolGroup === "favorites" ? t.favoritesEmpty : t.categoryEmpty}
+                </p>
               </div>
             )}
 
@@ -1286,6 +1382,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     categoryLabel={CATEGORY_TABS.find((c) => c.key === sku.category)?.label ?? ""}
                     creditsLabel={t.credits}
                     startLabel={t.startCreating}
+                    favoriteAddLabel={t.favoriteAdd}
+                    favoriteRemoveLabel={t.favoriteRemove}
+                    isFavorite={favoriteSkuIds.has(sku.skuId)}
+                    onToggleFavorite={() => toggleFavoriteSku(sku.skuId)}
                     onClick={() => enterStudio(sku)}
                   />
                 ))}
@@ -1768,22 +1868,43 @@ interface WorkflowCardProps {
   categoryLabel: string;
   creditsLabel: string;
   startLabel: string;
+  favoriteAddLabel: string;
+  favoriteRemoveLabel: string;
+  isFavorite: boolean;
+  onToggleFavorite: () => void;
   onClick: () => void;
 }
 
-function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, onClick }: WorkflowCardProps) {
+function WorkflowCard({
+  sku,
+  locale,
+  categoryLabel,
+  creditsLabel,
+  startLabel,
+  favoriteAddLabel,
+  favoriteRemoveLabel,
+  isFavorite,
+  onToggleFavorite,
+  onClick,
+}: WorkflowCardProps) {
   const name = locale === "en" && sku.displayNameEn ? sku.displayNameEn : sku.displayName;
   const desc = locale === "en" && sku.descriptionEn ? sku.descriptionEn : sku.description;
   const isDanceMove = sku.skuId === "BAILIAN_WAN22_ANIMATE_MOVE";
   const isS2v = sku.skuId === "BAILIAN_WAN22_S2V";
   const isVideoEdit = WAN27_VIDEO_EDIT_SKU_IDS.has(sku.skuId);
+  const isCoverReserved = sku.skuId === "BAILIAN_VOICE_CLONE"
+    || sku.skuId === "BAILIAN_COSYVOICE_VOICE_DESIGN"
+    || sku.skuId === "BAILIAN_EMOTIONAL_TTS";
+  const favoriteActionLabel = isFavorite ? favoriteRemoveLabel : favoriteAddLabel;
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group relative flex cursor-pointer flex-col overflow-hidden rounded-2xl bg-[#111e34] shadow-lg shadow-black/30 transition-all duration-300 hover:-translate-y-1.5 hover:shadow-2xl hover:shadow-black/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#07101f]"
-    >
+    <article className="group relative flex flex-col overflow-hidden rounded-2xl bg-[#111e34] shadow-lg shadow-black/30 transition-all duration-300 hover:-translate-y-1.5 hover:shadow-2xl hover:shadow-black/50">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={`${startLabel}: ${name}`}
+        className="absolute inset-0 z-10 cursor-pointer rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-inset"
+      />
       {/* Cover image */}
       <div className="relative aspect-video w-full overflow-hidden">
         {sku.cover ? (
@@ -1794,6 +1915,8 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
             loading="lazy"
             className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.06]"
           />
+        ) : isCoverReserved ? (
+          <div className="h-full w-full bg-[#07101f]" aria-label={locale === "en" ? "Cover image reserved" : "封面图片预留"} />
         ) : (
           <div className={`h-full w-full bg-gradient-to-br ${CATEGORY_BG[sku.category]}`}>
             <div className="flex h-full items-center justify-center">
@@ -1831,15 +1954,31 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
 
       {/* Bottom bar */}
       <div className="flex items-center justify-between bg-[#0e1929] px-4 py-3">
-        <span className="truncate text-sm font-semibold text-slate-200">{name}</span>
-        <span className="ml-3 flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-400 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-          {startLabel}
-          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-          </svg>
-        </span>
+        <span className="min-w-0 truncate text-sm font-semibold text-slate-200">{name}</span>
+        <div className="ml-3 flex shrink-0 items-center gap-2">
+          <span className="flex items-center gap-1 text-xs font-medium text-emerald-400 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            {startLabel}
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+            </svg>
+          </span>
+          <button
+            type="button"
+            onClick={onToggleFavorite}
+            aria-pressed={isFavorite}
+            aria-label={favoriteActionLabel}
+            title={favoriteActionLabel}
+            className={`relative z-20 inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 ${
+              isFavorite
+                ? "border-amber-300/45 bg-amber-400/15 text-amber-300"
+                : "border-white/15 bg-white/[0.035] text-slate-400 hover:border-amber-300/45 hover:bg-amber-400/10 hover:text-amber-300"
+            }`}
+          >
+            <Star className="h-4 w-4" fill={isFavorite ? "currentColor" : "none"} strokeWidth={1.8} aria-hidden />
+          </button>
+        </div>
       </div>
-    </button>
+    </article>
   );
 }
 

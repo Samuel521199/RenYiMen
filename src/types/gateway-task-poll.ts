@@ -17,7 +17,7 @@ export interface GatewayTaskPollBody {
    */
   resultUrls?: string[];
   /** 适配器明确标注的媒体类型，优先于客户端从 URL 后缀推断。"text" 表示纯文本输出。 */
-  resultMediaType?: "image" | "video" | "text";
+  resultMediaType?: "image" | "video" | "audio" | "text";
   /** 纯文本输出内容（如提示词反推），存在时前端展示文本区域。 */
   resultText?: string;
 }

@@ -241,6 +241,13 @@ export async function POST(req: Request) {
         resultUrlsRaw.length > 1
           ? JSON.stringify(resultUrlsRaw)
           : (resultUrlsRaw[0] ?? null);
+      const directMediaType =
+        rawDirect.resultMediaType === "audio" ||
+        rawDirect.resultMediaType === "video" ||
+        rawDirect.resultMediaType === "image" ||
+        rawDirect.resultMediaType === "text"
+          ? rawDirect.resultMediaType
+          : "image";
 
       const directCost =
         typeof rawDirect.providerCost === "number" && Number.isFinite(rawDirect.providerCost)
@@ -265,7 +272,7 @@ export async function POST(req: Request) {
                   providerCode,
                   cost: directCost,
                   resultUrl,
-                  mediaType: "image",
+                  mediaType: directMediaType,
                   durationInt: durationIntSec,
                   ...(toolProjectId ? { toolProjectId } : {}),
                   ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
@@ -282,7 +289,13 @@ export async function POST(req: Request) {
                   tx,
                   session.user.id,
                   directCost,
-                  "GPT图片生成",
+                  skuId === "BAILIAN_COSYVOICE_VOICE_DESIGN"
+                    ? "文字设计新音色"
+                    : skuId === "BAILIAN_VOICE_CLONE"
+                      ? "声音克隆"
+                      : skuId === "BAILIAN_EMOTIONAL_TTS"
+                        ? "情绪化配音"
+                      : "同步内容生成",
                   upstream.taskId
                 );
               }
@@ -304,7 +317,7 @@ export async function POST(req: Request) {
         return NextResponse.json(
           {
             ok: false,
-            error: "图片已生成但记录保存失败，请联系管理员并提供任务ID",
+            error: "内容已生成但记录保存失败，请联系管理员并提供任务ID",
             code: "DB_WRITE_FAILED",
             taskId: upstream.taskId,
           },

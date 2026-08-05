@@ -45,13 +45,13 @@ test("camera replication SKU routes to Alibaba Model Studio and exposes the inte
   }
 });
 
-test("camera replication catalog card intentionally leaves its cover unset", async () => {
+test("camera replication catalog card uses its dedicated cover", async () => {
   const body = await (await getSkuCatalog()).json();
   const sku = body.skus.find((item: { skuId: string }) =>
     item.skuId === "BAILIAN_WAN27_CAMERA_REPLICATION"
   );
   assert.ok(sku);
-  assert.equal(sku.cover, undefined);
+  assert.equal(sku.cover, "/covers/camera-movement-replication.webp");
   assert.equal(sku.displayName, "运镜复刻");
   assert.equal(sku.providerCode, "ALIYUN_BAILIAN");
 });

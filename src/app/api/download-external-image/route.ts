@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 const MAX_BYTES_IMAGE = 25 * 1024 * 1024;
 /** 视频结果通常大于单张图；仍由服务端一次性缓冲，超大文件可后续改为流式透传。 */
 const MAX_BYTES_VIDEO = 200 * 1024 * 1024;
+const MAX_BYTES_AUDIO = 80 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 45_000;
 const IMAGE_PREVIEW_CACHE_CONTROL = "private, max-age=604800, stale-while-revalidate=86400, immutable";
 const NO_STORE_CACHE_CONTROL = "private, no-store";
@@ -82,8 +83,9 @@ async function proxyExternalMedia(
   options: { cachePreview: boolean },
 ) {
   const isVideo = mediaKindRaw === "video";
-  const maxBytes = isVideo ? MAX_BYTES_VIDEO : MAX_BYTES_IMAGE;
-  const cacheControl = options.cachePreview && !isVideo
+  const isAudio = mediaKindRaw === "audio";
+  const maxBytes = isVideo ? MAX_BYTES_VIDEO : isAudio ? MAX_BYTES_AUDIO : MAX_BYTES_IMAGE;
+  const cacheControl = options.cachePreview && !isVideo && !isAudio
     ? IMAGE_PREVIEW_CACHE_CONTROL
     : NO_STORE_CACHE_CONTROL;
 
@@ -141,7 +143,7 @@ async function proxyExternalMedia(
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        Accept: isVideo ? "video/*,*/*;q=0.9" : "image/*,*/*;q=0.8",
+        Accept: isVideo ? "video/*,*/*;q=0.9" : isAudio ? "audio/*,*/*;q=0.9" : "image/*,*/*;q=0.8",
       },
     }, isVideo ? 2 : 3);
 

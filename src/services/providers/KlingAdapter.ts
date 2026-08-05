@@ -95,6 +95,13 @@ function resolveAspectRatio(payload: StandardPayload): string {
   return KLING_ASPECT_RATIOS.has(raw) ? raw : "16:9";
 }
 
+function resolveSound(payload: StandardPayload): boolean {
+  const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
+  const flags = isRecord(payload.flags) ? payload.flags : undefined;
+  const raw = inputNode?.sound ?? flags?.sound;
+  return typeof raw === "boolean" ? raw : true;
+}
+
 /** 解析 302.ai 提交响应，提取 requestId */
 function extractRequestId(data: unknown): string {
   const d = isRecord(data) ? data : {};
@@ -189,6 +196,7 @@ export class KlingAdapter implements IProviderAdapter {
     const prompt = resolvePrompt(payload);
     const duration = resolveDuration(payload);
     const aspectRatio = resolveAspectRatio(payload);
+    const sound = resolveSound(payload);
 
     const endpoint = `${API_302AI_BASE}/${this.modelPath}`;
     console.log("[KlingAdapter] 提交任务 model=%s duration=%ds ratio=%s", this.modelPath, duration, aspectRatio);
@@ -197,7 +205,7 @@ export class KlingAdapter implements IProviderAdapter {
       prompt,
       duration,
       aspect_ratio: aspectRatio,
-      sound: true,
+      sound,
       image: imageUrl,
     };
 

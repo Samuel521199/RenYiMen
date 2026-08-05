@@ -2,12 +2,19 @@ import { NextResponse } from "next/server";
 import { bailianMultiRefWorkflowMock } from "@/mocks/bailian-multi-ref-workflow";
 import { bailianDanceMoveWorkflowMock } from "@/mocks/bailian-dance-move-workflow";
 import { bailianWan22S2vWorkflowMock } from "@/mocks/bailian-wan22-s2v-workflow";
+import { bailianVoiceCloneWorkflowMock } from "@/mocks/bailian-voice-clone-workflow";
 import { bailianWanxI2vWorkflowMock } from "@/mocks/bailian-wanx-i2v-workflow";
+import { bailianHappyHorseVideoEditWorkflowMock } from "@/mocks/bailian-happyhorse-video-edit-workflow";
+import { bailianSceneLightVideoEditWorkflowMock } from "@/mocks/bailian-scene-light-video-edit-workflow";
+import { bailianOverallStyleTransferWorkflowMock } from "@/mocks/bailian-overall-style-transfer-workflow";
+import { bailianHighDynamicRedrawWorkflowMock } from "@/mocks/bailian-high-dynamic-redraw-workflow";
 import { autoSubtitleWorkflowMock } from "@/mocks/auto-subtitle-workflow";
 import { AUTO_SUBTITLE_CREDITS } from "@/lib/subtitle-pricing";
 import { bailianVideoContinuationWorkflowMock } from "@/mocks/bailian-video-continuation-workflow";
 import { bailianCameraReplicationWorkflowMock } from "@/mocks/bailian-camera-replication-workflow";
 import { bailianEffectReplicationWorkflowMock } from "@/mocks/bailian-effect-replication-workflow";
+import { bailianVoiceDesignWorkflowMock } from "@/mocks/bailian-voice-design-workflow";
+import { bailianEmotionalTtsWorkflowMock } from "@/mocks/bailian-emotional-tts-workflow";
 import { bgReplaceWorkflowMock } from "@/mocks/bg-replace-workflow";
 import { videoEnhanceWorkflowMock } from "@/mocks/video-enhance-workflow";
 import { faceSwapWorkflowMock } from "@/mocks/face-swap-workflow";
@@ -142,6 +149,21 @@ const CATALOG: SkuDefinition[] = [
     sellCredits: 30,
     uiSchema: storyboardWorkflowMock,
   },
+  {
+    skuId: "CHARACTER_TURNAROUND",
+    providerCode: "VIDEO_ORCHESTRATOR",
+    category: "image",
+    cover: "/covers/character-turnaround.webp",
+    displayName: "人物三视图",
+    displayNameEn: "Character Turnaround",
+    description:
+      "上传一张人物身份参考图，依次生成并审核正面、侧面和背面三张独立全身设定图。侧面继承已批准正面，背面继承已批准侧面，避免身份漂移。",
+    descriptionEn:
+      "Upload one identity reference to generate three separate full-body views: front, side, and back. Each derived view waits for the previous approved view to preserve identity.",
+    sellCredits: 0,
+    href: "/workbench/tools/character-turnaround",
+    uiSchema: textToImageWorkflowMock,
+  },
   // ── 视频 / Video ─────────────────────────────────────────────────
   {
     skuId: "LOCAL_AUTO_SUBTITLES",
@@ -230,6 +252,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "BAILIAN_WAN27_CAMERA_REPLICATION",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
+    cover: "/covers/camera-movement-replication.webp",
     displayName: "运镜复刻",
     displayNameEn: "Camera Movement Replication",
     description:
@@ -243,6 +266,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "BAILIAN_WAN27_EFFECT_REPLICATION",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
+    cover: "/covers/effect-replication.webp",
     displayName: "特效复刻",
     displayNameEn: "Effect Replication",
     description:
@@ -267,6 +291,104 @@ const CATALOG: SkuDefinition[] = [
     uiSchema: bailianWan22S2vWorkflowMock,
   },
   {
+    skuId: "BAILIAN_VOICE_CLONE",
+    providerCode: "ALIYUN_BAILIAN_VOICE_CLONE",
+    category: "video",
+    cover: "/covers/voice-cloning.webp",
+    displayName: "声音克隆",
+    displayNameEn: "Voice Cloning",
+    description:
+      "上传 5～20 秒清晰录音，复刻音色并将指定文本合成为试听音频。仅可使用本人声音或已获得明确授权的声音。",
+    descriptionEn:
+      "Upload 5–20 seconds of clear speech, clone its timbre, and synthesize a preview from your text. Use only voices you are authorized to use.",
+    sellCredits: 20,
+    uiSchema: bailianVoiceCloneWorkflowMock,
+  },
+  {
+    skuId: "BAILIAN_COSYVOICE_VOICE_DESIGN",
+    providerCode: "ALIYUN_BAILIAN_VOICE_DESIGN",
+    category: "video",
+    cover: "/covers/voice-design-from-text.webp",
+    displayName: "文字设计新音色",
+    displayNameEn: "Design a New Voice from Text",
+    description:
+      "无需真人录音，只需描述年龄、气质与声音质感，即可生成带试听音频和专属音色 ID 的全新品牌声音。",
+    descriptionEn:
+      "Create a new reusable brand voice and audio preview by describing its age, personality, and vocal texture—no recording required.",
+    sellCredits: 0,
+    uiSchema: bailianVoiceDesignWorkflowMock,
+  },
+  {
+    skuId: "BAILIAN_EMOTIONAL_TTS",
+    providerCode: "ALIYUN_BAILIAN_EMOTIONAL_TTS",
+    category: "video",
+    cover: "/covers/expressive-voiceover.webp",
+    displayName: "情绪化配音",
+    displayNameEn: "Expressive Voiceover",
+    description:
+      "控制开心、悲伤、愤怒、耳语、激动和冷静等情绪，并调节语速与音量，快速生成适合短剧对白的高表现力配音。",
+    descriptionEn:
+      "Generate expressive short-drama voiceover with happy, sad, angry, whispering, excited, or calm delivery plus adjustable speed and volume.",
+    sellCredits: 1,
+    uiSchema: bailianEmotionalTtsWorkflowMock,
+  },
+  {
+    skuId: "BAILIAN_HAPPYHORSE_VIDEO_EDIT",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "video",
+    cover: "/covers/local-video-edit.webp",
+    displayName: "局部修改",
+    displayNameEn: "Local Video Edit",
+    description:
+      "用自然语言修改视频中的局部内容，例如衣服变色、删除路人或替换产品；可选上传参考图来指定替换目标。",
+    descriptionEn:
+      "Edit local elements in a video with natural-language instructions, such as recoloring clothing, removing passers-by, or replacing a product. Optional reference images can guide replacements.",
+    sellCredits: 225,
+    uiSchema: bailianHappyHorseVideoEditWorkflowMock,
+  },
+  {
+    skuId: "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "video",
+    cover: "/covers/scene-light-transform.webp",
+    displayName: "场景与光影变换",
+    displayNameEn: "Scene & Lighting Transform",
+    description:
+      "改变视频的时间、天气、光线与背景环境，例如白天变夜景、晴天变雨天或背景换成森林，同时尽量保持主体与镜头运动一致。",
+    descriptionEn:
+      "Transform the time of day, weather, lighting, or environment in a video while preserving its subjects and camera motion.",
+    sellCredits: 225,
+    uiSchema: bailianSceneLightVideoEditWorkflowMock,
+  },
+  {
+    skuId: "BAILIAN_OVERALL_STYLE_TRANSFER",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "video",
+    cover: "/covers/overall-style-transfer.webp",
+    displayName: "整体风格迁移",
+    displayNameEn: "Overall Style Transfer",
+    description:
+      "将整段视频统一转换为动画、国风、黏土、水彩或赛博朋克等视觉风格，同时尽量保持主体、动作与镜头连续性。",
+    descriptionEn:
+      "Transform an entire video into animation, Chinese art, clay, watercolor, cyberpunk, or another cohesive visual style while preserving subjects, motion, and camera continuity.",
+    sellCredits: 225,
+    uiSchema: bailianOverallStyleTransferWorkflowMock,
+  },
+  {
+    skuId: "BAILIAN_HIGH_DYNAMIC_REDRAW",
+    providerCode: "ALIYUN_BAILIAN",
+    category: "video",
+    cover: "/covers/high-motion-redraw.webp",
+    displayName: "高动态重绘",
+    displayNameEn: "High-Motion Restyle",
+    description:
+      "改变视频整体风格，同时尽量保留高速动作、复杂运动轨迹和原有镜头语言，适合动态丰富的素材重绘。",
+    descriptionEn:
+      "Restyle a video while preserving fast action, complex motion trajectories, and the original camera language as closely as possible.",
+    sellCredits: 300,
+    uiSchema: bailianHighDynamicRedrawWorkflowMock,
+  },
+  {
     skuId: "BAILIAN_WANX_I2V",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
@@ -284,6 +406,7 @@ const CATALOG: SkuDefinition[] = [
     skuId: "BAILIAN_WAN27_VIDEO_CONTINUATION",
     providerCode: "ALIYUN_BAILIAN",
     category: "video",
+    cover: "/covers/video-continuation.webp",
     displayName: "视频续写",
     displayNameEn: "Video Continuation",
     description:

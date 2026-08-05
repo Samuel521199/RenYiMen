@@ -129,6 +129,8 @@ function mapLeafToApiValue(field: WorkflowField, raw: unknown): unknown {
       return typeof raw === "number" ? raw : field.validation.min;
     case "select":
       return typeof raw === "string" ? raw : "";
+    case "booleanToggle":
+      return typeof raw === "boolean" ? raw : field.defaultValue ?? false;
     default:
       return raw;
   }
@@ -628,6 +630,8 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             if (field.validation?.required && !s) errors[field.id] = "请选择一项";
             break;
           }
+          case "booleanToggle":
+            break;
           default:
             break;
         }

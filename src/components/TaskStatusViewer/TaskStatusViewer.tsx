@@ -167,9 +167,10 @@ function IdleArtboard({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function layerClass(active: boolean) {
+function layerClass(active: boolean, scrollable = true) {
   return cn(
-    "absolute inset-0 flex flex-col overflow-x-hidden overflow-y-auto p-6 transition-all duration-500 ease-out",
+    "absolute inset-0 flex flex-col overflow-x-hidden p-6 transition-all duration-500 ease-out",
+    scrollable ? "overflow-y-auto" : "overflow-y-hidden",
     active ? "z-10 translate-y-0 scale-100 opacity-100" : "pointer-events-none z-0 translate-y-2 scale-[0.995] opacity-0"
   );
 }
@@ -220,7 +221,7 @@ function LoadingLayer({
     : computePseudoProgressPercent(elapsed, expected);
 
   return (
-    <div className={layerClass(active)} aria-hidden={!active}>
+    <div className={layerClass(active, false)} aria-hidden={!active}>
       <div className="flex flex-1 flex-col gap-5">
         <header>
           <p className="text-xs font-medium uppercase tracking-widest text-slate-500">{title}</p>
@@ -293,10 +294,10 @@ function SuccessLayer({
   const [videoDownloadBusy, setVideoDownloadBusy] = useState(false);
 
   const mediaUrl = model.videoUrl;
-  const mediaType: "image" | "video" | "text" | undefined =
+  const mediaType: "image" | "video" | "audio" | "text" | undefined =
     model.mediaType ?? (mediaUrl ? "video" : undefined);
 
-  const isTextResult = mediaType === "text" || (typeof model.resultText === "string" && model.resultText.trim().length > 0);
+  const isTextResult = mediaType === "text" || (!mediaUrl && typeof model.resultText === "string" && model.resultText.trim().length > 0);
   const isMultiImage = !isTextResult && Array.isArray(model.resultUrls) && model.resultUrls.length > 1;
   const showBilling =
     typeof model.sellPrice === "number" && Number.isFinite(model.sellPrice) && model.sellPrice >= 0;
@@ -304,6 +305,8 @@ function SuccessLayer({
   const resolvedDownloadName =
     model.mediaType === "image" && /\.mp4$/i.test(downloadFileName)
       ? "generated-image.png"
+      : model.mediaType === "audio" && /\.mp4$/i.test(downloadFileName)
+        ? (mediaUrl?.toLowerCase().includes(".mp3") ? "voice-preview.mp3" : "voice-preview.wav")
       : downloadFileName;
 
   const handleDownload = useCallback(async () => {
@@ -341,7 +344,8 @@ function SuccessLayer({
   const resultHeadline =
     mediaType === "text" ? tt.successPrompt :
     !mediaUrl ? tt.successNoPreview :
-    mediaType === "image" ? tt.successImage : tt.successVideo;
+    mediaType === "image" ? tt.successImage :
+    mediaType === "audio" ? tt.successAudio : tt.successVideo;
 
   const openImageLightbox = useCallback(() => {
     if (mediaType === "image" && mediaUrl) setLightboxOpen(true);
@@ -452,6 +456,13 @@ function SuccessLayer({
                   }}
                   className="mx-auto block max-h-[min(78vh,920px)] w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-lg ring-1 ring-white/10 transition-opacity hover:opacity-95"
                 />
+              ) : mediaType === "audio" ? (
+                <div className="flex min-h-40 flex-col items-center justify-center gap-5 rounded-lg bg-gradient-to-br from-violet-950/70 via-slate-950 to-cyan-950/70 p-6 shadow-lg ring-1 ring-white/10">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full border border-cyan-300/25 bg-cyan-300/10 text-3xl" aria-hidden>
+                    ♪
+                  </div>
+                  <audio className="w-full max-w-xl" src={mediaUrl} controls preload="metadata" />
+                </div>
               ) : (
                 <video
                   className="aspect-video w-full rounded-lg object-contain shadow-lg ring-1 ring-white/10"
@@ -471,6 +482,12 @@ function SuccessLayer({
             )}
           </div>
         </div>
+
+        {mediaType === "audio" && model.resultText && (
+          <div className="max-w-2xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-3">
+            <p className="select-all break-all font-mono text-sm text-cyan-100">{model.resultText}</p>
+          </div>
+        )}
 
         <div className="flex max-w-2xl shrink-0 flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">

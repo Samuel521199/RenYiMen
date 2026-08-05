@@ -40,13 +40,13 @@ test("effect replication SKU routes to Alibaba Model Studio and exposes the requ
   assert.equal(fields.children.find((field) => field.id === "targetCharacterImage")?.kind, "imageUpload");
 });
 
-test("effect replication catalog card intentionally leaves its cover unset", async () => {
+test("effect replication catalog card uses its dedicated cover", async () => {
   const body = await (await getSkuCatalog()).json();
   const sku = body.skus.find((item: { skuId: string }) =>
     item.skuId === "BAILIAN_WAN27_EFFECT_REPLICATION"
   );
   assert.ok(sku);
-  assert.equal(sku.cover, undefined);
+  assert.equal(sku.cover, "/covers/effect-replication.webp");
   assert.equal(sku.displayName, "特效复刻");
   assert.equal(sku.providerCode, "ALIYUN_BAILIAN");
 });
