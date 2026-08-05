@@ -2,7 +2,9 @@
 
 FROM node:18-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl ffmpeg
+RUN apk add --no-cache libc6-compat openssl ffmpeg fontconfig font-noto-cjk \
+  && fc-cache -f \
+  && fc-list | grep -q "Noto Sans CJK SC"
 
 # --- Stage 1: deps — install dependencies ---
 FROM base AS deps

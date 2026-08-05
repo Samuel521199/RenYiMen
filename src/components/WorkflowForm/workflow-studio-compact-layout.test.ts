@@ -48,4 +48,7 @@ test("embedded task viewer can shrink to the parent panel", () => {
   assert.match(source, /compact\?: boolean/);
   assert.match(source, /h-full min-h-\[510px\]/);
   assert.match(source, /lg:min-h-0/);
+  assert.match(source, /min-h-0 overflow-y-auto/);
+  assert.match(source, /visibleBarPct/);
+  assert.match(source, /progressEstimateLabel/);
 });

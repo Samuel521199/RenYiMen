@@ -21,6 +21,7 @@ import {
 } from "@/lib/workflow-utils";
 import { uploadImageToOSS } from "@/services/oss-upload";
 import { fetchWorkbenchAssetAsFile } from "@/lib/workbench-asset-import";
+import { isImageSizeWithinBounds } from "@/lib/image-crop";
 
 export interface WorkflowStoreState {
   schema: WorkflowFormSchema | null;
@@ -207,6 +208,58 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
               status: "error",
               fileName: file.name,
               errorMessage: "仅支持 MP3 或 WAV 音频",
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+      }
+
+      if (
+        field.kind === "imageUpload"
+        && (field.validation?.minDimension != null || field.validation?.maxDimension != null)
+      ) {
+        const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+          const objectUrl = URL.createObjectURL(file);
+          const image = new Image();
+          image.onload = () => {
+            const result = { width: image.naturalWidth, height: image.naturalHeight };
+            URL.revokeObjectURL(objectUrl);
+            resolve(result);
+          };
+          image.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error("无法读取图片尺寸"));
+          };
+          image.src = objectUrl;
+        }).catch((error: unknown) => {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: error instanceof Error ? error.message : "无法读取图片尺寸",
+            } satisfies ImageFieldValue);
+          });
+          return null;
+        });
+        if (!dimensions) return;
+
+        if (!isImageSizeWithinBounds(
+          dimensions.width,
+          dimensions.height,
+          field.validation.minDimension,
+          field.validation.maxDimension,
+        )) {
+          const previewUrl = URL.createObjectURL(file);
+          const minText = field.validation.minDimension ? `不小于 ${field.validation.minDimension}px` : "";
+          const maxText = field.validation.maxDimension ? `不大于 ${field.validation.maxDimension}px` : "";
+          set((draft) => {
+            const prev = getAtPath(draft.parameters, path) as ImageFieldValue | undefined;
+            if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              previewUrl,
+              fileName: file.name,
+              errorMessage: `当前图片为 ${dimensions.width}×${dimensions.height}px，宽高需${[minText, maxText].filter(Boolean).join("且")}。请裁剪后继续。`,
             } satisfies ImageFieldValue);
           });
           return;

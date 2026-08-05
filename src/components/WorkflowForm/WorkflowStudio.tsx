@@ -45,6 +45,7 @@ import { useLanguage, useT } from "@/i18n";
 // ─── View type ──────────────────────────────────────────────────────────────
 
 type View = "gallery" | "studio";
+type SubtitleProcessState = "idle" | "processing" | "success" | "error";
 
 const WORKFLOW_STUDIO_HISTORY_KEY = "__workflowStudioSkuId";
 const STUDIO_SPLIT_STORAGE_KEY = "workflow-studio-split-percent";
@@ -88,6 +89,9 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const [autoSaveToAssetLibrary, setAutoSaveToAssetLibrary] = useState(false);
   const [isAutoSaving, setIsAutoSaving] = useState(false);
   const [autoSaveNotice, setAutoSaveNotice] = useState<string | null>(null);
+  const [subtitleState, setSubtitleState] = useState<SubtitleProcessState>("idle");
+  const [captionedVideoUrl, setCaptionedVideoUrl] = useState<string | null>(null);
+  const [subtitleError, setSubtitleError] = useState<string | null>(null);
   const [studioSplitPercent, setStudioSplitPercent] = useState(DEFAULT_STUDIO_SPLIT_PERCENT);
   const studioSplitRef = useRef(DEFAULT_STUDIO_SPLIT_PERCENT);
   const studioColumnsRef = useRef<HTMLDivElement>(null);
@@ -189,6 +193,24 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     () => skus.find((s) => s.skuId === selectedSkuId) ?? null,
     [skus, selectedSkuId]
   );
+  const isTalkingVideo = selectedSku?.skuId === "BAILIAN_WAN22_S2V";
+  const isAutoSubtitleTool = selectedSku?.skuId === "LOCAL_AUTO_SUBTITLES";
+  const voiceAudioUrl = useMemo(() => {
+    if (!isTalkingVideo) return null;
+    const path = fieldPaths.voiceAudio;
+    const value = path ? getAtPath(parameters, path) as ImageFieldValue | undefined : undefined;
+    return value?.status === "ready" && typeof value.remoteUrl === "string" ? value.remoteUrl : null;
+  }, [isTalkingVideo, fieldPaths, parameters]);
+  const standaloneSourceVideoUrl = useMemo(() => {
+    if (!isAutoSubtitleTool) return null;
+    const path = fieldPaths.sourceVideo;
+    const value = path ? getAtPath(parameters, path) as ImageFieldValue | undefined : undefined;
+    return value?.status === "ready" && typeof value.remoteUrl === "string" ? value.remoteUrl : null;
+  }, [isAutoSubtitleTool, fieldPaths, parameters]);
+
+  useEffect(() => {
+    if (isAutoSubtitleTool && standaloneSourceVideoUrl) setSubmitError(null);
+  }, [isAutoSubtitleTool, standaloneSourceVideoUrl]);
 
   const hasImageUploadInFlight = useMemo(() => {
     if (!schema) return false;
@@ -262,6 +284,9 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       hydrateSchema(sku.uiSchema);
       setShowErrors(false);
       setSubmitError(null);
+      setSubtitleState("idle");
+      setCaptionedVideoUrl(null);
+      setSubtitleError(null);
     },
     [hydrateSchema, setGatewaySelection, setViewingHistoryId, resetPoll]
   );
@@ -331,7 +356,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   );
 
   const viewerModel = useMemo(() => {
-    if (!activeTaskId) return null;
+    if (!activeTaskId && !isSubmitting) return null;
     return buildTaskViewerModel(pollData, {
       isPolling,
       transportError,
@@ -340,7 +365,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       expectedDurationMs,
       skuId: selectedSku?.skuId,
     });
-  }, [activeTaskId, pollData, isPolling, transportError, consecutiveErrors, elapsedMs, expectedDurationMs, selectedSku?.skuId]);
+  }, [activeTaskId, isSubmitting, pollData, isPolling, transportError, consecutiveErrors, elapsedMs, expectedDurationMs, selectedSku?.skuId]);
 
   const displayViewerModel = useMemo((): TaskStatusViewModel | null => {
     if (viewingHistoryId) {
@@ -357,6 +382,26 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     }
     return viewerModel;
   }, [viewingHistoryId, cloudHistory, viewerModel]);
+
+  const effectiveViewerModel = useMemo((): TaskStatusViewModel | null => {
+    if (!isAutoSubtitleTool) return displayViewerModel;
+    if (subtitleState === "processing") {
+      return viewerModel ?? {
+        phase: "loading",
+        subPhase: "running",
+        elapsedMs: 0,
+        expectedDurationMs: 60_000,
+        hints: [locale === "en" ? "Transcribing speech and rendering subtitles…" : "正在识别人声、匹配时间轴并合成字幕…"],
+      };
+    }
+    if (subtitleState === "success" && captionedVideoUrl) {
+      return { phase: "success", videoUrl: captionedVideoUrl, mediaType: "video", hints: [] };
+    }
+    if (subtitleState === "error") {
+      return { phase: "failure", errorMessage: subtitleError ?? "字幕处理失败，请重试", hints: [] };
+    }
+    return null;
+  }, [isAutoSubtitleTool, displayViewerModel, subtitleState, viewerModel, captionedVideoUrl, subtitleError, locale]);
 
   useEffect(() => {
     void useWorkflowStore.getState().fetchCloudHistory();
@@ -435,12 +480,45 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     const errs = validate();
     if (Object.keys(errs).length > 0) { setSubmitError(null); return; }
 
+    if (isAutoSubtitleTool) {
+      if (!standaloneSourceVideoUrl) { setSubmitError(locale === "en" ? "Please upload a source video first." : "请先上传原视频"); return; }
+      setSubmitError(null);
+      setSubtitleError(null);
+      setCaptionedVideoUrl(null);
+      setSubtitleState("processing");
+      setIsSubmitting(true);
+      try {
+        const response = await fetch("/api/gateway/subtitles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ sourceVideoUrl: standaloneSourceVideoUrl }),
+        });
+        const raw: unknown = await response.json().catch(() => null);
+        const result = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+        if (!response.ok || result?.ok !== true || typeof result.captionedVideoUrl !== "string") {
+          throw new Error(typeof result?.error === "string" ? result.error : "字幕处理失败，请稍后重试");
+        }
+        setCaptionedVideoUrl(result.captionedVideoUrl);
+        setSubtitleState("success");
+      } catch (error) {
+        setSubtitleError(error instanceof Error ? error.message : "字幕处理失败，请稍后重试");
+        setSubtitleState("error");
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
     const built = buildPayload();
     if (!built) { setSubmitError(t.errIncomplete); return; }
     if (!built.skuId || !built.providerCode) { setSubmitError(t.errMissingSku); return; }
 
     setSubmitError(null);
     setAutoSaveNotice(null);
+    setSubtitleState("idle");
+    setCaptionedVideoUrl(null);
+    setSubtitleError(null);
     setIsSubmitting(true);
     resetPoll();
     setActiveTaskId(null);
@@ -480,7 +558,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       setIsSubmitting(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSku, validate, buildPayload, resetPoll, setViewingHistoryId]);
+  }, [selectedSku, validate, buildPayload, resetPoll, setViewingHistoryId, isAutoSubtitleTool, standaloneSourceVideoUrl, locale]);
 
   const onStudioFormSubmit = useCallback<FormEventHandler<HTMLFormElement>>(
     (e) => { e.preventDefault(); void handleSubmitToGateway(); },
@@ -492,7 +570,56 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     setActiveTaskId(null);
     setSubmitError(null);
     setAutoSaveNotice(null);
+    setSubtitleState("idle");
+    setCaptionedVideoUrl(null);
+    setSubtitleError(null);
   }, [resetPoll]);
+
+  const talkingVideoReady = Boolean(
+    isTalkingVideo
+    && !viewingHistoryId
+    && activeTaskId
+    && pollData?.status === "succeeded"
+    && typeof pollData.resultUrl === "string"
+    && pollData.resultUrl.trim(),
+  );
+
+  const handleAutoSubtitle = useCallback(async () => {
+    if (!talkingVideoReady || !activeTaskId || !voiceAudioUrl || subtitleState === "processing") return;
+    setSubtitleState("processing");
+    setSubtitleError(null);
+    try {
+      const response = await fetch("/api/gateway/subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ taskId: activeTaskId, audioUrl: voiceAudioUrl }),
+      });
+      const raw: unknown = await response.json().catch(() => null);
+      const result = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+      if (!response.ok || result?.ok !== true || typeof result.captionedVideoUrl !== "string") {
+        throw new Error(typeof result?.error === "string" ? result.error : "字幕处理失败，请稍后重试");
+      }
+      setCaptionedVideoUrl(result.captionedVideoUrl);
+      setSubtitleState("success");
+    } catch (error) {
+      setSubtitleError(error instanceof Error ? error.message : "字幕处理失败，请稍后重试");
+      setSubtitleState("error");
+    }
+  }, [talkingVideoReady, activeTaskId, voiceAudioUrl, subtitleState]);
+
+  const supplementaryVideo = isTalkingVideo && subtitleState !== "idle"
+    ? {
+        status: subtitleState === "success" ? "success" as const : subtitleState === "error" ? "error" as const : "processing" as const,
+        url: captionedVideoUrl ?? undefined,
+        title: locale === "en" ? "Captioned video" : "字幕版视频",
+        message: subtitleState === "error"
+          ? subtitleError ?? undefined
+          : locale === "en"
+            ? "Transcribing speech and rendering subtitles…"
+            : "正在识别人声并合成字幕…",
+      }
+    : null;
 
   const bailianEstimate = useMemo(() => {
     if (!selectedSku || selectedSku.skuId !== "BAILIAN_WANX_I2V" || !schema) return null;
@@ -808,11 +935,29 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                         </button>
                         <button
                           type="button"
-                          onClick={() => { setShowErrors(false); setSubmitError(null); reset(); }}
+                          onClick={() => { setShowErrors(false); setSubmitError(null); setSubtitleState("idle"); setCaptionedVideoUrl(null); setSubtitleError(null); reset(); }}
                           className="min-h-11 rounded-xl border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-slate-300 transition-all duration-200 hover:border-white/[0.18] hover:bg-white/[0.075] hover:text-white active:scale-[0.98]"
                         >
                           {t.resetBtn}
                         </button>
+                        {isTalkingVideo && (
+                          <button
+                            type="button"
+                            onClick={() => void handleAutoSubtitle()}
+                            disabled={!talkingVideoReady || !voiceAudioUrl || subtitleState === "processing"}
+                            title={!talkingVideoReady
+                              ? (locale === "en" ? "Available after the talking video is generated" : "有声视频生成完成后即可使用")
+                              : undefined}
+                            className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-cyan-300/30 bg-gradient-to-r from-cyan-500/20 to-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-cyan-100 shadow-[0_10px_26px_-16px_rgba(34,211,238,0.75)] transition-all duration-200 hover:-translate-y-0.5 hover:border-cyan-200/50 hover:from-cyan-500/30 hover:to-emerald-500/30 disabled:translate-y-0 disabled:cursor-not-allowed disabled:border-white/[0.07] disabled:bg-none disabled:bg-white/[0.035] disabled:text-slate-600 disabled:shadow-none"
+                          >
+                            {subtitleState === "processing" && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current/25 border-t-current" />}
+                            {subtitleState === "processing"
+                              ? (locale === "en" ? "Adding subtitles…" : "正在添加字幕…")
+                              : subtitleState === "success"
+                                ? (locale === "en" ? "Regenerate subtitles" : "重新生成字幕")
+                                : (locale === "en" ? "Auto subtitles" : "自动添加字幕")}
+                          </button>
+                        )}
                         {activeTaskId && (
                           <button
                             type="button"
@@ -862,7 +1007,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
           </div>
 
           {/* ── Right: viewer + history ── */}
-          <div className="wf-panel-enter flex min-h-[560px] w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1 lg:max-h-[calc(100vh-2.5rem)]">
+          <div className="wf-panel-enter flex min-h-[560px] w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:h-full lg:flex-1 lg:max-h-[calc(100vh-2.5rem)]">
             <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.07] px-4">
               <div className="flex items-center gap-2.5">
                 <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />
@@ -871,16 +1016,17 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                 </span>
               </div>
               <span className="rounded-full border border-white/[0.07] bg-white/[0.035] px-2.5 py-1 text-[10px] font-medium text-slate-500">
-                {activeTaskId ? (locale === "en" ? "LIVE" : "任务中") : (locale === "en" ? "READY" : "待命")}
+                {activeTaskId || isSubmitting ? (locale === "en" ? "LIVE" : "任务中") : (locale === "en" ? "READY" : "待命")}
               </span>
             </div>
-            <div className="flex-1">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <TaskStatusViewer
-                model={displayViewerModel}
+                model={effectiveViewerModel}
                 onRegenerate={handleRegenerate}
                 downloadFileName="workflow-studio.mp4"
                 className="h-full w-full"
                 compact={embedded}
+                supplementaryVideo={supplementaryVideo}
               />
             </div>
             {cloudHistory.length > 0 && (
@@ -1132,6 +1278,7 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
   const desc = locale === "en" && sku.descriptionEn ? sku.descriptionEn : sku.description;
   const isDanceMove = sku.skuId === "BAILIAN_WAN22_ANIMATE_MOVE";
   const isS2v = sku.skuId === "BAILIAN_WAN22_S2V";
+  const isAutoSubtitle = sku.skuId === "LOCAL_AUTO_SUBTITLES";
 
   return (
     <button
@@ -1149,6 +1296,8 @@ function WorkflowCard({ sku, locale, categoryLabel, creditsLabel, startLabel, on
             loading="lazy"
             className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.06]"
           />
+        ) : isAutoSubtitle ? (
+          <div className="h-full w-full bg-[#07101f]" aria-label={locale === "en" ? "Cover image reserved" : "封面图片预留"} />
         ) : (
           <div className={`h-full w-full bg-gradient-to-br ${CATEGORY_BG[sku.category]}`}>
             <div className="flex h-full items-center justify-center">

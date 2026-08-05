@@ -10,9 +10,9 @@ export const imageToVideoWorkflowMock: WorkflowFormSchema = {
   title: "首尾帧生成视频",
   titleEn: "First & Last Frame to Video",
   description:
-    "上传首帧与尾帧，填写镜头描述；可选由工作流内大模型根据双图扩写。节点与 LU 首尾帧工作流（ImageLoader 23/20、CLIP 22 链路）对齐。",
+    "上传首帧与尾帧并描述过渡、动作和镜头变化，自动补全中间画面，生成首尾自然衔接的视频。",
   descriptionEn:
-    "Upload a first frame and a last frame, then provide a camera description. Optionally let the in-workflow LLM expand the prompt based on both images. Nodes are aligned with the LU first-last-frame workflow (ImageLoader 23/20, CLIP 22 path).",
+    "Upload a first and last frame and describe the transition, motion, and camera changes to generate a smoothly connected video.",
   fields: [
     {
       kind: "group",

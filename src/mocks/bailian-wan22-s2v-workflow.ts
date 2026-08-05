@@ -3,7 +3,7 @@ import type { WorkflowFormSchema } from "@/types/workflow";
 /** 百炼万相数字人：人物图片 + 人声音频 → 有声人物视频。 */
 export const bailianWan22S2vWorkflowMock: WorkflowFormSchema = {
   workflowId: "bailian-wan2.2-s2v",
-  version: "1.0.0",
+  version: "1.1.0",
   title: "有声视频",
   titleEn: "Talking Character Video",
   description:
@@ -18,16 +18,6 @@ export const bailianWan22S2vWorkflowMock: WorkflowFormSchema = {
       labelEn: "",
       children: [
         {
-          kind: "select",
-          id: "modelName",
-          label: "生成模型",
-          labelEn: "Model",
-          mapping: { nodeId: "input", inputPath: ["modelName"] },
-          defaultValue: "wan2.2-s2v",
-          options: [{ value: "wan2.2-s2v", label: "万相 2.2 有声视频", labelEn: "Wan 2.2 S2V" }],
-          validation: { required: true },
-        },
-        {
           kind: "imageUpload",
           id: "characterImage",
           label: "人物图片",
@@ -40,6 +30,7 @@ export const bailianWan22S2vWorkflowMock: WorkflowFormSchema = {
             maxSizeMB: 5,
             accept: ["image/jpeg", "image/png", "image/bmp", "image/webp"],
             minDimension: 400,
+            maxDimension: 7000,
           },
         },
         {

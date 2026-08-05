@@ -54,10 +54,18 @@ export const bailianDanceMoveWorkflowMock: WorkflowFormSchema = {
           description: "专业模式动作更流畅、画面更真实，但通常需要更长时间。",
           descriptionEn: "Professional mode is smoother and more realistic, but usually takes longer.",
           mapping: { nodeId: "input", inputPath: ["mode"] },
-          defaultValue: "wan-std",
+          defaultValue: "wan-pro",
           options: [
-            { value: "wan-std", label: "标准模式（推荐）", labelEn: "Standard (Recommended)" },
-            { value: "wan-pro", label: "专业模式", labelEn: "Professional" },
+            {
+              value: "wan-std",
+              label: "标准模式（适合快速预览效果）",
+              labelEn: "Standard (Best for quick previews)",
+            },
+            {
+              value: "wan-pro",
+              label: "专业模式（适合专业细腻生成）",
+              labelEn: "Professional (Best for detailed generation)",
+            },
           ],
           validation: { required: true },
         },

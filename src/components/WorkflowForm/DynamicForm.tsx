@@ -65,6 +65,9 @@ function uploadConstraintHelp(field: WorkflowField, locale: "zh" | "en", existin
   if (validation.minDimension && !new RegExp(`${validation.minDimension}(?:px|像素)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `Width and height at least ${validation.minDimension}px` : `宽高均不小于 ${validation.minDimension}px`);
   }
+  if (validation.maxDimension && !new RegExp(`${validation.maxDimension}(?:px|像素)`, "i").test(normalized)) {
+    parts.push(locale === "en" ? `Width and height at most ${validation.maxDimension}px` : `宽高均不大于 ${validation.maxDimension}px`);
+  }
   if (validation.minDurationSec && !new RegExp(`${validation.minDurationSec}(?:s|sec|seconds?|秒)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `At least ${validation.minDurationSec}s` : `时长不少于 ${validation.minDurationSec} 秒`);
   }

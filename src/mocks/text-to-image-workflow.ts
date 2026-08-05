@@ -9,8 +9,8 @@ export const textToImageWorkflowMock: WorkflowFormSchema = {
   version: "1.0.0",
   title: "文生图",
   titleEn: "Text-to-Image",
-  description: "输入画面提示词并选择画幅；提示词映射至节点 82，尺寸解析后写入节点 58 的宽高。",
-  descriptionEn: "Enter an image prompt and choose an aspect ratio. The prompt maps to node 82; the resolution is parsed and written as width/height to node 58.",
+  description: "输入画面描述并选择画幅比例，生成符合描述的创意图片。",
+  descriptionEn: "Describe the desired scene and choose an aspect ratio to generate a matching creative image.",
   fields: [
     {
       kind: "group",

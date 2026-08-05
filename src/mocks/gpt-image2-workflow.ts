@@ -18,9 +18,9 @@ export const gptImage2WorkflowMock: WorkflowFormSchema = {
   title: "智能图片生成",
   titleEn: "AI Image Generation",
   description:
-    "上传一张参考图（可选）并输入创作提示词，GPT-image-2 将生成 1–8 张风格一致的高质量图片。支持自定义尺寸与质量。",
+    "上传参考图（可选）并输入创作提示词，可生成 1–8 张风格一致的高质量图片，并自定义画面尺寸与质量。",
   descriptionEn:
-    "Upload a reference image (optional) and enter a creative prompt — GPT-image-2 generates 1–8 high-quality images with a consistent style. Customize size and quality.",
+    "Upload an optional reference image and enter a creative prompt to generate 1–8 consistent, high-quality images with customizable size and quality.",
   fields: [
     {
       kind: "group",

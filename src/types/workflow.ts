@@ -39,6 +39,8 @@ export interface ImageValidation {
   accept?: string[];
   /** 图片最小边长（宽和高均须 ≥ 此值，单位 px）；上传前在浏览器端校验 */
   minDimension?: number;
+  /** 图片最大边长（宽和高均须 <= 此值，单位 px）；上传前在浏览器端校验。 */
+  maxDimension?: number;
   /** 音视频最短时长（秒）；上传前在浏览器端校验。 */
   minDurationSec?: number;
   /** 音视频最长时长（秒）；上传前在浏览器端校验。 */

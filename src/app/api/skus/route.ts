@@ -3,6 +3,8 @@ import { bailianMultiRefWorkflowMock } from "@/mocks/bailian-multi-ref-workflow"
 import { bailianDanceMoveWorkflowMock } from "@/mocks/bailian-dance-move-workflow";
 import { bailianWan22S2vWorkflowMock } from "@/mocks/bailian-wan22-s2v-workflow";
 import { bailianWanxI2vWorkflowMock } from "@/mocks/bailian-wanx-i2v-workflow";
+import { autoSubtitleWorkflowMock } from "@/mocks/auto-subtitle-workflow";
+import { AUTO_SUBTITLE_CREDITS } from "@/lib/subtitle-pricing";
 import { bgReplaceWorkflowMock } from "@/mocks/bg-replace-workflow";
 import { videoEnhanceWorkflowMock } from "@/mocks/video-enhance-workflow";
 import { faceSwapWorkflowMock } from "@/mocks/face-swap-workflow";
@@ -47,9 +49,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "智能图片生成",
     displayNameEn: "AI Image Generation",
     description:
-      "上传参考图（可选）+ 提示词，由 GPT-image-2 生成 1–8 张高质量图片，支持方图、竖图、横图输出。按张计费：低质 20积分、中质 50积分、高质 150积分。",
+      "上传参考图（可选）并输入创作描述，可一次生成 1–8 张风格一致的高质量图片，支持方形、竖版和横版输出。",
     descriptionEn:
-      "Upload a reference image (optional) plus a prompt — GPT-image-2 generates 1–8 high-quality images in square, portrait, or landscape. Per-image billing: Low 20 cr, Medium 50 cr, High 150 cr.",
+      "Upload an optional reference image and a creative description to generate 1–8 consistent, high-quality images in square, portrait, or landscape formats.",
     sellCredits: 50,
     uiSchema: gptImage2WorkflowMock,
   },
@@ -154,6 +156,18 @@ const CATALOG: SkuDefinition[] = [
   },
   // ── 视频 / Video ─────────────────────────────────────────────────
   {
+    skuId: "LOCAL_AUTO_SUBTITLES",
+    providerCode: "LOCAL_MEDIA",
+    category: "video",
+    cover: "/covers/auto-subtitles.webp",
+    displayName: "自动添加字幕",
+    displayNameEn: "Auto Subtitles",
+    description: "上传带有人声的视频，自动完成语音识别、时间轴匹配与字幕合成，并输出一个新的字幕版视频。",
+    descriptionEn: "Upload a video with speech to automatically transcribe, align, and render a new captioned video.",
+    sellCredits: AUTO_SUBTITLE_CREDITS,
+    uiSchema: autoSubtitleWorkflowMock,
+  },
+  {
     skuId: "ONE_PROMPT_30S_VIDEO",
     providerCode: "VIDEO_ORCHESTRATOR",
     category: "video",
@@ -218,9 +232,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "模仿生成舞蹈视频",
     displayNameEn: "Dance Motion Transfer",
     description:
-      "上传人物图片和舞蹈参考视频，将视频中的动作与表情迁移到图片人物上。使用阿里百炼 wan2.2-animate-move，平均生成约 377 秒。",
+      "上传人物图片和舞蹈参考视频，将参考视频中的动作与表情自然迁移到图片人物上，适合舞蹈演绎、角色表演与创意短视频制作。",
     descriptionEn:
-      "Upload a character image and dance reference video to transfer its motion and expressions with Alibaba Model Studio wan2.2-animate-move. Average generation time: about 377 seconds.",
+      "Upload a character image and dance reference video to transfer the motion and expressions naturally onto the character for dance, performance, and creative short videos.",
     sellCredits: 500,
     uiSchema: bailianDanceMoveWorkflowMock,
   },
@@ -232,9 +246,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "有声视频",
     displayNameEn: "Talking Character Video",
     description:
-      "上传人物图片和人声音频，生成口型、表情和动作同步的说话、唱歌或表演视频。使用阿里百炼 wan2.2-s2v，支持 480P 与 720P。",
+      "上传人物图片和人声音频，生成口型、表情和动作同步的说话、唱歌或表演视频，支持 480P 与 720P 输出。",
     descriptionEn:
-      "Upload a character image and human-voice audio to generate a synchronized speaking, singing, or performing video with Alibaba Model Studio wan2.2-s2v.",
+      "Upload a character image and voice audio to generate a synchronized speaking, singing, or performing video in 480P or 720P.",
     sellCredits: 625,
     uiSchema: bailianWan22S2vWorkflowMock,
   },
@@ -246,9 +260,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "多模态图生视频",
     displayNameEn: "Multimodal Image-to-Video",
     description:
-      "上传一张参考图，用文字描述您想要的动作或场景，AI 将为您生成流畅生动的动画视频。支持多种最新模型自选。计费规则：250积分/秒，动态扣除。",
+      "上传一张参考图并描述想要的动作或场景，生成流畅生动的动画视频，可自由设置画面比例、清晰度与时长。",
     descriptionEn:
-      "Upload a reference image, describe the desired action or scene, and AI generates a smooth animated video. Multiple cutting-edge models available. Billing: 250 credits/sec, charged dynamically.",
+      "Upload a reference image and describe the desired action or scene to generate a smooth animated video with adjustable aspect ratio, quality, and duration.",
     sellCredits: 1250,
     uiSchema: bailianWanxI2vWorkflowMock,
   },
@@ -260,9 +274,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "多参考图剧场生成",
     displayNameEn: "Multi-Reference Drama",
     description:
-      "支持上传多达 9 张参考图！在描述中轻松引用不同角色与场景，为您生成连贯的微短剧片段。计费规则：动态秒数计费。",
+      "上传多张参考图，在描述中指定不同角色与场景，生成角色外观与画面风格保持连贯的微短剧片段。",
     descriptionEn:
-      "Upload up to 9 reference images! Easily reference different characters and scenes in your description to generate coherent micro-drama clips. Billed dynamically by duration.",
+      "Upload multiple reference images and identify characters and scenes in the description to generate coherent micro-drama clips with consistent visual style.",
     sellCredits: 1250,
     uiSchema: bailianMultiRefWorkflowMock,
   },
@@ -281,6 +295,20 @@ const CATALOG: SkuDefinition[] = [
     uiSchema: imageToVideoWorkflowMock,
   },
 ];
+
+const PUBLIC_DESCRIPTION_FORBIDDEN_NAME = /阿里百炼|Alibaba Model Studio|RunningHub|GPT[- ]?image|Qwen|llama\.cpp|O3[- ]?pro|wan\d|HappyHorse|通义万相|Tongyi Wanxiang/i;
+
+for (const sku of CATALOG) {
+  const publicDescriptions = [
+    sku.description,
+    sku.descriptionEn,
+    sku.uiSchema.description,
+    sku.uiSchema.descriptionEn,
+  ].filter((value): value is string => typeof value === "string");
+  if (publicDescriptions.some((description) => PUBLIC_DESCRIPTION_FORBIDDEN_NAME.test(description))) {
+    throw new Error(`Public tool description must describe functionality without provider or model names: ${sku.skuId}`);
+  }
+}
 
 /**
  * GET `/api/skus` — 返回创作功能目录与表单配置，供工作台动态渲染。

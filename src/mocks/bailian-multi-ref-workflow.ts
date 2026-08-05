@@ -13,9 +13,9 @@ export const bailianMultiRefWorkflowMock: WorkflowFormSchema = {
   title: "多参考图剧场生成",
   titleEn: "Multi-Reference Video Generation",
   description:
-    "支持上传多达 5 张参考图！在描述中轻松引用不同角色与场景，为您生成连贯的微短剧片段。计费规则：动态秒数计费。",
+    "上传多张参考图，在描述中指定不同角色与场景，生成角色外观与画面风格保持连贯的微短剧片段。",
   descriptionEn:
-    "Upload up to 5 reference images! Reference different characters and scenes in your description to generate coherent micro-drama clips. Billing: dynamic per-second rate.",
+    "Upload multiple reference images and identify characters and scenes in the description to generate coherent micro-drama clips with a consistent visual style.",
   schema: {
     type: "object",
     properties: {

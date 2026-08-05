@@ -919,10 +919,13 @@ function mapDashScopeTaskToPollData(raw: unknown): TaskStatusPollData {
     };
   }
   if (st === "PENDING" || st === "QUEUED" || st === "SUBMITTED") {
-    return { status: "queued", progress: 22 };
+    // DashScope only exposes a coarse task state for these video jobs.  Do not
+    // present a made-up percentage as provider progress; the viewer will use
+    // elapsed time and the SKU's expected duration for a truthful estimate.
+    return { status: "queued" };
   }
   if (st === "RUNNING" || st === "PROCESSING") {
-    return { status: "running", progress: 68 };
+    return { status: "running" };
   }
-  return { status: "running", progress: 45 };
+  return { status: "running" };
 }

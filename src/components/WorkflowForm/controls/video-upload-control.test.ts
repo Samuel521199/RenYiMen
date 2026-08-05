@@ -15,6 +15,14 @@ const imageUploadSource = readFileSync(
   path.join(process.cwd(), "src/components/WorkflowForm/controls/ImageUploadControl.tsx"),
   "utf8",
 );
+const audioUploadSource = readFileSync(
+  path.join(process.cwd(), "src/components/WorkflowForm/controls/AudioUploadControl.tsx"),
+  "utf8",
+);
+const uploadStyleSource = readFileSync(
+  path.join(process.cwd(), "src/components/WorkflowForm/controls/upload-control-styles.ts"),
+  "utf8",
+);
 const studioSource = readFileSync(
   path.join(process.cwd(), "src/components/WorkflowForm/WorkflowStudio.tsx"),
   "utf8",
@@ -34,4 +42,20 @@ test("video upload preview cannot be widened by long filenames or OSS URLs", () 
 test("upload controls hide clear actions and remote storage metadata", () => {
   assert.doesNotMatch(source, /clearImageField|uploadRemoteUrl/);
   assert.doesNotMatch(imageUploadSource, /clearImageField|uploadRemoteUrl|uploadFileName/);
+});
+
+test("file picker buttons share a subdued secondary action style", () => {
+  assert.match(source, /className=\{uploadPickerButtonClass\}/);
+  assert.match(imageUploadSource, /className=\{uploadPickerButtonClass\}/);
+  assert.match(audioUploadSource, /className=\{uploadPickerButtonClass\}/);
+  assert.match(uploadStyleSource, /bg-slate-700\/30/);
+  assert.doesNotMatch(uploadStyleSource, /bg-emerald-500/);
+});
+
+test("image, video, and audio upload previews share the same height and action spacing", () => {
+  assert.match(imageUploadSource, /h-\[176px\]/);
+  assert.match(source, /h-\[176px\]/);
+  assert.match(audioUploadSource, /h-\[176px\]/);
+  assert.match(source, /space-y-3 overflow-hidden/);
+  assert.match(audioUploadSource, /space-y-3 overflow-hidden/);
 });

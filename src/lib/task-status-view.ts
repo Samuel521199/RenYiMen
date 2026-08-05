@@ -151,6 +151,10 @@ export function buildTaskViewerModel(
   return {
     phase: "loading",
     subPhase,
+    progress:
+      typeof data?.progress === "number" && Number.isFinite(data.progress)
+        ? Math.max(0, Math.min(99, data.progress))
+        : null,
     elapsedMs: elapsed,
     expectedDurationMs: expectedMs,
     hints: resolveLoadingHints(ctx.skuId),

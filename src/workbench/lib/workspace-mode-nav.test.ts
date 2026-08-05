@@ -18,6 +18,10 @@ test("top navigation switches between isolated sidebar menus", () => {
   assert.match(headerSource, /href="\/workbench\/operations"/);
   assert.match(headerSource, /workspaceGeneral/);
   assert.match(headerSource, /workspaceOperations/);
+  assert.ok(
+    headerSource.indexOf("workspaceOperations") < headerSource.indexOf("workspaceGeneral"),
+    "operations workspace should be displayed before general workspace",
+  );
   assert.match(sidebarSource, /isGeneralWorkspace/);
   assert.match(sidebarSource, /item\.href === "\/workbench\/tools"/);
   assert.match(sidebarSource, /item\.href !== "\/workbench\/tools"/);
