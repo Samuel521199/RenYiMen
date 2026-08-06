@@ -234,7 +234,7 @@ export default function WorkbenchTopNavigation() {
           <span>{isEn ? item.labelEn : t(item.label)}</span>
           <ArrowRight className="h-3.5 w-3.5 text-slate-600 transition-all group-hover/ops:translate-x-0.5 group-hover/ops:text-[#9ef5d8]" />
         </div>
-        <p className="mt-2 text-[11px] leading-5 text-slate-500">{isEn ? descriptionEn : description}</p>
+        <p className="mt-2 text-xs leading-5 text-slate-500">{isEn ? descriptionEn : description}</p>
       </Link>
     );
   };
@@ -246,7 +246,7 @@ export default function WorkbenchTopNavigation() {
         <div className="text-sm font-semibold text-slate-100">{isEn ? item.labelEn : t(item.label)}</div>
         <div className={`mt-3 border-t border-white/[0.07] pt-3 ${split ? "grid grid-cols-2 gap-x-4 gap-y-1" : "space-y-1"}`}>
           {item.children.map((child) => (
-            <Link key={child.href} href={child.href} className="group/child flex min-w-0 items-center justify-between gap-2 rounded-md px-1 py-1.5 text-[11px] text-slate-400 transition-colors hover:bg-white/[0.025] hover:text-[#9ef5d8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9ef5d8]/60">
+            <Link key={child.href} href={child.href} className="group/child flex min-w-0 items-center justify-between gap-2 rounded-md px-1 py-1.5 text-xs text-slate-400 transition-colors hover:bg-white/[0.025] hover:text-[#9ef5d8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9ef5d8]/60">
               <span className="flex min-w-0 items-center gap-2"><span className="h-1 w-1 shrink-0 rounded-full bg-slate-600 transition-colors group-hover/child:bg-[#9ef5d8]" /><span className="truncate">{t(child.label)}</span></span>
               <ArrowRight className="h-3 w-3 shrink-0 opacity-0 transition-all group-hover/child:translate-x-0.5 group-hover/child:opacity-60" />
             </Link>
@@ -275,9 +275,8 @@ export default function WorkbenchTopNavigation() {
             <div className="relative flex items-center justify-between border-b border-white/[0.07] bg-white/[0.012] px-5 py-4">
               <div>
                 <div className="flex items-center gap-2 text-sm font-semibold text-white"><Clapperboard className="h-4 w-4 text-[#9ef5d8]" />{isEn ? "Operations Workspace" : "运营部工作台"}</div>
-                <p className="mt-1 text-[11px] text-slate-500">{isEn ? "Tasks, templates, assets, review, and system administration" : "集中进入任务、模板、素材、审核、数据与系统管理"}</p>
               </div>
-              <Link href="/workbench/operations" className="flex items-center gap-1 text-xs font-medium text-[#9ef5d8]/80 hover:text-[#9ef5d8]">{isEn ? "Open overview" : "进入概览"}<ArrowRight className="h-3.5 w-3.5" /></Link>
+              <Link href="/workbench/operations" className="flex items-center gap-1 text-sm font-medium text-[#9ef5d8]/80 hover:text-[#9ef5d8]">{isEn ? "Open overview" : "进入概览"}<ArrowRight className="h-3.5 w-3.5" /></Link>
             </div>
             <div className="relative grid max-h-[min(560px,calc(100vh-8rem))] grid-cols-1 gap-3 overflow-y-auto overscroll-contain p-4 lg:grid-cols-[1.12fr_1fr_1fr]">
               <div className="flex min-w-0 flex-col gap-3">
@@ -314,15 +313,14 @@ export default function WorkbenchTopNavigation() {
         </button>
         {openMenu === "creative" ? (
           <div className="absolute left-1/2 top-[calc(100%-2px)] z-[100] w-[min(920px,calc(100vw-2rem))] translate-x-[calc(-50%+10rem)] pt-3" onMouseEnter={() => open("creative")} onMouseLeave={scheduleClose}>
-            <div className="relative overflow-hidden rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(16,17,22,.985),rgba(6,8,12,.99))] shadow-[0_32px_100px_rgba(0,0,0,.68),inset_0_1px_0_rgba(255,255,255,.045)] backdrop-blur-2xl">
+            <div className="workbench-creative-menu relative overflow-hidden rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(16,17,22,.995),rgba(6,8,12,.998))] shadow-[0_32px_100px_rgba(0,0,0,.68),inset_0_1px_0_rgba(255,255,255,.045)]">
               <div className="pointer-events-none absolute -left-20 -top-32 h-64 w-72 rounded-full bg-cyan-400/[0.055] blur-[85px]" />
               <div className="pointer-events-none absolute -right-16 top-8 h-52 w-64 rounded-full bg-violet-500/[0.045] blur-[90px]" />
               <div className="relative flex items-center justify-between border-b border-white/[0.07] bg-white/[0.012] px-5 py-4">
                 <div>
-                  <div className="flex items-center gap-2 text-sm font-semibold text-white"><Sparkles className="h-4 w-4 text-cyan-300" />{isEn ? "Creative Hub" : "创作中心"}</div>
-                  <p className="mt-1 text-[11px] text-slate-500">{isEn ? "Choose by the result you want to create" : "按照你想完成的创作结果选择工具"}</p>
+                  <div className="flex items-center gap-2 text-sm font-medium text-white"><Sparkles className="h-4 w-4 text-cyan-300" />{isEn ? "Creative Hub" : "创作中心"}</div>
                 </div>
-                <Link href="/workbench/tools" className="flex items-center gap-1 text-xs font-medium text-cyan-300 hover:text-cyan-200">{isEn ? "All tools" : "全部工具"}<ArrowRight className="h-3.5 w-3.5" /></Link>
+                <Link href="/workbench/tools" className="flex items-center gap-1 text-sm font-medium text-cyan-300 hover:text-cyan-200">{isEn ? "All tools" : "全部工具"}<ArrowRight className="h-3.5 w-3.5" /></Link>
               </div>
               <div className="relative grid grid-cols-2 gap-px bg-white/[0.055] xl:grid-cols-4">
                 {GENERAL_COLUMNS.map((column) => {
@@ -331,12 +329,12 @@ export default function WorkbenchTopNavigation() {
                     <div key={column.label} className="group bg-[rgba(9,11,15,.94)] p-5 transition-colors hover:bg-white/[0.025]">
                       <Link href={column.href} className="block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60">
                         <div className={`mb-4 flex h-9 w-9 items-center justify-center rounded-xl ${column.accent}`}><Icon className="h-4.5 w-4.5" /></div>
-                        <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-100 hover:text-white">{isEn ? column.labelEn : column.label}<ArrowRight className="h-3.5 w-3.5 opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100" /></div>
-                        <p className="mt-1.5 min-h-9 text-[11px] leading-4 text-slate-500">{isEn ? column.descriptionEn : column.description}</p>
+                        <div className="flex items-center gap-1.5 text-sm font-medium text-slate-100 hover:text-white">{isEn ? column.labelEn : column.label}<ArrowRight className="h-3.5 w-3.5 opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100" /></div>
+                        <p className="mt-1.5 min-h-9 text-sm leading-[1.5] text-slate-500">{isEn ? column.descriptionEn : column.description}</p>
                       </Link>
                       <div className="mt-4 space-y-2 border-t border-white/[0.07] pt-3">
                         {column.tools.map((tool) => (
-                          <Link key={tool.href} href={tool.href} className="group/tool flex items-center justify-between gap-2 rounded-md px-1 py-0.5 text-[11px] text-slate-400 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60">
+                          <Link key={tool.href} href={tool.href} className="group/tool flex items-center justify-between gap-2 rounded-md px-1 py-0.5 text-sm leading-[1.5] text-slate-400 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60">
                             <span className="flex min-w-0 items-center gap-2"><span className="h-1 w-1 shrink-0 rounded-full bg-slate-600 transition-colors group-hover/tool:bg-cyan-400" /><span className="truncate">{isEn ? tool.labelEn : tool.label}</span></span>
                             <ArrowRight className="h-3 w-3 shrink-0 opacity-0 transition-all group-hover/tool:translate-x-0.5 group-hover/tool:opacity-60" />
                           </Link>
@@ -368,7 +366,7 @@ export default function WorkbenchTopNavigation() {
             {openMenu === menuKey ? (
               <div className="absolute left-1/2 top-[calc(100%-2px)] z-[100] w-56 -translate-x-1/2 pt-3" onMouseEnter={() => open(menuKey)} onMouseLeave={scheduleClose}>
                 <div className="rounded-xl border border-white/[0.09] bg-[rgba(9,11,15,.98)] p-2 shadow-[0_24px_70px_rgba(0,0,0,.62),inset_0_1px_0_rgba(255,255,255,.035)] backdrop-blur-2xl">
-                  {item.children?.map((child) => <Link key={child.href} href={child.href} className={`block rounded-lg px-3 py-2.5 text-xs transition-colors ${pathname === child.href ? "bg-[#9ef5d8]/[0.08] text-[#9ef5d8]" : "text-slate-400 hover:bg-white/[0.06] hover:text-white"}`}>{t(child.label)}</Link>)}
+                  {item.children?.map((child) => <Link key={child.href} href={child.href} className={`block rounded-lg px-3 py-2.5 text-sm transition-colors ${pathname === child.href ? "bg-[#9ef5d8]/[0.08] text-[#9ef5d8]" : "text-slate-400 hover:bg-white/[0.06] hover:text-white"}`}>{t(child.label)}</Link>)}
                 </div>
               </div>
             ) : null}

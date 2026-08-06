@@ -27,7 +27,8 @@ test("the workbench brand and default entry points target the visual home page",
   assert.ok(homeSource.indexOf("<PopularWorksShowcase") > homeSource.indexOf("<HomeShowcaseCarousel"));
   assert.match(popularWorksSource, /POPULAR_WORKS/);
   assert.match(popularWorksSource, /showcase\/popular-works\/color-blitz-social\.mp4/);
-  assert.equal((popularWorksSource.match(/video: "\/showcase\/popular-works\//g) ?? []).length, 6);
+  assert.equal((popularWorksSource.match(/video: "\/showcase\/popular-works\//g) ?? []).length, 7);
+  assert.match(popularWorksSource, /showcase\/popular-works\/island-dance-workflow\.mp4/);
   assert.match(popularWorksSource, /role="dialog"/);
   assert.equal((homeSource.match(/home-display-title/g) ?? []).length, 2);
   assert.equal((homeSource.match(/home-section-title/g) ?? []).length, 1);
@@ -92,4 +93,7 @@ test("the compact top navigation searches across the complete tool catalog", () 
   assert.match(studioSource, /sku\.displayNameEn/);
   assert.match(studioSource, /sku\.providerCode/);
   assert.match(studioSource, /visibleCategoryTabs = routeSearchQuery/);
+  assert.match(studioSource, /key: "audio", label: t\.categoryAudio/);
+  assert.match(studioSource, /AUDIO_CATEGORY_SKU_IDS/);
+  assert.match(studioSource, /getGalleryCategory\(s\) === activeCategory/);
 });

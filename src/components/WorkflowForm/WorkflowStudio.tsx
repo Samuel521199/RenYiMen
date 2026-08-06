@@ -71,6 +71,7 @@ import {
 // ─── View type ──────────────────────────────────────────────────────────────
 
 type View = "gallery" | "studio";
+type GalleryCategory = SkuCategory | "audio";
 type VideoGenerationTab = "image-to-video" | "video-continuation";
 type VideoEditingTab = "ai-video-edit" | "motion-replica";
 type SubtitleProcessState = "idle" | "processing" | "success" | "error";
@@ -87,10 +88,11 @@ function clampStudioSplit(percent: number): number {
 
 // ─── Category metadata ──────────────────────────────────────────────────────
 
-const CATEGORY_ICON: Record<SkuCategory, string> = {
+const CATEGORY_ICON: Record<GalleryCategory, string> = {
   prompt: "✦",
   image: "◈",
   video: "▶",
+  audio: "♪",
   model: "◇",
 };
 
@@ -152,6 +154,17 @@ const AUDIO_POST_SKU_IDS = new Set([
   "BAILIAN_EMOTIONAL_TTS",
   "LOCAL_AUTO_SUBTITLES",
 ]);
+
+const AUDIO_CATEGORY_SKU_IDS = new Set([
+  "LOCAL_AUDIO_EXTRACTION",
+  "BAILIAN_VOICE_CLONE",
+  "BAILIAN_COSYVOICE_VOICE_DESIGN",
+  "BAILIAN_EMOTIONAL_TTS",
+]);
+
+function getGalleryCategory(sku: SkuDefinition): GalleryCategory {
+  return AUDIO_CATEGORY_SKU_IDS.has(sku.skuId) ? "audio" : sku.category;
+}
 
 const VIDEO_EDITING_TABS: { key: VideoEditingTab; label: string; labelEn: string }[] = [
   { key: "ai-video-edit", label: "AI视频编辑微调", labelEn: "AI Video Editing" },
@@ -218,10 +231,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const [projectSaving, setProjectSaving] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
   const routeCategory = searchParams.get("category");
-  const routeSkuCategory: SkuCategory | null = routeCategory === "prompt" || routeCategory === "image" || routeCategory === "video"
+  const routeSkuCategory: GalleryCategory | null = routeCategory === "prompt" || routeCategory === "image" || routeCategory === "video" || routeCategory === "audio" || routeCategory === "model"
     ? routeCategory
     : null;
-  const [activeCategory, setActiveCategory] = useState<SkuCategory>(routeSkuCategory ?? "prompt");
+  const [activeCategory, setActiveCategory] = useState<GalleryCategory>(routeSkuCategory ?? "prompt");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [profileRefreshKey, setProfileRefreshKey] = useState(0);
@@ -772,7 +785,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         window.location.href,
       );
       applySku(sku);
-      setActiveCategory(sku.category);
+      setActiveCategory(getGalleryCategory(sku));
       setView("studio");
     },
     [applySku]
@@ -801,7 +814,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     );
     setActiveToolGroup(null);
     applySku(sku);
-    setActiveCategory(sku.category);
+    setActiveCategory(getGalleryCategory(sku));
     setView("studio");
   }, [applySku, routeSkuId, skus]);
 
@@ -835,7 +848,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         return;
       }
       applySku(sku);
-      setActiveCategory(sku.category);
+      setActiveCategory(getGalleryCategory(sku));
       setView("studio");
     };
 
@@ -1189,10 +1202,11 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         ? t.submitBtnSubmitting
         : t.submitBtn;
 
-  const CATEGORY_TABS: { key: SkuCategory; label: string }[] = [
+  const CATEGORY_TABS: { key: GalleryCategory; label: string }[] = [
     { key: "prompt", label: t.categoryPrompt },
     { key: "image", label: t.categoryImage },
     { key: "video", label: t.categoryVideo },
+    { key: "audio", label: t.categoryAudio },
     { key: "model", label: t.categoryModel },
   ];
   const visibleCategoryTabs = routeSearchQuery || activeToolGroup === "favorites"
@@ -1223,7 +1237,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       ? skus.filter((s) => isSkuInVideoEditingTab(s, activeVideoEditingTab))
     : activeToolGroup
       ? skus.filter((s) => isSkuInToolGroup(s, activeToolGroup))
-      : skus.filter((s) => s.category === activeCategory);
+      : skus.filter((s) => getGalleryCategory(s) === activeCategory);
   const activeToolGroupLabel = activeToolGroup
     ? TOOL_GROUP_LABELS[activeToolGroup][locale]
     : "";
@@ -1381,7 +1395,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
               }) : visibleCategoryTabs.map((tab) => {
                 const count = activeToolGroup
                   ? visibleSkus.length
-                  : skus.filter((s) => s.category === tab.key).length;
+                  : skus.filter((s) => getGalleryCategory(s) === tab.key).length;
                 const isActive = activeCategory === tab.key;
                 return (
                   <button
@@ -1476,7 +1490,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     key={sku.skuId}
                     sku={sku}
                     locale={locale}
-                    categoryLabel={CATEGORY_TABS.find((c) => c.key === sku.category)?.label ?? ""}
+                    categoryLabel={CATEGORY_TABS.find((c) => c.key === getGalleryCategory(sku))?.label ?? ""}
                     creditsLabel={t.credits}
                     startLabel={t.startCreating}
                     favoriteAddLabel={t.favoriteAdd}

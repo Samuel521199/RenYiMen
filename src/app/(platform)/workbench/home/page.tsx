@@ -40,7 +40,7 @@ const CAPABILITY_SECTIONS_ZH: CapabilitySection[] = [
     tools: [
       { eyebrow: "多角色叙事", title: "多参考图剧场生成", description: "最多引用 9 张人物与场景图，生成角色一致、叙事连贯的微短剧片段。", href: "/workbench/tools?sku=BAILIAN_MULTI_REF_I2V", cover: "/covers/multi-reference-drama.webp", motion: "/covers/multi-reference-drama-motion.mp4" },
       { eyebrow: "镜头语言", title: "运镜复刻", description: "把推拉、环绕、升降与跟拍节奏迁移到目标画面。", href: "/workbench/tools?sku=BAILIAN_WAN27_CAMERA_REPLICATION", cover: "/covers/camera-movement-replication.webp", motion: "/covers/camera-movement-replication-motion.mp4" },
-      { eyebrow: "视觉特效", title: "特效复刻", description: "迁移火焰、粒子、变身等效果，同时保留人物主体。", href: "/workbench/tools?sku=BAILIAN_WAN27_EFFECT_REPLICATION", cover: "/covers/effect-replication.webp", motion: "/covers/effect-replication-motion.mp4" },
+      { eyebrow: "风格重塑", title: "风格迁移", description: "迁移参考视频的整体视觉风格，同时保留主体、动作与镜头语言。", href: "/workbench/tools?sku=BAILIAN_OVERALL_STYLE_TRANSFER", cover: "/covers/overall-style-transfer.webp", motion: "/covers/overall-style-transfer-motion.mp4" },
       { eyebrow: "风格重塑", title: "高动态重绘", description: "改变视觉风格，并尽量保留高速动作与原有镜头语言。", href: "/workbench/tools?sku=BAILIAN_HIGH_DYNAMIC_REDRAW", cover: "/covers/high-motion-redraw.webp", motion: "/covers/high-motion-redraw-motion.mp4" },
     ],
   },
@@ -95,7 +95,7 @@ const CAPABILITY_SECTIONS_EN: CapabilitySection[] = [
     tools: [
       { ...CAPABILITY_SECTIONS_ZH[0].tools[0], eyebrow: "Multi-character stories", title: "Multi-reference drama", description: "Reference up to nine characters and scenes to create coherent micro-drama clips." },
       { ...CAPABILITY_SECTIONS_ZH[0].tools[1], eyebrow: "Camera language", title: "Camera replication", description: "Transfer dolly, orbit, crane, and tracking motion to a target scene." },
-      { ...CAPABILITY_SECTIONS_ZH[0].tools[2], eyebrow: "Visual effects", title: "Effect replication", description: "Transfer fire, particles, and transformations while preserving the subject." },
+      { ...CAPABILITY_SECTIONS_ZH[0].tools[2], eyebrow: "Visual restyling", title: "Style transfer", description: "Transfer the reference video's visual style while preserving subject, motion, and camera language." },
       { ...CAPABILITY_SECTIONS_ZH[0].tools[3], eyebrow: "Visual restyling", title: "High-motion redraw", description: "Restyle footage while retaining fast action and original camera language." },
     ],
   },

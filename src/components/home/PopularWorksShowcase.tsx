@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Maximize2, Play, X } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Maximize2, Play, Volume1, Volume2, VolumeX, X } from "lucide-react";
 
 type PopularWork = {
   id: string;
@@ -28,24 +28,25 @@ const POPULAR_WORKS: PopularWork[] = [
   },
   {
     id: "face-swap-resort-hostess",
-    titleZh: "海岛角色焕新",
-    titleEn: "Resort Character Refresh",
+    titleZh: "风格迁移",
+    titleEn: "Style Transfer",
     categoryZh: "角色形象重塑",
     categoryEn: "Character restyling",
     video: "/showcase/popular-works/face-swap-resort-hostess.mp4",
     poster: "/showcase/popular-works/face-swap-resort-hostess-poster.jpg",
-    className: "min-h-[360px] lg:order-1 lg:col-span-3 lg:min-h-[620px]",
+    className: "min-h-[360px] lg:order-2 lg:col-span-3 lg:min-h-[620px]",
     mediaClassName: "object-[50%_18%]",
   },
   {
     id: "scene-light-texas-hostess",
-    titleZh: "德州大厅漫游",
+    titleZh: "场景与光影变换",
     titleEn: "Texas Lounge Walkthrough",
     categoryZh: "场景与光影",
     categoryEn: "Scene and lighting",
     video: "/showcase/popular-works/scene-light-texas-hostess.mp4",
     poster: "/showcase/popular-works/scene-light-texas-hostess-poster.jpg",
-    className: "min-h-[360px] lg:order-2 lg:col-span-3 lg:min-h-[620px]",
+    className: "min-h-[360px] lg:order-5 lg:col-span-3 lg:min-h-[360px]",
+    mediaClassName: "object-[50%_18%]",
   },
   {
     id: "cowboy-character-design",
@@ -55,7 +56,7 @@ const POPULAR_WORKS: PopularWork[] = [
     categoryEn: "IP character design",
     video: "/showcase/popular-works/cowboy-character-design.mp4",
     poster: "/showcase/popular-works/cowboy-character-design-poster.jpg",
-    className: "min-h-[260px] lg:order-4 lg:col-span-4 lg:min-h-[360px]",
+    className: "min-h-[260px] lg:order-4 lg:col-span-3 lg:min-h-[360px]",
   },
   {
     id: "character-motion-workflow",
@@ -65,8 +66,19 @@ const POPULAR_WORKS: PopularWork[] = [
     categoryEn: "Motion generation",
     video: "/showcase/popular-works/character-motion-workflow.mp4",
     poster: "/showcase/popular-works/character-motion-workflow-poster.jpg",
-    className: "min-h-[260px] lg:order-5 lg:col-span-3 lg:min-h-[360px]",
+    className: "min-h-[260px] lg:order-1 lg:col-span-3 lg:min-h-[620px]",
     mediaClassName: "object-[50%_20%]",
+  },
+  {
+    id: "island-dance-workflow",
+    titleZh: "海岛舞步",
+    titleEn: "Island Dance",
+    categoryZh: "角色动画",
+    categoryEn: "Character animation",
+    video: "/showcase/popular-works/island-dance-workflow.mp4",
+    poster: "/showcase/popular-works/island-dance-workflow-poster.jpg",
+    className: "min-h-[260px] lg:order-6 lg:col-span-3 lg:min-h-[360px]",
+    mediaClassName: "object-[50%_22%]",
   },
   {
     id: "color-blitz-social",
@@ -76,11 +88,11 @@ const POPULAR_WORKS: PopularWork[] = [
     categoryEn: "30-second film",
     video: "/showcase/popular-works/color-blitz-social.mp4",
     poster: "/showcase/popular-works/color-blitz-social-poster.jpg",
-    className: "col-span-2 min-h-[280px] lg:order-6 lg:col-span-5 lg:min-h-[360px]",
+    className: "min-h-[260px] lg:order-7 lg:col-span-3 lg:min-h-[360px]",
   },
 ];
 
-function PopularWorkVideo({ work, priority }: { work: PopularWork; priority: boolean }) {
+function PopularWorkVideo({ work, priority, muted, volume }: { work: PopularWork; priority: boolean; muted: boolean; volume: number }) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -97,11 +109,19 @@ function PopularWorkVideo({ work, priority }: { work: PopularWork; priority: boo
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = muted;
+    video.volume = volume;
+    if (!muted) void video.play().catch(() => undefined);
+  }, [muted, volume]);
+
   return (
     <video
       ref={videoRef}
       className={`absolute inset-0 h-full w-full object-cover opacity-90 saturate-[1.05] transition duration-700 group-hover:scale-[1.025] group-hover:opacity-100 group-hover:saturate-[1.14] ${work.mediaClassName ?? ""}`}
-      muted
+      muted={muted}
       loop
       playsInline
       preload={priority ? "metadata" : "none"}
@@ -115,6 +135,15 @@ function PopularWorkVideo({ work, priority }: { work: PopularWork; priority: boo
 
 export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
   const [selectedWork, setSelectedWork] = useState<PopularWork | null>(null);
+  const [unmutedWorkId, setUnmutedWorkId] = useState<string | null>(null);
+  const [workVolumes, setWorkVolumes] = useState<Record<string, number>>(() =>
+    Object.fromEntries(POPULAR_WORKS.map((work) => [work.id, 0.7])),
+  );
+
+  const openWork = (work: PopularWork) => {
+    setUnmutedWorkId(null);
+    setSelectedWork(work);
+  };
 
   useEffect(() => {
     if (!selectedWork) return;
@@ -138,7 +167,7 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
           <div className="mb-5 flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.28em] text-[#9ef5d8]">
             <span>{isEn ? "Popular now" : "正在流行"}</span>
             <span className="h-px w-10 bg-current opacity-45" />
-            <span className="text-white/35">CURATED 06</span>
+            <span className="text-white/35">CURATED 07</span>
           </div>
           <h2 className="home-section-title max-w-4xl text-[clamp(2.5rem,4.8vw,5.25rem)]">
             {isEn ? "Made with imagination.\nFinished with intelligence." : "灵感已成片，\n好作品正在发生。"}
@@ -147,8 +176,8 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
         <div className="md:col-span-4 md:pb-2">
           <p className="max-w-md whitespace-pre-line text-sm leading-7 text-white/45">
             {isEn
-              ? "Six recent audience favorites, spanning character, motion, scene, and short-form storytelling."
-              : "从角色塑造、动作生成到场景叙事，\n精选近期最受欢迎的六支成片。"}
+              ? "Seven recent audience favorites, spanning character, motion, scene, and short-form storytelling."
+              : "从角色塑造、动作生成到场景叙事，\n精选近期最受欢迎的七支成片。"}
           </p>
           <p className="mt-4 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.2em] text-white/30">
             <Play className="h-3 w-3 fill-current" />
@@ -158,37 +187,84 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
       </div>
 
       <div className="relative grid grid-cols-2 gap-3 lg:grid-cols-12 lg:gap-4">
-        {POPULAR_WORKS.map((work, index) => (
-          <button
+        {POPULAR_WORKS.map((work, index) => {
+          const isMuted = unmutedWorkId !== work.id;
+          const volume = workVolumes[work.id] ?? 0.7;
+          return (
+          <article
             key={work.id}
-            type="button"
-            onClick={() => setSelectedWork(work)}
-            className={`home-popular-card group relative overflow-hidden rounded-[1.35rem] border border-white/[0.12] bg-[#09111a] text-left shadow-[0_18px_60px_rgba(0,0,0,.24)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9ef5d8] focus-visible:ring-offset-4 focus-visible:ring-offset-[#05080d] ${work.className}`}
-            aria-label={`${isEn ? "Watch" : "观看"} ${isEn ? work.titleEn : work.titleZh}`}
+            className={`home-popular-card group relative overflow-hidden rounded-[1.35rem] border border-white/[0.12] bg-[#09111a] text-left shadow-[0_18px_60px_rgba(0,0,0,.24)] ${work.className}`}
           >
-            <PopularWorkVideo work={work} priority={index < 3} />
+            <PopularWorkVideo work={work} priority={index < 3} muted={isMuted} volume={volume} />
             <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(3,7,11,.94)_0%,rgba(3,7,11,.24)_48%,rgba(3,7,11,.03)_78%)] transition duration-500 group-hover:bg-[linear-gradient(0deg,rgba(3,7,11,.9)_0%,rgba(3,7,11,.15)_48%,rgba(3,7,11,.01)_78%)]" />
-            <div className="absolute inset-x-0 top-0 flex items-start justify-between p-4 sm:p-5">
-              <span className="rounded-full border border-white/15 bg-black/25 px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-white/75 backdrop-blur-md">
-                {isEn ? work.categoryEn : work.categoryZh}
-              </span>
-              <span className="flex h-8 w-8 translate-y-1 items-center justify-center rounded-full border border-white/20 bg-black/20 text-white/75 opacity-0 backdrop-blur-md transition duration-300 group-hover:translate-y-0 group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={() => openWork(work)}
+              className="absolute inset-0 z-10 rounded-[1.35rem] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#9ef5d8]"
+              aria-label={`${isEn ? "Watch" : "观看"} ${isEn ? work.titleEn : work.titleZh}`}
+            />
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-end p-4 sm:p-5">
+              <span className="flex h-8 w-8 translate-y-1 items-center justify-center rounded-full border border-white/20 bg-black/20 text-white/75 opacity-0 backdrop-blur-md transition duration-300 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100">
                 <Maximize2 className="h-3.5 w-3.5" />
               </span>
             </div>
-            <div className="absolute inset-x-0 bottom-0 flex items-end justify-between gap-4 p-5 sm:p-6">
-              <div>
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between gap-4 p-5 sm:p-6">
+              <div className="min-w-0 flex-1">
                 <span className="mb-2 block text-[9px] font-medium uppercase tracking-[0.2em] text-[#9ef5d8]/70">0{index + 1}</span>
-                <h3 className="text-xl font-medium tracking-[-0.035em] text-white sm:text-2xl">
-                  {isEn ? work.titleEn : work.titleZh}
-                </h3>
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <h3 className="min-w-0 shrink truncate text-xl font-medium tracking-[-0.035em] text-white sm:text-2xl">
+                    {isEn ? work.titleEn : work.titleZh}
+                  </h3>
+                  <div className="home-volume-control group/volume pointer-events-auto relative z-30 shrink-0 sm:translate-y-1 sm:opacity-0 sm:transition sm:duration-300 sm:group-hover:translate-y-0 sm:group-hover:opacity-100 sm:group-focus-within:translate-y-0 sm:group-focus-within:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!isMuted) {
+                          setUnmutedWorkId(null);
+                          return;
+                        }
+                        if (volume === 0) setWorkVolumes((current) => ({ ...current, [work.id]: 0.7 }));
+                        setUnmutedWorkId(work.id);
+                      }}
+                      className="flex h-8 w-8 items-center justify-center rounded-full bg-[#9ef5d8] text-[#071019] shadow-[0_8px_24px_rgba(0,0,0,.28),0_0_0_1px_rgba(158,245,216,.16)] transition duration-300 hover:scale-105 hover:bg-[#b8f8e3] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                      aria-label={isMuted ? (isEn ? `Unmute ${work.titleEn}` : `开启${work.titleZh}的声音`) : (isEn ? `Mute ${work.titleEn}` : `静音${work.titleZh}`)}
+                      aria-pressed={!isMuted}
+                      title={isMuted ? (isEn ? "Turn sound on" : "开启声音") : (isEn ? "Mute or adjust volume" : "静音或调节音量")}
+                    >
+                      {isMuted || volume === 0 ? <VolumeX className="h-3.5 w-3.5" /> : volume <= 0.5 ? <Volume1 className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+                    </button>
+                    <div className="pointer-events-none invisible absolute left-full top-1/2 w-[110px] -translate-y-1/2 pl-2 opacity-0 transition duration-200 group-hover/volume:pointer-events-auto group-hover/volume:visible group-hover/volume:opacity-100 group-focus-within/volume:pointer-events-auto group-focus-within/volume:visible group-focus-within/volume:opacity-100">
+                      <div className="flex h-8 w-[102px] items-center gap-1.5 rounded-full bg-black/45 px-2 backdrop-blur-md">
+                        <input
+                          className="home-volume-slider block w-[70px] shrink-0 cursor-pointer"
+                          style={{ "--volume-progress": `${volume * 100}%` } as CSSProperties}
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={volume}
+                          onChange={(event) => {
+                            const nextVolume = Number(event.target.value);
+                            setWorkVolumes((current) => ({ ...current, [work.id]: nextVolume }));
+                            setUnmutedWorkId(nextVolume === 0 ? null : work.id);
+                          }}
+                          aria-label={isEn ? `${work.titleEn} volume` : `${work.titleZh}音量`}
+                        />
+                        <span className="w-5 text-right text-[10px] font-medium tabular-nums text-white/80">
+                          {Math.round(volume * 100)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#071019] shadow-[0_10px_30px_rgba(0,0,0,.28)] transition duration-300 group-hover:scale-110 group-hover:bg-[#9ef5d8]">
+              <span className="home-popular-play flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#071019] shadow-[0_10px_30px_rgba(0,0,0,.28)] transition duration-300 group-hover:scale-110 group-hover:bg-[#9ef5d8]">
                 <Play className="ml-0.5 h-3.5 w-3.5 fill-current" />
               </span>
             </div>
-          </button>
-        ))}
+          </article>
+          );
+        })}
       </div>
 
       {selectedWork ? (

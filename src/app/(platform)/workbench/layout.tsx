@@ -170,10 +170,10 @@ export default function WorkbenchProviders({ children }: { children: React.React
           <div className="relative z-0 flex h-[calc(100vh-5rem)] w-full overflow-hidden bg-[#05080d]">
             <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden bg-[#05080d] text-slate-100">
               <main
-                className={`workbench-content flex-1 overflow-y-auto ${isTools || isHome ? "" : "operations-workspace p-6"}`}
+                className={`workbench-content flex-1 overflow-y-auto ${isTools || isHome ? "" : "operations-workspace p-4 sm:p-6 lg:p-8"}`}
               >
                 <WorkbenchPermissionGuard>
-                  {children}
+                  {isOperations ? <div className="operations-content-shell">{children}</div> : children}
                 </WorkbenchPermissionGuard>
               </main>
             </div>

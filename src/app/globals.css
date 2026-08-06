@@ -505,6 +505,44 @@
 .home-model-track { animation: home-model-scroll 34s linear infinite; }
 .home-model-marquee:hover .home-model-track { animation-play-state: paused; }
 
+.home-volume-slider {
+  height: 3px;
+  appearance: none;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #79e8e7 0,
+    #79e8e7 var(--volume-progress, 70%),
+    rgb(255 255 255 / .42) var(--volume-progress, 70%),
+    rgb(255 255 255 / .42) 100%
+  );
+}
+
+.home-volume-slider::-webkit-slider-thumb {
+  width: 11px;
+  height: 11px;
+  appearance: none;
+  border: 2px solid #071019;
+  border-radius: 999px;
+  background: #a7eff0;
+  box-shadow: 0 0 0 4px rgb(167 239 240 / .16);
+}
+
+.home-volume-slider::-moz-range-thumb {
+  width: 8px;
+  height: 8px;
+  border: 2px solid #071019;
+  border-radius: 999px;
+  background: #a7eff0;
+  box-shadow: 0 0 0 4px rgb(167 239 240 / .16);
+}
+
+.home-popular-card:has(.home-volume-control:hover) .home-popular-play,
+.home-popular-card:has(.home-volume-control:focus-within) .home-popular-play {
+  opacity: 0;
+  transform: scale(.82);
+}
+
 .home-display-title {
   color: #f7f9fb;
   font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
@@ -635,4 +673,78 @@
   background-image:
     radial-gradient(circle at 10% 0%, rgb(56 189 171 / .055), transparent 28rem),
     radial-gradient(circle at 88% 8%, rgb(59 130 151 / .045), transparent 34rem);
+}
+
+.workbench-creative-menu {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  font-synthesis: none;
+  font-kerning: normal;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.operations-content-shell {
+  width: 100%;
+  max-width: 1560px;
+  min-height: 100%;
+  margin-inline: auto;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.operations-content-shell .workbench-page-header {
+  margin-bottom: 2.25rem;
+}
+
+.operations-content-shell .workbench-page-title,
+.operations-content-shell h1 {
+  color: #eef3f6;
+  font-size: clamp(1.9rem, 2.2vw, 2.55rem);
+  font-weight: 650;
+  letter-spacing: -.04em;
+  line-height: 1.08;
+}
+
+.operations-content-shell .workbench-page-description {
+  max-width: 48rem;
+  margin-top: .7rem;
+  color: rgb(255 255 255 / .52);
+  font-size: .9375rem;
+  line-height: 1.65;
+}
+
+.operations-content-shell h2 {
+  color: #e2e9ee;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -.018em;
+  line-height: 1.35;
+}
+
+.operations-content-shell h3 {
+  font-size: .975rem;
+  font-weight: 600;
+  letter-spacing: -.012em;
+}
+
+.operations-content-shell .workbench-stat-label {
+  color: rgb(203 213 225 / .88);
+  font-size: .9375rem;
+  letter-spacing: -.01em;
+}
+
+.operations-content-shell .workbench-stat-value {
+  font-size: 2rem;
+  font-weight: 650;
+  letter-spacing: -.035em;
+}
+
+.operations-dashboard h2 {
+  font-size: .9375rem;
+  font-weight: 600;
+  letter-spacing: -.012em;
 }

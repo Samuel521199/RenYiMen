@@ -288,8 +288,9 @@ export default function DashboardPage() {
     .sort((a, b) => b.total_calls - a.total_calls);
 
   return (
-    <div className="space-y-6">
+    <div className={mode === "operations" ? "operations-dashboard mx-auto w-full max-w-[1560px] space-y-8 px-1 pb-12 sm:px-3 lg:px-5" : "space-y-6"}>
       <PageHeader
+        prominent={mode === "operations"}
         title={mode === "general" ? t("通用型") : t("运营部")}
         description={
           mode === "general"
@@ -365,7 +366,7 @@ export default function DashboardPage() {
         <div className="space-y-4">
           {/* 分隔标题 */}
           <div className="flex items-center gap-3">
-            <span className="text-sm font-semibold text-slate-300">AI 模型调用统计</span>
+            <span className="text-base font-semibold tracking-[-0.015em] text-slate-200">AI 模型调用统计</span>
             <div className="h-px flex-1 bg-white/10" />
             <span className="rounded-full border border-[#9ef5d8]/15 bg-[#9ef5d8]/[0.07] px-2 py-0.5 text-xs text-[#9ef5d8]/75">管理员可见</span>
           </div>
@@ -379,7 +380,7 @@ export default function DashboardPage() {
               { label: "模型种类", value: aiLoading ? "…" : aiModelCount },
               { label: "活跃用户数", value: aiLoading ? "…" : aiUserCount },
             ].map((c) => (
-              <StatCard key={c.label} label={c.label} value={c.value} />
+              <StatCard key={c.label} label={c.label} value={c.value} prominent />
             ))}
           </div>
 
