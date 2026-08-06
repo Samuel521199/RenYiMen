@@ -481,9 +481,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "多参考图剧场生成",
     displayNameEn: "Multi-Reference Drama",
     description:
-      "支持上传多达 9 张参考图！在描述中轻松引用不同角色与场景，为您生成连贯的微短剧片段。计费规则：动态秒数计费。",
+      "通义万相 2.7 支持上传最多 5 张参考图，在描述中可引用不同角色与场景，生成连贯的微短剧片段。计费规则：动态秒数计费。",
     descriptionEn:
-      "Upload up to 9 reference images! Easily reference different characters and scenes in your description to generate coherent micro-drama clips. Billed dynamically by duration.",
+      "Wan 2.7 supports up to 5 reference images. Reference different characters and scenes in your description to generate coherent micro-drama clips. Billed dynamically by duration.",
     sellCredits: 1250,
     uiSchema: bailianMultiRefWorkflowMock,
   },

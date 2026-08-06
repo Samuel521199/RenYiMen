@@ -1,12 +1,12 @@
 import type { WorkflowFormSchema } from "@/types/workflow";
 
 const MODEL_ENUM = ["wan2.7-i2v-2026-04-25", "happyhorse-1.1-i2v"] as const;
-const MODEL_ENUM_NAMES = ["通义万相 2.7", "HappyHorse 1.1"] as const;
+const MODEL_ENUM_NAMES = ["通义万相 2.7（首帧 / 首尾帧）", "HappyHorse 1.1"] as const;
 
 /** 多模态图生视频：单张参考图 + 文案描述生成短视频，模型与时长在表单中自选。 */
 export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
   workflowId: "bailian-multi-i2v",
-  version: "1.8.0",
+  version: "1.9.0",
   title: "多模态图生视频",
   titleEn: "Multimodal Image-to-Video",
   description:
@@ -53,7 +53,7 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
           mapping: { nodeId: "input", inputPath: ["modelName"] },
           defaultValue: "wan2.7-i2v-2026-04-25",
           options: [
-            { value: "wan2.7-i2v-2026-04-25", label: "通义万相 2.7", labelEn: "Tongyi Wanxiang 2.7" },
+            { value: "wan2.7-i2v-2026-04-25", label: "通义万相 2.7（首帧 / 首尾帧）", labelEn: "Tongyi Wanxiang 2.7 (first / first-last frame)" },
             { value: "happyhorse-1.1-i2v", label: "HappyHorse 1.1", labelEn: "HappyHorse 1.1" },
           ],
           validation: { required: true },
@@ -85,18 +85,18 @@ export const bailianWanxI2vWorkflowMock: WorkflowFormSchema = {
         {
           kind: "imageUpload",
           id: "refImage",
-          label: "参考图",
-          labelEn: "Reference Image",
-          description: "请上传一张清晰的图片（宽高均 ≥ 300 px），作为视频的起始画面。",
-          descriptionEn: "Upload a clear image (width and height ≥ 300 px) to serve as the opening frame.",
+          label: "首帧参考图（限 1 张）",
+          labelEn: "First-frame Reference (1 image)",
+          description: "通义万相 2.7 图生视频接口只接收 1 张首帧图；请上传宽高均 ≥ 300 px 的清晰图片。需要多张人物或场景参考图时，请使用“多参考图剧场生成”。",
+          descriptionEn: "Wan 2.7 image-to-video accepts one first-frame image. Use Multi-Reference Video Generation when you need multiple character or scene references.",
           mapping: { nodeId: "input", inputPath: ["image_url"] },
           validation: { required: true, maxSizeMB: 20, accept: ["image/jpeg", "image/png", "image/webp"], minDimension: 300 },
         },
         {
           kind: "imageUpload",
           id: "lastFrame",
-          label: "尾帧图",
-          labelEn: "Last Frame",
+          label: "尾帧图（可选，限 1 张）",
+          labelEn: "Last Frame (optional, 1 image)",
           description: "仅通义万相 2.7 支持。上传视频结束时需要到达的画面；不上传则只使用首帧生成。",
           descriptionEn: "Available for Tongyi Wanxiang 2.7 only. Upload the desired final frame, or leave it empty for first-frame-only generation.",
           mapping: { nodeId: "input", inputPath: ["last_frame_url"] },

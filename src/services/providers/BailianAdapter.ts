@@ -366,17 +366,25 @@ function resolveRatio(payload: StandardPayload, inputNode: Record<string, unknow
   return "16:9";
 }
 
-const R2V_MAX_IMAGES = 9;
+const WAN27_R2V_MAX_IMAGES = 5;
+const HAPPYHORSE_R2V_MAX_IMAGES = 9;
 
-/** Reference-to-Video（r2v）：每张参考图为 `reference_image`，HappyHorse 官方上限为 9 张。 */
+function resolveR2vMaxImages(modelLc: string): number {
+  return modelLc.startsWith("wan2.7-r2v")
+    ? WAN27_R2V_MAX_IMAGES
+    : HAPPYHORSE_R2V_MAX_IMAGES;
+}
+
+/** Reference-to-Video（r2v）：每张参考图为 `reference_image`；万相 2.7 最多 5 张，HappyHorse 最多 9 张。 */
 function buildR2vReferenceMediaList(
   singleImageUrl: string | undefined,
-  imageUrls: string[]
+  imageUrls: string[],
+  maxImages: number,
 ): Array<{ type: "reference_image"; url: string }> {
   if (imageUrls.length > 0) {
-    if (imageUrls.length > R2V_MAX_IMAGES) {
+    if (imageUrls.length > maxImages) {
       throw new ProviderError(
-        `参考图最多 ${R2V_MAX_IMAGES} 张，当前上传了 ${imageUrls.length} 张，请删除多余图片后重试。`,
+        `参考图最多 ${maxImages} 张，当前上传了 ${imageUrls.length} 张，请删除多余图片后重试。`,
         "BAILIAN_TOO_MANY_IMAGES",
         400
       );
@@ -697,7 +705,7 @@ export class BailianAdapter implements IProviderAdapter {
         providerId: "ALIYUN_BAILIAN",
         modelId: targetModel,
         transportSchema: "dashscope_media",
-        maxImages: isVideoEdit ? 4 : R2V_MAX_IMAGES,
+        maxImages: isVideoEdit ? 4 : resolveR2vMaxImages(modelLc),
         maxPromptCharacters: 5000,
         supportsSemanticEndFramePrompt: true,
         promptCanAddressInputOrder: true,
@@ -1172,7 +1180,7 @@ export class BailianAdapter implements IProviderAdapter {
       }
       const isR2v = modelLc.includes("r2v");
       const media = isR2v
-        ? buildR2vReferenceMediaList(imageUrl, refImageUrls)
+        ? buildR2vReferenceMediaList(imageUrl, refImageUrls, resolveR2vMaxImages(modelLc))
         : buildI2vBoundaryMedia(imageUrl, refImageUrls, lastFrameUrl);
       if (media.length === 0) {
         throw new ProviderError(

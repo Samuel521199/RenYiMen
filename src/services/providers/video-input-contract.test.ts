@@ -276,6 +276,58 @@ test("Bailian gateway defaults to Wan 2.7 native first-last payload without R2V 
   }
 });
 
+test("Bailian Wan 2.7 R2V accepts up to five reference images and rejects a sixth", () => {
+  const adapter = new BailianAdapter();
+  const imageUrls = Array.from({ length: 5 }, (_, index) => `https://example.com/ref-${index + 1}.png`);
+  const payload: StandardPayload = {
+    templateId: "bailian-multi-ref-i2v",
+    nodeInputs: {
+      input: {
+        modelName: "wan2.7-r2v",
+        image_urls: imageUrls,
+        prompt: "图1和图2中的角色在图3的场景中相遇。",
+      },
+    },
+  };
+
+  const capabilities = adapter.getVideoInputCapabilities(payload);
+  const body = adapter.buildPayload(payload);
+  assert.equal(capabilities.modelId, "wan2.7-r2v");
+  assert.equal(capabilities.maxImages, 5);
+  assert.ok("media" in body.input);
+  assert.equal(body.input.media.length, 5);
+  assert.deepEqual(body.input.media[0], { type: "reference_image", url: imageUrls[0] });
+
+  assert.throws(
+    () => adapter.buildPayload({
+      ...payload,
+      nodeInputs: {
+        input: {
+          ...payload.nodeInputs.input,
+          image_urls: [...imageUrls, "https://example.com/ref-6.png"],
+        },
+      },
+    }),
+    /最多 5 张/,
+  );
+});
+
+test("Bailian HappyHorse R2V keeps its nine-reference limit", () => {
+  const adapter = new BailianAdapter();
+  const payload: StandardPayload = {
+    templateId: "bailian-multi-ref-i2v",
+    nodeInputs: {
+      input: {
+        modelName: "happyhorse-1.1-r2v",
+        image_urls: ["https://example.com/ref.png"],
+        prompt: "[Image 1] walks into the scene.",
+      },
+    },
+  };
+
+  assert.equal(adapter.getVideoInputCapabilities(payload).maxImages, 9);
+});
+
 test("Bailian gateway keeps the explicit HappyHorse compatibility switch", () => {
   const previous = process.env.BAILIAN_FORCE_HAPPYHORSE_MODEL;
   try {

@@ -23,6 +23,7 @@ test("the workbench brand and default entry points target the visual home page",
   assert.match(homeSource, /<source src=\{tool\.motion\} type="video\/mp4" \/>/);
   assert.doesNotMatch(homeSource, /\/workbench\/tools\/one-prompt-video/);
   assert.match(homeSource, /<HomeShowcaseCarousel \/>/);
+  assert.match(homeSource, /kling-standard-motion\.mp4/);
   assert.match(homeSource, /<PopularWorksShowcase isEn=\{isEn\} \/>/);
   assert.ok(homeSource.indexOf("<PopularWorksShowcase") > homeSource.indexOf("<HomeShowcaseCarousel"));
   assert.match(popularWorksSource, /POPULAR_WORKS/);
