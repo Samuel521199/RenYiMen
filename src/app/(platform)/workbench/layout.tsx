@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { LanguageProvider } from "@workbench/lib/LanguageContext";
 import { PermissionProvider, usePermission } from "@workbench/lib/PermissionContext";
-import WorkbenchSidebar from "@workbench/components/layout/Sidebar";
+import WorkbenchTopNavigation from "@workbench/components/layout/TopNavigation";
 import { syncWorkbenchTokenFromSession } from "@workbench/lib/auth";
 
 function WorkbenchAuthSync({ children }: { children: React.ReactNode }) {
@@ -30,7 +30,7 @@ function WorkbenchAuthSync({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (status === "loading") return;
     if (status === "unauthenticated") {
-      router.replace("/auth/signin?callbackUrl=/workbench/tools");
+      router.replace("/auth/signin?callbackUrl=/workbench/home");
       return;
     }
     void doSync();
@@ -95,7 +95,8 @@ function WorkbenchPermissionGuard({ children }: { children: React.ReactNode }) {
 
   // 工具页始终放行
   const isTools = pathname.startsWith("/workbench/tools");
-  if (isTools) return <>{children}</>;
+  const isHome = pathname === "/workbench/home";
+  if (isTools || isHome) return <>{children}</>;
 
   // 管理员无限制
   if (isAdmin) return <>{children}</>;
@@ -158,16 +159,18 @@ function WorkbenchPermissionGuard({ children }: { children: React.ReactNode }) {
 export default function WorkbenchProviders({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isTools = pathname.startsWith("/workbench/tools");
+  const isHome = pathname === "/workbench/home";
+  const isOperations = !isTools && !isHome;
 
   return (
     <LanguageProvider>
       <PermissionProvider>
         <WorkbenchAuthSync>
-          <div className="relative z-0 flex h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-[#0a0f1e]">
-            <WorkbenchSidebar />
-            <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden bg-[#0a0f1e] text-slate-100">
+          <WorkbenchTopNavigation />
+          <div className="relative z-0 flex h-[calc(100vh-5rem)] w-full overflow-hidden bg-[#05080d]">
+            <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden bg-[#05080d] text-slate-100">
               <main
-                className={`workbench-content flex-1 overflow-y-auto ${isTools ? "" : "p-6"}`}
+                className={`workbench-content flex-1 overflow-y-auto ${isTools || isHome ? "" : "operations-workspace p-6"}`}
               >
                 <WorkbenchPermissionGuard>
                   {children}

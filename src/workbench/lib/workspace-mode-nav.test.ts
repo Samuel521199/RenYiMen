@@ -4,37 +4,42 @@ import test from "node:test";
 
 import { NAV_GROUPS } from "./constants.ts";
 
-test("general and operations entries are removed from the sidebar", () => {
+test("workspace switches remain outside the workspace-specific navigation", () => {
   assert.equal(NAV_GROUPS.some((item) => item.label === "通用型"), false);
   assert.equal(NAV_GROUPS.some((item) => item.label === "运营部"), false);
   assert.equal(NAV_GROUPS.some((item) => item.label === "首页看板"), false);
 });
 
-test("top navigation switches between isolated sidebar menus", () => {
+test("top navigation switches between isolated full-width workspace menus", () => {
   const headerSource = readFileSync("src/components/platform/PlatformShell.tsx", "utf8");
-  const sidebarSource = readFileSync("src/workbench/components/layout/Sidebar.tsx", "utf8");
+  const layoutSource = readFileSync("src/app/(platform)/workbench/layout.tsx", "utf8");
+  const topNavSource = readFileSync("src/workbench/components/layout/TopNavigation.tsx", "utf8");
 
-  assert.match(headerSource, /href="\/workbench\/tools"/);
-  assert.match(headerSource, /href="\/workbench\/operations"/);
-  assert.match(headerSource, /workspaceGeneral/);
-  assert.match(headerSource, /workspaceOperations/);
+  assert.doesNotMatch(headerSource, /workspaceGeneral/);
+  assert.doesNotMatch(headerSource, /workspaceOperations/);
+  assert.match(topNavSource, /operations-mega/);
+  assert.match(topNavSource, /href="\/workbench\/operations"/);
   assert.ok(
-    headerSource.indexOf("workspaceOperations") < headerSource.indexOf("workspaceGeneral"),
-    "operations workspace should be displayed before general workspace",
+    topNavSource.indexOf("generalLinks[0]") < topNavSource.indexOf("{operationsMegaMenu}"),
+    "operations mega menu should be displayed immediately after home",
   );
-  assert.match(sidebarSource, /isGeneralWorkspace/);
-  assert.match(sidebarSource, /TOOL_SECTION_NAV_ITEMS/);
-  assert.match(sidebarSource, /getNavItemHref\(item\)/);
+  assert.match(headerSource, /workbench-top-navigation-root/);
+  assert.match(layoutSource, /<WorkbenchTopNavigation \/>/);
+  assert.doesNotMatch(layoutSource, /<WorkbenchSidebar \/>/);
+  assert.match(topNavSource, /GENERAL_COLUMNS/);
+  assert.match(topNavSource, /operationsMenus/);
+  assert.match(topNavSource, /w-\[min\(900px,calc\(100vw-3rem\)\)\]/);
+  assert.match(topNavSource, /max-h-\[min\(560px,calc\(100vh-8rem\)\)\]/);
+  assert.match(topNavSource, /createPortal/);
 });
 
-test("tool section sidebar entries use reliable document navigation", () => {
-  const sidebarSource = readFileSync("src/workbench/components/layout/Sidebar.tsx", "utf8");
+test("general top navigation exposes the approved catalog sections", () => {
+  const topNavSource = readFileSync("src/workbench/components/layout/TopNavigation.tsx", "utf8");
 
-  assert.match(sidebarSource, /\/workbench\/tools\?group=video-generation/);
-  assert.match(sidebarSource, /\/workbench\/tools\?group=favorites/);
-  assert.match(sidebarSource, /\/workbench\/tools\?group=video-editing/);
-  assert.match(sidebarSource, /\/workbench\/tools\?group=audio-post/);
-  assert.match(sidebarSource, /isToolSection\s*\?\s*\(/);
-  assert.match(sidebarSource, /navigateWorkbenchToolSection\(href\)/);
-  assert.match(sidebarSource, /event\.preventDefault\(\)/);
+  assert.match(topNavSource, /\/workbench\/tools\?group=video-generation/);
+  assert.match(topNavSource, /\/workbench\/tools\?group=favorites/);
+  assert.match(topNavSource, /\/workbench\/tools\?group=video-editing/);
+  assert.match(topNavSource, /\/workbench\/tools\?group=audio-post/);
+  assert.match(topNavSource, /\/workbench\/tools\?category=image/);
+  assert.doesNotMatch(topNavSource, /one-prompt-video|一句话成片/);
 });

@@ -3,7 +3,7 @@ import { Suspense } from "react";
 import { ForgotPasswordForm } from "./ForgotPasswordForm";
 
 export const metadata = {
-  title: "重置密码 · Workflow",
+  title: "重置密码",
 };
 
 export default function ForgotPasswordPage() {

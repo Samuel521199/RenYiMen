@@ -11,7 +11,7 @@ export function middleware(request: NextRequest) {
     pathname === "/workbench" ||
     pathname === "/workbench/dashboard"
   ) {
-    return NextResponse.redirect(new URL("/workbench/tools", request.url));
+    return NextResponse.redirect(new URL("/workbench/home", request.url));
   }
 
   return NextResponse.next();

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "high-dynamic-redraw-cow",
+    "rank": 1,
+    "title": "牛仔牛冲进卡牌竞技场",
+    "subtitle": "高速动作与镜头轨迹完整保留，重绘为高冲击二维游戏动画",
+    "tool": "高动态重绘",
+    "skuId": "BAILIAN_HIGH_DYNAMIC_REDRAW",
+    "href": "/workbench/tools?sku=BAILIAN_HIGH_DYNAMIC_REDRAW",
+    "video": "/showcase/game-tools/high-dynamic-redraw-cow.mp4",
+    "poster": "/showcase/game-tools/high-dynamic-redraw-cow-poster.jpg",
+    "aspectRatio": "16:9"
+  },
+  {
+    "id": "scene-light-texas-hostess",
+    "rank": 2,
+    "title": "荷官走进金色德州牌局大厅",
+    "subtitle": "白棚连续变为海岛日落牌局大厅，人物与镜头运动保持稳定",
+    "tool": "场景与光影变化",
+    "skuId": "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+    "href": "/workbench/tools?sku=BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
+    "video": "/showcase/game-tools/scene-light-texas-hostess.mp4",
+    "poster": "/showcase/game-tools/scene-light-texas-hostess-poster.jpg",
+    "aspectRatio": "16:9"
+  },
+  {
+    "id": "local-edit-bingo-hero",
+    "rank": 3,
+    "title": "红帽主角一秒换上 Bingo Flash 礼服",
+    "subtitle": "仅替换服装与手中道具，角色身份、动作和背景不变",
+    "tool": "局部修改",
+    "skuId": "BAILIAN_HAPPYHORSE_VIDEO_EDIT",
+    "href": "/workbench/tools?sku=BAILIAN_HAPPYHORSE_VIDEO_EDIT",
+    "video": "/showcase/game-tools/local-edit-bingo-hero.mp4",
+    "poster": "/showcase/game-tools/local-edit-bingo-hero-poster.jpg",
+    "aspectRatio": "16:9"
+  },
+  {
+    "id": "overall-style-transfer-cow",
+    "rank": 4,
+    "title": "牛仔牛的黏土牌桌世界",
+    "subtitle": "整段迁移为收藏级黏土手办质感，保持角色、动作与构图连续",
+    "tool": "整体风格迁移",
+    "skuId": "BAILIAN_OVERALL_STYLE_TRANSFER",
+    "href": "/workbench/tools?sku=BAILIAN_OVERALL_STYLE_TRANSFER",
+    "video": "/showcase/game-tools/overall-style-transfer-cow.mp4",
+    "poster": "/showcase/game-tools/overall-style-transfer-cow-poster.jpg",
+    "aspectRatio": "16:9"
+  },
+  {
+    "id": "face-swap-resort-hostess",
+    "rank": 5,
+    "title": "海岛角色身份焕新",
+    "subtitle": "换头换脸生成身份结果，再用图生视频完成自然转头与招手",
+    "tool": "换头换脸 + 图生视频",
+    "skuId": "RH_FACE_SWAP",
+    "href": "/workbench/tools?sku=RH_FACE_SWAP",
+    "video": "/showcase/game-tools/face-swap-resort-hostess.mp4",
+    "poster": "/showcase/game-tools/face-swap-resort-hostess-poster.jpg",
+    "aspectRatio": "16:9"
+  }
+]

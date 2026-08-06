@@ -16,7 +16,7 @@ test("multi-fusion workflow page wires API routes and reference uploads", () => 
   assert.match(pageSource, /gpt-image 系列/);
 });
 
-test("sidebar maps multi-fusion workflow permission key", () => {
-  const sidebarSource = readFileSync("src/workbench/components/layout/Sidebar.tsx", "utf8");
-  assert.match(sidebarSource, /\/workbench\/workflows\/multi-fusion": "multi_fusion"/);
+test("operations top navigation maps the multi-fusion permission key", () => {
+  const topNavSource = readFileSync("src/workbench/components/layout/TopNavigation.tsx", "utf8");
+  assert.match(topNavSource, /\["multi_fusion", "多图融合", "\/workbench\/workflows\/multi-fusion"\]/);
 });

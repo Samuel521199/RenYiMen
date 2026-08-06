@@ -2,5 +2,5 @@
 import { redirect } from "next/navigation";
 
 export default function WorkbenchHomePage() {
-  redirect("/workbench/tools");
+  redirect("/workbench/home");
 }

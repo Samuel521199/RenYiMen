@@ -2,7 +2,7 @@ import { Suspense } from "react";
 import { SignInForm } from "./SignInForm";
 
 export const metadata = {
-  title: "登录 · Workflow",
+  title: "登录",
 };
 
 export default function SignInPage() {

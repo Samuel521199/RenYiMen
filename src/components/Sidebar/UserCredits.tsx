@@ -20,9 +20,11 @@ export function UserCredits({
   refreshMs = DEFAULT_REFRESH_MS,
   /** 变化时立即重新拉取余额（如任务终态结算后） */
   refreshKey = 0,
+  size = "default",
 }: {
   refreshMs?: number;
   refreshKey?: number;
+  size?: "default" | "header";
 }) {
   const { status } = useSession();
   const [data, setData] = useState<ProfilePayload | null>(null);
@@ -68,18 +70,19 @@ export function UserCredits({
   if (status !== "authenticated") {
     return null;
   }
+  const isHeaderSize = size === "header";
 
   return (
     <div
-      className="inline-flex items-center gap-2 rounded-full border border-amber-200/90 bg-gradient-to-r from-amber-50 to-amber-100/80 px-3 py-1.5 shadow-sm ring-1 ring-amber-300/30"
+      className={`inline-flex items-center rounded-full border border-amber-200/90 bg-gradient-to-r from-amber-50 to-amber-100/80 shadow-sm ring-1 ring-amber-300/30 ${isHeaderSize ? "gap-2.5 px-4 py-2" : "gap-2 px-3 py-1.5"}`}
       title="当前积分余额（任务完成后会立即同步，其余时间定时刷新）"
     >
-      <span className="text-base leading-none" aria-hidden>
+      <span className={`${isHeaderSize ? "text-xl" : "text-base"} leading-none`} aria-hidden>
         💎
       </span>
       <div className="flex min-w-0 flex-col leading-none">
-        <span className="text-[9px] font-medium uppercase tracking-wide text-amber-900/70">积分</span>
-        <span className="font-mono text-sm font-semibold tabular-nums tracking-tight text-amber-950">
+        <span className={`${isHeaderSize ? "text-[10px]" : "text-[9px]"} font-medium uppercase tracking-wide text-amber-900/70`}>积分</span>
+        <span className={`font-mono font-semibold tabular-nums tracking-tight text-amber-950 ${isHeaderSize ? "text-base" : "text-sm"}`}>
           {loading && data == null ? "…" : data != null ? `${formatCredits(data.balance)} 积分` : "—"}
         </span>
       </div>

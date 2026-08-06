@@ -2,10 +2,10 @@
 export const translations = {
   zh: {
     // ── 品牌 / 顶部导航 ──
-    brandName: "创作工作室",
+    brandName: "HeronHub",
     brandBadge: "Beta",
     navAiStudio: "AI 创作",
-    navWorkbench: "社媒工作台",
+    navWorkbench: "HeronHub",
     workspaceSwitchLabel: "工作台切换",
     workspaceGeneral: "通用型",
     workspaceOperations: "运营部",
@@ -164,10 +164,10 @@ export const translations = {
 
   en: {
     // ── Brand / Top Nav ──
-    brandName: "Studio",
+    brandName: "HeronHub",
     brandBadge: "Beta",
     navAiStudio: "AI Studio",
-    navWorkbench: "Workbench",
+    navWorkbench: "HeronHub",
     workspaceSwitchLabel: "Workspace switcher",
     workspaceGeneral: "General",
     workspaceOperations: "Operations",

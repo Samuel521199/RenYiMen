@@ -2,21 +2,86 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("general workspace entry points target the AI creation studio", () => {
+test("the workbench brand and default entry points target the visual home page", () => {
   const shellSource = readFileSync("src/components/platform/PlatformShell.tsx", "utf8");
   const workbenchIndexSource = readFileSync("src/app/(platform)/workbench/page.tsx", "utf8");
   const workbenchLayoutSource = readFileSync("src/app/(platform)/workbench/layout.tsx", "utf8");
+  const homeSource = readFileSync("src/app/(platform)/workbench/home/page.tsx", "utf8");
+  const showcaseSource = readFileSync("src/components/home/HomeShowcaseCarousel.tsx", "utf8");
+  const globalCss = readFileSync("src/app/globals.css", "utf8");
 
-  assert.equal((shellSource.match(/href="\/workbench\/tools"/g) ?? []).length, 2);
-  assert.match(workbenchIndexSource, /redirect\("\/workbench\/tools"\)/);
-  assert.match(workbenchLayoutSource, /callbackUrl=\/workbench\/tools/);
+  assert.match(shellSource, /href="\/workbench\/home"/);
+  assert.match(workbenchIndexSource, /redirect\("\/workbench\/home"\)/);
+  assert.match(workbenchLayoutSource, /callbackUrl=\/workbench\/home/);
+  assert.match(homeSource, /Creative capabilities/i);
+  assert.match(homeSource, /MODEL_NAMES/);
+  assert.match(homeSource, /multi-reference-drama\.webp/);
+  assert.doesNotMatch(homeSource, /import Image from "next\/image"/);
+  assert.doesNotMatch(homeSource, /<Image\s/);
+  assert.match(homeSource, /<source src=\{tool\.motion\} type="video\/mp4" \/>/);
+  assert.doesNotMatch(homeSource, /\/workbench\/tools\/one-prompt-video/);
+  assert.match(homeSource, /<HomeShowcaseCarousel \/>/);
+  assert.equal((homeSource.match(/home-display-title/g) ?? []).length, 2);
+  assert.equal((homeSource.match(/home-section-title/g) ?? []).length, 1);
+  assert.doesNotMatch(homeSource, /The right intelligence for every creative decision/);
+  assert.match(homeSource, /CAPABILITY_SECTIONS_ZH/);
+  assert.match(homeSource, /featuredToolIndexes/);
+  assert.match(homeSource, /advanceFeaturedTool/);
+  assert.match(homeSource, /onEnded=\{isFeatured && !isSingleTool/);
+  assert.match(globalCss, /\.home-capability-swap/);
+  assert.doesNotMatch(homeSource, /\{section\.description\}/);
+  assert.match(homeSource, /BAILIAN_TRIPO_3D/);
+  assert.match(homeSource, /声音与角色/);
+  assert.match(homeSource, /视觉创意/);
+  assert.match(homeSource, /FEATURED_MODELS_ZH/);
+  assert.match(homeSource, /精选模型 API/);
+  assert.doesNotMatch(homeSource, /Explore all tools/);
+  assert.doesNotMatch(homeSource, /href=\{model\.href\}/);
+  assert.doesNotMatch(homeSource, /group-hover:opacity-100 group-hover:saturate-110/);
+  assert.match(homeSource, /model-showcase\/wan-27-motion\.mp4/);
+  assert.match(homeSource, /model-showcase\/tripo-3d-motion\.mp4/);
+  assert.match(globalCss, /\.home-display-title\s*\{[^}]*font-weight:\s*900/s);
+  assert.match(globalCss, /\.home-section-title\s*\{[^}]*font-weight:\s*700/s);
+  assert.match(globalCss, /font-family:\s*"Noto Sans SC",\s*"Microsoft YaHei"/);
+  assert.match(showcaseSource, /multimodal-image-to-video-motion-ai-4k\.mp4/);
+  assert.match(showcaseSource, /overall-style-transfer-ai-4k\.mp4/);
+  assert.match(showcaseSource, /dance-motion-transfer-ai-4k\.mp4/);
+  assert.match(showcaseSource, /high-motion-redraw-ai-4k\.mp4/);
+  assert.match(showcaseSource, /voice-cloning-ai-4k\.mp4/);
+  assert.match(showcaseSource, /multimodal-image-to-video\.webp/);
+  assert.match(showcaseSource, /<h1 className="home-display-title home-showcase-title/);
+  assert.match(globalCss, /\.home-showcase-title\s*\{[^}]*font-weight:\s*800/s);
+  assert.doesNotMatch(showcaseSource, /prompt-intelligence\.mp4/);
+  assert.match(showcaseSource, /autoPlay/);
+  assert.match(showcaseSource, /onEnded=\{\(\) => move\(1\)\}/);
+  assert.match(showcaseSource, /sku=BAILIAN_WANX_I2V/);
+  assert.match(showcaseSource, /sku=BAILIAN_OVERALL_STYLE_TRANSFER/);
+  assert.match(showcaseSource, /sku=BAILIAN_WAN22_ANIMATE_MOVE/);
+  assert.match(showcaseSource, /sku=BAILIAN_HIGH_DYNAMIC_REDRAW/);
+  assert.match(showcaseSource, /sku=BAILIAN_VOICE_CLONE/);
+  assert.match(showcaseSource, /activeIndex \* 20/);
+  assert.match(showcaseSource, /立即使用/);
 });
 
-test("legacy dashboard and root URLs redirect to the creation studio", () => {
+test("legacy dashboard and root URLs redirect to the home page", () => {
   const middlewareSource = readFileSync("src/middleware.ts", "utf8");
 
   assert.match(middlewareSource, /pathname === "\/workbench\/dashboard"/);
-  assert.match(middlewareSource, /new URL\("\/workbench\/tools"/);
+  assert.match(middlewareSource, /new URL\("\/workbench\/home"/);
   assert.match(middlewareSource, /pathname === "\/workbench"/);
   assert.match(middlewareSource, /matcher: \["\/", "\/studio", "\/workbench", "\/workbench\/dashboard"\]/);
+});
+
+test("the compact top navigation searches across the complete tool catalog", () => {
+  const navigationSource = readFileSync("src/workbench/components/layout/TopNavigation.tsx", "utf8");
+  const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+
+  assert.match(navigationSource, /placeholder=\{isEn \? "Search tools" : "搜索工具"\}/);
+  assert.match(navigationSource, /\/workbench\/tools\?q=\$\{encodeURIComponent\(keyword\)\}/);
+  assert.match(navigationSource, /gap-1 xl:flex/);
+  assert.match(navigationSource, /translate-x-\[calc\(-50%\+10rem\)\]/);
+  assert.match(studioSource, /searchParams\.get\("q"\)/);
+  assert.match(studioSource, /sku\.displayNameEn/);
+  assert.match(studioSource, /sku\.providerCode/);
+  assert.match(studioSource, /visibleCategoryTabs = routeSearchQuery/);
 });

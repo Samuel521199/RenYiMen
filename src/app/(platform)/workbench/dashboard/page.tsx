@@ -55,7 +55,7 @@ function TimeRangeTab({ value, onChange }: { value: TimeRange; onChange: (v: Tim
     <div className="flex gap-0.5 rounded-md border border-white/10 bg-white/5 p-0.5">
       {(["7d", "30d"] as TimeRange[]).map((r) => (
         <button key={r} type="button" onClick={() => onChange(r)}
-          className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${value === r ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+          className={`rounded px-2.5 py-1 text-xs font-medium transition-all ${value === r ? "bg-[#9ef5d8] text-[#071019] shadow-[0_0_18px_rgba(158,245,216,.12)]" : "text-white/42 hover:bg-white/[0.05] hover:text-white/80"}`}
         >
           {r === "7d" ? "近7天" : "近30天"}
         </button>
@@ -79,14 +79,14 @@ function shortenModelName(name: string): string {
 }
 
 const CHART_TOOLTIP_STYLE = {
-  backgroundColor: "#0f1728",
-  border: "1px solid rgba(255,255,255,0.1)",
+  backgroundColor: "#080d12",
+  border: "1px solid rgba(158,245,216,0.16)",
   borderRadius: "8px",
   color: "#e2e8f0",
   fontSize: "12px",
 };
 
-const PIE_COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#3b82f6","#8b5cf6","#ec4899","#14b8a6","#f97316","#06b6d4"];
+const PIE_COLORS = ["#9ef5d8", "#5fd8c1", "#75b9d5", "#e7c879", "#8da7b8", "#a99ac5", "#6fc0a9", "#d79d78", "#7f97c4", "#b9d7cd"];
 
 // ─── 子组件：图表容器 ────────────────────────────────────────────────────────
 
@@ -367,7 +367,7 @@ export default function DashboardPage() {
           <div className="flex items-center gap-3">
             <span className="text-sm font-semibold text-slate-300">AI 模型调用统计</span>
             <div className="h-px flex-1 bg-white/10" />
-            <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-300">管理员可见</span>
+            <span className="rounded-full border border-[#9ef5d8]/15 bg-[#9ef5d8]/[0.07] px-2 py-0.5 text-xs text-[#9ef5d8]/75">管理员可见</span>
           </div>
 
           {aiError && <div className={WB_ERROR_BANNER_CLASS}>{aiError}</div>}
@@ -387,7 +387,7 @@ export default function DashboardPage() {
           <div className="flex gap-1 rounded-lg border border-white/10 bg-white/5 p-1 w-fit">
             {(["time", "model", "user"] as Dimension[]).map((d) => (
               <button key={d} type="button" onClick={() => setDim(d)}
-                className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${dim === d ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-slate-200"}`}
+                className={`rounded-md px-4 py-1.5 text-sm font-medium transition-all ${dim === d ? "bg-[#9ef5d8] text-[#071019] shadow-[0_0_20px_rgba(158,245,216,.1)]" : "text-white/42 hover:bg-white/[0.05] hover:text-white/80"}`}
               >
                 {d === "time" ? "按时间" : d === "model" ? "按模型" : "按用户"}
               </button>
@@ -411,8 +411,8 @@ export default function DashboardPage() {
                     <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} stroke="rgba(255,255,255,0.1)" allowDecimals={false} />
                     <Tooltip contentStyle={CHART_TOOLTIP_STYLE} />
                     <Legend iconSize={8} wrapperStyle={{ fontSize: "11px", color: "#94a3b8" }} />
-                    <Line type="monotone" dataKey="image_calls" name="图片调用" stroke="#6366f1" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
-                    <Line type="monotone" dataKey="video_calls" name="视频调用" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
+                    <Line type="monotone" dataKey="image_calls" name="图片调用" stroke="#9ef5d8" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
+                    <Line type="monotone" dataKey="video_calls" name="视频调用" stroke="#e7c879" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </ChartShell>
@@ -442,7 +442,7 @@ export default function DashboardPage() {
                     <XAxis type="number" tick={{ fontSize: 11, fill: "#94a3b8" }} stroke="rgba(255,255,255,0.1)" allowDecimals={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#94a3b8" }} stroke="rgba(255,255,255,0.1)" width={100} />
                     <Tooltip contentStyle={CHART_TOOLTIP_STYLE} />
-                    <Bar dataKey="calls" name="调用次数" fill="#6366f1" radius={[0, 4, 4, 0]} />
+                    <Bar dataKey="calls" name="调用次数" fill="#5fd8c1" radius={[0, 4, 4, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </ChartShell>
@@ -492,10 +492,10 @@ export default function DashboardPage() {
                     placeholder="搜索模型名…"
                     value={modelSearch}
                     onChange={(e) => setModelSearch(e.target.value)}
-                    className="w-52 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 outline-none focus:border-indigo-500/60"
+                    className="w-52 rounded-lg border border-white/[0.1] bg-[#080d12] px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 outline-none transition focus:border-[#9ef5d8]/45"
                   />
                 </div>
-                <div className="overflow-hidden rounded-xl border border-white/10 bg-[#0f1728]">
+                <div className="overflow-hidden rounded-xl border border-white/[0.085] bg-[#0a0f15]">
                   <table className="min-w-full">
                     <thead>
                       <tr className="border-b border-white/10 bg-white/5">
@@ -513,11 +513,11 @@ export default function DashboardPage() {
                         <tr key={row.model_name} className="hover:bg-white/5 transition-colors">
                           <td className="px-4 py-3 text-sm text-slate-500">{idx + 1}</td>
                           <td className="px-4 py-3">
-                            <code className="text-sm font-medium text-indigo-200">{row.model_name}</code>
+                            <code className="text-sm font-medium text-[#9ef5d8]/80">{row.model_name}</code>
                             <p className="text-xs text-slate-500">{row.model_provider}</p>
                           </td>
                           <td className="px-4 py-3">
-                            <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${row.type === "video" ? "border-violet-500/30 bg-violet-500/15 text-violet-300" : "border-blue-500/30 bg-blue-500/15 text-blue-300"}`}>
+                            <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${row.type === "video" ? "border-emerald-300/20 bg-emerald-300/[0.08] text-emerald-200/80" : "border-cyan-300/20 bg-cyan-300/[0.08] text-cyan-200/80"}`}>
                               {row.type === "video" ? "视频" : "图片"}
                             </span>
                           </td>
@@ -540,10 +540,10 @@ export default function DashboardPage() {
                     placeholder="搜索用户名…"
                     value={userSearch}
                     onChange={(e) => setUserSearch(e.target.value)}
-                    className="w-52 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 outline-none focus:border-indigo-500/60"
+                    className="w-52 rounded-lg border border-white/[0.1] bg-[#080d12] px-3 py-1.5 text-sm text-slate-200 placeholder-slate-600 outline-none transition focus:border-[#9ef5d8]/45"
                   />
                 </div>
-                <div className="overflow-hidden rounded-xl border border-white/10 bg-[#0f1728]">
+                <div className="overflow-hidden rounded-xl border border-white/[0.085] bg-[#0a0f15]">
                   <table className="min-w-full">
                     <thead>
                       <tr className="border-b border-white/10 bg-white/5">
@@ -582,9 +582,9 @@ export default function DashboardPage() {
                                         <tbody className="divide-y divide-white/5">
                                           {user.models.map((m) => (
                                             <tr key={m.model_name} className="hover:bg-white/5">
-                                              <td className="px-3 py-2"><code className="text-xs text-indigo-200">{m.model_name}</code></td>
+                                              <td className="px-3 py-2"><code className="text-xs text-[#9ef5d8]/80">{m.model_name}</code></td>
                                               <td className="px-3 py-2">
-                                                <span className={`rounded-full px-1.5 py-0.5 text-xs ${m.type === "video" ? "bg-violet-500/15 text-violet-300" : "bg-blue-500/15 text-blue-300"}`}>
+                                                <span className={`rounded-full px-1.5 py-0.5 text-xs ${m.type === "video" ? "bg-emerald-300/[0.08] text-emerald-200/80" : "bg-cyan-300/[0.08] text-cyan-200/80"}`}>
                                                   {m.type === "video" ? "视频" : "图片"}
                                                 </span>
                                               </td>

@@ -2,7 +2,7 @@ import { Suspense } from "react";
 import { RegisterForm } from "./RegisterForm";
 
 export const metadata = {
-  title: "注册 · Workflow",
+  title: "注册",
 };
 
 export default function RegisterPage() {

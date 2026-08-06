@@ -12,14 +12,14 @@ test("workflow favorites are isolated by account and tolerate invalid stored dat
 
 test("workflow cards expose an independent favorite control and favorite filtering", () => {
   const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
-  const sidebarSource = readFileSync("src/workbench/components/layout/Sidebar.tsx", "utf8");
+  const topNavSource = readFileSync("src/workbench/components/layout/TopNavigation.tsx", "utf8");
 
   assert.match(studioSource, /aria-pressed=\{isFavorite\}/);
   assert.match(studioSource, /<Star[\s\S]*fill=\{isFavorite \? "currentColor" : "none"\}/);
   assert.match(studioSource, /activeToolGroup === "favorites"[\s\S]*favoriteSkuIds\.has\(s\.skuId\)/);
-  assert.match(sidebarSource, /group=favorites/);
+  assert.match(topNavSource, /group=favorites/);
   assert.ok(
-    sidebarSource.indexOf("group=favorites") < sidebarSource.indexOf("group=video-generation"),
-    "favorites should be the first item below the tools home entry",
+    topNavSource.indexOf("group=favorites") > topNavSource.indexOf("group=audio-post"),
+    "favorites should remain a dedicated general-workspace destination",
   );
 });

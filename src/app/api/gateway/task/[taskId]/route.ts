@@ -20,6 +20,8 @@ import {
 } from "@/services/providers/RunningHubAdapter";
 import type { IProviderAdapter } from "@/services/providers/types";
 import { ProviderError } from "@/services/providers/types";
+import { persistTemporaryPollVideo } from "@/services/history-media-persistence";
+import { isOwnOssUrl, isTemporaryDashScopeUrl } from "@/services/video-orchestrator/oss-media";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,7 +53,8 @@ function isTransientPollFailure(e: unknown): boolean {
     (e.code === "RH_POLL_FETCH_TIMEOUT" ||
       e.code === "RH_POLL_ABORTED" ||
       e.code === "BAILIAN_POLL_ABORTED" ||
-      e.code === "BAILIAN_POLL_NETWORK")
+      e.code === "BAILIAN_POLL_NETWORK" ||
+      e.code === "RESULT_PERSISTENCE_PENDING")
   );
 }
 
@@ -123,8 +126,22 @@ async function persistGenerationHistoryTerminal(
   if (pollData.status === "succeeded" && owned.status === GenerationHistoryStatus.SUCCESS) {
     const row = await prisma.generationHistory.findUnique({
       where: { taskId },
-      select: { cost: true },
+      select: { cost: true, resultUrl: true },
     });
+    if (
+      pollData.resultUrl &&
+      isOwnOssUrl(pollData.resultUrl) &&
+      row?.resultUrl &&
+      isTemporaryDashScopeUrl(row.resultUrl)
+    ) {
+      await prisma.generationHistory.update({
+        where: { taskId },
+        data: {
+          resultUrl: pollData.resultUrl,
+          mediaType: pollData.resultMediaType ?? inferMediaTypeFromResultUrl(pollData.resultUrl),
+        },
+      });
+    }
     return typeof row?.cost === "number" && Number.isFinite(row.cost) ? row.cost : null;
   }
   if (pollData.status === "failed") {
@@ -332,10 +349,25 @@ export async function GET(
 
   const t0 = Date.now();
   try {
-    const pollData = await adapter.queryTask(taskId, {
+    const upstreamPollData = await adapter.queryTask(taskId, {
       signal: controller.signal,
       skuId: taskRecord?.skuId,
     });
+    let pollData: TaskStatusPollData;
+    try {
+      pollData = await persistTemporaryPollVideo({
+        userId: session.user.id,
+        taskId,
+        pollData: upstreamPollData,
+      });
+    } catch (error) {
+      throw new ProviderError(
+        "视频已生成，正在保存永久副本，请稍后重试",
+        "RESULT_PERSISTENCE_PENDING",
+        503,
+        error,
+      );
+    }
     let billCredits: number | null = null;
     try {
       billCredits = await persistGenerationHistoryTerminal(session.user.id, taskId, pollData);

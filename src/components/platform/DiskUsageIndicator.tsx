@@ -25,7 +25,13 @@ function levelClasses(level: "normal" | "warning" | "critical"): string {
   return "border-slate-500/40 bg-slate-900/70 text-slate-200 ring-slate-500/20";
 }
 
-export function DiskUsageIndicator({ refreshMs = DEFAULT_REFRESH_MS }: { refreshMs?: number }) {
+export function DiskUsageIndicator({
+  refreshMs = DEFAULT_REFRESH_MS,
+  size = "default",
+}: {
+  refreshMs?: number;
+  size?: "default" | "header";
+}) {
   const { status } = useSession();
   const t = useT();
   const [data, setData] = useState<DiskUsagePayload | null>(null);
@@ -86,19 +92,21 @@ export function DiskUsageIndicator({ refreshMs = DEFAULT_REFRESH_MS }: { refresh
         : t.diskUsageNormalTip(data.path, formatBytesAsGib(data.free_bytes), formatBytesAsGib(data.total_bytes))
     : t.diskUsageUnavailable;
 
+  const isHeaderSize = size === "header";
+
   return (
     <div
-      className={`hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs shadow-sm ring-1 sm:inline-flex ${levelClasses(level)}`}
+      className={`hidden items-center rounded-full border shadow-sm ring-1 sm:inline-flex ${isHeaderSize ? "gap-2.5 px-4 py-2 text-sm" : "gap-2 px-3 py-1.5 text-xs"} ${levelClasses(level)}`}
       title={tooltip}
       role="status"
       aria-live="polite"
     >
-      <span className="text-sm leading-none" aria-hidden>
+      <span className={`${isHeaderSize ? "text-lg" : "text-sm"} leading-none`} aria-hidden>
         {level === "critical" ? "⚠️" : level === "warning" ? "🟠" : "💾"}
       </span>
       <div className="flex min-w-0 flex-col leading-none">
-        <span className="text-[9px] font-medium uppercase tracking-wide opacity-80">{t.diskUsageLabel}</span>
-        <span className="font-mono text-sm font-semibold tabular-nums tracking-tight">{summary}</span>
+        <span className={`${isHeaderSize ? "text-[10px]" : "text-[9px]"} font-medium uppercase tracking-wide opacity-80`}>{t.diskUsageLabel}</span>
+        <span className={`font-mono font-semibold tabular-nums tracking-tight ${isHeaderSize ? "text-base" : "text-sm"}`}>{summary}</span>
       </div>
     </div>
   );

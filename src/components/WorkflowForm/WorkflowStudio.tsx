@@ -12,7 +12,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { Star } from "lucide-react";
+import { ArrowRight, Star } from "lucide-react";
 import type { Session } from "next-auth";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -216,15 +216,22 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const [projectLoadRevision, setProjectLoadRevision] = useState(0);
   const [projectSaving, setProjectSaving] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
-  const [activeCategory, setActiveCategory] = useState<SkuCategory>("prompt");
+  const routeCategory = searchParams.get("category");
+  const routeSkuCategory: SkuCategory | null = routeCategory === "prompt" || routeCategory === "image" || routeCategory === "video"
+    ? routeCategory
+    : null;
+  const [activeCategory, setActiveCategory] = useState<SkuCategory>(routeSkuCategory ?? "prompt");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [profileRefreshKey, setProfileRefreshKey] = useState(0);
   const historyViewRestoredRef = useRef(false);
+  const directSkuHandledRef = useRef<string | null>(null);
   const suppressedDraftSaveRef = useRef<string | null>(null);
   const suppressedProjectSaveRef = useRef<string | null>(null);
   const projectRequestSequenceRef = useRef(0);
   const routeToolGroup = readWorkbenchToolGroup(searchParams.get("group"));
+  const routeSkuId = searchParams.get("sku")?.trim() || null;
+  const routeSearchQuery = searchParams.get("q")?.trim() ?? "";
   const [activeToolGroup, setActiveToolGroup] = useState<ToolGroup | null>(routeToolGroup);
   const [activeVideoGenerationTab, setActiveVideoGenerationTab] = useState<VideoGenerationTab>("image-to-video");
   const [activeVideoEditingTab, setActiveVideoEditingTab] = useState<VideoEditingTab>("ai-video-edit");
@@ -654,7 +661,9 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
 
   useEffect(() => {
     setActiveToolGroup(routeToolGroup);
-  }, [routeToolGroup]);
+    if (!routeToolGroup && routeSkuCategory) setActiveCategory(routeSkuCategory);
+    setView("gallery");
+  }, [routeSkuCategory, routeToolGroup]);
 
   useEffect(() => {
     const handleToolSectionChange = (event: Event) => {
@@ -767,6 +776,33 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     },
     [applySku]
   );
+
+  useEffect(() => {
+    if (!routeSkuId) {
+      directSkuHandledRef.current = null;
+      return;
+    }
+    if (skus.length === 0 || directSkuHandledRef.current === routeSkuId) return;
+    const sku = skus.find((item) => item.skuId === routeSkuId);
+    if (!sku) return;
+    directSkuHandledRef.current = routeSkuId;
+    if (sku.href) {
+      window.location.assign(sku.href);
+      return;
+    }
+    const currentState = window.history.state && typeof window.history.state === "object"
+      ? window.history.state
+      : {};
+    window.history.replaceState(
+      { ...currentState, [WORKFLOW_STUDIO_HISTORY_KEY]: sku.skuId },
+      "",
+      window.location.href,
+    );
+    setActiveToolGroup(null);
+    applySku(sku);
+    setActiveCategory(sku.category);
+    setView("studio");
+  }, [applySku, routeSkuId, skus]);
 
   const backToGallery = useCallback(() => {
     void persistCurrentProject();
@@ -1052,6 +1088,17 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     }
   }, [resetPoll, selectedToolProjectId, updateToolProject]);
 
+  const handleHistorySelect = useCallback((taskId: string) => {
+    setViewingHistoryId(taskId);
+    void fetch(`/api/user/history/${encodeURIComponent(taskId)}/repair-media`, {
+      method: "POST",
+      credentials: "same-origin",
+    }).then((response) => {
+      if (response.ok) return fetchCloudHistory(selectedToolProjectId);
+      return undefined;
+    }).catch(() => undefined);
+  }, [fetchCloudHistory, selectedToolProjectId, setViewingHistoryId]);
+
   const talkingVideoReady = Boolean(
     isTalkingVideo
     && !viewingHistoryId
@@ -1147,7 +1194,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     { key: "video", label: t.categoryVideo },
     { key: "model", label: t.categoryModel },
   ];
-  const visibleCategoryTabs = activeToolGroup === "favorites"
+  const visibleCategoryTabs = routeSearchQuery || activeToolGroup === "favorites"
     ? []
     : activeToolGroup
       ? CATEGORY_TABS.filter((tab) => tab.key === "video")
@@ -1157,7 +1204,17 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     if (activeToolGroup && activeToolGroup !== "favorites") setActiveCategory("video");
   }, [activeToolGroup]);
 
-  const visibleSkus = activeToolGroup === "favorites"
+  const normalizedSearchQuery = routeSearchQuery.toLocaleLowerCase();
+  const visibleSkus = normalizedSearchQuery
+    ? skus.filter((sku) => [
+        sku.displayName,
+        sku.displayNameEn,
+        sku.description,
+        sku.descriptionEn,
+        sku.skuId,
+        sku.providerCode,
+      ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearchQuery)))
+    : activeToolGroup === "favorites"
     ? skus.filter((s) => favoriteSkuIds.has(s.skuId))
     : activeToolGroup === "video-generation"
     ? skus.filter((s) => isSkuInVideoGenerationTab(s, activeVideoGenerationTab))
@@ -1177,7 +1234,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   // Shared nav (renders differently for gallery vs studio)
   // ──────────────────────────────────────────────────────────────────────────
   const renderNav = embedded ? null : (
-    <nav className="sticky top-0 z-50 border-b border-[#1a2540]/80 bg-[#07101f]/90 backdrop-blur-xl">
+    <nav className="sticky top-0 z-50 border-b border-white/[0.07] bg-[#05080d]/90 backdrop-blur-xl">
       <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-4 py-3 sm:px-6">
         {/* Left: brand OR back button + breadcrumb */}
         <div className="flex min-w-0 items-center gap-3">
@@ -1186,7 +1243,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
               <button
                 type="button"
                 onClick={backToGallery}
-                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[#2a3d5e] px-3 py-1.5 text-xs font-medium text-slate-400 transition-all hover:border-[#3f5880] hover:text-slate-200"
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/[0.1] bg-white/[0.025] px-3 py-1.5 text-xs font-medium text-white/50 transition-all hover:-translate-y-0.5 hover:border-[#9ef5d8]/35 hover:bg-[#9ef5d8]/[0.06] hover:text-[#dffdf4]"
               >
                 <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
@@ -1204,8 +1261,8 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
             </>
           ) : (
             <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 shadow-lg shadow-emerald-500/20">
-                <span className="text-[11px] font-black tracking-tighter text-white">AI</span>
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-[#9ef5d8]/25 bg-[#9ef5d8]/10 shadow-[0_0_20px_rgba(158,245,216,0.08)]">
+                <span className="text-[11px] font-black tracking-tighter text-[#9ef5d8]">AI</span>
               </div>
               <div className="hidden sm:block">
                 <span className="text-sm font-semibold tracking-tight text-slate-200">{t.brandName}</span>
@@ -1223,7 +1280,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
             type="button"
             onClick={toggleLocale}
             title={locale === "zh" ? "Switch to English" : "切换为中文"}
-            className="flex items-center gap-1.5 rounded-lg border border-[#2a3d5e] px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-all hover:border-[#3f5880] hover:text-slate-200"
+            className="flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-white/[0.025] px-2.5 py-1.5 text-xs font-medium text-white/50 transition-all hover:border-[#9ef5d8]/35 hover:bg-[#9ef5d8]/[0.06] hover:text-[#dffdf4]"
           >
             <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10" />
@@ -1248,16 +1305,21 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   // ──────────────────────────────────────────────────────────────────────────
   if (view === "gallery") {
     return (
-      <div className="flex min-h-screen flex-col bg-[#07101f]">
+      <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#05080d]">
         {renderNav}
 
         {/* Hero section */}
-        <div className="border-b border-[#1a2540]/60 bg-gradient-to-b from-[#0c1a30] to-[#07101f] px-4 pb-8 pt-10 sm:px-6">
-          <div className="mx-auto max-w-[1400px]">
-            <h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">
+        <div className="relative border-b border-white/[0.07] bg-[radial-gradient(circle_at_18%_0%,rgba(107,240,200,0.09),transparent_34%),linear-gradient(180deg,#080d13_0%,#05080d_100%)] px-4 pb-8 pt-10 sm:px-6">
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-[#9ef5d8]/25 to-transparent" aria-hidden />
+          <div className="relative mx-auto max-w-[1400px]">
+            <div className="mb-3 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.22em] text-[#9ef5d8]/75">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#9ef5d8] shadow-[0_0_12px_rgba(158,245,216,0.8)]" />
+              HERON CREATIVE SYSTEM
+            </div>
+            <h1 className="text-3xl font-medium tracking-[-0.04em] text-[#e8eef4] sm:text-4xl">
               {t.pageTitle}
             </h1>
-            <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/40 sm:text-base">
               {t.pageSubtitle}
             </p>
 
@@ -1272,17 +1334,17 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     type="button"
                     onClick={() => setActiveVideoGenerationTab(tab.key)}
                     className={[
-                      "flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all duration-200",
+                      "flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition-all duration-200",
                       isActive
-                        ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/30"
-                        : "bg-[#1a2844] text-slate-400 hover:bg-[#243560] hover:text-slate-200",
+                        ? "border-[#9ef5d8]/35 bg-[#9ef5d8]/[0.12] text-[#dffdf4] shadow-[0_8px_24px_-16px_rgba(158,245,216,0.7)]"
+                        : "border-white/[0.08] bg-white/[0.025] text-white/[0.42] hover:-translate-y-0.5 hover:border-white/[0.16] hover:bg-white/[0.055] hover:text-white/80",
                     ].join(" ")}
                   >
                     <span>{locale === "en" ? tab.labelEn : tab.label}</span>
                     {!catalogLoading && (
                       <span className={[
                         "rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-none tabular-nums",
-                        isActive ? "bg-white/20 text-white" : "bg-[#0d1929] text-slate-500",
+                        isActive ? "bg-[#9ef5d8]/15 text-[#9ef5d8]" : "bg-black/25 text-white/30",
                       ].join(" ")}>
                         {count}
                       </span>
@@ -1298,17 +1360,17 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     type="button"
                     onClick={() => setActiveVideoEditingTab(tab.key)}
                     className={[
-                      "flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all duration-200",
+                      "flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition-all duration-200",
                       isActive
-                        ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/30"
-                        : "bg-[#1a2844] text-slate-400 hover:bg-[#243560] hover:text-slate-200",
+                        ? "border-[#9ef5d8]/35 bg-[#9ef5d8]/[0.12] text-[#dffdf4] shadow-[0_8px_24px_-16px_rgba(158,245,216,0.7)]"
+                        : "border-white/[0.08] bg-white/[0.025] text-white/[0.42] hover:-translate-y-0.5 hover:border-white/[0.16] hover:bg-white/[0.055] hover:text-white/80",
                     ].join(" ")}
                   >
                     <span>{locale === "en" ? tab.labelEn : tab.label}</span>
                     {!catalogLoading && (
                       <span className={[
                         "rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-none tabular-nums",
-                        isActive ? "bg-white/20 text-white" : "bg-[#0d1929] text-slate-500",
+                        isActive ? "bg-[#9ef5d8]/15 text-[#9ef5d8]" : "bg-black/25 text-white/30",
                       ].join(" ")}>
                         {count}
                       </span>
@@ -1326,10 +1388,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     type="button"
                     onClick={() => setActiveCategory(tab.key)}
                     className={[
-                      "flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all duration-200",
+                      "flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition-all duration-200",
                       isActive
-                        ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/30"
-                        : "bg-[#1a2844] text-slate-400 hover:bg-[#243560] hover:text-slate-200",
+                        ? "border-[#9ef5d8]/35 bg-[#9ef5d8]/[0.12] text-[#dffdf4] shadow-[0_8px_24px_-16px_rgba(158,245,216,0.7)]"
+                        : "border-white/[0.08] bg-white/[0.025] text-white/[0.42] hover:-translate-y-0.5 hover:border-white/[0.16] hover:bg-white/[0.055] hover:text-white/80",
                     ].join(" ")}
                   >
                     <span className="text-xs leading-none">{CATEGORY_ICON[tab.key]}</span>
@@ -1337,7 +1399,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     {!catalogLoading && (
                       <span className={[
                         "rounded-full px-1.5 py-0.5 text-[11px] font-bold leading-none tabular-nums",
-                        isActive ? "bg-white/20 text-white" : "bg-[#0d1929] text-slate-500",
+                        isActive ? "bg-[#9ef5d8]/15 text-[#9ef5d8]" : "bg-black/25 text-white/30",
                       ].join(" ")}>
                         {count}
                       </span>
@@ -1352,6 +1414,15 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         {/* Card grid */}
         <div className="flex-1 px-4 py-8 sm:px-6">
           <div className="mx-auto max-w-[1400px]">
+            {routeSearchQuery && (
+              <div className="mb-5 flex items-end justify-between gap-4">
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-300/80">{locale === "en" ? "Tool search" : "工具搜索"}</div>
+                  <h2 className="mt-1 text-xl font-semibold tracking-tight text-white">“{routeSearchQuery}”</h2>
+                </div>
+                {!catalogLoading && <span className="text-xs text-slate-500">{visibleSkus.length} {locale === "en" ? "results" : "个结果"}</span>}
+              </div>
+            )}
             {activeToolGroupLabel && (
               <div className="mb-5 flex items-center justify-between">
                 <h2 className="text-xl font-semibold tracking-tight text-white">
@@ -1364,11 +1435,11 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
             {catalogLoading && (
               <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {Array.from({ length: 8 }).map((_, i) => (
-                  <div key={i} className="overflow-hidden rounded-2xl bg-[#111e34]">
-                    <div className="aspect-video animate-pulse bg-[#1a2844]" />
-                    <div className="space-y-2 bg-[#0e1929] px-4 py-3">
-                      <div className="h-4 w-2/3 animate-pulse rounded-full bg-[#1a2844]" />
-                      <div className="h-3 w-1/3 animate-pulse rounded-full bg-[#1a2844]" />
+                  <div key={i} className="overflow-hidden rounded-2xl border border-white/[0.06] bg-[#090e14]">
+                    <div className="aspect-video animate-pulse bg-white/[0.045]" />
+                    <div className="space-y-2 bg-[#080c11] px-4 py-3">
+                      <div className="h-4 w-2/3 animate-pulse rounded-full bg-white/[0.055]" />
+                      <div className="h-3 w-1/3 animate-pulse rounded-full bg-white/[0.04]" />
                     </div>
                   </div>
                 ))}
@@ -1426,10 +1497,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   // STUDIO VIEW
   // ──────────────────────────────────────────────────────────────────────────
   return (
-    <div className={embedded ? "relative flex h-full min-h-0 flex-col overflow-y-auto bg-[#08111f]" : "relative flex min-h-screen flex-col bg-[#08111f]"}>
+    <div className={embedded ? "relative flex h-full min-h-0 flex-col overflow-y-auto bg-[#05080d]" : "relative flex min-h-screen flex-col bg-[#05080d]"}>
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden>
-        <div className="wf-ambient-orb absolute -left-40 top-10 h-[34rem] w-[34rem] rounded-full bg-cyan-500/[0.055] blur-[110px]" />
-        <div className="wf-ambient-orb absolute right-0 top-1/3 h-[30rem] w-[30rem] rounded-full bg-emerald-500/[0.045] blur-[120px] [animation-delay:-5s]" />
+        <div className="wf-ambient-orb absolute -left-40 top-10 h-[34rem] w-[34rem] rounded-full bg-[#9ef5d8]/[0.035] blur-[110px]" />
+        <div className="wf-ambient-orb absolute right-0 top-1/3 h-[30rem] w-[30rem] rounded-full bg-[#6bd8c2]/[0.025] blur-[120px] [animation-delay:-5s]" />
       </div>
       {renderNav}
 
@@ -1445,7 +1516,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
           <aside className="w-full min-w-0 max-w-full overflow-x-hidden lg:w-[var(--studio-left-width)] lg:flex-none">
 
             {/* Parameter form */}
-            <div className="wf-panel-enter min-w-0 max-w-full overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#111d31]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-xl">
+            <div className="wf-panel-enter min-w-0 max-w-full overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#0a0f15]/[0.92] shadow-[0_28px_80px_-36px_rgba(0,0,0,0.88),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl">
               {schema ? (
                 <DynamicForm
                   schema={schema}
@@ -1489,7 +1560,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                     </div>
                   }
                   formFooter={
-                    <div className="-mx-5 -mb-5 space-y-3 border-t border-white/[0.07] bg-[#0b1628]/75 px-5 pb-5 pt-4 lg:-mx-6 lg:-mb-6 lg:px-6 lg:pb-6">
+                    <div className="-mx-5 -mb-5 space-y-3 border-t border-white/[0.07] bg-[#070b10]/80 px-5 pb-5 pt-4 lg:-mx-6 lg:-mb-6 lg:px-6 lg:pb-6">
                       {showErrors && Object.keys(errors).length > 0 && (
                         <div className="rounded-xl border border-red-500/25 bg-red-900/20 p-3.5 text-sm">
                           <p className="font-semibold text-red-400">{t.errFixFields}</p>
@@ -1516,7 +1587,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                               type="checkbox"
                               checked={autoSaveToAssetLibrary}
                               onChange={(e) => setAutoSaveToAssetLibrary(e.target.checked)}
-                              className="h-4 w-4 rounded border-[#3a5070] bg-[#0f1728] text-emerald-500 focus:ring-2 focus:ring-emerald-500/30 focus:ring-offset-0"
+                              className="h-4 w-4 rounded border-white/20 bg-[#070b10] text-emerald-400 focus:ring-2 focus:ring-emerald-400/30 focus:ring-offset-0"
                             />
                             {t.autoSaveToAssetToggle}
                           </label>
@@ -1524,7 +1595,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       )}
 
                       {(isAutoSaving || autoSaveNotice) && (
-                        <div className="rounded-xl border border-[#2a3d5e] bg-[#13253f] px-3.5 py-2.5 text-xs text-slate-300">
+                        <div className="rounded-xl border border-[#9ef5d8]/15 bg-[#9ef5d8]/[0.055] px-3.5 py-2.5 text-xs text-white/65">
                           {isAutoSaving ? t.autoSaveSaving : autoSaveNotice}
                         </div>
                       )}
@@ -1630,7 +1701,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
           {/* ── Right: viewer + history ── */}
           <div
             className={cn(
-              "wf-panel-enter flex w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#091422]/90 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.035)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1",
+              "wf-panel-enter flex w-full min-w-0 flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#080d13]/[0.92] shadow-[0_28px_80px_-36px_rgba(0,0,0,0.92),inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur-xl [animation-delay:80ms] lg:sticky lg:top-5 lg:flex-1",
               embedded
                 ? "min-h-[480px] lg:h-[calc(100dvh-7rem)] lg:min-h-[360px] lg:max-h-[calc(100dvh-7rem)]"
                 : "min-h-[560px] lg:max-h-[calc(100vh-2.5rem)]"
@@ -1658,11 +1729,11 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
               />
             </div>
             {cloudHistory.length > 0 && (
-              <div className="shrink-0 border-t border-white/[0.07] bg-[#08111f]/80 px-3">
+              <div className="shrink-0 border-t border-white/[0.07] bg-[#05080d]/85 px-3">
                 <HistoryFilmstrip
                   history={cloudHistory}
                   activeId={viewingHistoryId}
-                  onSelect={setViewingHistoryId}
+                  onSelect={handleHistorySelect}
                 />
               </div>
             )}
@@ -1950,7 +2021,7 @@ function WorkflowCard({
         : `${sku.sellCredits} ${creditsLabel}`;
 
   return (
-    <article className="group relative flex flex-col overflow-hidden rounded-2xl bg-[#111e34] shadow-lg shadow-black/30 transition-all duration-300 hover:-translate-y-1.5 hover:shadow-2xl hover:shadow-black/50">
+    <article className="group relative flex flex-col overflow-hidden rounded-2xl border border-white/[0.07] bg-[#090e14] shadow-[0_18px_50px_-32px_rgba(0,0,0,0.95)] transition-all duration-300 hover:-translate-y-1.5 hover:border-[#9ef5d8]/25 hover:shadow-[0_24px_65px_-32px_rgba(107,216,194,0.28)]">
       <button
         type="button"
         onClick={onClick}
@@ -1987,7 +2058,7 @@ function WorkflowCard({
             )}
           </>
         ) : isCoverReserved ? (
-          <div className="h-full w-full bg-[#07101f]" aria-label={locale === "en" ? "Cover image reserved" : "封面图片预留"} />
+          <div className="h-full w-full bg-[#05080d]" aria-label={locale === "en" ? "Cover image reserved" : "封面图片预留"} />
         ) : (
           <div className={`h-full w-full bg-gradient-to-br ${CATEGORY_BG[sku.category]}`}>
             <div className="flex h-full items-center justify-center">
@@ -1996,10 +2067,9 @@ function WorkflowCard({
           </div>
         )}
 
-        <div className="pointer-events-none absolute inset-0 z-[11] flex translate-y-2 flex-col justify-end bg-gradient-to-t from-[#050a13]/95 via-[#07101f]/80 to-[#07101f]/15 p-4 opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100">
-          <span className="mb-1 text-[10px] font-medium text-cyan-200/80">{categoryLabel}</span>
-          <div className="flex min-w-0 items-start justify-between gap-3">
-            <h3 className="line-clamp-2 min-w-0 text-sm font-semibold leading-snug text-white">{name}</h3>
+        <div className="pointer-events-none absolute inset-0 z-[11] flex translate-y-2 flex-col justify-end bg-gradient-to-t from-[#030609]/95 via-[#05080d]/78 to-transparent p-4 opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100">
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <span className="text-[10px] font-medium text-[#9ef5d8]/80">{categoryLabel}</span>
             <span className="max-w-[48%] shrink-0 text-right text-[11px] font-semibold leading-snug text-emerald-300">
               {priceLabel}
             </span>
@@ -2021,6 +2091,14 @@ function WorkflowCard({
         >
           <Star className="h-4 w-4" fill={isFavorite ? "currentColor" : "none"} strokeWidth={1.8} aria-hidden />
         </button>
+      </div>
+
+      <div className="pointer-events-none relative z-[12] flex min-h-[56px] items-center justify-between gap-3 border-t border-white/[0.07] bg-[#0d151f] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,.025)] transition-colors duration-300 group-hover:bg-[#101b26]">
+        <h3 className="min-w-0 truncate text-sm font-semibold tracking-[-0.01em] text-slate-100">{name}</h3>
+        <span className="flex shrink-0 translate-x-1 items-center gap-1.5 text-[11px] font-medium text-[#86b8ab] opacity-0 transition-all duration-300 group-hover:translate-x-0 group-hover:text-[#a7d6c9] group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100 [@media(hover:none)]:translate-x-0 [@media(hover:none)]:opacity-100">
+          {startLabel}
+          <ArrowRight className="h-3.5 w-3.5 transition-transform duration-300 group-hover:translate-x-0.5" aria-hidden />
+        </span>
       </div>
     </article>
   );

@@ -7,7 +7,10 @@ import { cn } from "@/lib/utils";
 const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 export const metadata: Metadata = {
-  title: "Workflow",
+  title: {
+    default: "HeronHub",
+    template: "%s · HeronHub",
+  },
   description: "AI workflow SaaS — schema-driven ComfyUI / RunningHub front end",
 };
 
