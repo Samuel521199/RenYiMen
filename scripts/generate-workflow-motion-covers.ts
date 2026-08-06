@@ -76,6 +76,11 @@ const TARGETS: MotionCoverTarget[] = [
     prompt: "The presenter speaks naturally with subtle mouth and hand movement while clean subtitle lines appear in precise timed segments along the lower safe area, synchronized to each phrase. Keep the editing timeline and speaker composition stable. No random camera motion, no watermark.",
   },
   {
+    skuId: "LOCAL_AUDIO_EXTRACTION",
+    coverFile: "video-audio-extraction.webp",
+    prompt: "Demonstrate functional video-to-audio extraction: the video preview on the left plays with subtle natural presenter motion, its visible sound signal flows purposefully through the central extraction device, and the independent waveform on the right builds in synchronization before resolving into the audio file tile. Keep the left-to-right workflow and all object designs stable. No scene cut, no random zoom, no added text, no watermark.",
+  },
+  {
     skuId: "ONE_PROMPT_30S_VIDEO",
     coverFile: "animated-cover.webp",
     prompt: "A single creative idea expands into a complete production workflow: story beats organize into storyboard panels, approved keyframes come alive in sequence, and the shots assemble along a cinematic timeline into one finished video. Preserve the visual language and layout, no random zoom, no watermark.",

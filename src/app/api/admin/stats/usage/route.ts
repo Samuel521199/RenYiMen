@@ -35,6 +35,7 @@ const SKU_DISPLAY_NAMES: Record<string, string> = {
   RH_TXT2IMG_SHORTDRAMA: "文字生成图片",
   RH_STORYBOARD: "分镜生成出图",
   RH_VIDEO_ENHANCE: "视频模糊修复",
+  LOCAL_AUDIO_EXTRACTION: "视频提取音频",
   KLING_CINEMA_PRO: "单图生成短视频",
   BAILIAN_WANX_I2V: "多模态图生视频",
   BAILIAN_HAPPYHORSE_VIDEO_EDIT: "局部修改",

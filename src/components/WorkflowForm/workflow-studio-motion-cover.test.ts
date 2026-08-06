@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const studio = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
@@ -33,15 +33,16 @@ test("every catalog workflow has a matching semantic motion cover", () => {
   const skuCount = (catalog.match(/\bskuId:/g) ?? []).length;
   const coverPairs = [...catalog.matchAll(/cover: "\/covers\/([^"]+)",\s+coverVideo: "\/covers\/([^"]+)"/g)];
 
-  assert.equal(skuCount, 30);
+  assert.equal(skuCount, 31);
   assert.equal(coverPairs.length, skuCount);
   for (const pair of coverPairs) {
-    assert.equal(pair[2], pair[1].replace(/\.[^.]+$/, "-motion.mp4"));
+    assert.match(pair[2], /-motion\.mp4$/);
+    assert.equal(existsSync(`public/covers/${pair[2]}`), true);
   }
 });
 
 test("batch generation uses Alibaba Model Studio HappyHorse instead of Kling", () => {
-  assert.equal((generator.match(/\bcoverFile: "/g) ?? []).length, 30);
+  assert.equal((generator.match(/\bcoverFile: "/g) ?? []).length, 31);
   assert.match(generator, /new BailianAdapter\(\)/);
   assert.match(generator, /happyhorse-1\.1-i2v/);
   assert.doesNotMatch(generator, /providers\/KlingAdapter/);

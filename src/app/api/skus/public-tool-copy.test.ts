@@ -4,6 +4,7 @@ import test from "node:test";
 import { GET as getSkuCatalog } from "./route";
 
 const NEW_TOOL_SKU_IDS = [
+  "LOCAL_AUDIO_EXTRACTION",
   "LOCAL_AUTO_SUBTITLES",
   "BAILIAN_WAN27_CAMERA_REPLICATION",
   "BAILIAN_WAN27_EFFECT_REPLICATION",

@@ -25,6 +25,12 @@ const ARTBOARD_GRID_STYLE: CSSProperties = {
   backgroundSize: "20px 20px",
 };
 
+function audioDownloadFileName(mediaUrl: string | undefined): string {
+  const path = mediaUrl?.trim().split(/[?#]/)[0]?.toLowerCase() ?? "";
+  const extension = path.match(/\.(mp3|m4a|wav|aac|ogg|opus|flac)$/)?.[1] ?? "mp3";
+  return `extracted-audio.${extension}`;
+}
+
 export interface TaskStatusViewerProps {
   /** 未提单、无任务时为 `null`，展示空闲画板 */
   model?: TaskStatusViewModel | null;
@@ -313,7 +319,7 @@ function SuccessLayer({
       : model.mediaType === "model" && !/\.glb$/i.test(downloadFileName)
         ? "generated-model.glb"
       : model.mediaType === "audio" && /\.mp4$/i.test(downloadFileName)
-        ? (mediaUrl?.toLowerCase().includes(".mp3") ? "voice-preview.mp3" : "voice-preview.wav")
+        ? audioDownloadFileName(mediaUrl)
       : downloadFileName;
 
   const handleDownload = useCallback(async () => {

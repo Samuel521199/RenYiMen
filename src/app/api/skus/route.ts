@@ -10,6 +10,7 @@ import { bailianSceneLightVideoEditWorkflowMock } from "@/mocks/bailian-scene-li
 import { bailianOverallStyleTransferWorkflowMock } from "@/mocks/bailian-overall-style-transfer-workflow";
 import { bailianHighDynamicRedrawWorkflowMock } from "@/mocks/bailian-high-dynamic-redraw-workflow";
 import { autoSubtitleWorkflowMock } from "@/mocks/auto-subtitle-workflow";
+import { localAudioExtractionWorkflowMock } from "@/mocks/local-audio-extraction-workflow";
 import { AUTO_SUBTITLE_CREDITS } from "@/lib/subtitle-pricing";
 import { bailianVideoContinuationWorkflowMock } from "@/mocks/bailian-video-continuation-workflow";
 import { bailianCameraReplicationWorkflowMock } from "@/mocks/bailian-camera-replication-workflow";
@@ -201,6 +202,19 @@ const CATALOG: SkuDefinition[] = [
     descriptionEn: "Upload a video with speech to automatically transcribe, align, and render a new captioned video.",
     sellCredits: AUTO_SUBTITLE_CREDITS,
     uiSchema: autoSubtitleWorkflowMock,
+  },
+  {
+    skuId: "LOCAL_AUDIO_EXTRACTION",
+    providerCode: "LOCAL_AUDIO_EXTRACTION",
+    category: "video",
+    cover: "/covers/video-audio-extraction.webp",
+    coverVideo: "/covers/video-audio-extraction-motion.mp4",
+    displayName: "视频提取音频",
+    displayNameEn: "Extract Audio from Video",
+    description: "上传带音轨的视频，一键提取为 MP3、M4A 或 WAV 音频。全程使用本地媒体处理，不消耗模型积分。",
+    descriptionEn: "Upload a video with audio and extract it as MP3, M4A, or WAV. Local media processing only, with no model credits consumed.",
+    sellCredits: 0,
+    uiSchema: localAudioExtractionWorkflowMock,
   },
   {
     skuId: "ONE_PROMPT_30S_VIDEO",

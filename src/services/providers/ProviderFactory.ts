@@ -5,6 +5,7 @@ import { BailianAdapter } from "./BailianAdapter";
 import { BailianVoiceDesignAdapter } from "./BailianVoiceDesignAdapter";
 import { BailianVoiceCloneAdapter } from "./BailianVoiceCloneAdapter";
 import { BailianEmotionalTtsAdapter } from "./BailianEmotionalTtsAdapter";
+import { LocalAudioExtractionAdapter } from "./LocalAudioExtractionAdapter";
 import { GptImage2Adapter } from "./GptImage2Adapter";
 import { KlingAdapter } from "./KlingAdapter";
 import { RunningHubAdapter } from "./RunningHubAdapter";
@@ -38,6 +39,7 @@ const SKU_TO_PROVIDER: Record<string, string> = {
   BAILIAN_COSYVOICE_VOICE_DESIGN: "ALIYUN_BAILIAN_VOICE_DESIGN",
   BAILIAN_VOICE_CLONE: "ALIYUN_BAILIAN_VOICE_CLONE",
   BAILIAN_EMOTIONAL_TTS: "ALIYUN_BAILIAN_EMOTIONAL_TTS",
+  LOCAL_AUDIO_EXTRACTION: "LOCAL_AUDIO_EXTRACTION",
   /** 分镜生成出图（多图输出） */
   RH_STORYBOARD: "RUNNINGHUB_STORYBOARD",
   /** 提示词反推（图生文，Qwen3 VQA） */
@@ -105,6 +107,8 @@ export function getProviderAdapter(providerCode: string): IProviderAdapter {
       return new BailianVoiceCloneAdapter();
     case "ALIYUN_BAILIAN_EMOTIONAL_TTS":
       return new BailianEmotionalTtsAdapter();
+    case "LOCAL_AUDIO_EXTRACTION":
+      return new LocalAudioExtractionAdapter();
     case "GPT_IMAGE2":
       return new GptImage2Adapter();
     default:

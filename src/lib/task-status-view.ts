@@ -74,6 +74,12 @@ export const EMOTIONAL_TTS_LOADING_HINTS = [
   "正在合成自然、有表现力的短剧配音…",
 ];
 
+export const AUDIO_EXTRACTION_LOADING_HINTS = [
+  "正在读取视频中的音轨信息…",
+  "正在提取并转换音频格式…",
+  "正在保存音频文件，请稍候…",
+];
+
 function resolveLoadingHints(skuId?: string): string[] {
   if (skuId === "BAILIAN_WAN22_ANIMATE_MOVE") return DANCE_MOVE_LOADING_HINTS;
   if (skuId === "BAILIAN_WAN22_S2V") return S2V_LOADING_HINTS;
@@ -83,6 +89,7 @@ function resolveLoadingHints(skuId?: string): string[] {
   if (skuId === "BAILIAN_COSYVOICE_VOICE_DESIGN") return VOICE_DESIGN_LOADING_HINTS;
   if (skuId === "BAILIAN_VOICE_CLONE") return VOICE_CLONE_LOADING_HINTS;
   if (skuId === "BAILIAN_EMOTIONAL_TTS") return EMOTIONAL_TTS_LOADING_HINTS;
+  if (skuId === "LOCAL_AUDIO_EXTRACTION") return AUDIO_EXTRACTION_LOADING_HINTS;
   return DEFAULT_TASK_LOADING_HINTS;
 }
 
@@ -98,6 +105,7 @@ const SKU_EXPECTED_DURATION_MS: Record<string, number> = {
   BAILIAN_COSYVOICE_VOICE_DESIGN: 30_000,
   BAILIAN_VOICE_CLONE: 45_000,
   BAILIAN_EMOTIONAL_TTS: 30_000,
+  LOCAL_AUDIO_EXTRACTION: 15_000,
   KLING_CINEMA_PRO: 180_000,
   RH_SVD_IMG2VID: 180_000,
   RH_TXT2IMG_SHORTDRAMA: 30_000,
