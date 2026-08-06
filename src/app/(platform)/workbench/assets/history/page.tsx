@@ -94,7 +94,7 @@ export default function GenerationHistoryLibraryPage() {
         <div className="flex flex-col gap-7 border-b border-white/[0.09] pb-8 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="mb-4 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.26em] text-[#9ef5d8]"><History className="h-4 w-4" />HERONHUB / {isEn ? "ASSET LIBRARY" : "个人资产库"}</div>
-            <h1 className="text-[clamp(2.4rem,4.6vw,5rem)] font-black leading-none tracking-[-0.055em]">{isEn ? "Generation history" : "生成历史"}</h1>
+            <h1 className="text-[clamp(2rem,2.8vw,3.25rem)] font-black leading-none tracking-[-0.045em]">{isEn ? "Generation history" : "生成历史"}</h1>
             <p className="mt-5 max-w-2xl text-sm leading-7 text-white/45">{isEn ? "Every successful image, video, audio, and 3D generation is kept here and loaded chronologically." : "所有成功生成的图片、视频、音频和 3D 资产都会按时间保存在这里，可继续翻阅更早的记录。"}</p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -109,7 +109,7 @@ export default function GenerationHistoryLibraryPage() {
         ) : error ? (
           <div className="flex min-h-[420px] flex-col items-center justify-center gap-5 text-center"><PackageOpen className="h-12 w-12 text-white/20" /><p className="text-sm text-rose-300/80">{error}</p><button type="button" onClick={() => void loadAssets()} className="rounded-full border border-white/15 px-5 py-2 text-sm text-white/70 hover:bg-white/5">{isEn ? "Try again" : "重新加载"}</button></div>
         ) : visibleAssets.length === 0 ? (
-          <div className="flex min-h-[420px] flex-col items-center justify-center gap-4 text-center"><PackageOpen className="h-14 w-14 text-white/15" /><p className="text-sm text-white/35">{isEn ? "No assets in this category yet." : "这个分类下还没有生成资产"}</p></div>
+          <div className="flex min-h-[420px] flex-col items-center justify-center gap-4 text-center"><PackageOpen className="h-14 w-14 text-white/15" /><p className="text-sm text-white/35">{isEn ? "No matching assets in the loaded history yet." : "已加载的记录中暂时没有这个分类"}</p>{nextCursor ? <button type="button" disabled={loadingMore} onClick={() => void loadAssets(nextCursor)} className="inline-flex min-w-36 items-center justify-center rounded-full border border-white/15 bg-white/[0.025] px-6 py-3 text-sm text-white/65 transition hover:bg-white/[0.06] disabled:opacity-50">{loadingMore ? <LoaderCircle className="h-4 w-4 animate-spin" /> : isEn ? "Search earlier" : "继续查找更早记录"}</button> : null}</div>
         ) : (
           <>
             <div className="grid gap-4 py-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">

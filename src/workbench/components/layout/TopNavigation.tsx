@@ -228,7 +228,7 @@ export default function WorkbenchTopNavigation() {
     { label: "我的收藏", labelEn: "Favorites", href: "/workbench/tools?group=favorites" },
   ];
 
-  const linkClasses = (href: string) => `group relative flex h-full items-center rounded-lg px-3.5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${
+  const linkClasses = (href: string) => `group relative flex h-full shrink-0 items-center whitespace-nowrap rounded-lg px-3.5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${
     isHrefActive(pathname, query, href)
       ? "text-white after:scale-x-100 after:opacity-100"
       : "text-white/50 after:scale-x-0 after:opacity-0"
@@ -267,12 +267,12 @@ export default function WorkbenchTopNavigation() {
   };
 
   const operationsMegaMenu = (
-    <div className="h-full" onMouseEnter={() => open("operations-mega")} onMouseLeave={scheduleClose}>
+    <div className="h-full shrink-0" onMouseEnter={() => open("operations-mega")} onMouseLeave={scheduleClose}>
       <button
         type="button"
         onClick={() => setOpenMenu((current) => current === "operations-mega" ? null : "operations-mega")}
         aria-expanded={openMenu === "operations-mega"}
-        className={`group relative flex h-full items-center gap-2 rounded-lg px-5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-4 after:right-4 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "operations-mega" ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
+        className={`group relative flex h-full items-center gap-2 whitespace-nowrap rounded-lg px-5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-4 after:right-4 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "operations-mega" ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
       >
         {isEn ? "Operations" : "运营部"}
         <ChevronDown className={`h-3.5 w-3.5 text-white/35 transition-all duration-300 group-hover:translate-y-0.5 group-hover:text-white/80 ${openMenu === "operations-mega" ? "rotate-180 text-white/80" : ""}`} />
@@ -312,12 +312,12 @@ export default function WorkbenchTopNavigation() {
     <nav aria-label={isEn ? "General workspace navigation" : "通用型导航"} className="hidden h-full min-w-0 flex-1 items-stretch justify-center gap-1 xl:flex">
       <Link href={generalLinks[0].href} className={linkClasses(generalLinks[0].href)}>{isEn ? generalLinks[0].labelEn : generalLinks[0].label}</Link>
       {operationsMegaMenu}
-      <div className="relative h-full" onMouseEnter={() => open("creative")} onMouseLeave={scheduleClose}>
+      <div className="relative h-full shrink-0" onMouseEnter={() => open("creative")} onMouseLeave={scheduleClose}>
         <button
           type="button"
           onClick={() => setOpenMenu((current) => current === "creative" ? null : "creative")}
           aria-expanded={openMenu === "creative"}
-          className={`group relative flex h-full items-center gap-2 rounded-lg px-3.5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "creative" || (pathname === "/workbench/tools" && (!query || searchParams.has("sku") || searchParams.has("q"))) ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
+          className={`group relative flex h-full items-center gap-2 whitespace-nowrap rounded-lg px-3.5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "creative" || (pathname === "/workbench/tools" && (!query || searchParams.has("sku") || searchParams.has("q"))) ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
         >
           {isEn ? "Creative Hub" : "创作中心"}<ChevronDown className={`h-3.5 w-3.5 text-white/35 transition-all duration-300 group-hover:translate-y-0.5 group-hover:text-white/80 ${openMenu === "creative" ? "rotate-180 text-white/80" : ""}`} />
         </button>

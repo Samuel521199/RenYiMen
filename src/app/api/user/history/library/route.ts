@@ -35,12 +35,11 @@ export async function GET(request: Request) {
   });
 
   const hasMore = rows.length > limit;
-  const items = rows
-    .slice(0, limit)
-    .filter((row) => Boolean(row.resultUrl?.trim()));
+  const pageRows = rows.slice(0, limit);
+  const items = pageRows.filter((row) => Boolean(row.resultUrl?.trim()));
 
   return NextResponse.json({
     items,
-    nextCursor: hasMore ? items.at(-1)?.id ?? null : null,
+    nextCursor: hasMore ? pageRows.at(-1)?.id ?? null : null,
   });
 }

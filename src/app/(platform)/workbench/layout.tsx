@@ -96,7 +96,8 @@ function WorkbenchPermissionGuard({ children }: { children: React.ReactNode }) {
   // 工具页始终放行
   const isTools = pathname.startsWith("/workbench/tools");
   const isHome = pathname === "/workbench/home";
-  if (isTools || isHome) return <>{children}</>;
+  const isPersonalAssetLibrary = pathname.startsWith("/workbench/assets/history");
+  if (isTools || isHome || isPersonalAssetLibrary) return <>{children}</>;
 
   // 管理员无限制
   if (isAdmin) return <>{children}</>;
@@ -160,7 +161,8 @@ export default function WorkbenchProviders({ children }: { children: React.React
   const pathname = usePathname();
   const isTools = pathname.startsWith("/workbench/tools");
   const isHome = pathname === "/workbench/home";
-  const isOperations = !isTools && !isHome;
+  const isPersonalAssetLibrary = pathname.startsWith("/workbench/assets/history");
+  const isOperations = !isTools && !isHome && !isPersonalAssetLibrary;
 
   return (
     <LanguageProvider>

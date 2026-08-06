@@ -27,6 +27,8 @@ test("top navigation switches between isolated full-width workspace menus", () =
   assert.match(layoutSource, /<WorkbenchTopNavigation \/>/);
   assert.doesNotMatch(layoutSource, /<WorkbenchSidebar \/>/);
   assert.match(topNavSource, /GENERAL_COLUMNS/);
+  assert.match(topNavSource, /h-full shrink-0 items-center whitespace-nowrap/);
+  assert.match(topNavSource, /relative h-full shrink-0/);
   assert.match(topNavSource, /operationsMenus/);
   assert.match(topNavSource, /w-\[min\(900px,calc\(100vw-3rem\)\)\]/);
   assert.match(topNavSource, /max-h-\[min\(560px,calc\(100vh-8rem\)\)\]/);
