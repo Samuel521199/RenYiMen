@@ -134,14 +134,14 @@ type FeaturedModel = {
 };
 
 const FEATURED_MODELS_ZH: FeaturedModel[] = [
-  { name: "Wan 2.7", family: "视频生成", description: "覆盖图生视频、运镜复刻、特效复刻与视频续写", href: "/workbench/tools?category=video", poster: "/model-showcase/wan-27.webp", motion: "/model-showcase/wan-27-motion.mp4?v=2" },
-  { name: "Wan 2.2 S2V", family: "声音驱动视频", description: "由人声驱动角色口型、表情与动作自然同步", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V", poster: "/model-showcase/wan-22-s2v.webp", motion: "/model-showcase/wan-22-s2v-motion.mp4?v=2" },
-  { name: "Kling Cinema", family: "电影级影像", description: "从单张参考图快速生成连贯、富有表现力的镜头", href: "/workbench/tools?sku=KLING_CINEMA_PRO", poster: "/model-showcase/kling-cinema.webp", motion: "/model-showcase/kling-cinema-motion.mp4?v=2" },
-  { name: "GPT Image 2", family: "图像生成", description: "结合自然语言与参考图生成高质量完整视觉", href: "/workbench/tools?sku=GPT_IMAGE2_REF", poster: "/model-showcase/gpt-image-2.webp", motion: "/model-showcase/gpt-image-2-motion.mp4?v=2" },
-  { name: "Qwen3-VL", family: "视觉理解", description: "理解画面中的主体、场景、风格与光线并反推提示词", href: "/workbench/tools?sku=RH_PROMPT_REVERSE", poster: "/model-showcase/qwen3-vl.webp", motion: "/model-showcase/qwen3-vl-motion.mp4?v=2" },
-  { name: "CosyVoice", family: "语音生成", description: "完成音色设计、声音克隆与富有情绪的语音表达", href: "/workbench/tools?sku=BAILIAN_COSYVOICE_VOICE_DESIGN", poster: "/model-showcase/cosyvoice.webp", motion: "/model-showcase/cosyvoice-motion.mp4?v=2" },
-  { name: "Tripo 3D", family: "三维生成", description: "从文字、单图或多视角参考创建带材质的 3D 资产", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D", poster: "/model-showcase/tripo-3d.webp", motion: "/model-showcase/tripo-3d-motion.mp4?v=2" },
-  { name: "RunningHub", family: "工作流引擎", description: "连接复杂节点工作流，为图像与视频工具提供稳定执行能力", href: "/workbench/tools?group=video-editing", poster: "/model-showcase/runninghub-workflow.webp", motion: "/model-showcase/runninghub-workflow-motion.mp4?v=2" },
+  { name: "Wan 2.7", family: "视频生成", description: "覆盖图生视频、运镜复刻、特效复刻与视频续写", href: "/workbench/tools?category=video", poster: "/model-showcase/wan-27.webp", motion: "/model-showcase/wan-27-motion.mp4?v=3" },
+  { name: "Wan 2.2 S2V", family: "声音驱动视频", description: "由人声驱动角色口型、表情与动作自然同步", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V", poster: "/model-showcase/wan-22-s2v.webp", motion: "/model-showcase/wan-22-s2v-motion.mp4?v=3" },
+  { name: "Kling Cinema", family: "电影级影像", description: "从单张参考图快速生成连贯、富有表现力的镜头", href: "/workbench/tools?sku=KLING_CINEMA_PRO", poster: "/model-showcase/kling-cinema.webp", motion: "/model-showcase/kling-cinema-motion.mp4?v=3" },
+  { name: "GPT Image 2", family: "图像生成", description: "结合自然语言与参考图生成高质量完整视觉", href: "/workbench/tools?sku=GPT_IMAGE2_REF", poster: "/model-showcase/gpt-image-2.webp", motion: "/model-showcase/gpt-image-2-motion.mp4?v=3" },
+  { name: "Qwen3-VL", family: "视觉理解", description: "理解画面中的主体、场景、风格与光线并反推提示词", href: "/workbench/tools?sku=RH_PROMPT_REVERSE", poster: "/model-showcase/qwen3-vl.webp", motion: "/model-showcase/qwen3-vl-motion.mp4?v=3" },
+  { name: "CosyVoice", family: "语音生成", description: "完成音色设计、声音克隆与富有情绪的语音表达", href: "/workbench/tools?sku=BAILIAN_COSYVOICE_VOICE_DESIGN", poster: "/model-showcase/cosyvoice.webp", motion: "/model-showcase/cosyvoice-motion.mp4?v=3" },
+  { name: "Tripo 3D", family: "三维生成", description: "从文字、单图或多视角参考创建带材质的 3D 资产", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D", poster: "/model-showcase/tripo-3d.webp", motion: "/model-showcase/tripo-3d-motion.mp4?v=3" },
+  { name: "RunningHub", family: "工作流引擎", description: "连接复杂节点工作流，为图像与视频工具提供稳定执行能力", href: "/workbench/tools?group=video-editing", poster: "/model-showcase/runninghub-workflow.webp", motion: "/model-showcase/runninghub-workflow-motion.mp4?v=3" },
 ];
 
 const FEATURED_MODELS_EN: FeaturedModel[] = [
