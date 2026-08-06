@@ -224,6 +224,7 @@ function LoadingLayer({
 
   const elapsed = model.elapsedMs ?? 0;
   const expected = expectedProp ?? model.expectedDurationMs ?? 150_000;
+  const isOverdue = model.subPhase === "running" && elapsed >= expected * 2;
   const barPct = typeof model.progress === "number" && Number.isFinite(model.progress)
     ? Math.max(0, Math.min(99, model.progress))
     : computePseudoProgressPercent(elapsed, expected);
@@ -239,6 +240,12 @@ function LoadingLayer({
         {model.transportMessage && (
           <p className="rounded-lg border border-amber-500/25 bg-amber-900/20 px-3 py-2 text-xs text-amber-400">
             {model.transportMessage}
+          </p>
+        )}
+
+        {isOverdue && (
+          <p role="status" className="rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-xs leading-5 text-amber-300">
+            {tt.progressOverdue}
           </p>
         )}
 
@@ -258,11 +265,11 @@ function LoadingLayer({
 
         <div className="max-w-xl space-y-2">
           <p className="text-sm tabular-nums tracking-tight text-slate-400">
-            {tt.progressElapsed}: {formatClockMmSs(elapsed)} / {tt.progressEstimated}: {formatClockMmSs(expected)}
+            {tt.progressElapsed}: {formatClockMmSs(elapsed)} / {isOverdue ? tt.progressTypical : tt.progressEstimated}: {formatClockMmSs(expected)}
           </p>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#1e2d4a]">
             <div
-              className="h-full rounded-full bg-emerald-500 transition-[width] duration-300 ease-out"
+              className={`h-full rounded-full transition-[width] duration-300 ease-out ${isOverdue ? "animate-pulse bg-amber-400" : "bg-emerald-500"}`}
               style={{ width: `${barPct}%` }}
             />
           </div>
@@ -271,7 +278,7 @@ function LoadingLayer({
               {hints[hintIndex]}
             </p>
             <p className="shrink-0 text-right tabular-nums">
-              {tt.progressPct(barPct)}
+              {isOverdue ? tt.progressStillRunning : tt.progressPct(barPct)}
             </p>
           </div>
         </div>

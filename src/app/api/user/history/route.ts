@@ -36,7 +36,9 @@ export async function GET(req: Request) {
     take: HISTORY_LIMIT,
   });
 
-  const withUrl = rows.filter((r) => (r.resultUrl ?? "").trim().length > 0);
+  const withUrl = rows
+    .filter((r) => (r.resultUrl ?? "").trim().length > 0)
+    .map(({ providerState: _providerState, ...row }) => row);
 
   return NextResponse.json(withUrl);
 }

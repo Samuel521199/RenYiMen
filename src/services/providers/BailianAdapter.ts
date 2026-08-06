@@ -1,4 +1,5 @@
 import type { TaskStatusPollData } from "@/types/task-status";
+import type { ExtractedAudioResult } from "@/services/media/audio-extraction";
 import type {
   IProviderAdapter,
   ProviderCostResult,
@@ -7,6 +8,17 @@ import type {
 } from "./types";
 import { ProviderError } from "./types";
 import type { VideoProviderInputCapabilities } from "./video-input-contract";
+import {
+  applyTalkingVideoSpeech,
+  estimateTalkingVideoTtsCredits,
+  isTalkingVideoPayload,
+  isTalkingVideoTextMode,
+  isTalkingVideoVideoMode,
+  resolveTalkingVideoPerformanceMode,
+  talkingVideoMaxAudioDurationSeconds,
+  type TalkingVideoSpeechResult,
+} from "./bailian-talking-video-input";
+import { exceedsMediaDurationMaximum } from "@/lib/media-duration-boundary";
 
 const DEFAULT_BASE = "https://dashscope.aliyuncs.com";
 const VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
@@ -14,9 +26,13 @@ const IMAGE_TO_VIDEO_SYNTHESIS_PATH = "/api/v1/services/aigc/image2video/video-s
 const TRIPO_3D_GENERATION_PATH = "/api/v1/services/aigc/video-generation/3d-generation";
 const WAN_ANIMATE_MOVE_MODEL = "wan2.2-animate-move";
 const WAN_S2V_MODEL = "wan2.2-s2v";
+const VIDEO_RETALK_MODEL = "videoretalk";
 const TRIPO_P1_MODEL = "Tripo/Tripo-P1.0";
 const TRIPO_H31_MODEL = "Tripo/Tripo-H3.1";
 const TRIPO_TASK_PREFIX = "tripo_";
+const S2V_TTS_TASK_PREFIX = "s2vtts_";
+const WAN27_TALKING_TASK_PREFIX = "w27talk_";
+const PRECISE_TALKING_TASK_PREFIX = "talkchain_";
 const HAPPYHORSE_VIDEO_EDIT_MODEL = "happyhorse-1.0-video-edit";
 const WAN_VIDEO_EDIT_MODEL = "wan2.7-videoedit";
 const WAN27_I2V_MODEL = "wan2.7-i2v-2026-04-25";
@@ -43,6 +59,11 @@ export const BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND = Math.round(0.6 * BAIL
 /** wan2.2-s2v 华北 2 官方原价：480P 0.5 元/秒、720P 0.9 元/秒。 */
 export const BAILIAN_S2V_480P_CREDITS_PER_SECOND = Math.round(0.5 * BAILIAN_CREDITS_PER_CNY);
 export const BAILIAN_S2V_720P_CREDITS_PER_SECOND = Math.round(0.9 * BAILIAN_CREDITS_PER_CNY);
+/** wan2.7-i2v 华北 2 官方原价：720P 0.6 元/秒、1080P 1 元/秒。 */
+export const BAILIAN_WAN27_I2V_720P_CREDITS_PER_SECOND = Math.round(0.6 * BAILIAN_CREDITS_PER_CNY);
+export const BAILIAN_WAN27_I2V_1080P_CREDITS_PER_SECOND = Math.round(1 * BAILIAN_CREDITS_PER_CNY);
+/** VideoRetalk 华北 2 官方原价：0.08 元/秒。 */
+export const BAILIAN_VIDEO_RETALK_CREDITS_PER_SECOND = Math.round(0.08 * BAILIAN_CREDITS_PER_CNY);
 /** happyhorse-1.0-video-edit 华北 2 官方原价：720P 0.9 元/秒、1080P 1.6 元/秒。 */
 export const BAILIAN_VIDEO_EDIT_720P_CREDITS_PER_SECOND = Math.round(0.9 * BAILIAN_CREDITS_PER_CNY);
 export const BAILIAN_VIDEO_EDIT_1080P_CREDITS_PER_SECOND = Math.round(1.6 * BAILIAN_CREDITS_PER_CNY);
@@ -272,7 +293,12 @@ function resolveDashScopeModel(payload: StandardPayload): string {
     || templateId === WAN27_EFFECT_REPLICATION_TEMPLATE
   ) return WAN27_VIDEO_EDIT_MODEL;
   if (templateId.includes(WAN_ANIMATE_MOVE_MODEL)) return WAN_ANIMATE_MOVE_MODEL;
-  if (templateId.includes(WAN_S2V_MODEL)) return WAN_S2V_MODEL;
+  if (templateId.includes(WAN_S2V_MODEL)) {
+    const mode = resolveTalkingVideoPerformanceMode(payload);
+    if (mode === "prompted") return WAN27_I2V_MODEL;
+    if (mode === "precise") return WAN_ANIMATE_MOVE_MODEL;
+    return WAN_S2V_MODEL;
+  }
   const input = payload.nodeInputs["input"];
   if (isRecord(input)) {
     const mn = input.modelName;
@@ -449,6 +475,11 @@ export type BailianS2vInput = {
   audio_url: string;
 };
 
+export type BailianVideoRetalkInput = {
+  video_url: string;
+  audio_url: string;
+};
+
 type TripoGenerationMode = "text" | "single_image" | "multi_image";
 type TripoImageInput = { type: "jpeg" | "png"; file_token: string };
 
@@ -490,6 +521,11 @@ export type BailianVideoSynthesisRequestBody =
       model: typeof WAN_S2V_MODEL;
       input: BailianS2vInput;
       parameters: { resolution: "480P" | "720P" };
+    }
+  | {
+      model: typeof VIDEO_RETALK_MODEL;
+      input: BailianVideoRetalkInput;
+      parameters: { video_extension: boolean };
     }
   | {
       model: typeof HAPPYHORSE_VIDEO_EDIT_MODEL | typeof WAN_VIDEO_EDIT_MODEL;
@@ -650,6 +686,76 @@ function parseTripoTaskId(taskId: string): { upstreamTaskId: string; credits: nu
     : null;
 }
 
+function encodeS2vTtsTaskId(upstreamTaskId: string, credits: number): string {
+  return `${S2V_TTS_TASK_PREFIX}${credits}__${upstreamTaskId}`;
+}
+
+function parseS2vTtsTaskId(taskId: string): { upstreamTaskId: string; credits: number } | null {
+  const match = /^s2vtts_(\d+)__(.+)$/.exec(taskId);
+  if (!match) return null;
+  const credits = Number(match[1]);
+  return Number.isFinite(credits) && credits > 0
+    ? { upstreamTaskId: match[2], credits }
+    : null;
+}
+
+function encodeWan27TalkingTaskId(upstreamTaskId: string, ttsCredits: number): string {
+  return `${WAN27_TALKING_TASK_PREFIX}${Math.max(0, Math.round(ttsCredits))}__${upstreamTaskId}`;
+}
+
+function parseWan27TalkingTaskId(taskId: string): { upstreamTaskId: string; ttsCredits: number } | null {
+  const match = /^w27talk_(\d+)__(.+)$/.exec(taskId);
+  if (!match) return null;
+  const ttsCredits = Number(match[1]);
+  return Number.isFinite(ttsCredits)
+    ? { upstreamTaskId: match[2], ttsCredits }
+    : null;
+}
+
+type PreciseTalkingVideoProviderState = {
+  kind: "bailian_precise_talking_v1";
+  stage: "animate" | "retalk";
+  upstreamTaskId: string;
+  audioUrl: string;
+  videoExtension: boolean;
+  accumulatedCredits: number;
+  accumulatedDurationSeconds: number;
+};
+
+function parsePreciseTalkingVideoState(value: unknown): PreciseTalkingVideoProviderState | null {
+  if (!isRecord(value) || value.kind !== "bailian_precise_talking_v1") return null;
+  if (value.stage !== "animate" && value.stage !== "retalk") return null;
+  const upstreamTaskId = typeof value.upstreamTaskId === "string" ? value.upstreamTaskId.trim() : "";
+  const audioUrl = typeof value.audioUrl === "string" ? value.audioUrl.trim() : "";
+  const accumulatedCredits = Number(value.accumulatedCredits);
+  const accumulatedDurationSeconds = Number(value.accumulatedDurationSeconds);
+  if (!upstreamTaskId || !/^https?:\/\//i.test(audioUrl)) return null;
+  return {
+    kind: "bailian_precise_talking_v1",
+    stage: value.stage,
+    upstreamTaskId,
+    audioUrl,
+    videoExtension: value.videoExtension !== false,
+    accumulatedCredits: Number.isFinite(accumulatedCredits) ? Math.max(0, accumulatedCredits) : 0,
+    accumulatedDurationSeconds: Number.isFinite(accumulatedDurationSeconds)
+      ? Math.max(0, accumulatedDurationSeconds)
+      : 0,
+  };
+}
+
+type BailianAdapterDependencies = {
+  synthesizeTalkingSpeech?: (
+    payload: StandardPayload,
+    credentials: unknown,
+  ) => Promise<TalkingVideoSpeechResult>;
+  extractTalkingAudio?: (
+    sourceUrl: string,
+    format: "mp3",
+    taskId: string,
+  ) => Promise<ExtractedAudioResult>;
+  isAllowedTalkingVideoSource?: (url: string) => boolean;
+};
+
 /**
  * 阿里云百炼 / DashScope 图生视频（异步任务）适配器。
  * - `buildPayload`：标准负载 → DashScope `video-synthesis` 请求体；
@@ -658,6 +764,8 @@ function parseTripoTaskId(taskId: string): { upstreamTaskId: string; credits: nu
  * - `queryTask`：GET `/api/v1/tasks/{task_id}` 轮询。
  */
 export class BailianAdapter implements IProviderAdapter {
+  constructor(private readonly dependencies: BailianAdapterDependencies = {}) {}
+
   getVideoInputCapabilities(payload: StandardPayload): VideoProviderInputCapabilities {
     const requestedModel = resolveDashScopeModel(payload);
     const requestedLc = requestedModel.toLowerCase();
@@ -667,6 +775,7 @@ export class BailianAdapter implements IProviderAdapter {
       || requestedLc === WAN_S2V_MODEL
       || requestedLc === HAPPYHORSE_VIDEO_EDIT_MODEL
       || requestedLc === WAN_VIDEO_EDIT_MODEL
+      || isTalkingVideoPayload(payload)
       ? requestedLc
       : shouldForceHappyHorseModel()
       ? forceHappyHorseModel(requestedModel, payload)
@@ -760,6 +869,34 @@ export class BailianAdapter implements IProviderAdapter {
       const credits = calculateTripoCredits(payload, tripoModel);
       return { cost: credits, sellPrice: credits };
     }
+    const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
+    if (isTalkingVideoPayload(payload)) {
+      const performanceMode = resolveTalkingVideoPerformanceMode(payload);
+      const audioDuration = readNumberFromNode(inputNode, ["duration", "audio_duration"])
+        ?? (performanceMode === "prompted" ? 10 : performanceMode === "precise" ? 10 : 5);
+      const ttsCredits = isTalkingVideoTextMode(payload) ? estimateTalkingVideoTtsCredits(payload) : 0;
+      if (performanceMode === "prompted") {
+        const resolution = readStringFromNode(inputNode, ["resolution", "videoResolution"]);
+        const rate = resolution?.toUpperCase() === "1080P"
+          ? BAILIAN_WAN27_I2V_1080P_CREDITS_PER_SECOND
+          : BAILIAN_WAN27_I2V_720P_CREDITS_PER_SECOND;
+        const seconds = Math.min(15, Math.max(2, Math.ceil(audioDuration)));
+        const cost = seconds * rate + ttsCredits;
+        return { cost, sellPrice: cost };
+      }
+      if (performanceMode === "precise") {
+        const motionDuration = readNumberFromNode(inputNode, ["motion_duration", "motionDuration"])
+          ?? Math.min(30, Math.max(2, audioDuration));
+        const mode = readStringFromNode(inputNode, ["mode", "qualityMode"]);
+        const animateRate = mode === "wan-pro"
+          ? BAILIAN_ANIMATE_MOVE_PRO_CREDITS_PER_SECOND
+          : BAILIAN_ANIMATE_MOVE_STD_CREDITS_PER_SECOND;
+        const cost = Math.ceil(Math.min(30, Math.max(2, motionDuration))) * animateRate
+          + Math.ceil(Math.min(120, Math.max(2, audioDuration))) * BAILIAN_VIDEO_RETALK_CREDITS_PER_SECOND
+          + ttsCredits;
+        return { cost, sellPrice: cost };
+      }
+    }
     const requestedModel = resolvedModel.toLowerCase();
     const isWan27Replication = payload.templateId.trim().toLowerCase() === WAN27_CAMERA_REPLICATION_TEMPLATE
       || payload.templateId.trim().toLowerCase() === WAN27_EFFECT_REPLICATION_TEMPLATE;
@@ -770,7 +907,6 @@ export class BailianAdapter implements IProviderAdapter {
         : requestedModel === WAN_VIDEO_EDIT_MODEL
           ? resolveRequestedVideoDurationSec(payload, 2, 10)
         : resolveRequestedVideoDurationSec(payload);
-    const inputNode = isRecord(payload.nodeInputs["input"]) ? payload.nodeInputs["input"] : undefined;
     const requestedMode =
       readStringFlag(isRecord(f) ? f : undefined, ["mode", "qualityMode"]) ??
       readStringFromNode(inputNode, ["mode", "qualityMode"]);
@@ -809,6 +945,9 @@ export class BailianAdapter implements IProviderAdapter {
     if (isRecord(f) && typeof f.catalogBaseCost === "number" && Number.isFinite(f.catalogBaseCost)) {
       const b = Math.floor(f.catalogBaseCost);
       if (b >= 1) cost = b;
+    }
+    if (requestedModel === WAN_S2V_MODEL && isTalkingVideoTextMode(payload)) {
+      cost += estimateTalkingVideoTtsCredits(payload);
     }
     return { cost, sellPrice: cost };
   }
@@ -1179,9 +1318,26 @@ export class BailianAdapter implements IProviderAdapter {
         delete parameters.promptExtend;
       }
       const isR2v = modelLc.includes("r2v");
-      const media = isR2v
+      const boundaryMedia = isR2v
         ? buildR2vReferenceMediaList(imageUrl, refImageUrls, resolveR2vMaxImages(modelLc))
         : buildI2vBoundaryMedia(imageUrl, refImageUrls, lastFrameUrl);
+      const drivingAudioUrl = isTalkingVideoPayload(payload)
+        && resolveTalkingVideoPerformanceMode(payload) === "prompted"
+        ? readStringFromNode(inputNode, ["audio_url", "audioUrl"])
+        : undefined;
+      if (isTalkingVideoPayload(payload)
+        && resolveTalkingVideoPerformanceMode(payload) === "prompted"
+        && (!drivingAudioUrl || !/^https?:\/\//i.test(drivingAudioUrl))) {
+        throw new ProviderError(
+          "提示词手势模式缺少驱动音频",
+          "BAILIAN_TALKING_MISSING_DRIVING_AUDIO",
+          400,
+        );
+      }
+      const media: Array<{ type: string; url: string }> = [
+        ...boundaryMedia,
+        ...(drivingAudioUrl ? [{ type: "driving_audio", url: drivingAudioUrl.trim() }] : []),
+      ];
       if (media.length === 0) {
         throw new ProviderError(
           "无法组装图生视频所需的 input.media（请检查图片 URL）",
@@ -1250,7 +1406,9 @@ export class BailianAdapter implements IProviderAdapter {
     const isTripo = normalizeTripoModel(body.model) != null;
     const path = isTripo
       ? TRIPO_3D_GENERATION_PATH
-      : bodyModel === WAN_ANIMATE_MOVE_MODEL || bodyModel === WAN_S2V_MODEL
+      : bodyModel === WAN_ANIMATE_MOVE_MODEL
+        || bodyModel === WAN_S2V_MODEL
+        || bodyModel === VIDEO_RETALK_MODEL
         ? IMAGE_TO_VIDEO_SYNTHESIS_PATH
         : VIDEO_SYNTHESIS_PATH;
     const url = `${isTripo ? resolveTripoBaseUrl(credentials) : baseUrl}${path}`;
@@ -1291,24 +1449,13 @@ export class BailianAdapter implements IProviderAdapter {
     return { taskId, raw };
   }
 
-  async generate(payload: StandardPayload, credentials: unknown): Promise<ProviderResponse> {
-    const body = this.buildPayload(payload);
-    const { taskId, raw } = await this.submitTask(body, credentials);
-    const tripoModel = normalizeTripoModel(body.model);
-    return {
-      taskId: tripoModel ? encodeTripoTaskId(taskId, calculateTripoCredits(payload, tripoModel)) : taskId,
-      raw,
-    };
-  }
-
-  async queryTask(taskId: string, credentials: unknown): Promise<TaskStatusPollData> {
+  private async fetchTaskRaw(
+    upstreamTaskId: string,
+    credentials: unknown,
+    useTripoBase = false,
+  ): Promise<{ ok: boolean; status: number; raw: unknown }> {
     const { apiKey, baseUrl, signal } = extractBailianCredentials(credentials);
-    const tripoTask = parseTripoTaskId(taskId);
-    const upstreamTaskId = tripoTask?.upstreamTaskId ?? taskId;
-    const skuId = isRecord(credentials) && typeof credentials.skuId === "string"
-      ? credentials.skuId.trim().toUpperCase()
-      : "";
-    const url = `${tripoTask ? resolveTripoBaseUrl(credentials) : baseUrl}/api/v1/tasks/${encodeURIComponent(upstreamTaskId)}`;
+    const url = `${useTripoBase ? resolveTripoBaseUrl(credentials) : baseUrl}/api/v1/tasks/${encodeURIComponent(upstreamTaskId)}`;
     let res: Response;
     try {
       res = await fetch(url, {
@@ -1332,11 +1479,254 @@ export class BailianAdapter implements IProviderAdapter {
     } catch {
       raw = { parseError: true, httpStatus: res.status };
     }
-    if (!res.ok) {
-      const msg = extractDashScopeErrorMessage(raw) || `HTTP ${res.status}`;
+    return { ok: res.ok, status: res.status, raw };
+  }
+
+  async generate(payload: StandardPayload, credentials: unknown): Promise<ProviderResponse> {
+    const isTalkingVideo = isTalkingVideoPayload(payload);
+    const performanceMode = isTalkingVideo
+      ? resolveTalkingVideoPerformanceMode(payload)
+      : undefined;
+    let effectivePayload = payload;
+    let generatedSpeech: TalkingVideoSpeechResult | undefined;
+    let extractedTalkingAudio: ExtractedAudioResult | undefined;
+    if (isTalkingVideo && isTalkingVideoVideoMode(payload)) {
+      const input = isRecord(payload.nodeInputs.input) ? payload.nodeInputs.input : {};
+      const preparedAudioUrl = readStringFromNode(input, ["audio_url", "audioUrl"]);
+      if (!preparedAudioUrl || !/^https?:\/\//i.test(preparedAudioUrl)) {
+        const sourceVideoUrl = readStringFromNode(input, ["audio_video_url", "audioVideoUrl"]);
+        if (!sourceVideoUrl || !/^https?:\/\//i.test(sourceVideoUrl)) {
+          throw new ProviderError("请先上传包含人声的 MP4 视频", "BAILIAN_TALKING_VIDEO_AUDIO_SOURCE_REQUIRED", 400);
+        }
+        if (!this.dependencies.extractTalkingAudio || !this.dependencies.isAllowedTalkingVideoSource) {
+          throw new ProviderError(
+            "当前阿里云适配器未启用 MP4 音频提取服务",
+            "BAILIAN_TALKING_VIDEO_AUDIO_EXTRACT_NOT_CONFIGURED",
+            500,
+          );
+        }
+        if (!this.dependencies.isAllowedTalkingVideoSource(sourceVideoUrl)) {
+          throw new ProviderError(
+            "仅支持处理通过本平台上传的 MP4 视频",
+            "BAILIAN_TALKING_VIDEO_AUDIO_SOURCE_NOT_ALLOWED",
+            400,
+          );
+        }
+        try {
+          extractedTalkingAudio = await this.dependencies.extractTalkingAudio(
+            sourceVideoUrl,
+            "mp3",
+            `talking-video-${globalThis.crypto.randomUUID().replace(/-/g, "")}`,
+          );
+        } catch (error) {
+          throw new ProviderError(
+            error instanceof Error ? error.message : "无法从 MP4 视频中提取声音",
+            "BAILIAN_TALKING_VIDEO_AUDIO_EXTRACT_FAILED",
+            400,
+            error,
+          );
+        }
+        const sourceDuration = readNumberFromNode(input, ["duration", "video_duration"]);
+        const extractedDuration = extractedTalkingAudio.durationSeconds ?? sourceDuration;
+        if (extractedDuration == null || !Number.isFinite(extractedDuration)) {
+          throw new ProviderError(
+            "无法读取提取后音频的时长",
+            "BAILIAN_TALKING_VIDEO_AUDIO_DURATION_MISSING",
+            400,
+          );
+        }
+        effectivePayload = applyTalkingVideoSpeech(payload, {
+          audioUrl: extractedTalkingAudio.url,
+          durationSeconds: extractedDuration,
+        });
+      }
+    }
+    if (isTalkingVideo && isTalkingVideoTextMode(payload)) {
+      if (!this.dependencies.synthesizeTalkingSpeech) {
+        throw new ProviderError(
+          "当前阿里云适配器未启用文字口播合成服务",
+          "BAILIAN_S2V_TTS_NOT_CONFIGURED",
+          500,
+        );
+      }
+      generatedSpeech = await this.dependencies.synthesizeTalkingSpeech(payload, credentials);
+      effectivePayload = applyTalkingVideoSpeech(payload, generatedSpeech);
+    }
+    if (isTalkingVideo) {
+      const effectiveInput = isRecord(effectivePayload.nodeInputs.input)
+        ? effectivePayload.nodeInputs.input
+        : undefined;
+      const audioUrl = readStringFromNode(effectiveInput, ["audio_url", "audioUrl"]);
+      if (!audioUrl || !/^https?:\/\//i.test(audioUrl)) {
+        throw new ProviderError("缺少目标人声音频", "BAILIAN_TALKING_MISSING_AUDIO", 400);
+      }
+      const audioDuration = readNumberFromNode(effectiveInput, ["duration", "audio_duration"]);
+      const maxAudioDuration = talkingVideoMaxAudioDurationSeconds(effectivePayload);
+      const exceedsLimit = audioDuration != null && exceedsMediaDurationMaximum(
+        audioDuration,
+        maxAudioDuration,
+        performanceMode !== "prompted",
+      );
+      if (exceedsLimit) {
+        throw new ProviderError(
+          `当前动作模式要求音频${performanceMode === "prompted" ? "不超过" : "短于"} ${maxAudioDuration} 秒`,
+          "BAILIAN_TALKING_AUDIO_TOO_LONG",
+          400,
+        );
+      }
+      const belowMinimum = audioDuration != null && (
+        performanceMode === "precise" ? audioDuration <= 2 : audioDuration < 2
+      );
+      if (belowMinimum) {
+        throw new ProviderError(
+          `当前动作模式要求音频${performanceMode === "precise" ? "大于" : "不少于"} 2 秒`,
+          "BAILIAN_TALKING_AUDIO_TOO_SHORT",
+          400,
+        );
+      }
+    }
+    const body = this.buildPayload(effectivePayload);
+    const { taskId, raw } = await this.submitTask(body, credentials);
+    const tripoModel = normalizeTripoModel(body.model);
+    const talkingInputRaw = generatedSpeech && isRecord(raw)
+      ? {
+          ...raw,
+          talkingVideoSpeech: {
+            audioUrl: generatedSpeech.audioUrl,
+            durationSeconds: generatedSpeech.durationSeconds,
+            voice: generatedSpeech.voice,
+            providerCost: generatedSpeech.providerCost,
+          },
+        }
+      : extractedTalkingAudio && isRecord(raw)
+        ? {
+            ...raw,
+            talkingVideoExtractedAudio: extractedTalkingAudio,
+          }
+        : raw;
+    if (performanceMode === "precise") {
+      const effectiveInput = isRecord(effectivePayload.nodeInputs.input)
+        ? effectivePayload.nodeInputs.input
+        : {};
+      const audioUrl = readStringFromNode(effectiveInput, ["audio_url", "audioUrl"]);
+      if (!audioUrl || !/^https?:\/\//i.test(audioUrl)) {
+        throw new ProviderError("精准动作模式缺少目标音频", "BAILIAN_TALKING_MISSING_AUDIO", 400);
+      }
+      const state: PreciseTalkingVideoProviderState = {
+        kind: "bailian_precise_talking_v1",
+        stage: "animate",
+        upstreamTaskId: taskId,
+        audioUrl,
+        videoExtension: readBooleanFromNode(effectiveInput, ["video_extension", "videoExtension"]) ?? true,
+        accumulatedCredits: generatedSpeech?.providerCost ?? 0,
+        accumulatedDurationSeconds: 0,
+      };
+      return {
+        taskId: `${PRECISE_TALKING_TASK_PREFIX}${globalThis.crypto.randomUUID().replace(/-/g, "")}`,
+        raw: talkingInputRaw,
+        providerState: state,
+      };
+    }
+    return {
+      taskId: tripoModel
+        ? encodeTripoTaskId(taskId, calculateTripoCredits(payload, tripoModel))
+        : performanceMode === "prompted"
+          ? encodeWan27TalkingTaskId(taskId, generatedSpeech?.providerCost ?? 0)
+        : generatedSpeech
+          ? encodeS2vTtsTaskId(taskId, generatedSpeech.providerCost)
+          : taskId,
+      raw: talkingInputRaw,
+    };
+  }
+
+  async queryTask(taskId: string, credentials: unknown): Promise<TaskStatusPollData> {
+    const persistedState = isRecord(credentials)
+      ? parsePreciseTalkingVideoState(credentials.providerState)
+      : null;
+    if (persistedState) {
+      const upstream = await this.fetchTaskRaw(persistedState.upstreamTaskId, credentials);
+      if (!upstream.ok) {
+        const msg = extractDashScopeErrorMessage(upstream.raw) || `HTTP ${upstream.status}`;
+        return { status: "failed", errorMessage: normalizeDashScopeUserErrorMessage(msg) };
+      }
+      const phasePoll = mapDashScopeTaskToPollData(upstream.raw, undefined, "BAILIAN_WAN22_S2V");
+      if (phasePoll.status === "failed") return { ...phasePoll, providerState: null };
+      if (phasePoll.status !== "succeeded") {
+        return {
+          ...phasePoll,
+          progress: persistedState.stage === "animate" ? 30 : 75,
+          providerState: persistedState,
+        };
+      }
+
+      if (persistedState.stage === "animate") {
+        if (!phasePoll.resultUrl) {
+          return { status: "failed", errorMessage: "动作迁移完成但未返回视频地址", providerState: null };
+        }
+        const retalk = await this.submitTask({
+          model: VIDEO_RETALK_MODEL,
+          input: {
+            video_url: phasePoll.resultUrl,
+            audio_url: persistedState.audioUrl,
+          },
+          parameters: { video_extension: persistedState.videoExtension },
+        }, credentials);
+        const nextState: PreciseTalkingVideoProviderState = {
+          ...persistedState,
+          stage: "retalk",
+          upstreamTaskId: retalk.taskId,
+          accumulatedCredits: persistedState.accumulatedCredits + (phasePoll.providerCost ?? 0),
+          accumulatedDurationSeconds:
+            persistedState.accumulatedDurationSeconds + (phasePoll.providerDurationSec ?? 0),
+        };
+        return { status: "running", progress: 55, providerState: nextState };
+      }
+
+      const retalkDuration = phasePoll.providerDurationSec ?? extractDashScopeUsageDurationSec(upstream.raw);
+      const totalCredits = Math.round(
+        persistedState.accumulatedCredits
+        + retalkDuration * BAILIAN_VIDEO_RETALK_CREDITS_PER_SECOND,
+      );
+      return {
+        ...phasePoll,
+        providerCost: totalCredits,
+        flatFeeCredits: totalCredits,
+        providerDurationSec: persistedState.accumulatedDurationSeconds + retalkDuration,
+        providerState: null,
+      };
+    }
+
+    const tripoTask = parseTripoTaskId(taskId);
+    const s2vTtsTask = parseS2vTtsTaskId(taskId);
+    const wan27TalkingTask = parseWan27TalkingTaskId(taskId);
+    const upstreamTaskId = tripoTask?.upstreamTaskId
+      ?? s2vTtsTask?.upstreamTaskId
+      ?? wan27TalkingTask?.upstreamTaskId
+      ?? taskId;
+    const skuId = isRecord(credentials) && typeof credentials.skuId === "string"
+      ? credentials.skuId.trim().toUpperCase()
+      : "";
+    const upstream = await this.fetchTaskRaw(upstreamTaskId, credentials, Boolean(tripoTask));
+    if (!upstream.ok) {
+      const msg = extractDashScopeErrorMessage(upstream.raw) || `HTTP ${upstream.status}`;
       return { status: "failed", errorMessage: normalizeDashScopeUserErrorMessage(msg) };
     }
-    return mapDashScopeTaskToPollData(raw, tripoTask?.credits, skuId);
+    const pollData = mapDashScopeTaskToPollData(upstream.raw, tripoTask?.credits, skuId);
+    if (wan27TalkingTask && pollData.status === "succeeded") {
+      const resolution = extractDashScopeUsageResolution(upstream.raw);
+      const duration = pollData.providerDurationSec ?? extractDashScopeUsageDurationSec(upstream.raw);
+      const rate = resolution === 1080
+        ? BAILIAN_WAN27_I2V_1080P_CREDITS_PER_SECOND
+        : BAILIAN_WAN27_I2V_720P_CREDITS_PER_SECOND;
+      return {
+        ...pollData,
+        providerCost: Math.round(duration * rate + wan27TalkingTask.ttsCredits),
+      };
+    }
+    if (s2vTtsTask && pollData.status === "succeeded" && typeof pollData.providerCost === "number") {
+      return { ...pollData, providerCost: pollData.providerCost + s2vTtsTask.credits };
+    }
+    return pollData;
   }
 }
 

@@ -57,6 +57,19 @@ function sanitizeReadyMediaValue(raw: unknown): ImageFieldValue | null {
   if (typeof raw.durationSec === "number" && Number.isFinite(raw.durationSec) && raw.durationSec >= 0) {
     value.durationSec = raw.durationSec;
   }
+  if (isRecord(raw.extractedAudio) && raw.extractedAudio.status === "ready") {
+    const extractedUrl = optionalString(raw.extractedAudio.remoteUrl);
+    if (extractedUrl) {
+      value.extractedAudio = {
+        status: "ready",
+        remoteUrl: extractedUrl,
+        ...(optionalString(raw.extractedAudio.fileName) ? { fileName: optionalString(raw.extractedAudio.fileName) } : {}),
+        ...(typeof raw.extractedAudio.durationSec === "number" && Number.isFinite(raw.extractedAudio.durationSec)
+          ? { durationSec: raw.extractedAudio.durationSec }
+          : {}),
+      };
+    }
+  }
   return value;
 }
 
@@ -114,6 +127,10 @@ function hasUnfinishedUpload(schema: WorkflowFormSchema, parameters: Record<stri
     if (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload") {
       const status = isRecord(raw) ? raw.status : undefined;
       if (status === "uploading" || status === "error") return true;
+      const extractedStatus = isRecord(raw) && isRecord(raw.extractedAudio)
+        ? raw.extractedAudio.status
+        : undefined;
+      if (extractedStatus === "extracting" || extractedStatus === "error") return true;
     }
     if (field.kind === "multiImageUpload" && isRecord(raw) && Array.isArray(raw.items)) {
       if (raw.items.some((item) => isRecord(item) && (item.status === "uploading" || item.status === "error"))) {

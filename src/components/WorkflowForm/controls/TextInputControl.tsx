@@ -2,6 +2,7 @@
 
 import type { TextInputField } from "@/types/workflow";
 import { getAtPath } from "@/lib/workflow-utils";
+import { estimateTalkingVideoSpeechDuration } from "@/lib/talking-video-speech-duration";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { loc } from "@/components/WorkflowForm/DynamicForm";
 
@@ -15,7 +16,22 @@ export function TextInputControl({ field, error, locale = "zh" }: TextInputContr
   const path = useWorkflowStore((s) => s.fieldPaths[field.id]);
   const raw = useWorkflowStore((s) => (path ? getAtPath(s.parameters, path) : undefined));
   const setFieldValue = useWorkflowStore((s) => s.setFieldValue);
+  const parameters = useWorkflowStore((s) => s.parameters);
+  const fieldPaths = useWorkflowStore((s) => s.fieldPaths);
   const value = typeof raw === "string" ? raw : "";
+  const speechEstimate = field.id === "speechText" && value.trim()
+    ? estimateTalkingVideoSpeechDuration(value)
+    : null;
+  const performanceModePath = fieldPaths.performanceMode;
+  const performanceMode = performanceModePath
+    ? getAtPath(parameters, performanceModePath)
+    : undefined;
+  const durationLimit = performanceMode === "natural"
+    ? 20
+    : performanceMode === "precise"
+      ? 120
+      : 15;
+  const estimateExceedsLimit = speechEstimate != null && speechEstimate.maxSeconds > durationLimit;
   const placeholder = loc(
     field.defaultValue || field.placeholder || "",
     field.placeholderEn,
@@ -46,6 +62,13 @@ export function TextInputControl({ field, error, locale = "zh" }: TextInputContr
           onChange={(e) => setFieldValue(field.id, e.target.value)}
           className={className}
         />
+      )}
+      {speechEstimate && (
+        <p className={`text-xs leading-relaxed ${estimateExceedsLimit ? "text-amber-300" : "text-slate-400"}`}>
+          {locale === "en"
+            ? `Estimated ${Math.max(1, Math.ceil(speechEstimate.minSeconds))}-${Math.max(1, Math.ceil(speechEstimate.maxSeconds))}s (${speechEstimate.englishWords} English words${speechEstimate.cjkCharacters ? `, ${speechEstimate.cjkCharacters} CJK characters` : ""}); current mode limit: ${durationLimit}s.`
+            : `预计约 ${Math.max(1, Math.ceil(speechEstimate.minSeconds))}-${Math.max(1, Math.ceil(speechEstimate.maxSeconds))} 秒（${speechEstimate.englishWords} 个英文单词${speechEstimate.cjkCharacters ? `，${speechEstimate.cjkCharacters} 个中日韩文字` : ""}）；当前动作模式上限 ${durationLimit} 秒。`}
+        </p>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </div>

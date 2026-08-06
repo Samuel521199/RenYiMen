@@ -24,6 +24,8 @@ export interface StandardPayload {
 export interface ProviderResponse {
   taskId: string;
   raw?: unknown;
+  /** 可持久化的多阶段任务状态，由网关在后续轮询时原样传回适配器。 */
+  providerState?: unknown;
 }
 
 /** 同步计价结果：成本积分与对外售价（积分） */

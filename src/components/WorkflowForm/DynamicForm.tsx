@@ -5,7 +5,12 @@ import { FormErrorBoundary } from "@/components/WorkflowForm/FormErrorBoundary";
 import type { WorkflowField, WorkflowFormSchema } from "@/types/workflow";
 import { isGroupField } from "@/types/workflow";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
-import { isWorkflowFieldVisible } from "@/lib/workflow-utils";
+import {
+  isWorkflowFieldVisible,
+  mediaDurationRangeText,
+  resolveMediaDurationRange,
+  type FieldPathMap,
+} from "@/lib/workflow-utils";
 import { ImageUploadControl } from "@/components/WorkflowForm/controls/ImageUploadControl";
 import { VideoUploadControl } from "@/components/WorkflowForm/controls/VideoUploadControl";
 import { AudioUploadControl } from "@/components/WorkflowForm/controls/AudioUploadControl";
@@ -52,7 +57,13 @@ const MIME_LABELS: Record<string, string> = {
 };
 
 /** Build any upload constraints that are present in validation but missing from authored help copy. */
-function uploadConstraintHelp(field: WorkflowField, locale: "zh" | "en", existingHelp: string): string | null {
+function uploadConstraintHelp(
+  field: WorkflowField,
+  locale: "zh" | "en",
+  existingHelp: string,
+  parameters: Record<string, unknown>,
+  fieldPaths: FieldPathMap,
+): string | null {
   if (!isUploadField(field)) return null;
   const validation = field.validation;
   if (!validation) return null;
@@ -72,11 +83,12 @@ function uploadConstraintHelp(field: WorkflowField, locale: "zh" | "en", existin
   if (validation.maxDimension && !new RegExp(`${validation.maxDimension}(?:px|像素)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `Width and height at most ${validation.maxDimension}px` : `宽高均不大于 ${validation.maxDimension}px`);
   }
-  if (validation.minDurationSec && !new RegExp(`${validation.minDurationSec}(?:s|sec|seconds?|秒)`, "i").test(normalized)) {
-    parts.push(locale === "en" ? `At least ${validation.minDurationSec}s` : `时长不少于 ${validation.minDurationSec} 秒`);
-  }
-  if (validation.maxDurationSec && !new RegExp(`${validation.maxDurationSec}(?:s|sec|seconds?|秒)`, "i").test(normalized)) {
-    parts.push(locale === "en" ? `Up to ${validation.maxDurationSec}s` : `时长不超过 ${validation.maxDurationSec} 秒`);
+  if (field.kind === "audioUpload" || field.kind === "videoUpload") {
+    const durationRange = resolveMediaDurationRange(field, parameters, fieldPaths);
+    const durationText = mediaDurationRangeText(durationRange, locale);
+    if (durationText && !normalized.includes(durationText.toLowerCase().replace(/\s+/g, ""))) {
+      parts.push(locale === "en" ? `Duration: ${durationText}` : `时长：${durationText}`);
+    }
   }
   if (field.kind === "multiImageUpload" && field.maxItems && !new RegExp(`${field.maxItems}(?:images?|files?|张)`, "i").test(normalized)) {
     parts.push(locale === "en" ? `Up to ${field.maxItems} images` : `最多 ${field.maxItems} 张`);
@@ -250,14 +262,23 @@ function FieldBranch({
   const err = errors[field.id];
   const useSpanLabel = field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload" || field.kind === "multiImageUpload";
   const displayLabel = loc(field.label, field.labelEn, locale);
+  const requirementLabel = field.requirement === "required"
+    ? (locale === "en" ? "Required" : "必填")
+    : field.requirement === "optional"
+      ? (locale === "en" ? "Optional" : "选填")
+      : null;
   const authoredDescription = field.description
     ? loc(field.description, field.descriptionEn, locale)
     : null;
   const authoredHelp = [inheritedDescription, authoredDescription].filter(Boolean).join(" ");
-  const constraintHelp = uploadConstraintHelp(field, locale, authoredHelp);
+  const constraintHelp = uploadConstraintHelp(field, locale, authoredHelp, parameters, fieldPaths);
   const fieldDescription = [authoredHelp, constraintHelp].filter(Boolean).join(" ") || null;
 
-  const fullWidthClass = field.kind === "multiImageUpload" ? "xl:col-span-2" : "";
+  const fullWidthClass = field.kind === "multiImageUpload"
+    || (field.kind === "select" && field.display === "segmented")
+    || (field.kind === "textInput" && field.multiline)
+    ? "xl:col-span-2"
+    : "";
 
   return (
     <div className={`min-w-0 max-w-full space-y-2.5 overflow-visible ${fullWidthClass}`}>
@@ -271,6 +292,14 @@ function FieldBranch({
                 {displayLabel}
               </label>
             )
+          )}
+          {requirementLabel && (
+            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${field.requirement === "required"
+              ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300"
+              : "border-white/[0.1] bg-white/[0.035] text-slate-500"
+            }`}>
+              {requirementLabel}
+            </span>
           )}
           {fieldDescription && (
             <div className="group/help relative inline-flex shrink-0">

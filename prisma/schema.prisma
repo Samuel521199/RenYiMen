@@ -746,6 +746,8 @@ model GenerationHistory {
   durationInt      Int                     @default(0) @map("duration_int")
   /// 缁堟€佷负 FAILED 鏃剁殑閿欒鍘熷洜锛堟潵鑷笂娓告垨缃戝叧锛夛紱PENDING/SUCCESS 涓虹┖
   errorMessage     String?                 @map("error_message") @db.Text
+  /// 多阶段上游任务的可恢复状态；任务终态后清空。
+  providerState    Json?                   @map("provider_state")
   toolProjectId    String?                 @map("tool_project_id")
 
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)

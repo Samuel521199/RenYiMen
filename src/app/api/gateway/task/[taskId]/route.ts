@@ -148,7 +148,11 @@ async function persistGenerationHistoryTerminal(
     const errMsg = (pollData.errorMessage ?? "上游任务失败").slice(0, 500);
     await prisma.generationHistory.updateMany({
       where: { taskId, userId, status: GenerationHistoryStatus.PENDING },
-      data: { status: GenerationHistoryStatus.FAILED, errorMessage: errMsg },
+      data: {
+        status: GenerationHistoryStatus.FAILED,
+        errorMessage: errMsg,
+        providerState: Prisma.JsonNull,
+      },
     });
     return null;
   }
@@ -242,6 +246,7 @@ async function persistGenerationHistoryTerminal(
             cost: totalCredits,
             ...(actualCost != null ? { actualCost } : {}),
             durationInt: durationIntFinal,
+            providerState: Prisma.JsonNull,
           },
         });
         if (updated.count === 0) {
@@ -326,7 +331,7 @@ export async function GET(
 
   const taskRecord = await prisma.generationHistory.findUnique({
     where: { taskId },
-    select: { skuId: true },
+    select: { skuId: true, providerState: true },
   });
 
   let adapter: IProviderAdapter;
@@ -352,7 +357,22 @@ export async function GET(
     const upstreamPollData = await adapter.queryTask(taskId, {
       signal: controller.signal,
       skuId: taskRecord?.skuId,
+      providerState: taskRecord?.providerState ?? undefined,
     });
+    if (upstreamPollData.providerState !== undefined) {
+      await prisma.generationHistory.updateMany({
+        where: {
+          taskId,
+          userId: session.user.id,
+          status: GenerationHistoryStatus.PENDING,
+        },
+        data: {
+          providerState: upstreamPollData.providerState === null
+            ? Prisma.JsonNull
+            : JSON.parse(JSON.stringify(upstreamPollData.providerState)) as Prisma.InputJsonValue,
+        },
+      });
+    }
     let pollData: TaskStatusPollData;
     try {
       pollData = await persistTemporaryPollVideo({

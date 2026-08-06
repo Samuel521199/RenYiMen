@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { bailianWanxI2vWorkflowMock } from "../mocks/bailian-wanx-i2v-workflow.ts";
+import { bailianWan22S2vWorkflowMock } from "../mocks/bailian-wan22-s2v-workflow.ts";
 import { isGroupField } from "../types/workflow.ts";
 import { useWorkflowStore } from "../store/useWorkflowStore.ts";
 import {
@@ -9,6 +10,7 @@ import {
   isWorkflowFieldVisible,
   iterateLeafFields,
   setAtPath,
+  validateMediaDuration,
 } from "./workflow-utils.ts";
 
 test("Wan 2.7 exposes the optional last frame and HappyHorse hides it", () => {
@@ -45,4 +47,18 @@ test("a hidden last frame is omitted from the gateway payload after switching mo
   store.setFieldValue("modelName", "happyhorse-1.1-i2v");
   const happyHorsePayload = store.buildPayload();
   assert.equal(happyHorsePayload?.nodeInputs.input.last_frame_url, undefined);
+});
+
+test("inclusive media limits tolerate AAC frame padding without weakening exclusive limits", () => {
+  const fields = [...iterateLeafFields(bailianWan22S2vWorkflowMock.fields)];
+  const voiceVideo = fields.find((field) => field.id === "voiceVideo");
+  assert.ok(voiceVideo && !isGroupField(voiceVideo) && voiceVideo.kind === "videoUpload");
+  const fieldPaths = buildFieldPathMap(bailianWan22S2vWorkflowMock.fields);
+  const parameters = buildInitialParameters(bailianWan22S2vWorkflowMock);
+
+  assert.equal(validateMediaDuration(voiceVideo, 15.022993, parameters, fieldPaths), null);
+  assert.match(validateMediaDuration(voiceVideo, 15.06, parameters, fieldPaths) ?? "", /15/);
+
+  setAtPath(parameters, fieldPaths.performanceMode, "natural");
+  assert.match(validateMediaDuration(voiceVideo, 20, parameters, fieldPaths) ?? "", /20/);
 });

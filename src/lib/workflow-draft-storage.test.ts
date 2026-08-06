@@ -28,7 +28,13 @@ const schema: WorkflowFormSchema = {
       label: "Inputs",
       children: [
         { id: "image", kind: "imageUpload", label: "Image", mapping },
-        { id: "video", kind: "videoUpload", label: "Video", mapping },
+        {
+          id: "video",
+          kind: "videoUpload",
+          label: "Video",
+          mapping,
+          audioExtraction: { format: "mp3", mapping: { nodeId: "input", inputPath: ["audio_url"] } },
+        },
         { id: "prompt", kind: "textInput", label: "Prompt", mapping },
         { id: "strength", kind: "numberSlider", label: "Strength", mapping, validation: { min: 1, max: 10, integer: true } },
         { id: "quality", kind: "select", label: "Quality", mapping, options: [{ value: "std", label: "Standard" }, { value: "pro", label: "Pro" }] },
@@ -71,6 +77,48 @@ test("draft sanitizer keeps durable values and drops blob previews and unfinishe
       },
     },
   });
+});
+
+test("draft sanitizer preserves a completed extracted MP3 and rejects an in-progress extraction", () => {
+  const ready = sanitizeWorkflowDraftParameters(schema, {
+    inputs: {
+      video: {
+        status: "ready",
+        remoteUrl: "https://oss/source.mp4",
+        fileName: "source.mp4",
+        durationSec: 8.5,
+        extractedAudio: {
+          status: "ready",
+          remoteUrl: "https://oss/source.mp3",
+          fileName: "source.mp3",
+          durationSec: 8.4,
+        },
+      },
+    },
+  });
+  assert.deepEqual((ready.inputs as Record<string, unknown>).video, {
+    status: "ready",
+    remoteUrl: "https://oss/source.mp4",
+    fileName: "source.mp4",
+    durationSec: 8.5,
+    extractedAudio: {
+      status: "ready",
+      remoteUrl: "https://oss/source.mp3",
+      fileName: "source.mp3",
+      durationSec: 8.4,
+    },
+  });
+
+  const storage = new MemoryStorage();
+  assert.equal(saveWorkflowDraft(storage, "user-a", "SKU_A", schema, {
+    inputs: {
+      video: {
+        status: "ready",
+        remoteUrl: "https://oss/source.mp4",
+        extractedAudio: { status: "extracting" },
+      },
+    },
+  }), false);
 });
 
 test("drafts are isolated by user and SKU and can be cleared", () => {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { GenerationHistoryStatus } from "@prisma/client";
+import { GenerationHistoryStatus, Prisma } from "@prisma/client";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { consumeUserBalanceInTransaction } from "@/lib/billing";
@@ -23,6 +23,27 @@ function extractSkuId(body: Record<string, unknown> | null): string {
   if (!body) return "N/A";
   const v = body.skuId;
   return typeof v === "string" && v.trim() ? v.trim() : "N/A";
+}
+
+function toPrismaJson(value: unknown): Prisma.InputJsonValue | undefined {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+async function generationHistorySchemaReady(): Promise<boolean> {
+  try {
+    await prisma.generationHistory.findFirst({
+      select: {
+        id: true,
+        providerState: true,
+        toolProjectId: true,
+      },
+    });
+    return true;
+  } catch (error) {
+    console.error("[gateway/generate] generation_histories schema is out of date", error);
+    return false;
+  }
 }
 
 /** 合并网关层可传入的计价提示（如目录基础分），再交给适配器 calculateCost */
@@ -118,6 +139,20 @@ export async function POST(req: Request) {
 
     const payloadForCost = enrichPayloadForPricing(standardPayload, rawBody);
     const { cost, sellPrice } = adapter.calculateCost(payloadForCost);
+
+    if (!await generationHistorySchemaReady()) {
+      return NextResponse.json(
+        {
+          ok: false,
+          success: false,
+          error: "数据库结构未同步，任务尚未提交，请管理员更新 Prisma 数据库结构后重试。",
+          code: "DB_SCHEMA_OUT_OF_SYNC",
+          providerCode,
+          skuId,
+        },
+        { status: 503 },
+      );
+    }
 
     // 提交前先清理该用户的幽灵 PENDING，防止历史中断轮询的记录误触发并发限额
     await expireStaleUserPending(session.user.id);
@@ -353,6 +388,9 @@ export async function POST(req: Request) {
       providerCode,
       cost: Number.isFinite(cost) ? Math.round(Number(cost)) : 0,
       mediaType: "",
+      ...(upstream.providerState !== undefined
+        ? { providerState: toPrismaJson(upstream.providerState) }
+        : {}),
       ...(toolProjectId ? { toolProjectId } : {}),
       ...(sourceAssetBytes != null ? { sourceAssetBytes } : {}),
     };

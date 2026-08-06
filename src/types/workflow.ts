@@ -18,6 +18,14 @@ export interface NodeInputMapping {
 /** 图片控件在各阶段的状态 */
 export type ImageFieldStatus = "empty" | "uploading" | "ready" | "error";
 
+export interface ExtractedAudioFieldValue {
+  status: "extracting" | "ready" | "error";
+  remoteUrl?: string;
+  durationSec?: number;
+  fileName?: string;
+  errorMessage?: string;
+}
+
 /** 图片字段运行时值：预览、上传中、远端 URL 等 */
 export interface ImageFieldValue {
   status: ImageFieldStatus;
@@ -28,6 +36,8 @@ export interface ImageFieldValue {
   fileName?: string;
   /** 音视频媒体时长（秒），用于按时长预估计费。 */
   durationSec?: number;
+  /** Optional audio produced from an uploaded video and reused by the provider. */
+  extractedAudio?: ExtractedAudioFieldValue;
   errorMessage?: string;
 }
 
@@ -45,6 +55,18 @@ export interface ImageValidation {
   minDurationSec?: number;
   /** 音视频最长时长（秒）；上传前在浏览器端校验。 */
   maxDurationSec?: number;
+  /** 根据另一个字段的当前值覆盖媒体时长限制。 */
+  durationRangeByFieldValue?: {
+    fieldId: string;
+    values: Record<string, {
+      minDurationSec?: number;
+      maxDurationSec?: number;
+      minExclusive?: boolean;
+      maxExclusive?: boolean;
+      label?: string;
+      labelEn?: string;
+    }>;
+  };
 }
 
 export interface TextValidation {
@@ -81,6 +103,8 @@ interface WorkflowFieldBase {
   description?: string;
   /** English description — shown when locale is "en" */
   descriptionEn?: string;
+  /** Optional UI hint that makes required and optional inputs explicit. */
+  requirement?: "required" | "optional";
   mapping: NodeInputMapping;
   /** 仅当依赖字段等于指定值时展示、校验并提交该字段。 */
   visibleWhen?: {
@@ -107,6 +131,12 @@ export interface VideoUploadField extends WorkflowFieldBase {
   validation?: ImageValidation;
   /** 可选：把浏览器读取到的视频时长映射到标准负载，供计费或上游参数使用。 */
   durationMapping?: NodeInputMapping;
+  /** Extract an audio preview after upload and map that exact file into the provider payload. */
+  audioExtraction?: {
+    format: "mp3";
+    mapping: NodeInputMapping;
+    durationMapping?: NodeInputMapping;
+  };
 }
 
 /** 音频上传字段，运行时状态与图片/视频上传一致。 */
@@ -204,6 +234,10 @@ export interface SelectField extends WorkflowFieldBase {
   kind: "select";
   defaultValue?: string;
   options: SelectOption[];
+  /** Render mode choices as an always-visible segmented control. */
+  display?: "select" | "segmented";
+  /** Clear incompatible field values when an option is selected. */
+  clearFieldsByValue?: Record<string, string[]>;
   validation?: SelectValidation;
 }
 

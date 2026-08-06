@@ -43,7 +43,7 @@ test("upload constraints live in field help instead of persistent group copy", (
   assert.match(source, /uploadConstraintHelp/);
   assert.match(source, /validation\.maxSizeMB/);
   assert.match(source, /validation\.minDimension/);
-  assert.match(source, /validation\.maxDurationSec/);
+  assert.match(source, /resolveMediaDurationRange/);
   assert.match(source, /field\.maxItems/);
   assert.match(source, /group-hover\/help:visible/);
 });
@@ -62,17 +62,33 @@ test("embedded task viewer can shrink to the parent panel", () => {
   assert.match(studioSource, /100dvh-7rem/);
 });
 
-test("re-entering the same tool reuses its loaded project and project requests cannot spin forever", () => {
-  const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
-  const selectorSource = readFileSync("src/components/WorkflowForm/ToolProjectSelector.tsx", "utf8");
+test("editing workflow parameters clears a stale submission error", () => {
+  const source = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
 
-  assert.match(studioSource, /canResumeExistingProject/);
-  assert.match(studioSource, /setProjectLoadRevision\(\(revision\) => revision \+ 1\)/);
-  assert.match(studioSource, /new AbortController\(\)/);
-  assert.match(studioSource, /controller\.abort\(\), 8_000/);
-  assert.match(studioSource, /handleRetryToolProjects/);
-  assert.match(selectorSource, /暂无可用项目/);
-  assert.doesNotMatch(selectorSource, /正在创建项目/);
+  assert.match(source, /setSubmitError\(null\);\s*\}, \[parameters\]\);/);
+});
+
+test("audio upload shows and enforces the selected motion mode duration range", () => {
+  const source = readFileSync("src/components/WorkflowForm/controls/AudioUploadControl.tsx", "utf8");
+  const videoSource = readFileSync("src/components/WorkflowForm/controls/VideoUploadControl.tsx", "utf8");
+
+  assert.match(source, /mediaDurationRangeText/);
+  assert.match(source, /validateMediaDuration/);
+  assert.match(source, /当前动作模式时长/);
+  assert.match(source, /uploaded/);
+  assert.match(videoSource, /hasDynamicDuration/);
+  assert.match(videoSource, /validateMediaDuration/);
+  assert.match(videoSource, /当前动作模式时长/);
+});
+
+test("tool generation does not depend on the optional project persistence API", () => {
+  const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+
+  assert.doesNotMatch(studioSource, /<ToolProjectSelector/);
+  assert.doesNotMatch(studioSource, /Please wait for a project to load/);
+  assert.doesNotMatch(studioSource, /!selectedToolProjectId \|\| sessionStatus/);
+  assert.match(studioSource, /body: JSON\.stringify\(built\)/);
+  assert.match(studioSource, /fetchCloudHistory\(null\)/);
 });
 
 test("task elapsed time survives polling view reinitialization for the same task", () => {

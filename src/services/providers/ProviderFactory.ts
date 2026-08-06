@@ -2,10 +2,13 @@ import type { IProviderAdapter, StandardPayload } from "./types";
 import type { VideoProviderInputCapabilities } from "./video-input-contract";
 import { ProviderError } from "./types";
 import { BailianAdapter } from "./BailianAdapter";
+import { synthesizeTalkingVideoSpeech } from "./bailian-talking-video-tts";
 import { BailianVoiceDesignAdapter } from "./BailianVoiceDesignAdapter";
 import { BailianVoiceCloneAdapter } from "./BailianVoiceCloneAdapter";
 import { BailianEmotionalTtsAdapter } from "./BailianEmotionalTtsAdapter";
 import { LocalAudioExtractionAdapter } from "./LocalAudioExtractionAdapter";
+import { extractAudioFromVideo } from "@/services/media/audio-extraction";
+import { isOwnOssUrl } from "@/services/video-orchestrator/oss-media";
 import { GptImage2Adapter } from "./GptImage2Adapter";
 import { KlingAdapter } from "./KlingAdapter";
 import { RunningHubAdapter } from "./RunningHubAdapter";
@@ -100,7 +103,11 @@ export function getProviderAdapter(providerCode: string): IProviderAdapter {
     case "BAILIAN":
     case "DASHSCOPE_I2V":
     case "DASHSCOPE_VIDEO":
-      return new BailianAdapter();
+      return new BailianAdapter({
+        synthesizeTalkingSpeech: synthesizeTalkingVideoSpeech,
+        extractTalkingAudio: extractAudioFromVideo,
+        isAllowedTalkingVideoSource: isOwnOssUrl,
+      });
     case "ALIYUN_BAILIAN_VOICE_DESIGN":
       return new BailianVoiceDesignAdapter();
     case "ALIYUN_BAILIAN_VOICE_CLONE":

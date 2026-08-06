@@ -19,6 +19,7 @@ import {
   isWorkflowFieldVisible,
   iterateLeafFields,
   resolveNumberInputMax,
+  validateMediaDuration,
   type ValuePath,
 } from "@/lib/workflow-utils";
 import { uploadImageToOSS } from "@/services/oss-upload";
@@ -228,6 +229,22 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         });
         return;
       }
+      if (field.kind === "videoUpload" && field.validation?.accept?.length) {
+        const allowed = field.validation.accept;
+        const extension = file.name.split(".").pop()?.toLowerCase();
+        const accepted = allowed.includes(file.type)
+          || (extension != null && allowed.some((type) => type.endsWith(`/${extension}`)));
+        if (!accepted) {
+          set((draft) => {
+            setAtPathDraft(draft.parameters, path, {
+              status: "error",
+              fileName: file.name,
+              errorMessage: "视频格式不受支持",
+            } satisfies ImageFieldValue);
+          });
+          return;
+        }
+      }
       if (maxMb != null && file.size > maxMb * 1024 * 1024) {
         set((draft) => {
           setAtPathDraft(draft.parameters, path, {
@@ -338,7 +355,11 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
       let mediaDurationSec: number | undefined;
       const shouldReadMediaDuration =
         (field.kind === "audioUpload" || field.kind === "videoUpload")
-        && (field.validation?.minDurationSec != null || field.validation?.maxDurationSec != null);
+        && (
+          field.validation?.minDurationSec != null
+          || field.validation?.maxDurationSec != null
+          || field.validation?.durationRangeByFieldValue != null
+        );
       if (shouldReadMediaDuration) {
         const durationSec = await new Promise<number>((resolve, reject) => {
           const objectUrl = URL.createObjectURL(file);
@@ -367,31 +388,20 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
         });
         if (durationSec == null) return;
         mediaDurationSec = durationSec;
-        const minDurationSec = field.validation?.minDurationSec;
-        const maxDurationSec = field.validation?.maxDurationSec;
-        if (minDurationSec != null && durationSec < minDurationSec) {
-          set((draft) => {
-            setAtPathDraft(draft.parameters, path, {
-              status: "error",
-              fileName: file.name,
-              errorMessage: `${field.kind === "videoUpload" ? "视频" : "音频"}时长不得少于 ${minDurationSec} 秒`,
-            } satisfies ImageFieldValue);
-          });
-          return;
-        }
-        const exceedsMaximum = maxDurationSec != null && (
-          field.kind === "audioUpload"
-            ? durationSec >= maxDurationSec
-            : durationSec > maxDurationSec
+        const latestState = get();
+        const durationError = validateMediaDuration(
+          field,
+          durationSec,
+          latestState.parameters,
+          latestState.fieldPaths,
         );
-        if (exceedsMaximum) {
+        if (durationError) {
           set((draft) => {
             setAtPathDraft(draft.parameters, path, {
               status: "error",
               fileName: file.name,
-              errorMessage: field.kind === "videoUpload"
-                ? `视频时长不得超过 ${maxDurationSec} 秒`
-                : `音频时长须小于 ${maxDurationSec} 秒`,
+              durationSec,
+              errorMessage: durationError,
             } satisfies ImageFieldValue);
           });
           return;
@@ -656,6 +666,34 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             if (v?.status === "uploading") {
               errors[field.id] = isVideo ? "视频仍在上传中" : isAudio ? "音频仍在上传中" : "图片仍在上传中";
             }
+            if (
+              !errors[field.id]
+              && v?.status === "ready"
+              && (field.kind === "videoUpload" || field.kind === "audioUpload")
+            ) {
+              const durationError = validateMediaDuration(field, v.durationSec, parameters, fieldPaths);
+              if (durationError) errors[field.id] = durationError;
+            }
+            if (!errors[field.id] && field.kind === "videoUpload" && field.audioExtraction) {
+              const extracted = v?.extractedAudio;
+              if (extracted?.status === "extracting") {
+                errors[field.id] = "正在从 MP4 提取 MP3，请稍候";
+              } else if (extracted?.status === "error") {
+                errors[field.id] = extracted.errorMessage || "MP4 声音提取失败";
+              } else if (extracted?.status !== "ready" || !extracted.remoteUrl) {
+                errors[field.id] = "请等待 MP4 声音提取完成";
+              } else {
+                const durationError = validateMediaDuration(
+                  field,
+                  extracted.durationSec,
+                  parameters,
+                  fieldPaths,
+                  "zh",
+                  "audio",
+                );
+                if (durationError) errors[field.id] = durationError;
+              }
+            }
             break;
           }
           case "multiImageUpload": {
@@ -792,6 +830,19 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
             (raw as ImageFieldValue).durationSec,
           );
         }
+        if (field.kind === "videoUpload" && field.audioExtraction) {
+          const extracted = (raw as ImageFieldValue | undefined)?.extractedAudio;
+          if (extracted?.status === "ready" && extracted.remoteUrl) {
+            const { nodeId: audioNodeId, inputPath: audioInputPath } = field.audioExtraction.mapping;
+            if (!nodeInputs[audioNodeId]) nodeInputs[audioNodeId] = {};
+            deepAssignInput(nodeInputs[audioNodeId], audioInputPath, extracted.remoteUrl);
+            if (field.audioExtraction.durationMapping && typeof extracted.durationSec === "number") {
+              const { nodeId: durationNodeId, inputPath: durationInputPath } = field.audioExtraction.durationMapping;
+              if (!nodeInputs[durationNodeId]) nodeInputs[durationNodeId] = {};
+              deepAssignInput(nodeInputs[durationNodeId], durationInputPath, extracted.durationSec);
+            }
+          }
+        }
       }
 
       return {
@@ -910,6 +961,7 @@ function parseGenerationHistoryArray(json: unknown): GenerationHistory[] {
       sourceAssetBytes,
       durationInt,
       errorMessage,
+      providerState: null,
       toolProjectId: typeof o.toolProjectId === "string" && o.toolProjectId.trim()
         ? o.toolProjectId.trim()
         : null,

@@ -331,9 +331,9 @@ const CATALOG: SkuDefinition[] = [
     displayName: "有声视频",
     displayNameEn: "Talking Character Video",
     description:
-      "上传人物图片和人声音频，生成口型、表情和动作同步的说话、唱歌或表演视频。使用阿里百炼 wan2.2-s2v，支持 480P 与 720P。",
+      "支持自然口播、提示词手势和精准动作三种模式。可选择阿里云音色或上传现成录音，并用 Wan2.7、Animate Move 与 VideoRetalk 生成口型和动作同步的视频。",
     descriptionEn:
-      "Upload a character image and human-voice audio to generate a synchronized speaking, singing, or performing video with Alibaba Model Studio wan2.2-s2v.",
+      "Choose natural speech, prompted gestures, or precise reference motion. Use an Alibaba Cloud voice or an existing recording with Wan 2.7, Animate Move, and VideoRetalk.",
     sellCredits: 625,
     uiSchema: bailianWan22S2vWorkflowMock,
   },

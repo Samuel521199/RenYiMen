@@ -1,4 +1,5 @@
 import type {
+  AudioUploadField,
   ImageFieldValue,
   ImageUploadField,
   BooleanToggleField,
@@ -6,9 +7,11 @@ import type {
   NumberInputField,
   NumberSliderField,
   SelectField,
+  VideoUploadField,
   WorkflowField,
   WorkflowFormSchema,
 } from "@/types/workflow";
+import { exceedsMediaDurationMaximum } from "@/lib/media-duration-boundary";
 import { isGroupField } from "@/types/workflow";
 
 export type ValuePath = (string | number)[];
@@ -148,6 +151,91 @@ export function resolveNumberInputMax(
   return typeof dynamicMax === "number" && Number.isFinite(dynamicMax)
     ? Math.min(field.validation.max, dynamicMax)
     : field.validation.max;
+}
+
+export interface ResolvedMediaDurationRange {
+  minDurationSec?: number;
+  maxDurationSec?: number;
+  minExclusive: boolean;
+  maxExclusive: boolean;
+  label?: string;
+  labelEn?: string;
+}
+
+type DurationMediaField = AudioUploadField | VideoUploadField;
+
+/** Resolve upload duration limits, including limits selected by another form field. */
+export function resolveMediaDurationRange(
+  field: DurationMediaField,
+  parameters: Record<string, unknown>,
+  fieldPaths: FieldPathMap,
+): ResolvedMediaDurationRange {
+  const validation = field.validation;
+  const base: ResolvedMediaDurationRange = {
+    minDurationSec: validation?.minDurationSec,
+    maxDurationSec: validation?.maxDurationSec,
+    minExclusive: false,
+    // Preserve existing audio behavior: its static upper bound is exclusive.
+    maxExclusive: field.kind === "audioUpload",
+  };
+  const dynamic = validation?.durationRangeByFieldValue;
+  if (!dynamic) return base;
+  const dependencyPath = fieldPaths[dynamic.fieldId];
+  if (!dependencyPath) return base;
+  const selected = dynamic.values[String(getAtPath(parameters, dependencyPath))];
+  return selected
+    ? {
+        minDurationSec: selected.minDurationSec ?? base.minDurationSec,
+        maxDurationSec: selected.maxDurationSec ?? base.maxDurationSec,
+        minExclusive: selected.minExclusive ?? base.minExclusive,
+        maxExclusive: selected.maxExclusive ?? base.maxExclusive,
+        label: selected.label,
+        labelEn: selected.labelEn,
+      }
+    : base;
+}
+
+export function mediaDurationRangeText(
+  range: ResolvedMediaDurationRange,
+  locale: "zh" | "en" = "zh",
+): string {
+  const min = range.minDurationSec;
+  const max = range.maxDurationSec;
+  if (locale === "en") {
+    const bounds = [
+      min == null ? "" : `${range.minExclusive ? "more than" : "at least"} ${min}s`,
+      max == null ? "" : `${range.maxExclusive ? "less than" : "up to"} ${max}s`,
+    ].filter(Boolean).join(" and ");
+    return `${range.labelEn ? `${range.labelEn}: ` : ""}${bounds}`;
+  }
+  const bounds = [
+    min == null ? "" : `${range.minExclusive ? "大于" : "不少于"} ${min} 秒`,
+    max == null ? "" : `${range.maxExclusive ? "小于" : "不超过"} ${max} 秒`,
+  ].filter(Boolean).join("且");
+  return `${range.label ? `${range.label}：` : ""}${bounds}`;
+}
+
+export function validateMediaDuration(
+  field: DurationMediaField,
+  durationSec: number | undefined,
+  parameters: Record<string, unknown>,
+  fieldPaths: FieldPathMap,
+  locale: "zh" | "en" = "zh",
+  mediaKind: "audio" | "video" = field.kind === "audioUpload" ? "audio" : "video",
+): string | null {
+  if (durationSec == null || !Number.isFinite(durationSec)) return null;
+  const range = resolveMediaDurationRange(field, parameters, fieldPaths);
+  const belowMinimum = range.minDurationSec != null && (
+    range.minExclusive ? durationSec <= range.minDurationSec : durationSec < range.minDurationSec
+  );
+  const aboveMaximum = range.maxDurationSec != null && (
+    exceedsMediaDurationMaximum(durationSec, range.maxDurationSec, range.maxExclusive)
+  );
+  if (!belowMinimum && !aboveMaximum) return null;
+  const current = durationSec.toFixed(1);
+  return locale === "en"
+    ? `Current ${mediaKind} is ${current}s. Required: ${mediaDurationRangeText(range, "en")}.`
+    : `当前${mediaKind === "audio" ? "音频" : "视频"}为 ${current} 秒；要求${mediaDurationRangeText(range, "zh")}。`;
 }
 
 /**

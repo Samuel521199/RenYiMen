@@ -55,7 +55,7 @@ const CAPABILITY_SECTIONS_ZH: CapabilitySection[] = [
     accent: "text-emerald-300",
     glow: "bg-emerald-400/[0.12]",
     tools: [
-      { eyebrow: "声音驱动角色", title: "有声视频", description: "一张人物图加一段人声，生成口型、表情与动作自然同步的表演视频。", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V", cover: "/covers/talking-character-video.webp", motion: "/covers/talking-character-video-motion.mp4" },
+      { eyebrow: "声音驱动角色", title: "有声视频", description: "自然口播、提示词手势和精准动作三档可选，支持阿里云音色与现成录音。", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V", cover: "/covers/talking-character-video.webp", motion: "/covers/talking-character-video-motion.mp4" },
       { eyebrow: "专属音色", title: "声音克隆", description: "用一段清晰录音复刻音色，并快速合成指定文本。", href: "/workbench/tools?sku=BAILIAN_VOICE_CLONE", cover: "/covers/voice-cloning-animated.webp", motion: "/covers/voice-cloning-motion.mp4" },
       { eyebrow: "品牌声线", title: "文字设计新音色", description: "描述年龄、气质和质感，创造可复用的新声音。", href: "/workbench/tools?sku=BAILIAN_COSYVOICE_VOICE_DESIGN", cover: "/covers/voice-design-from-text.webp", motion: "/covers/voice-design-from-text-motion.mp4" },
       { eyebrow: "情绪表达", title: "情绪化配音", description: "控制开心、悲伤、愤怒、耳语等情绪与语速。", href: "/workbench/tools?sku=BAILIAN_EMOTIONAL_TTS", cover: "/covers/expressive-voiceover.webp", motion: "/covers/expressive-voiceover-motion.mp4" },

@@ -16,6 +16,8 @@ export type RemoteTaskStatus = "queued" | "running" | "succeeded" | "failed";
 
 export interface TaskStatusPollData {
   status: RemoteTaskStatus;
+  /** 多阶段任务推进后的新状态，仅供网关持久化，不返回浏览器。 */
+  providerState?: unknown;
   /** 0–100，可选；缺省时 UI 使用不确定进度样式 */
   progress?: number | null;
   resultUrl?: string | null;

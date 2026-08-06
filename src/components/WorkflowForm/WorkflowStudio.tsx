@@ -22,7 +22,6 @@ import { TaskStatusViewer } from "@/components/TaskStatusViewer/TaskStatusViewer
 import { UserCredits } from "@/components/Sidebar/UserCredits";
 import { DynamicForm } from "@/components/WorkflowForm/DynamicForm";
 import { FixedWorkflowPricing } from "@/components/WorkflowForm/FixedWorkflowPricing";
-import { ToolProjectSelector } from "@/components/WorkflowForm/ToolProjectSelector";
 import { useTaskPolling } from "@/hooks/useTaskPolling";
 import {
   buildTaskViewerModel,
@@ -417,6 +416,10 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   }, [isAutoSubtitleTool, standaloneSourceVideoUrl]);
 
   useEffect(() => {
+    setSubmitError(null);
+  }, [parameters]);
+
+  useEffect(() => {
     if (!draftOwnerId || !selectedSkuId || !schema) return;
     const identity = `${draftOwnerId}:${selectedSkuId}`;
     if (suppressedDraftSaveRef.current === identity) {
@@ -439,7 +442,8 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       const p = fieldPaths[field.id];
       const raw = p ? getAtPath(parameters, p) : undefined;
       if (field.kind === "imageUpload" || field.kind === "videoUpload" || field.kind === "audioUpload") {
-        if ((raw as ImageFieldValue | undefined)?.status === "uploading") return true;
+        const media = raw as ImageFieldValue | undefined;
+        if (media?.status === "uploading" || media?.extractedAudio?.status === "extracting") return true;
       } else if (field.kind === "multiImageUpload") {
         const items = (raw as MultiImageFieldValue | undefined)?.items ?? [];
         if (items.some((it) => it.status === "uploading")) return true;
@@ -554,20 +558,8 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   // ── SKU switch ───────────────────────────────────────────────────────────
   const applySku = useCallback(
     (sku: SkuDefinition) => {
-      const canResumeExistingProject = selectedSkuId === sku.skuId
-        && selectedToolProjectId !== null
-        && toolProjects.some((project) => project.id === selectedToolProjectId);
-      if (canResumeExistingProject) {
-        setGatewaySelection(sku.skuId, selectedToolProject?.providerCode || sku.providerCode);
-        setShowErrors(false);
-        setSubmitError(null);
-        setProjectError(null);
-        return;
-      }
-
       projectRequestSequenceRef.current += 1;
-      setProjectLoadRevision((revision) => revision + 1);
-      setProjectsLoading(true);
+      setProjectsLoading(false);
       resetPoll();
       setActiveTaskId(null);
       setViewingHistoryId(null);
@@ -586,73 +578,13 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
       setCaptionedVideoUrl(null);
       setSubtitleError(null);
     },
-    [draftOwnerId, hydrateSchema, resetPoll, selectedSkuId, selectedToolProject, selectedToolProjectId, setGatewaySelection, setViewingHistoryId, toolProjects]
+    [draftOwnerId, hydrateSchema, resetPoll, setGatewaySelection, setViewingHistoryId]
   );
 
   useEffect(() => {
-    if (sessionStatus !== "authenticated" || !selectedSku || schema !== selectedSku.uiSchema) return;
-    const sequence = ++projectRequestSequenceRef.current;
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 8_000);
-    setProjectsLoading(true);
-    setProjectError(null);
-    void (async () => {
-      try {
-        const response = await fetch(`/api/tool-projects?skuId=${encodeURIComponent(selectedSku.skuId)}`, {
-          credentials: "same-origin",
-          headers: { Accept: "application/json" },
-          signal: controller.signal,
-        });
-        const payload: unknown = await response.json().catch(() => null);
-        const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
-        if (!response.ok || record?.ok !== true || !Array.isArray(record.projects)) {
-          throw new Error(typeof record?.error === "string" ? record.error : "项目加载失败");
-        }
-        let projects = record.projects as ToolProjectRecord[];
-        if (projects.length === 0) {
-          const createResponse = await fetch("/api/tool-projects", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            credentials: "same-origin",
-            signal: controller.signal,
-            body: JSON.stringify({
-              skuId: selectedSku.skuId,
-              providerCode: selectedSku.providerCode,
-              name: `${selectedSku.displayName}项目 1`,
-              formState: sanitizeWorkflowDraftParameters(
-                selectedSku.uiSchema,
-                useWorkflowStore.getState().parameters,
-              ),
-            }),
-          });
-          const createdPayload: unknown = await createResponse.json().catch(() => null);
-          const createdRecord = createdPayload && typeof createdPayload === "object"
-            ? createdPayload as Record<string, unknown>
-            : null;
-          if (!createResponse.ok || createdRecord?.ok !== true || !createdRecord.project) {
-            throw new Error(typeof createdRecord?.error === "string" ? createdRecord.error : "项目创建失败");
-          }
-          projects = [createdRecord.project as ToolProjectRecord];
-        }
-        if (sequence !== projectRequestSequenceRef.current) return;
-        setToolProjects(projects);
-        applyToolProject(projects[0], selectedSku);
-      } catch (error) {
-        if (sequence === projectRequestSequenceRef.current) {
-          setProjectError(controller.signal.aborted
-            ? (locale === "en" ? "Project loading timed out. Please retry." : "项目加载超时，请重试。")
-            : error instanceof Error ? error.message : "项目加载失败");
-        }
-      } finally {
-        window.clearTimeout(timeoutId);
-        if (sequence === projectRequestSequenceRef.current) setProjectsLoading(false);
-      }
-    })();
-    return () => {
-      window.clearTimeout(timeoutId);
-      controller.abort();
-    };
-  }, [applyToolProject, locale, projectLoadRevision, schema, selectedSku, sessionStatus]);
+    if (sessionStatus !== "authenticated" || !selectedSku) return;
+    void fetchCloudHistory(null);
+  }, [fetchCloudHistory, selectedSku, sessionStatus]);
 
   const handleRetryToolProjects = useCallback(() => {
     projectRequestSequenceRef.current += 1;
@@ -981,10 +913,6 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const handleSubmitToGateway = useCallback(async () => {
     setViewingHistoryId(null);
     if (!selectedSku) { setSubmitError(t.errSelectSku); return; }
-    if (!selectedToolProjectId) {
-      setSubmitError(locale === "en" ? "Please wait for a project to load." : "请等待项目加载完成后再提交。");
-      return;
-    }
     // 轮询进行中或已有提交在途，禁止重复提交
     if (isSubmitting || isPolling) return;
 
@@ -1044,7 +972,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ ...built, toolProjectId: selectedToolProjectId }),
+        body: JSON.stringify(built),
       });
       let json: unknown;
       try { json = await res.json(); } catch { setSubmitError(t.errServerAbnormal); return; }
@@ -1548,34 +1476,6 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       tripoEstimate={tripoEstimate}
                     />
                   ) : null}
-                  beforeFields={
-                    <div className="space-y-2">
-                      <ToolProjectSelector
-                        projects={toolProjects}
-                        selectedProjectId={selectedToolProjectId}
-                        loading={projectsLoading}
-                        saving={projectSaving}
-                        locale={locale}
-                        onSelect={(projectId) => void handleSelectToolProject(projectId)}
-                        onCreate={() => void handleCreateToolProject()}
-                        onRename={() => void handleRenameToolProject()}
-                        onDelete={() => void handleDeleteToolProject()}
-                      />
-                      {projectError && (
-                        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                          <span>{projectError}</span>
-                          <button
-                            type="button"
-                            onClick={handleRetryToolProjects}
-                            disabled={projectsLoading}
-                            className="shrink-0 rounded-lg border border-amber-300/25 bg-amber-300/10 px-2.5 py-1.5 font-medium text-amber-100 transition hover:bg-amber-300/20 disabled:opacity-50"
-                          >
-                            {locale === "en" ? "Retry" : "重新加载"}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  }
                   formFooter={
                     <div className="-mx-5 -mb-5 space-y-3 border-t border-white/[0.07] bg-[#070b10]/80 px-5 pb-5 pt-4 lg:-mx-6 lg:-mb-6 lg:px-6 lg:pb-6">
                       {showErrors && Object.keys(errors).length > 0 && (
@@ -1620,7 +1520,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       <div className="flex flex-wrap items-center gap-2.5 pt-1">
                         <button
                           type="submit"
-                          disabled={isSubmitting || isPolling || hasImageUploadInFlight || !selectedSku || !selectedToolProjectId || sessionStatus !== "authenticated"}
+                          disabled={isSubmitting || isPolling || hasImageUploadInFlight || !selectedSku || sessionStatus !== "authenticated"}
                           className="group relative inline-flex min-h-11 items-center gap-2 overflow-hidden rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 px-6 py-2.5 text-sm font-semibold text-white shadow-[0_12px_30px_-12px_rgba(16,185,129,0.7)] transition-all duration-300 hover:-translate-y-0.5 hover:brightness-110 hover:shadow-[0_16px_36px_-12px_rgba(16,185,129,0.8)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
                         >
                           {isSubmitting ? (
