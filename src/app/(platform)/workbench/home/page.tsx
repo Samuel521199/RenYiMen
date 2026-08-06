@@ -5,8 +5,7 @@ import Link from "next/link";
 import { ArrowRight, AudioLines, Box, Clapperboard, ImageIcon, Play, type LucideIcon } from "lucide-react";
 import { useLanguage } from "@/i18n";
 import { HomeShowcaseCarousel } from "@/components/home/HomeShowcaseCarousel";
-
-const MODEL_NAMES = ["Wan 2.7", "Kling Cinema", "GPT Image 2", "Qwen Vision", "CosyVoice", "RunningHub"];
+import { PopularWorksShowcase } from "@/components/home/PopularWorksShowcase";
 
 type HomeTool = {
   eyebrow: string;
@@ -134,14 +133,14 @@ type FeaturedModel = {
 };
 
 const FEATURED_MODELS_ZH: FeaturedModel[] = [
-  { name: "Wan 2.7", family: "视频生成", description: "覆盖图生视频、运镜复刻、特效复刻与视频续写", href: "/workbench/tools?category=video", poster: "/model-showcase/wan-27.webp", motion: "/model-showcase/wan-27-motion.mp4?v=3" },
-  { name: "Wan 2.2 S2V", family: "声音驱动视频", description: "由人声驱动角色口型、表情与动作自然同步", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V", poster: "/model-showcase/wan-22-s2v.webp", motion: "/model-showcase/wan-22-s2v-motion.mp4?v=3" },
-  { name: "Kling Cinema", family: "电影级影像", description: "从单张参考图快速生成连贯、富有表现力的镜头", href: "/workbench/tools?sku=KLING_CINEMA_PRO", poster: "/model-showcase/kling-cinema.webp", motion: "/model-showcase/kling-cinema-motion.mp4?v=3" },
-  { name: "GPT Image 2", family: "图像生成", description: "结合自然语言与参考图生成高质量完整视觉", href: "/workbench/tools?sku=GPT_IMAGE2_REF", poster: "/model-showcase/gpt-image-2.webp", motion: "/model-showcase/gpt-image-2-motion.mp4?v=3" },
-  { name: "Qwen3-VL", family: "视觉理解", description: "理解画面中的主体、场景、风格与光线并反推提示词", href: "/workbench/tools?sku=RH_PROMPT_REVERSE", poster: "/model-showcase/qwen3-vl.webp", motion: "/model-showcase/qwen3-vl-motion.mp4?v=3" },
-  { name: "CosyVoice", family: "语音生成", description: "完成音色设计、声音克隆与富有情绪的语音表达", href: "/workbench/tools?sku=BAILIAN_COSYVOICE_VOICE_DESIGN", poster: "/model-showcase/cosyvoice.webp", motion: "/model-showcase/cosyvoice-motion.mp4?v=3" },
-  { name: "Tripo 3D", family: "三维生成", description: "从文字、单图或多视角参考创建带材质的 3D 资产", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D", poster: "/model-showcase/tripo-3d.webp", motion: "/model-showcase/tripo-3d-motion.mp4?v=3" },
-  { name: "RunningHub", family: "工作流引擎", description: "连接复杂节点工作流，为图像与视频工具提供稳定执行能力", href: "/workbench/tools?group=video-editing", poster: "/model-showcase/runninghub-workflow.webp", motion: "/model-showcase/runninghub-workflow-motion.mp4?v=3" },
+  { name: "Wan 2.7", family: "视频生成", description: "覆盖图生视频、运镜复刻、特效复刻与视频续写", href: "/workbench/tools?category=video", poster: "/model-showcase/wan-27.webp", motion: "/model-showcase/wan-27-motion.mp4?v=2" },
+  { name: "Wan 2.2 S2V", family: "声音驱动视频", description: "由人声驱动角色口型、表情与动作自然同步", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V", poster: "/model-showcase/wan-22-s2v.webp", motion: "/model-showcase/wan-22-s2v-motion.mp4?v=2" },
+  { name: "Kling Cinema", family: "电影级影像", description: "从单张参考图快速生成连贯、富有表现力的镜头", href: "/workbench/tools?sku=KLING_CINEMA_PRO", poster: "/model-showcase/kling-cinema.webp", motion: "/model-showcase/kling-cinema-motion.mp4?v=2" },
+  { name: "GPT Image 2", family: "图像生成", description: "结合自然语言与参考图生成高质量完整视觉", href: "/workbench/tools?sku=GPT_IMAGE2_REF", poster: "/model-showcase/gpt-image-2.webp", motion: "/model-showcase/gpt-image-2-motion.mp4?v=2" },
+  { name: "Qwen3-VL", family: "视觉理解", description: "理解画面中的主体、场景、风格与光线并反推提示词", href: "/workbench/tools?sku=RH_PROMPT_REVERSE", poster: "/model-showcase/qwen3-vl.webp", motion: "/model-showcase/qwen3-vl-motion.mp4?v=2" },
+  { name: "CosyVoice", family: "语音生成", description: "完成音色设计、声音克隆与富有情绪的语音表达", href: "/workbench/tools?sku=BAILIAN_COSYVOICE_VOICE_DESIGN", poster: "/model-showcase/cosyvoice.webp", motion: "/model-showcase/cosyvoice-motion.mp4?v=2" },
+  { name: "Tripo 3D", family: "三维生成", description: "从文字、单图或多视角参考创建带材质的 3D 资产", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D", poster: "/model-showcase/tripo-3d.webp", motion: "/model-showcase/tripo-3d-motion.mp4?v=2" },
+  { name: "RunningHub", family: "工作流引擎", description: "连接复杂节点工作流，为图像与视频工具提供稳定执行能力", href: "/workbench/tools?group=video-editing", poster: "/model-showcase/runninghub-workflow.webp", motion: "/model-showcase/runninghub-workflow-motion.mp4?v=2" },
 ];
 
 const FEATURED_MODELS_EN: FeaturedModel[] = [
@@ -173,14 +172,7 @@ export default function WorkbenchHomePage() {
         <HomeShowcaseCarousel />
       </section>
 
-      <section className="border-y border-white/[0.08] bg-[#070b11]">
-        <div className="mx-auto flex max-w-[1500px] flex-col gap-5 px-6 py-7 sm:flex-row sm:items-center sm:justify-between lg:px-10">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/35">{isEn ? "One studio. Frontier intelligence." : "一个工作台 · 汇聚前沿智能"}</div>
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px] font-medium tracking-wide text-white/55">
-            {MODEL_NAMES.map((model) => <span key={model}>{model}</span>)}
-          </div>
-        </div>
-      </section>
+      <PopularWorksShowcase isEn={isEn} />
 
       <section className="relative mx-auto max-w-[1500px] px-6 pb-12 pt-24 lg:px-10 lg:pb-16 lg:pt-32">
         <div className="grid gap-8 border-t border-white/[0.12] pt-6 md:grid-cols-12 md:items-end">
@@ -262,19 +254,25 @@ export default function WorkbenchHomePage() {
       <section className="relative mx-auto max-w-[1500px] px-6 py-20 lg:px-10 lg:py-28">
         <div className="pointer-events-none absolute right-0 top-16 h-80 w-80 rounded-full bg-[#9ef5d8]/[0.07] blur-[120px]" />
         <div className="relative grid gap-3 lg:grid-cols-12">
-          <div className="flex min-h-[440px] flex-col justify-between overflow-hidden rounded-[1.5rem] bg-[#dbe9e3] p-7 text-[#071019] sm:p-9 lg:col-span-4 lg:row-span-2 lg:min-h-[520px]">
-            <div>
-              <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#071019]/55">HERONHUB / MODEL ROUTER</div>
+          <div className="relative flex min-h-[440px] flex-col justify-between overflow-hidden rounded-[1.5rem] border border-[#9ef5d8]/[0.16] bg-[linear-gradient(145deg,#0d1820_0%,#091017_52%,#05090e_100%)] p-7 text-white shadow-[inset_0_1px_0_rgba(255,255,255,.055),0_28px_80px_rgba(0,0,0,.28)] sm:p-9 lg:col-span-4 lg:row-span-2 lg:min-h-[520px]">
+            <div className="pointer-events-none absolute -left-24 -top-28 h-72 w-72 rounded-full bg-[#9ef5d8]/[0.11] blur-[90px]" />
+            <div className="pointer-events-none absolute inset-x-9 top-0 h-px bg-gradient-to-r from-transparent via-[#9ef5d8]/50 to-transparent" />
+            <div className="pointer-events-none absolute bottom-0 right-0 h-48 w-48 bg-[radial-gradient(circle_at_bottom_right,rgba(103,232,249,.08),transparent_68%)]" />
+            <div className="relative z-10">
+              <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-[#9ef5d8]/70">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#9ef5d8] shadow-[0_0_12px_rgba(158,245,216,.8)]" />
+                HERONHUB / MODEL ROUTER
+              </div>
               <h3 className="mt-7 max-w-sm text-[clamp(2.4rem,4vw,4.8rem)] font-black leading-[0.96] tracking-[-0.055em]">
                 {isEn ? "Selected model APIs" : "精选模型 API"}
               </h3>
-              <p className="mt-6 max-w-sm text-sm leading-7 text-[#071019]/65">
+              <p className="mt-6 max-w-sm text-sm leading-7 text-white/50">
                 {isEn ? "One consistent creative experience, backed by specialized intelligence for every medium." : "以统一的创作体验，调度不同媒介中各有所长的专业模型。"}
               </p>
             </div>
-            <div>
+            <div className="relative z-10">
               <div className="mb-6 flex flex-wrap gap-2">
-                {["VIDEO", "IMAGE", "VOICE", "VISION", "3D"].map((label) => <span key={label} className="rounded-full border border-[#071019]/15 px-3 py-1.5 text-[10px] font-semibold tracking-[0.12em] text-[#071019]/65">{label}</span>)}
+                {["VIDEO", "IMAGE", "VOICE", "VISION", "3D"].map((label) => <span key={label} className="rounded-full border border-white/[0.11] bg-white/[0.035] px-3 py-1.5 text-[10px] font-semibold tracking-[0.12em] text-white/55 shadow-[inset_0_1px_0_rgba(255,255,255,.035)]">{label}</span>)}
               </div>
             </div>
           </div>

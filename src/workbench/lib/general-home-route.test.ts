@@ -8,19 +8,27 @@ test("the workbench brand and default entry points target the visual home page",
   const workbenchLayoutSource = readFileSync("src/app/(platform)/workbench/layout.tsx", "utf8");
   const homeSource = readFileSync("src/app/(platform)/workbench/home/page.tsx", "utf8");
   const showcaseSource = readFileSync("src/components/home/HomeShowcaseCarousel.tsx", "utf8");
+  const popularWorksSource = readFileSync("src/components/home/PopularWorksShowcase.tsx", "utf8");
   const globalCss = readFileSync("src/app/globals.css", "utf8");
 
   assert.match(shellSource, /href="\/workbench\/home"/);
   assert.match(workbenchIndexSource, /redirect\("\/workbench\/home"\)/);
   assert.match(workbenchLayoutSource, /callbackUrl=\/workbench\/home/);
   assert.match(homeSource, /Creative capabilities/i);
-  assert.match(homeSource, /MODEL_NAMES/);
+  assert.doesNotMatch(homeSource, /MODEL_NAMES/);
+  assert.doesNotMatch(homeSource, /One studio\. Frontier intelligence\./);
   assert.match(homeSource, /multi-reference-drama\.webp/);
   assert.doesNotMatch(homeSource, /import Image from "next\/image"/);
   assert.doesNotMatch(homeSource, /<Image\s/);
   assert.match(homeSource, /<source src=\{tool\.motion\} type="video\/mp4" \/>/);
   assert.doesNotMatch(homeSource, /\/workbench\/tools\/one-prompt-video/);
   assert.match(homeSource, /<HomeShowcaseCarousel \/>/);
+  assert.match(homeSource, /<PopularWorksShowcase isEn=\{isEn\} \/>/);
+  assert.ok(homeSource.indexOf("<PopularWorksShowcase") > homeSource.indexOf("<HomeShowcaseCarousel"));
+  assert.match(popularWorksSource, /POPULAR_WORKS/);
+  assert.match(popularWorksSource, /showcase\/popular-works\/color-blitz-social\.mp4/);
+  assert.equal((popularWorksSource.match(/video: "\/showcase\/popular-works\//g) ?? []).length, 6);
+  assert.match(popularWorksSource, /role="dialog"/);
   assert.equal((homeSource.match(/home-display-title/g) ?? []).length, 2);
   assert.equal((homeSource.match(/home-section-title/g) ?? []).length, 1);
   assert.doesNotMatch(homeSource, /The right intelligence for every creative decision/);

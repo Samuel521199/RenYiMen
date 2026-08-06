@@ -15,13 +15,13 @@
     "id": "scene-light-texas-hostess",
     "rank": 2,
     "title": "荷官走进金色德州牌局大厅",
-    "subtitle": "白棚连续变为海岛日落牌局大厅，人物与镜头运动保持稳定",
+    "subtitle": "人物带着利落步伐走入海岛日落牌局大厅，场景与光线连续生长",
     "tool": "场景与光影变化",
     "skuId": "BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
     "href": "/workbench/tools?sku=BAILIAN_SCENE_LIGHT_VIDEO_EDIT",
     "video": "/showcase/game-tools/scene-light-texas-hostess.mp4",
     "poster": "/showcase/game-tools/scene-light-texas-hostess-poster.jpg",
-    "aspectRatio": "16:9"
+    "aspectRatio": "9:16"
   },
   {
     "id": "local-edit-bingo-hero",
@@ -51,12 +51,12 @@
     "id": "face-swap-resort-hostess",
     "rank": 5,
     "title": "海岛角色身份焕新",
-    "subtitle": "换头换脸生成身份结果，再用图生视频完成自然转头与招手",
+    "subtitle": "角色身份与海边画面柔和融合，再自然衔接转头、微笑与招手",
     "tool": "换头换脸 + 图生视频",
     "skuId": "RH_FACE_SWAP",
     "href": "/workbench/tools?sku=RH_FACE_SWAP",
-    "video": "/showcase/game-tools/face-swap-resort-hostess.mp4",
-    "poster": "/showcase/game-tools/face-swap-resort-hostess-poster.jpg",
-    "aspectRatio": "16:9"
+    "video": "/showcase/popular-works/face-swap-resort-hostess.mp4",
+    "poster": "/showcase/popular-works/face-swap-resort-hostess-poster.jpg",
+    "aspectRatio": "9:16"
   }
 ]
