@@ -19,7 +19,7 @@ test("workflow cards expose an independent favorite control and favorite filteri
   assert.match(studioSource, /activeToolGroup === "favorites"[\s\S]*favoriteSkuIds\.has\(s\.skuId\)/);
   assert.match(topNavSource, /group=favorites/);
   assert.ok(
-    topNavSource.indexOf("group=favorites") > topNavSource.indexOf("group=audio-post"),
+    topNavSource.indexOf("group=favorites") > topNavSource.indexOf("category=audio"),
     "favorites should remain a dedicated general-workspace destination",
   );
 });

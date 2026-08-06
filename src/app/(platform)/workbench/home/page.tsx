@@ -14,6 +14,8 @@ type HomeTool = {
   href: string;
   cover: string;
   motion: string;
+  alternateCover?: string;
+  alternateMotion?: string;
 };
 
 type CapabilitySection = {
@@ -69,7 +71,7 @@ const CAPABILITY_SECTIONS_ZH: CapabilitySection[] = [
     glow: "bg-violet-500/[0.16]",
     highlights: ["文生 3D", "单图生 3D", "多视角生 3D", "PBR 材质", "高精度几何"],
     tools: [
-      { eyebrow: "Tripo P1.0 / H3.1", title: "Tripo 3D 模型生成", description: "兼顾快速原型与高精度输出，为角色、商品和场景快速建立可交付的三维资产。", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D", cover: "/covers/tripo-3d.webp", motion: "/covers/tripo-3d-motion.mp4" },
+      { eyebrow: "Tripo P1.0 / H3.1", title: "Tripo 3D 模型生成", description: "兼顾快速原型与高精度输出，为角色、商品和场景快速建立可交付的三维资产。", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D", cover: "/covers/tripo-3d.webp", motion: "/covers/tripo-3d-motion.mp4", alternateCover: "/covers/tripo-3d-showcase-poster.webp", alternateMotion: "/covers/tripo-3d-showcase.mp4" },
     ],
   },
   {
@@ -159,6 +161,7 @@ export default function WorkbenchHomePage() {
   const isEn = locale === "en";
   const capabilitySections = isEn ? CAPABILITY_SECTIONS_EN : CAPABILITY_SECTIONS_ZH;
   const [featuredToolIndexes, setFeaturedToolIndexes] = useState<number[]>(() => CAPABILITY_SECTIONS_ZH.map(() => 0));
+  const [singleToolMotionIndexes, setSingleToolMotionIndexes] = useState<number[]>(() => CAPABILITY_SECTIONS_ZH.map(() => 0));
 
   const advanceFeaturedTool = (sectionIndex: number, toolCount: number) => {
     if (toolCount <= 1) return;
@@ -216,21 +219,34 @@ export default function WorkbenchHomePage() {
               {orderedTools.map((tool, displayIndex) => {
                 const isFeatured = displayIndex === 0;
                 const toolIndex = section.tools.indexOf(tool);
+                const motionSources = tool.alternateMotion ? [tool.motion, tool.alternateMotion] : [tool.motion];
+                const coverSources = tool.alternateCover ? [tool.cover, tool.alternateCover] : [tool.cover];
+                const activeMotionIndex = isSingleTool ? (singleToolMotionIndexes[sectionIndex] ?? 0) % motionSources.length : 0;
+                const activeMotion = motionSources[activeMotionIndex];
+                const activeCover = coverSources[activeMotionIndex] ?? tool.cover;
                 return (
                   <Link
                     key={`${section.navLabel}-${tool.title}-${isFeatured ? "featured" : "secondary"}`}
                     href={tool.href}
-                    className={`home-capability-card group relative overflow-hidden rounded-[1.5rem] border border-white/[0.12] bg-[#09111a] shadow-[0_18px_60px_rgba(0,0,0,.28)] ${isFeatured ? "home-capability-swap" : ""} ${isSingleTool ? "min-h-[520px] lg:min-h-[620px]" : isFeatured ? "min-h-[500px] lg:col-span-7 lg:row-span-3 lg:min-h-[650px]" : "min-h-[220px] lg:col-span-5"}`}
+                    className={`home-capability-card group relative overflow-hidden rounded-[1.5rem] border border-white/[0.12] bg-[#09111a] shadow-[0_18px_60px_rgba(0,0,0,.28)] ${isFeatured ? "home-capability-swap" : ""} ${isSingleTool ? "aspect-video min-h-[420px] sm:min-h-0" : isFeatured ? "min-h-[500px] lg:col-span-7 lg:row-span-3 lg:min-h-[650px]" : "min-h-[220px] lg:col-span-5"}`}
                   >
                     <video
-                      className={`absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:opacity-100 ${isFeatured ? "opacity-[.9] brightness-[1.08] contrast-[1.08] saturate-[1.18] group-hover:scale-[1.035] group-hover:saturate-[1.28]" : "opacity-90 brightness-[1.07] contrast-[1.07] saturate-[1.14] group-hover:scale-[1.04]"}`}
-                      autoPlay muted loop={!isFeatured || isSingleTool} playsInline preload="metadata" poster={tool.cover} aria-hidden="true"
-                      onEnded={isFeatured && !isSingleTool ? () => advanceFeaturedTool(sectionIndex, section.tools.length) : undefined}
+                      key={activeMotion}
+                      className={`absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:opacity-100 ${isSingleTool ? "opacity-[.94] brightness-[.88] contrast-[1.08] saturate-[1.08]" : isFeatured ? "opacity-[.9] brightness-[1.08] contrast-[1.08] saturate-[1.18] group-hover:scale-[1.035] group-hover:saturate-[1.28]" : "opacity-90 brightness-[1.07] contrast-[1.07] saturate-[1.14] group-hover:scale-[1.04]"}`}
+                      autoPlay muted loop={!isFeatured || (isSingleTool && motionSources.length === 1)} playsInline preload="metadata" poster={activeCover} aria-hidden="true"
+                      onEnded={isSingleTool && motionSources.length > 1
+                        ? () => setSingleToolMotionIndexes((current) => current.map((value, index) => index === sectionIndex ? (value + 1) % motionSources.length : value))
+                        : isFeatured ? () => advanceFeaturedTool(sectionIndex, section.tools.length) : undefined}
                     >
-                      <source src={tool.motion} type="video/mp4" />
+                      <source src={activeMotion} type="video/mp4" />
                     </video>
-                    <div className={`absolute inset-0 ${isSingleTool ? "bg-[linear-gradient(90deg,rgba(3,7,12,.96)_0%,rgba(3,7,12,.72)_43%,rgba(3,7,12,.08)_78%),linear-gradient(0deg,rgba(3,7,12,.75),transparent_60%)]" : "bg-[linear-gradient(0deg,rgba(3,7,12,.92)_0%,rgba(3,7,12,.44)_48%,rgba(3,7,12,.04)_82%)]"}`} />
-                    <div className={`home-capability-copy absolute inset-x-0 bottom-0 ${isSingleTool ? "max-w-3xl p-7 sm:p-12 lg:p-16" : isFeatured ? "p-7 sm:p-10" : "p-6"}`}>
+                    <div className={`absolute inset-0 ${isSingleTool ? "bg-[linear-gradient(90deg,rgba(3,7,12,.96)_0%,rgba(3,7,12,.82)_28%,rgba(3,7,12,.42)_52%,rgba(3,7,12,.06)_76%),linear-gradient(0deg,rgba(3,7,12,.88)_0%,rgba(3,7,12,.24)_48%,rgba(3,7,12,.1)_100%)]" : "bg-[linear-gradient(0deg,rgba(3,7,12,.92)_0%,rgba(3,7,12,.44)_48%,rgba(3,7,12,.04)_82%)]"}`} />
+                    {isSingleTool && motionSources.length > 1 ? (
+                      <div className="absolute right-5 top-5 z-10 flex items-center gap-1.5 rounded-full border border-white/[0.12] bg-black/25 px-2.5 py-2 backdrop-blur-md" aria-hidden="true">
+                        {motionSources.map((motion, motionIndex) => <span key={motion} className={`h-1 rounded-full transition-all duration-500 ${motionIndex === activeMotionIndex ? "w-7 bg-violet-300" : "w-3 bg-white/25"}`} />)}
+                      </div>
+                    ) : null}
+                    <div className={`home-capability-copy absolute inset-x-0 bottom-0 ${isSingleTool ? "max-w-2xl p-7 sm:p-10 lg:p-14" : isFeatured ? "p-7 sm:p-10" : "p-6"}`}>
                       <div className={`mb-4 text-[10px] font-semibold uppercase tracking-[0.22em] ${section.accent}`}>{String(toolIndex + 1).padStart(2, "0")} / {tool.eyebrow}</div>
                       <h3 className={`home-capability-title font-medium tracking-[-0.035em] ${isSingleTool ? "text-3xl sm:text-5xl" : isFeatured ? "text-3xl sm:text-4xl" : "text-xl sm:text-2xl"}`}>{tool.title}</h3>
                       <div className="mt-3 flex items-end justify-between gap-5">

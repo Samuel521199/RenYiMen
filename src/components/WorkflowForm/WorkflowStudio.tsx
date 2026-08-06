@@ -1212,11 +1212,13 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
   const visibleCategoryTabs = routeSearchQuery || activeToolGroup === "favorites"
     ? []
     : activeToolGroup
-      ? CATEGORY_TABS.filter((tab) => tab.key === "video")
+      ? CATEGORY_TABS.filter((tab) => tab.key === (activeToolGroup === "audio-post" ? "audio" : "video"))
       : CATEGORY_TABS;
 
   useEffect(() => {
-    if (activeToolGroup && activeToolGroup !== "favorites") setActiveCategory("video");
+    if (activeToolGroup && activeToolGroup !== "favorites") {
+      setActiveCategory(activeToolGroup === "audio-post" ? "audio" : "video");
+    }
   }, [activeToolGroup]);
 
   const normalizedSearchQuery = routeSearchQuery.toLocaleLowerCase();
@@ -1331,7 +1333,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
               <span className="h-1.5 w-1.5 rounded-full bg-[#9ef5d8] shadow-[0_0_12px_rgba(158,245,216,0.8)]" />
               HERON CREATIVE SYSTEM
             </div>
-            <h1 className="text-3xl font-medium tracking-[-0.04em] text-[#e8eef4] sm:text-4xl">
+            <h1 className="home-section-title text-3xl sm:text-4xl">
               {t.pageTitle}
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/40 sm:text-base">

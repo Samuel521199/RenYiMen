@@ -37,9 +37,11 @@ const GENERAL_COLUMNS = [
     tools: [
       { label: "单图生成短视频", labelEn: "Single-image video", href: "/workbench/tools?sku=KLING_CINEMA_PRO" },
       { label: "Kling 图生视频", labelEn: "Kling image-to-video", href: "/workbench/tools?sku=KLING_STD_I2V" },
+      { label: "模仿生成舞蹈视频", labelEn: "Dance motion transfer", href: "/workbench/tools?sku=BAILIAN_WAN22_ANIMATE_MOVE" },
       { label: "多模态图生视频", labelEn: "Multimodal I2V", href: "/workbench/tools?sku=BAILIAN_WANX_I2V" },
+      { label: "多参考图剧场生成", labelEn: "Multi-reference drama", href: "/workbench/tools?sku=BAILIAN_MULTI_REF_I2V" },
       { label: "视频续写", labelEn: "Video continuation", href: "/workbench/tools?sku=BAILIAN_WAN27_VIDEO_CONTINUATION" },
-      { label: "首尾帧过渡", labelEn: "Boundary-frame transition", href: "/workbench/tools?sku=RH_SVD_IMG2VID" },
+      { label: "首尾帧过渡视频", labelEn: "Boundary-frame transition", href: "/workbench/tools?sku=RH_SVD_IMG2VID" },
     ],
   },
   {
@@ -55,7 +57,9 @@ const GENERAL_COLUMNS = [
       { label: "运镜复刻", labelEn: "Camera replication", href: "/workbench/tools?sku=BAILIAN_WAN27_CAMERA_REPLICATION" },
       { label: "特效复刻", labelEn: "Effect replication", href: "/workbench/tools?sku=BAILIAN_WAN27_EFFECT_REPLICATION" },
       { label: "局部修改", labelEn: "Local editing", href: "/workbench/tools?sku=BAILIAN_HAPPYHORSE_VIDEO_EDIT" },
-      { label: "风格迁移", labelEn: "Style transfer", href: "/workbench/tools?sku=BAILIAN_OVERALL_STYLE_TRANSFER" },
+      { label: "场景与光影变换", labelEn: "Scene & lighting transform", href: "/workbench/tools?sku=BAILIAN_SCENE_LIGHT_VIDEO_EDIT" },
+      { label: "整体风格迁移", labelEn: "Overall style transfer", href: "/workbench/tools?sku=BAILIAN_OVERALL_STYLE_TRANSFER" },
+      { label: "高动态重绘", labelEn: "High-motion restyle", href: "/workbench/tools?sku=BAILIAN_HIGH_DYNAMIC_REDRAW" },
     ],
   },
   {
@@ -69,6 +73,7 @@ const GENERAL_COLUMNS = [
     tools: [
       { label: "有声视频", labelEn: "Talking character", href: "/workbench/tools?sku=BAILIAN_WAN22_S2V" },
       { label: "自动添加字幕", labelEn: "Automatic captions", href: "/workbench/tools?sku=LOCAL_AUTO_SUBTITLES" },
+      { label: "视频提取音频", labelEn: "Extract audio from video", href: "/workbench/tools?sku=LOCAL_AUDIO_EXTRACTION" },
       { label: "声音克隆", labelEn: "Voice cloning", href: "/workbench/tools?sku=BAILIAN_VOICE_CLONE" },
       { label: "文字设计音色", labelEn: "Voice design", href: "/workbench/tools?sku=BAILIAN_COSYVOICE_VOICE_DESIGN" },
       { label: "情绪化配音", labelEn: "Expressive speech", href: "/workbench/tools?sku=BAILIAN_EMOTIONAL_TTS" },
@@ -77,17 +82,22 @@ const GENERAL_COLUMNS = [
   {
     label: "图片与灵感",
     labelEn: "Images & Ideas",
-    description: "生成、处理图片，并把视觉参考转成创作灵感",
-    descriptionEn: "Create and refine images, then extract reusable ideas",
+    description: "生成与处理图片，把视觉参考转成灵感和三维资产",
+    descriptionEn: "Create and refine images, extract ideas, and build 3D assets",
     href: "/workbench/tools?category=image",
     icon: ImageIcon,
     accent: "text-amber-300 bg-amber-300/10",
     tools: [
       { label: "智能图片生成", labelEn: "Smart image generation", href: "/workbench/tools?sku=GPT_IMAGE2_REF" },
+      { label: "文字生成图片", labelEn: "Text to image", href: "/workbench/tools?sku=RH_TXT2IMG_SHORTDRAMA" },
+      { label: "分镜生成出图", labelEn: "Storyboard generator", href: "/workbench/tools?sku=RH_STORYBOARD" },
+      { label: "人物三视图", labelEn: "Character turnaround", href: "/workbench/tools/character-turnaround" },
       { label: "背景替换", labelEn: "Background replacement", href: "/workbench/tools?sku=RH_BG_REPLACE" },
       { label: "人像抠图", labelEn: "Portrait matting", href: "/workbench/tools?sku=RH_MATTING" },
+      { label: "换头换脸", labelEn: "Face swap", href: "/workbench/tools?sku=RH_FACE_SWAP" },
       { label: "高清放大", labelEn: "HD upscaling", href: "/workbench/tools?sku=RH_HD_UPSCALE" },
       { label: "提示词反推", labelEn: "Prompt intelligence", href: "/workbench/tools?sku=RH_PROMPT_REVERSE" },
+      { label: "Tripo 3D 模型生成", labelEn: "Tripo 3D model", href: "/workbench/tools?sku=BAILIAN_TRIPO_3D" },
     ],
   },
 ] as const;
@@ -214,7 +224,7 @@ export default function WorkbenchTopNavigation() {
     { label: "首页", labelEn: "Home", href: "/workbench/home" },
     { label: "视频", labelEn: "Video", href: "/workbench/tools?category=video" },
     { label: "图片", labelEn: "Images", href: "/workbench/tools?category=image" },
-    { label: "音频", labelEn: "Audio", href: "/workbench/tools?group=audio-post" },
+    { label: "音频", labelEn: "Audio", href: "/workbench/tools?category=audio" },
     { label: "我的收藏", labelEn: "Favorites", href: "/workbench/tools?group=favorites" },
   ];
 
@@ -312,15 +322,15 @@ export default function WorkbenchTopNavigation() {
           {isEn ? "Creative Hub" : "创作中心"}<ChevronDown className={`h-3.5 w-3.5 text-white/35 transition-all duration-300 group-hover:translate-y-0.5 group-hover:text-white/80 ${openMenu === "creative" ? "rotate-180 text-white/80" : ""}`} />
         </button>
         {openMenu === "creative" ? (
-          <div className="absolute left-1/2 top-[calc(100%-2px)] z-[100] w-[min(920px,calc(100vw-2rem))] translate-x-[calc(-50%+10rem)] pt-3" onMouseEnter={() => open("creative")} onMouseLeave={scheduleClose}>
-            <div className="workbench-creative-menu relative overflow-hidden rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(16,17,22,.995),rgba(6,8,12,.998))] shadow-[0_32px_100px_rgba(0,0,0,.68),inset_0_1px_0_rgba(255,255,255,.045)]">
+          <div className="fixed left-1/2 top-[calc(5rem-2px)] z-[100] w-[min(1180px,calc(100vw-3rem))] -translate-x-1/2 pt-3" onMouseEnter={() => open("creative")} onMouseLeave={scheduleClose}>
+            <div className="workbench-creative-menu relative max-h-[calc(100vh-6rem)] overflow-x-hidden overflow-y-auto rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(16,17,22,.995),rgba(6,8,12,.998))] shadow-[0_32px_100px_rgba(0,0,0,.68),inset_0_1px_0_rgba(255,255,255,.045)]">
               <div className="pointer-events-none absolute -left-20 -top-32 h-64 w-72 rounded-full bg-cyan-400/[0.055] blur-[85px]" />
               <div className="pointer-events-none absolute -right-16 top-8 h-52 w-64 rounded-full bg-violet-500/[0.045] blur-[90px]" />
               <div className="relative flex items-center justify-between border-b border-white/[0.07] bg-white/[0.012] px-5 py-4">
                 <div>
                   <div className="flex items-center gap-2 text-sm font-medium text-white"><Sparkles className="h-4 w-4 text-cyan-300" />{isEn ? "Creative Hub" : "创作中心"}</div>
                 </div>
-                <Link href="/workbench/tools" className="flex items-center gap-1 text-sm font-medium text-cyan-300 hover:text-cyan-200">{isEn ? "All tools" : "全部工具"}<ArrowRight className="h-3.5 w-3.5" /></Link>
+                <Link href="/workbench/tools" className="flex items-center gap-2 text-sm font-medium text-cyan-300 hover:text-cyan-200"><span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.06] px-2 py-0.5 text-[10px] tracking-[0.08em] text-cyan-200/70">30 {isEn ? "TOOLS" : "个工具"}</span>{isEn ? "All tools" : "全部工具"}<ArrowRight className="h-3.5 w-3.5" /></Link>
               </div>
               <div className="relative grid grid-cols-2 gap-px bg-white/[0.055] xl:grid-cols-4">
                 {GENERAL_COLUMNS.map((column) => {
@@ -332,10 +342,10 @@ export default function WorkbenchTopNavigation() {
                         <div className="flex items-center gap-1.5 text-sm font-medium text-slate-100 hover:text-white">{isEn ? column.labelEn : column.label}<ArrowRight className="h-3.5 w-3.5 opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100" /></div>
                         <p className="mt-1.5 min-h-9 text-sm leading-[1.5] text-slate-500">{isEn ? column.descriptionEn : column.description}</p>
                       </Link>
-                      <div className="mt-4 space-y-2 border-t border-white/[0.07] pt-3">
+                      <div className="mt-4 grid grid-cols-1 gap-x-3 gap-y-1.5 border-t border-white/[0.07] pt-3 xl:grid-cols-2">
                         {column.tools.map((tool) => (
-                          <Link key={tool.href} href={tool.href} className="group/tool flex items-center justify-between gap-2 rounded-md px-1 py-0.5 text-sm leading-[1.5] text-slate-400 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60">
-                            <span className="flex min-w-0 items-center gap-2"><span className="h-1 w-1 shrink-0 rounded-full bg-slate-600 transition-colors group-hover/tool:bg-cyan-400" /><span className="truncate">{isEn ? tool.labelEn : tool.label}</span></span>
+                          <Link key={tool.href} href={tool.href} className="group/tool flex min-h-7 items-start justify-between gap-1.5 rounded-md px-1 py-1 text-xs leading-[1.45] text-slate-400 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60">
+                            <span className="flex min-w-0 items-start gap-2"><span className="mt-[0.42rem] h-1 w-1 shrink-0 rounded-full bg-slate-600 transition-colors group-hover/tool:bg-cyan-400" /><span>{isEn ? tool.labelEn : tool.label}</span></span>
                             <ArrowRight className="h-3 w-3 shrink-0 opacity-0 transition-all group-hover/tool:translate-x-0.5 group-hover/tool:opacity-60" />
                           </Link>
                         ))}

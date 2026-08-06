@@ -6,16 +6,16 @@ const MODEL_ENUM_NAMES = ["通义万相 2.7 (多角色)", "HappyHorse 1.1 (多�
 
 const RATIO_ENUM = ["16:9", "9:16", "3:4", "4:3", "1:1"] as const;
 
-/** 多参考图图生视频：最多 5 张参考图 + 文案 + 时长 + 画面比例，供网关透传至百炼侧 `nodeInputs.input`。 */
+/** 多参考图图生视频：万相最多 5 张、HappyHorse 最多 9 张，供网关透传至百炼侧 `nodeInputs.input`。 */
 export const bailianMultiRefWorkflowMock: WorkflowFormSchema = {
   workflowId: "bailian-multi-ref-i2v",
-  version: "1.1.0",
+  version: "1.2.0",
   title: "多参考图剧场生成",
   titleEn: "Multi-Reference Video Generation",
   description:
-    "支持上传多达 5 张参考图！在描述中轻松引用不同角色与场景，为您生成连贯的微短剧片段。计费规则：动态秒数计费。",
+    "HappyHorse 1.1 最多支持 9 张参考图，通义万相 2.7 最多支持 5 张；可分别填写正向与负向提示词。计费规则：动态秒数计费。",
   descriptionEn:
-    "Upload up to 5 reference images! Reference different characters and scenes in your description to generate coherent micro-drama clips. Billing: dynamic per-second rate.",
+    "HappyHorse 1.1 supports up to 9 reference images and Wan 2.7 supports up to 5, with separate positive and negative prompt inputs. Billing: dynamic per-second rate.",
   schema: {
     type: "object",
     properties: {
@@ -41,9 +41,18 @@ export const bailianMultiRefWorkflowMock: WorkflowFormSchema = {
       },
       image_urls: {
         type: "array",
-        title: "参考图 (最多5张)",
+        title: "参考图 (HappyHorse 最多9张)",
         items: { type: "string" },
-        maxItems: 5,
+        maxItems: 9,
+      },
+      prompt: {
+        type: "string",
+        title: "正向提示词",
+      },
+      negative_prompt: {
+        type: "string",
+        title: "负向提示词",
+        maxLength: 500,
       },
     },
   },
@@ -57,7 +66,7 @@ export const bailianMultiRefWorkflowMock: WorkflowFormSchema = {
     image_urls: {
       "ui:widget": "multiImageUploader",
       "ui:help":
-        "最多5张。提示词引用规则：若选万相，请用『图1、图2』；若选 HappyHorse，请用『[Image 1]、[Image 2]』。",
+        "HappyHorse 最多9张，万相最多5张。若选万相，请用『图1、图2』；若选 HappyHorse，请用『[Image 1]、[Image 2]』。",
     },
   },
   fields: [
@@ -127,27 +136,41 @@ export const bailianMultiRefWorkflowMock: WorkflowFormSchema = {
         {
           kind: "multiImageUpload",
           id: "image_urls",
-          label: "参考图 (最多5张)",
-          labelEn: "Reference Images (up to 5)",
+          label: "参考图 (HappyHorse 最多9张)",
+          labelEn: "Reference Images (HappyHorse: up to 9)",
           description:
-            "最多 5 张。万相请在提示词中使用「图1、图2」；HappyHorse 请使用「[Image 1]、[Image 2]」。",
+            "HappyHorse 最多 9 张，万相最多 5 张。万相请使用「图1、图2」；HappyHorse 请使用「[Image 1]、[Image 2]」。",
           descriptionEn:
-            "Up to 5 images. For Wan, reference them in your prompt as '图1, 图2'; for HappyHorse, use '[Image 1], [Image 2]'.",
+            "HappyHorse accepts up to 9 images; Wan accepts up to 5. For Wan use '图1, 图2'; for HappyHorse use '[Image 1], [Image 2]'.",
           mapping: { nodeId: "input", inputPath: ["image_urls"] },
-          maxItems: 5,
-          validation: { required: true, maxSizeMB: 20, accept: ["image/jpeg", "image/png", "image/webp"], minDimension: 300 },
+          maxItems: 9,
+          validation: { required: true, maxSizeMB: 20, accept: ["image/jpeg", "image/png", "image/webp"], minDimension: 400 },
         },
         {
           kind: "textInput",
           id: "videoPrompt",
-          label: "视频描述 / 运镜",
-          labelEn: "Video Description / Camera",
+          label: "正向提示词",
+          labelEn: "Positive Prompt",
           multiline: true,
-          placeholder: "描述画面运动、镜头与风格，按所选模型使用「图1」或「[Image 1]」等引用参考图…",
-          placeholderEn: "Describe motion, camera moves and style; reference images using '图1' (Wan) or '[Image 1]' (HappyHorse)…",
+          placeholder: "描述希望出现的主体、动作、镜头与风格，并使用「图1」或「[Image 1]」引用参考图…",
+          placeholderEn: "Describe the subjects, motion, camera and style you want; reference images using '图1' or '[Image 1]'…",
           mapping: { nodeId: "input", inputPath: ["prompt"] },
           defaultValue: "",
-          validation: { required: true, minLength: 2, maxLength: 2000 },
+          validation: { required: true, minLength: 2, maxLength: 5000 },
+        },
+        {
+          kind: "textInput",
+          id: "negativePrompt",
+          label: "负向提示词",
+          labelEn: "Negative Prompt",
+          multiline: true,
+          placeholder: "描述不希望出现的内容，例如：低清晰度、畸形肢体、多余手指、闪烁、画面抖动…",
+          placeholderEn: "Describe what to avoid, e.g. low resolution, deformed limbs, extra fingers, flicker, camera shake…",
+          description: "万相将使用原生反向提示词；HappyHorse 将其转换为提示词中的排除约束。",
+          descriptionEn: "Wan uses the native negative prompt; for HappyHorse it is converted into an exclusion instruction.",
+          mapping: { nodeId: "input", inputPath: ["negative_prompt"] },
+          defaultValue: "",
+          validation: { maxLength: 500 },
         },
       ],
     },

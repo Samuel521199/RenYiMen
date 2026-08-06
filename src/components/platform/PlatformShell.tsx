@@ -15,8 +15,8 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
   const isWorkbench = pathname.startsWith("/workbench");
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#05080d] text-slate-100">
-      <header className={`sticky top-0 z-40 border-b backdrop-blur-xl ${isWorkbench ? "border-white/[0.07] bg-[#05080d]/92" : "border-white/10 bg-[#0f1728]/95"}`}>
+    <div className={`flex flex-col bg-[#05080d] text-slate-100 ${isWorkbench ? "h-screen overflow-hidden" : "min-h-screen"}`}>
+      <header className={`sticky top-0 z-40 shrink-0 border-b backdrop-blur-xl ${isWorkbench ? "border-white/[0.07] bg-[#05080d]/92" : "border-white/10 bg-[#0f1728]/95"}`}>
         <div className={`mx-auto flex max-w-[1800px] items-center gap-4 px-4 sm:px-6 ${isWorkbench ? "h-20" : "h-14"}`}>
           <Link
             href="/workbench/home"
@@ -68,7 +68,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <div className="flex flex-1">{children}</div>
+      <div className={`flex flex-1 ${isWorkbench ? "min-h-0 overflow-hidden" : ""}`}>{children}</div>
     </div>
   );
 }

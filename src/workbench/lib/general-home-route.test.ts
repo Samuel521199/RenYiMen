@@ -12,6 +12,8 @@ test("the workbench brand and default entry points target the visual home page",
   const globalCss = readFileSync("src/app/globals.css", "utf8");
 
   assert.match(shellSource, /href="\/workbench\/home"/);
+  assert.match(shellSource, /isWorkbench \? "h-screen overflow-hidden" : "min-h-screen"/);
+  assert.match(shellSource, /isWorkbench \? "min-h-0 overflow-hidden" : ""/);
   assert.match(workbenchIndexSource, /redirect\("\/workbench\/home"\)/);
   assert.match(workbenchLayoutSource, /callbackUrl=\/workbench\/home/);
   assert.match(homeSource, /Creative capabilities/i);
@@ -20,7 +22,8 @@ test("the workbench brand and default entry points target the visual home page",
   assert.match(homeSource, /multi-reference-drama\.webp/);
   assert.doesNotMatch(homeSource, /import Image from "next\/image"/);
   assert.doesNotMatch(homeSource, /<Image\s/);
-  assert.match(homeSource, /<source src=\{tool\.motion\} type="video\/mp4" \/>/);
+  assert.match(homeSource, /<source src=\{activeMotion\} type="video\/mp4" \/>/);
+  assert.match(homeSource, /motion: "\/covers\/tripo-3d-motion\.mp4", alternateCover: "\/covers\/tripo-3d-showcase-poster\.webp", alternateMotion: "\/covers\/tripo-3d-showcase\.mp4"/);
   assert.doesNotMatch(homeSource, /\/workbench\/tools\/one-prompt-video/);
   assert.match(homeSource, /<HomeShowcaseCarousel \/>/);
   assert.match(homeSource, /kling-standard-motion\.mp4/);
@@ -28,8 +31,12 @@ test("the workbench brand and default entry points target the visual home page",
   assert.ok(homeSource.indexOf("<PopularWorksShowcase") > homeSource.indexOf("<HomeShowcaseCarousel"));
   assert.match(popularWorksSource, /POPULAR_WORKS/);
   assert.match(popularWorksSource, /showcase\/popular-works\/color-blitz-social\.mp4/);
-  assert.equal((popularWorksSource.match(/video: "\/showcase\/popular-works\//g) ?? []).length, 7);
+  assert.equal((popularWorksSource.match(/video: "\/showcase\/popular-works\//g) ?? []).length, 8);
   assert.match(popularWorksSource, /showcase\/popular-works\/island-dance-workflow\.mp4/);
+  assert.match(popularWorksSource, /showcase\/popular-works\/3d-model-generation\.mp4/);
+  assert.match(popularWorksSource, /lg:order-8 lg:col-span-12/);
+  assert.match(popularWorksSource, /createHref: "\/workbench\/tools\?sku=BAILIAN_TRIPO_3D"/);
+  assert.match(popularWorksSource, /开始创作/);
   assert.match(popularWorksSource, /role="dialog"/);
   assert.equal((homeSource.match(/home-display-title/g) ?? []).length, 2);
   assert.equal((homeSource.match(/home-section-title/g) ?? []).length, 1);
@@ -37,7 +44,8 @@ test("the workbench brand and default entry points target the visual home page",
   assert.match(homeSource, /CAPABILITY_SECTIONS_ZH/);
   assert.match(homeSource, /featuredToolIndexes/);
   assert.match(homeSource, /advanceFeaturedTool/);
-  assert.match(homeSource, /onEnded=\{isFeatured && !isSingleTool/);
+  assert.match(homeSource, /onEnded=\{isSingleTool && motionSources\.length > 1/);
+  assert.match(homeSource, /setSingleToolMotionIndexes/);
   assert.match(globalCss, /\.home-capability-swap/);
   assert.doesNotMatch(homeSource, /\{section\.description\}/);
   assert.match(homeSource, /BAILIAN_TRIPO_3D/);
@@ -89,7 +97,8 @@ test("the compact top navigation searches across the complete tool catalog", () 
   assert.match(navigationSource, /placeholder=\{isEn \? "Search tools" : "搜索工具"\}/);
   assert.match(navigationSource, /\/workbench\/tools\?q=\$\{encodeURIComponent\(keyword\)\}/);
   assert.match(navigationSource, /gap-1 xl:flex/);
-  assert.match(navigationSource, /translate-x-\[calc\(-50%\+10rem\)\]/);
+  assert.match(navigationSource, /fixed left-1\/2 top-\[calc\(5rem-2px\)\]/);
+  assert.match(navigationSource, /w-\[min\(1180px,calc\(100vw-3rem\)\)\] -translate-x-1\/2/);
   assert.match(studioSource, /searchParams\.get\("q"\)/);
   assert.match(studioSource, /sku\.displayNameEn/);
   assert.match(studioSource, /sku\.providerCode/);

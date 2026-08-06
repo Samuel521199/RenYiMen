@@ -286,6 +286,7 @@ test("Bailian Wan 2.7 R2V accepts up to five reference images and rejects a sixt
         modelName: "wan2.7-r2v",
         image_urls: imageUrls,
         prompt: "图1和图2中的角色在图3的场景中相遇。",
+        negative_prompt: "低清晰度、畸形手指",
       },
     },
   };
@@ -297,6 +298,7 @@ test("Bailian Wan 2.7 R2V accepts up to five reference images and rejects a sixt
   assert.ok("media" in body.input);
   assert.equal(body.input.media.length, 5);
   assert.deepEqual(body.input.media[0], { type: "reference_image", url: imageUrls[0] });
+  assert.equal(body.input.negative_prompt, "低清晰度、畸形手指");
 
   assert.throws(
     () => adapter.buildPayload({
@@ -314,18 +316,38 @@ test("Bailian Wan 2.7 R2V accepts up to five reference images and rejects a sixt
 
 test("Bailian HappyHorse R2V keeps its nine-reference limit", () => {
   const adapter = new BailianAdapter();
+  const imageUrls = Array.from({ length: 9 }, (_, index) => `https://example.com/happyhorse-${index + 1}.png`);
   const payload: StandardPayload = {
     templateId: "bailian-multi-ref-i2v",
     nodeInputs: {
       input: {
         modelName: "happyhorse-1.1-r2v",
-        image_urls: ["https://example.com/ref.png"],
+        image_urls: imageUrls,
         prompt: "[Image 1] walks into the scene.",
+        negative_prompt: "flicker, deformed hands",
       },
     },
   };
 
   assert.equal(adapter.getVideoInputCapabilities(payload).maxImages, 9);
+  const body = adapter.buildPayload(payload);
+  assert.ok("media" in body.input);
+  assert.equal(body.input.media.length, 9);
+  assert.match(body.input.prompt, /不希望出现：flicker, deformed hands/);
+  assert.equal(body.input.negative_prompt, undefined);
+
+  assert.throws(
+    () => adapter.buildPayload({
+      ...payload,
+      nodeInputs: {
+        input: {
+          ...payload.nodeInputs.input,
+          image_urls: [...imageUrls, "https://example.com/happyhorse-10.png"],
+        },
+      },
+    }),
+    /最多 9 张/,
+  );
 });
 
 test("Bailian gateway keeps the explicit HappyHorse compatibility switch", () => {

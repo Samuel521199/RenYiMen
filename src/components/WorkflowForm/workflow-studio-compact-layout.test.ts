@@ -21,6 +21,12 @@ test("the tools route provides a definite height to the embedded studio", () => 
   assert.match(source, /className="h-full min-h-0 flex-1"/);
 });
 
+test("the tools gallery title uses the same display typography as the home section heading", () => {
+  const source = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+
+  assert.match(source, /<h1 className="home-section-title text-3xl sm:text-4xl">/);
+});
+
 test("dynamic fields use a responsive two-column desktop grid", () => {
   const source = readFileSync("src/components/WorkflowForm/DynamicForm.tsx", "utf8");
 
@@ -106,4 +112,14 @@ test("video generation is split into image-to-video and continuation tabs", () =
   assert.match(source, /isSkuInVideoGenerationTab/);
   assert.match(source, /VIDEO_CONTINUATION_SKU_IDS/);
   assert.match(source, /BAILIAN_WAN27_VIDEO_CONTINUATION/);
+});
+
+test("audio navigation uses the shared audio category button", () => {
+  const source = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+  const topNavigationSource = readFileSync("src/workbench/components/layout/TopNavigation.tsx", "utf8");
+
+  assert.match(topNavigationSource, /label: "音频", labelEn: "Audio", href: "\/workbench\/tools\?category=audio"/);
+  assert.match(source, /\{ key: "audio", label: t\.categoryAudio \}/);
+  assert.match(source, /activeToolGroup === "audio-post" \? "audio" : "video"/);
+  assert.doesNotMatch(source, /AUDIO_POST_TABS|AudioPostTab/);
 });

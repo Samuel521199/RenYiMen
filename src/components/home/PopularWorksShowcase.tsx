@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Maximize2, Play, Volume1, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowUpRight, Maximize2, Play, Volume1, Volume2, VolumeX, X } from "lucide-react";
 
 type PopularWork = {
   id: string;
@@ -13,6 +14,7 @@ type PopularWork = {
   poster: string;
   className: string;
   mediaClassName?: string;
+  createHref?: string;
 };
 
 const POPULAR_WORKS: PopularWork[] = [
@@ -89,6 +91,17 @@ const POPULAR_WORKS: PopularWork[] = [
     video: "/showcase/popular-works/color-blitz-social.mp4",
     poster: "/showcase/popular-works/color-blitz-social-poster.jpg",
     className: "min-h-[260px] lg:order-7 lg:col-span-3 lg:min-h-[360px]",
+  },
+  {
+    id: "3d-model-generation",
+    titleZh: "3D 模型生成",
+    titleEn: "3D Model Generation",
+    categoryZh: "3D 角色创作",
+    categoryEn: "3D character creation",
+    video: "/showcase/popular-works/3d-model-generation.mp4",
+    poster: "/showcase/popular-works/3d-model-generation-poster.jpg",
+    className: "col-span-2 min-h-[280px] lg:order-8 lg:col-span-12 lg:min-h-[500px]",
+    createHref: "/workbench/tools?sku=BAILIAN_TRIPO_3D",
   },
 ];
 
@@ -167,7 +180,7 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
           <div className="mb-5 flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.28em] text-[#9ef5d8]">
             <span>{isEn ? "Popular now" : "正在流行"}</span>
             <span className="h-px w-10 bg-current opacity-45" />
-            <span className="text-white/35">CURATED 07</span>
+            <span className="text-white/35">CURATED 08</span>
           </div>
           <h2 className="home-section-title max-w-4xl text-[clamp(2.5rem,4.8vw,5.25rem)]">
             {isEn ? "Made with imagination.\nFinished with intelligence." : "灵感已成片，\n好作品正在发生。"}
@@ -176,8 +189,8 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
         <div className="md:col-span-4 md:pb-2">
           <p className="max-w-md whitespace-pre-line text-sm leading-7 text-white/45">
             {isEn
-              ? "Seven recent audience favorites, spanning character, motion, scene, and short-form storytelling."
-              : "从角色塑造、动作生成到场景叙事，\n精选近期最受欢迎的七支成片。"}
+              ? "Eight recent audience favorites, spanning character, motion, scene, 3D creation, and short-form storytelling."
+              : "从角色塑造、动作生成到场景叙事与 3D 创作，\n精选近期最受欢迎的八支成片。"}
           </p>
           <p className="mt-4 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.2em] text-white/30">
             <Play className="h-3 w-3 fill-current" />
@@ -215,6 +228,16 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
                   <h3 className="min-w-0 shrink truncate text-xl font-medium tracking-[-0.035em] text-white sm:text-2xl">
                     {isEn ? work.titleEn : work.titleZh}
                   </h3>
+                  {work.createHref ? (
+                    <Link
+                      href={work.createHref}
+                      className="pointer-events-auto relative z-30 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-white/20 bg-black/25 px-3 text-[11px] font-medium tracking-[0.02em] text-white/75 backdrop-blur-md transition duration-300 hover:border-[#9ef5d8]/45 hover:bg-[#9ef5d8]/10 hover:text-[#dffdf4] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9ef5d8] sm:h-9 sm:px-4 sm:text-xs"
+                      aria-label={isEn ? `Start creating with ${work.titleEn}` : `开始创作${work.titleZh}`}
+                    >
+                      <span>{isEn ? "Start creating" : "开始创作"}</span>
+                      <ArrowUpRight className="h-3.5 w-3.5" />
+                    </Link>
+                  ) : null}
                   <div className="home-volume-control group/volume pointer-events-auto relative z-30 shrink-0 sm:translate-y-1 sm:opacity-0 sm:transition sm:duration-300 sm:group-hover:translate-y-0 sm:group-hover:opacity-100 sm:group-focus-within:translate-y-0 sm:group-focus-within:opacity-100">
                     <button
                       type="button"

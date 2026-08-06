@@ -1196,13 +1196,17 @@ export class BailianAdapter implements IProviderAdapter {
       const negativePrompt =
         readStringFlag(flags, ["negativePrompt", "negative_prompt"]) ??
         readStringFromNode(inputNode, ["negativePrompt", "negative_prompt"]);
+      const normalizedNegativePrompt = negativePrompt?.trim().slice(0, 500) ?? "";
+      const effectivePrompt = modelLc.includes("happyhorse") && normalizedNegativePrompt
+        ? `${prompt || ""}\n不希望出现：${normalizedNegativePrompt}`.trim()
+        : prompt || "";
 
       return {
         model: targetModel,
         input: {
-          prompt: prompt || "",
-          ...(modelLc.startsWith("wan2.7-i2v") && negativePrompt
-            ? { negative_prompt: negativePrompt.slice(0, 500) }
+          prompt: effectivePrompt,
+          ...(modelLc.startsWith("wan2.7") && normalizedNegativePrompt
+            ? { negative_prompt: normalizedNegativePrompt }
             : {}),
           media,
         },
