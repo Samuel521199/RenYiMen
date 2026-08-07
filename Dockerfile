@@ -2,7 +2,7 @@
 
 FROM node:18-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat openssl ffmpeg fontconfig font-noto-cjk blender-headless \
+RUN apk add --no-cache libc6-compat openssl ffmpeg fontconfig font-noto-cjk blender-headless py3-numpy \
   && fc-cache -f \
   && fc-list | grep -q "Noto Sans CJK SC"
 

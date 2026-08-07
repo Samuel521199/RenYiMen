@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { access, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -146,7 +146,18 @@ async function runBlenderExport(inputPath: string, outputPath: string, exportKin
       await new Promise<void>((resolvePromise, rejectPromise) => {
         const child = spawn(
           executable,
-          ["--background", "--factory-startup", "--python", BLENDER_SCRIPT_PATH, "--", inputPath, outputPath, exportKind],
+          [
+            "--background",
+            "--factory-startup",
+            "--python-exit-code",
+            "1",
+            "--python",
+            BLENDER_SCRIPT_PATH,
+            "--",
+            inputPath,
+            outputPath,
+            exportKind,
+          ],
           { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] },
         );
         let logs = "";
@@ -167,10 +178,20 @@ async function runBlenderExport(inputPath: string, outputPath: string, exportKin
           }
           rejectPromise(new ExportError(`无法启动模型转换器：${error.message}`, 503, "BLENDER_START_FAILED"));
         });
-        child.once("close", (code) => {
+        child.once("close", async (code) => {
           clearTimeout(timer);
           if (code === 0) {
-            resolvePromise();
+            try {
+              const output = await stat(outputPath);
+              if (!output.isFile() || output.size === 0) throw new Error("empty export output");
+              resolvePromise();
+            } catch {
+              rejectPromise(new ExportError(
+                `模型转换器没有生成 ZIP 文件。${logs.trim() ? `\n${logs.trim().slice(-2000)}` : "请检查服务器 Blender 运行环境。"}`,
+                500,
+                "BLENDER_OUTPUT_MISSING",
+              ));
+            }
             return;
           }
           rejectPromise(new ExportError(`模型转换失败。${logs.trim() ? `\n${logs.trim().slice(-2000)}` : ""}`, 500, "BLENDER_EXPORT_FAILED"));
@@ -224,7 +245,6 @@ export async function POST(request: Request) {
     const outputPath = join(directory, exportKind === "fbx" ? "model-fbx-package.zip" : "model-textures.zip");
     await fetchGlbToFile(sourceUrl, inputPath);
     await runBlenderExport(inputPath, outputPath, exportKind);
-    await access(outputPath);
 
     const fileStream = createReadStream(outputPath);
     fileStream.once("close", () => void safeRemoveTemporaryDirectory(directory));

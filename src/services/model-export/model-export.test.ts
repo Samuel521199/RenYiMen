@@ -13,6 +13,9 @@ test("model export route authenticates, blocks private hosts, and invokes Blende
   assert.match(routeSource, /isPrivateIp/);
   assert.match(routeSource, /redirect: "manual"/);
   assert.match(routeSource, /shell: false/);
+  assert.match(routeSource, /"--python-exit-code",\s*"1"/);
+  assert.match(routeSource, /await stat\(outputPath\)/);
+  assert.match(routeSource, /BLENDER_OUTPUT_MISSING/);
   assert.match(routeSource, /safeRemoveTemporaryDirectory/);
 });
 
@@ -35,6 +38,7 @@ test("model result UI exposes original GLB, FBX package, and texture package dow
 
 test("production image includes the headless Blender runtime and exporter script", () => {
   assert.match(dockerfileSource, /apk add --no-cache[^\n]*blender-headless/);
+  assert.match(dockerfileSource, /apk add --no-cache[^\n]*py3-numpy/);
   assert.match(dockerfileSource, /scripts\/model-export-blender\.py/);
   assert.match(dockerfileSource, /BLENDER_EXECUTABLE=\/usr\/bin\/blender-headless/);
 });
