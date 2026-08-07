@@ -13,6 +13,7 @@ import {
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { useT } from "@/i18n";
 import { useFileDrop } from "@/components/WorkflowForm/controls/useFileDrop";
+import { AudioPlayer } from "@/components/media/AudioPlayer";
 
 export interface VideoUploadControlProps {
   field: VideoUploadField;
@@ -235,12 +236,7 @@ export function VideoUploadControl({ field, error, locale = "zh" }: VideoUploadC
                 : null}
             </span>
           </div>
-          <audio
-            controls
-            preload="metadata"
-            src={v.extractedAudio.remoteUrl}
-            className="h-10 w-full"
-          />
+          <AudioPlayer src={v.extractedAudio.remoteUrl} />
         </div>
       )}
 

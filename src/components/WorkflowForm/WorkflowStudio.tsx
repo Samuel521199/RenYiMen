@@ -22,6 +22,7 @@ import { TaskStatusViewer } from "@/components/TaskStatusViewer/TaskStatusViewer
 import { UserCredits } from "@/components/Sidebar/UserCredits";
 import { DynamicForm } from "@/components/WorkflowForm/DynamicForm";
 import { FixedWorkflowPricing } from "@/components/WorkflowForm/FixedWorkflowPricing";
+import { ToolProjectSelector } from "@/components/WorkflowForm/ToolProjectSelector";
 import { useTaskPolling } from "@/hooks/useTaskPolling";
 import {
   buildTaskViewerModel,
@@ -586,6 +587,42 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
     void fetchCloudHistory(null);
   }, [fetchCloudHistory, selectedSku, sessionStatus]);
 
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || !selectedSku || !isTalkingVideo) return;
+
+    const requestSequence = ++projectRequestSequenceRef.current;
+    const controller = new AbortController();
+    setProjectsLoading(true);
+    setProjectError(null);
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/tool-projects?skuId=${encodeURIComponent(selectedSku.skuId)}`, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        const payload: unknown = await response.json().catch(() => null);
+        const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+        if (!response.ok || record?.ok !== true || !Array.isArray(record.projects)) {
+          throw new Error(typeof record?.error === "string" ? record.error : (locale === "en" ? "Failed to load projects" : "项目加载失败"));
+        }
+        if (projectRequestSequenceRef.current !== requestSequence) return;
+        const projects = record.projects as ToolProjectRecord[];
+        setToolProjects(projects);
+        if (projects.length > 0) applyToolProject(projects[0], selectedSku);
+        else setSelectedToolProjectId(null);
+      } catch (error) {
+        if (controller.signal.aborted || projectRequestSequenceRef.current !== requestSequence) return;
+        setProjectError(error instanceof Error ? error.message : (locale === "en" ? "Failed to load projects" : "项目加载失败"));
+      } finally {
+        if (projectRequestSequenceRef.current === requestSequence) setProjectsLoading(false);
+      }
+    })();
+
+    return () => controller.abort();
+  }, [applyToolProject, isTalkingVideo, locale, projectLoadRevision, selectedSku, sessionStatus]);
+
   const handleRetryToolProjects = useCallback(() => {
     projectRequestSequenceRef.current += 1;
     setProjectLoadRevision((revision) => revision + 1);
@@ -972,7 +1009,7 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify(built),
+        body: JSON.stringify(selectedToolProjectId ? { ...built, toolProjectId: selectedToolProjectId } : built),
       });
       let json: unknown;
       try { json = await res.json(); } catch { setSubmitError(t.errServerAbnormal); return; }
@@ -1475,6 +1512,33 @@ export function WorkflowStudio({ embedded = false }: { embedded?: boolean } = {}
                       bailianEstimate={bailianEstimate}
                       tripoEstimate={tripoEstimate}
                     />
+                  ) : null}
+                  beforeFields={isTalkingVideo ? (
+                    <div className="space-y-2">
+                      <ToolProjectSelector
+                        projects={toolProjects}
+                        selectedProjectId={selectedToolProjectId}
+                        loading={projectsLoading}
+                        saving={projectSaving}
+                        locale={locale}
+                        onSelect={(projectId) => void handleSelectToolProject(projectId)}
+                        onCreate={() => void handleCreateToolProject()}
+                        onRename={() => void handleRenameToolProject()}
+                        onDelete={() => void handleDeleteToolProject()}
+                      />
+                      {projectError && (
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-400/20 bg-amber-500/[0.07] px-3.5 py-2.5 text-xs text-amber-200/90">
+                          <span>{projectError}</span>
+                          <button
+                            type="button"
+                            onClick={handleRetryToolProjects}
+                            className="shrink-0 rounded-lg border border-amber-300/25 px-2.5 py-1.5 font-medium transition hover:bg-amber-300/10"
+                          >
+                            {locale === "en" ? "Retry" : "重试"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   ) : null}
                   formFooter={
                     <div className="-mx-5 -mb-5 space-y-3 border-t border-white/[0.07] bg-[#070b10]/80 px-5 pb-5 pt-4 lg:-mx-6 lg:-mb-6 lg:px-6 lg:pb-6">

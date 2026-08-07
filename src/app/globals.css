@@ -84,6 +84,97 @@
     background-clip: padding-box;
   }
 
+  .hover-reveal-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  .hover-reveal-scrollbar:hover,
+  .hover-reveal-scrollbar:focus-visible {
+    scrollbar-color: rgb(158 245 216 / 0.42) transparent;
+  }
+
+  .hover-reveal-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .hover-reveal-scrollbar::-webkit-scrollbar-track,
+  .hover-reveal-scrollbar::-webkit-scrollbar-track-piece,
+  .hover-reveal-scrollbar::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  .hover-reveal-scrollbar::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  .hover-reveal-scrollbar::-webkit-scrollbar-thumb {
+    min-height: 36px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    background-clip: padding-box;
+  }
+
+  .hover-reveal-scrollbar:hover::-webkit-scrollbar-thumb,
+  .hover-reveal-scrollbar:focus-visible::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgb(158 245 216 / 0.48), rgb(45 212 191 / 0.26));
+    background-clip: padding-box;
+  }
+
+  .hover-reveal-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgb(184 255 232 / 0.78), rgb(45 212 191 / 0.5));
+    background-clip: padding-box;
+  }
+
+  .audio-player-slider {
+    height: 4px;
+    appearance: none;
+    cursor: pointer;
+    border-radius: 999px;
+    outline: none;
+  }
+
+  .audio-player-slider:focus-visible {
+    box-shadow: 0 0 0 3px rgb(158 245 216 / 0.14);
+  }
+
+  .audio-player-slider::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .audio-player-slider::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
+    margin-top: -4px;
+    appearance: none;
+    border: 2px solid #07111b;
+    border-radius: 999px;
+    background: #9ef5d8;
+    box-shadow: 0 0 0 2px rgb(158 245 216 / 0.12), 0 3px 10px rgb(0 0 0 / 0.4);
+  }
+
+  .audio-player-slider::-moz-range-track {
+    height: 4px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .audio-player-slider::-moz-range-thumb {
+    width: 9px;
+    height: 9px;
+    border: 2px solid #07111b;
+    border-radius: 999px;
+    background: #9ef5d8;
+    box-shadow: 0 0 0 2px rgb(158 245 216 / 0.12), 0 3px 10px rgb(0 0 0 / 0.4);
+  }
+
   .one-prompt-video-workbench input[type="range"] {
     height: 18px;
     appearance: none;

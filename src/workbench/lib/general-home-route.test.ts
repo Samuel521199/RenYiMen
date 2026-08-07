@@ -22,7 +22,7 @@ test("the workbench brand and default entry points target the visual home page",
   assert.match(homeSource, /multi-reference-drama\.webp/);
   assert.doesNotMatch(homeSource, /import Image from "next\/image"/);
   assert.doesNotMatch(homeSource, /<Image\s/);
-  assert.match(homeSource, /<source src=\{activeMotion\} type="video\/mp4" \/>/);
+  assert.match(homeSource, /<source src=\{homeMediaUrl\(activeMotion\)\} type="video\/mp4" \/>/);
   assert.match(homeSource, /motion: "\/covers\/tripo-3d-motion\.mp4", alternateCover: "\/covers\/tripo-3d-showcase-poster\.webp", alternateMotion: "\/covers\/tripo-3d-showcase\.mp4"/);
   assert.doesNotMatch(homeSource, /\/workbench\/tools\/one-prompt-video/);
   assert.match(homeSource, /<HomeShowcaseCarousel \/>/);
@@ -96,7 +96,10 @@ test("the compact top navigation searches across the complete tool catalog", () 
 
   assert.match(navigationSource, /placeholder=\{isEn \? "Search tools" : "搜索工具"\}/);
   assert.match(navigationSource, /\/workbench\/tools\?q=\$\{encodeURIComponent\(keyword\)\}/);
-  assert.match(navigationSource, /gap-1 xl:flex/);
+  assert.match(navigationSource, /justify-between gap-\[clamp\(0rem,0\.2vw,0\.25rem\)\] min-\[1536px\]:flex/);
+  assert.match(navigationSource, /block min-w-20 w-\[clamp\(96px,11vw,240px\)\] shrink/);
+  assert.doesNotMatch(navigationSource, /role="search" className="[^"]*hidden/);
+  assert.match(navigationSource, /text-\[clamp\(0\.75rem,0\.78vw,0\.875rem\)\]/);
   assert.match(navigationSource, /fixed left-1\/2 top-\[calc\(5rem-2px\)\]/);
   assert.match(navigationSource, /w-\[min\(1180px,calc\(100vw-3rem\)\)\] -translate-x-1\/2/);
   assert.match(studioSource, /searchParams\.get\("q"\)/);

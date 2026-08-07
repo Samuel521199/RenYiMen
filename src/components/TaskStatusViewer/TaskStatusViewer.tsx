@@ -15,6 +15,7 @@ import { StoryboardResultGrid } from "./StoryboardResultGrid";
 import { TextResultDisplay } from "./TextResultDisplay";
 import { Model3DViewer } from "./Model3DViewer";
 import { useT } from "@/i18n";
+import { AudioPlayer } from "@/components/media/AudioPlayer";
 
 /** 与成功态画板一致的 20px 正交细线网格（#060a10 底） */
 const ARTBOARD_GRID_STYLE: CSSProperties = {
@@ -498,7 +499,7 @@ function SuccessLayer({
                   <div className="flex h-16 w-16 items-center justify-center rounded-full border border-cyan-300/25 bg-cyan-300/10 text-3xl" aria-hidden>
                     ♪
                   </div>
-                  <audio className="w-full max-w-xl" src={mediaUrl} controls preload="metadata" />
+                  <AudioPlayer className="max-w-xl" src={mediaUrl} />
                 </div>
               ) : (
                 <video

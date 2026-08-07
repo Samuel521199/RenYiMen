@@ -1,4 +1,6 @@
-/** Fallback only — primary redirect is in src/middleware.ts */
+/** Public entry: always open the product homepage. */
+import { redirect } from "next/navigation";
+
 export default function HomePage() {
-  return null;
+  redirect("/workbench/home");
 }

@@ -18,11 +18,21 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
   return (
     <div className={`flex flex-col bg-[#05080d] text-slate-100 ${isWorkbench ? "h-screen overflow-hidden" : "min-h-screen"}`}>
       <header className={`sticky top-0 z-40 shrink-0 border-b backdrop-blur-xl ${isWorkbench ? "border-white/[0.07] bg-[#05080d]/92" : "border-white/10 bg-[#0f1728]/95"}`}>
-        <div className={`mx-auto flex max-w-[1800px] items-center gap-4 px-4 sm:px-6 ${isWorkbench ? "h-20" : "h-14"}`}>
+        <div
+          className={`mx-auto flex items-center ${
+            isWorkbench
+              ? "h-20 w-[96%] max-w-none gap-[clamp(0.375rem,0.8vw,1rem)] px-0"
+              : "h-14 max-w-[1800px] gap-4 px-4 sm:px-6"
+          }`}
+        >
           <Link
             href="/workbench/home"
             aria-label={locale === "en" ? "Open home" : "进入首页"}
-            className={`group inline-flex shrink-0 items-center gap-2.5 rounded-md px-1.5 py-1 text-xl font-semibold text-white transition-colors hover:bg-white/5 ${isWorkbench ? "tracking-[0.01em]" : "tracking-wide"}`}
+            className={`group inline-flex shrink-0 items-center rounded-md py-1 font-semibold text-white transition-colors hover:bg-white/5 ${
+              isWorkbench
+                ? "gap-[clamp(0.375rem,0.55vw,0.625rem)] px-[clamp(0.125rem,0.3vw,0.375rem)] text-[clamp(0.95rem,1.05vw,1.25rem)] tracking-[0.01em]"
+                : "gap-2.5 px-1.5 text-xl tracking-wide"
+            }`}
           >
               <span aria-hidden className="text-[#9ef5d8] transition-transform duration-300 group-hover:rotate-45">
               ◈
@@ -32,7 +42,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
 
           {isWorkbench ? <div id="workbench-top-navigation-root" className="flex h-full min-w-0 flex-1 items-center" /> : <div className="flex-1" />}
 
-          <div className="flex shrink-0 items-center justify-end gap-2.5">
+          <div className="flex shrink-0 items-center justify-end gap-[clamp(0.25rem,0.5vw,0.625rem)]">
             <button
               type="button"
               onClick={toggleLocale}
@@ -45,7 +55,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
               <>
                 <DiskUsageIndicator size="header" />
                 <UserCredits refreshKey={0} size="header" />
-                <div className="group/account relative hidden sm:block">
+                <div className="group/account relative hidden 2xl:block">
                   <button type="button" className="flex max-w-[190px] items-center gap-1.5 rounded-lg border border-transparent px-2 py-2 text-sm text-slate-400 transition hover:border-white/[0.08] hover:bg-white/[0.035] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#9ef5d8]/40">
                     <span className="truncate">{session.user.email}</span>
                     <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform duration-200 group-hover/account:rotate-180" />
@@ -83,7 +93,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
                 <button
                   type="button"
                   onClick={() => signOut({ callbackUrl: "/auth/signin" })}
-                  className="rounded-md border border-white/10 px-3 py-1.5 text-sm text-slate-300 hover:bg-white/5"
+                  className="hidden rounded-md border border-white/10 px-3 py-1.5 text-sm text-slate-300 hover:bg-white/5 min-[1680px]:inline-flex"
                 >
                   {t.signOutBtn}
                 </button>

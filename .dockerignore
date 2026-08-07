@@ -1,6 +1,7 @@
 # Dependencies & build output (rebuilt inside Docker)
 node_modules
 .next
+.next-*
 out
 dist
 coverage

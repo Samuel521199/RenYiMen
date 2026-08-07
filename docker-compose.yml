@@ -125,6 +125,7 @@ services:
       target: runner
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+        NEXT_PUBLIC_HOME_MEDIA_BASE_URL: ${OSS_MEDIA_PUBLIC_DOMAIN:-${OSS_PUBLIC_DOMAIN:-}}
     expose:
       - "3001"
     ports:

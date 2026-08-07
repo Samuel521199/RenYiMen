@@ -6,6 +6,7 @@ import { ArrowRight, AudioLines, Box, Clapperboard, ImageIcon, Play, type Lucide
 import { useLanguage } from "@/i18n";
 import { HomeShowcaseCarousel } from "@/components/home/HomeShowcaseCarousel";
 import { PopularWorksShowcase } from "@/components/home/PopularWorksShowcase";
+import { homeMediaUrl } from "@/lib/home-media";
 
 type HomeTool = {
   eyebrow: string;
@@ -238,7 +239,7 @@ export default function WorkbenchHomePage() {
                         ? () => setSingleToolMotionIndexes((current) => current.map((value, index) => index === sectionIndex ? (value + 1) % motionSources.length : value))
                         : isFeatured ? () => advanceFeaturedTool(sectionIndex, section.tools.length) : undefined}
                     >
-                      <source src={activeMotion} type="video/mp4" />
+                      <source src={homeMediaUrl(activeMotion)} type="video/mp4" />
                     </video>
                     <div className={`absolute inset-0 ${isSingleTool ? "bg-[linear-gradient(90deg,rgba(3,7,12,.96)_0%,rgba(3,7,12,.82)_28%,rgba(3,7,12,.42)_52%,rgba(3,7,12,.06)_76%),linear-gradient(0deg,rgba(3,7,12,.88)_0%,rgba(3,7,12,.24)_48%,rgba(3,7,12,.1)_100%)]" : "bg-[linear-gradient(0deg,rgba(3,7,12,.92)_0%,rgba(3,7,12,.44)_48%,rgba(3,7,12,.04)_82%)]"}`} />
                     {isSingleTool && motionSources.length > 1 ? (
@@ -299,7 +300,7 @@ export default function WorkbenchHomePage() {
               className={`relative min-h-[245px] overflow-hidden rounded-[1.35rem] border border-white/[0.12] bg-[#0a0e13] ${modelIndex < 4 ? "lg:col-span-4" : "lg:col-span-3 lg:min-h-[230px]"}`}
             >
               <video className="absolute inset-0 h-full w-full object-cover opacity-90 saturate-[0.92]" autoPlay muted loop playsInline preload="metadata" poster={model.poster} aria-hidden="true">
-                <source src={model.motion} type="video/mp4" />
+                <source src={homeMediaUrl(model.motion)} type="video/mp4" />
               </video>
               <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(3,6,10,.94)_0%,rgba(3,6,10,.34)_52%,rgba(3,6,10,.04)_82%)]" />
               <div className="absolute inset-x-0 top-0 flex items-center justify-between p-5">
@@ -320,7 +321,7 @@ export default function WorkbenchHomePage() {
       <section className="px-3 pb-3 sm:px-5 sm:pb-5 lg:px-7">
         <div className="relative mx-auto min-h-[560px] max-w-[1600px] overflow-hidden rounded-[2rem] border border-white/[0.1] bg-[#0a1018]">
           <video className="absolute inset-0 h-full w-full object-cover opacity-50" autoPlay muted loop playsInline preload="metadata" poster="/covers/kling-standard.webp" aria-hidden="true">
-            <source src="/covers/kling-standard-motion.mp4" type="video/mp4" />
+            <source src={homeMediaUrl("/covers/kling-standard-motion.mp4")} type="video/mp4" />
           </video>
           <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(4,8,13,.96),rgba(4,8,13,.68)_48%,rgba(4,8,13,.12)),linear-gradient(0deg,rgba(4,8,13,.82),transparent_60%)]" />
           <div className="relative flex min-h-[560px] max-w-4xl flex-col justify-end p-7 sm:p-12 lg:p-16">

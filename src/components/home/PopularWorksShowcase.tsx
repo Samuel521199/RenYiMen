@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { ArrowUpRight, Maximize2, Play, Volume1, Volume2, VolumeX, X } from "lucide-react";
+import { homeMediaUrl } from "@/lib/home-media";
 
 type PopularWork = {
   id: string;
@@ -107,24 +108,44 @@ const POPULAR_WORKS: PopularWork[] = [
 
 function PopularWorkVideo({ work, priority, muted, volume }: { work: PopularWork; priority: boolean; muted: boolean; volume: number }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const mutedRef = useRef(muted);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!video) return;
+
+    let isVisible = false;
+    const playPreview = () => {
+      if (!isVisible) return;
+      // Card previews start muted so browsers can play them without a user gesture.
+      video.defaultMuted = true;
+      video.muted = mutedRef.current;
+      void video.play().catch(() => undefined);
+    };
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) void video.play().catch(() => undefined);
+        isVisible = entry.isIntersecting;
+        if (isVisible) playPreview();
         else video.pause();
       },
       { rootMargin: "160px 0px", threshold: 0.15 },
     );
+    // With preload="none", some production browsers resolve the first play()
+    // attempt before enough media is buffered. Retry as soon as it becomes playable.
+    video.addEventListener("loadeddata", playPreview);
+    video.addEventListener("canplay", playPreview);
     observer.observe(video);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      video.removeEventListener("loadeddata", playPreview);
+      video.removeEventListener("canplay", playPreview);
+    };
   }, []);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    mutedRef.current = muted;
     video.muted = muted;
     video.volume = volume;
     if (!muted) void video.play().catch(() => undefined);
@@ -141,7 +162,7 @@ function PopularWorkVideo({ work, priority, muted, volume }: { work: PopularWork
       poster={work.poster}
       aria-hidden="true"
     >
-      <source src={work.video} type="video/mp4" />
+      <source src={homeMediaUrl(work.video)} type="video/mp4" />
     </video>
   );
 }
@@ -317,7 +338,7 @@ export function PopularWorksShowcase({ isEn }: { isEn: boolean }) {
               playsInline
               poster={selectedWork.poster}
             >
-              <source src={selectedWork.video} type="video/mp4" />
+              <source src={homeMediaUrl(selectedWork.video)} type="video/mp4" />
             </video>
           </div>
         </div>

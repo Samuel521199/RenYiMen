@@ -3,6 +3,7 @@
   "version": "0.0.21",
   "private": true,
   "scripts": {
+    "publish:home-media": "node scripts/publish-home-media.mjs",
     "dev:kill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/free-dev-port.ps1",
     "dev": "npm run dev:kill && node scripts/ensure-prisma-client.mjs && node scripts/dev-with-video-worker.mjs",
     "dev:web": "next dev --turbopack --port 3001",

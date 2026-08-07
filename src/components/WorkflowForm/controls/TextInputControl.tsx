@@ -38,7 +38,7 @@ export function TextInputControl({ field, error, locale = "zh" }: TextInputContr
     locale,
   ) || undefined;
 
-  const className = `w-full rounded-xl border bg-[#091526]/90 px-3.5 py-3 text-sm leading-relaxed text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] placeholder:text-slate-500 placeholder:opacity-80 outline-none transition-all duration-200 focus:border-emerald-400/55 focus:ring-4 focus:ring-emerald-500/10 ${
+  const className = `hover-reveal-scrollbar w-full rounded-xl border bg-[#091526]/90 px-3.5 py-3 text-sm leading-relaxed text-slate-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] placeholder:text-slate-500 placeholder:opacity-80 outline-none transition-all duration-200 focus:border-emerald-400/55 focus:ring-4 focus:ring-emerald-500/10 ${
     error ? "border-red-500/50" : "border-white/[0.1] hover:border-white/[0.16]"
   }`;
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowUpRight, ChevronLeft, ChevronRight } from "lucide-react";
 import { useLanguage } from "@/i18n";
+import { homeMediaUrl } from "@/lib/home-media";
 
 type ShowcaseItem = {
   id: string;
@@ -121,7 +122,7 @@ export function HomeShowcaseCarousel() {
           poster={active.poster}
           onEnded={() => move(1)}
         >
-          <source src={active.video} type="video/mp4" />
+          <source src={homeMediaUrl(active.video)} type="video/mp4" />
         </video>
       ) : (
         // eslint-disable-next-line @next/next/no-img-element

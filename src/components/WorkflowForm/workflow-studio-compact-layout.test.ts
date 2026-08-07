@@ -71,6 +71,7 @@ test("editing workflow parameters clears a stale submission error", () => {
 test("audio upload shows and enforces the selected motion mode duration range", () => {
   const source = readFileSync("src/components/WorkflowForm/controls/AudioUploadControl.tsx", "utf8");
   const videoSource = readFileSync("src/components/WorkflowForm/controls/VideoUploadControl.tsx", "utf8");
+  const playerSource = readFileSync("src/components/media/AudioPlayer.tsx", "utf8");
 
   assert.match(source, /mediaDurationRangeText/);
   assert.match(source, /validateMediaDuration/);
@@ -79,16 +80,29 @@ test("audio upload shows and enforces the selected motion mode duration range", 
   assert.match(videoSource, /hasDynamicDuration/);
   assert.match(videoSource, /validateMediaDuration/);
   assert.match(videoSource, /当前动作模式时长/);
+  assert.match(videoSource, /<AudioPlayer src=\{v\.extractedAudio\.remoteUrl\}/);
+  assert.match(playerSource, /audio-player-slider/);
+  assert.match(playerSource, /togglePlayback/);
+  assert.doesNotMatch(videoSource, /<audio[\s\S]{0,80}controls/);
 });
 
-test("tool generation does not depend on the optional project persistence API", () => {
+test("talking video exposes project selection without blocking generation for other tools", () => {
   const studioSource = readFileSync("src/components/WorkflowForm/WorkflowStudio.tsx", "utf8");
+  const selectorSource = readFileSync("src/components/WorkflowForm/ToolProjectSelector.tsx", "utf8");
 
-  assert.doesNotMatch(studioSource, /<ToolProjectSelector/);
+  assert.match(studioSource, /beforeFields=\{isTalkingVideo \? \(/);
+  assert.match(studioSource, /<ToolProjectSelector/);
+  assert.match(studioSource, /\/api\/tool-projects\?skuId=/);
+  assert.match(studioSource, /toolProjectId: selectedToolProjectId/);
+  assert.match(studioSource, /onCreate=\{\(\) => void handleCreateToolProject\(\)\}/);
   assert.doesNotMatch(studioSource, /Please wait for a project to load/);
   assert.doesNotMatch(studioSource, /!selectedToolProjectId \|\| sessionStatus/);
-  assert.match(studioSource, /body: JSON\.stringify\(built\)/);
+  assert.match(studioSource, /selectedToolProjectId \? \{ \.\.\.built, toolProjectId: selectedToolProjectId \} : built/);
   assert.match(studioSource, /fetchCloudHistory\(null\)/);
+  assert.doesNotMatch(selectorSource, /<select/);
+  assert.match(selectorSource, /aria-haspopup="listbox"/);
+  assert.match(selectorSource, /role="option"/);
+  assert.match(selectorSource, /bg-\[#071018\]/);
 });
 
 test("task elapsed time survives polling view reinitialization for the same task", () => {

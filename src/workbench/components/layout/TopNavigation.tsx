@@ -228,7 +228,7 @@ export default function WorkbenchTopNavigation() {
     { label: "我的收藏", labelEn: "Favorites", href: "/workbench/tools?group=favorites" },
   ];
 
-  const linkClasses = (href: string) => `group relative flex h-full shrink-0 items-center whitespace-nowrap rounded-lg px-3.5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${
+  const linkClasses = (href: string) => `group relative flex h-full shrink-0 items-center whitespace-nowrap rounded-lg px-[clamp(0.55rem,0.65vw,0.875rem)] text-[clamp(0.75rem,0.78vw,0.875rem)] font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${
     isHrefActive(pathname, query, href)
       ? "text-white after:scale-x-100 after:opacity-100"
       : "text-white/50 after:scale-x-0 after:opacity-0"
@@ -272,7 +272,7 @@ export default function WorkbenchTopNavigation() {
         type="button"
         onClick={() => setOpenMenu((current) => current === "operations-mega" ? null : "operations-mega")}
         aria-expanded={openMenu === "operations-mega"}
-        className={`group relative flex h-full items-center gap-2 whitespace-nowrap rounded-lg px-5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-4 after:right-4 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "operations-mega" ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
+        className={`group relative flex h-full items-center gap-[clamp(0.3rem,0.45vw,0.5rem)] whitespace-nowrap rounded-lg px-[clamp(0.75rem,0.8vw,1.25rem)] text-[clamp(0.75rem,0.78vw,0.875rem)] font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-4 after:right-4 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "operations-mega" ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
       >
         {isEn ? "Operations" : "运营部"}
         <ChevronDown className={`h-3.5 w-3.5 text-white/35 transition-all duration-300 group-hover:translate-y-0.5 group-hover:text-white/80 ${openMenu === "operations-mega" ? "rotate-180 text-white/80" : ""}`} />
@@ -309,7 +309,7 @@ export default function WorkbenchTopNavigation() {
   );
 
   const generalDesktop = (
-    <nav aria-label={isEn ? "General workspace navigation" : "通用型导航"} className="hidden h-full min-w-0 flex-1 items-stretch justify-center gap-1 xl:flex">
+    <nav aria-label={isEn ? "General workspace navigation" : "通用型导航"} className="mx-[clamp(0.75rem,1.5vw,2rem)] hidden h-full min-w-0 flex-1 items-stretch justify-between gap-[clamp(0rem,0.2vw,0.25rem)] min-[1536px]:flex">
       <Link href={generalLinks[0].href} className={linkClasses(generalLinks[0].href)}>{isEn ? generalLinks[0].labelEn : generalLinks[0].label}</Link>
       {operationsMegaMenu}
       <div className="relative h-full shrink-0" onMouseEnter={() => open("creative")} onMouseLeave={scheduleClose}>
@@ -317,7 +317,7 @@ export default function WorkbenchTopNavigation() {
           type="button"
           onClick={() => setOpenMenu((current) => current === "creative" ? null : "creative")}
           aria-expanded={openMenu === "creative"}
-          className={`group relative flex h-full items-center gap-2 whitespace-nowrap rounded-lg px-3.5 text-sm font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "creative" || (pathname === "/workbench/tools" && (!query || searchParams.has("sku") || searchParams.has("q"))) ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
+          className={`group relative flex h-full items-center gap-[clamp(0.3rem,0.45vw,0.5rem)] whitespace-nowrap rounded-lg px-[clamp(0.55rem,0.65vw,0.875rem)] text-[clamp(0.75rem,0.78vw,0.875rem)] font-medium tracking-[0.02em] transition-all duration-300 after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all after:duration-300 hover:-translate-y-px hover:bg-white/[0.055] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,.08),0_8px_22px_rgba(0,0,0,.16)] hover:after:scale-x-100 hover:after:opacity-60 active:translate-y-0 active:scale-[.98] motion-reduce:transform-none motion-reduce:transition-none ${openMenu === "creative" || (pathname === "/workbench/tools" && (!query || searchParams.has("sku") || searchParams.has("q"))) ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}
         >
           {isEn ? "Creative Hub" : "创作中心"}<ChevronDown className={`h-3.5 w-3.5 text-white/35 transition-all duration-300 group-hover:translate-y-0.5 group-hover:text-white/80 ${openMenu === "creative" ? "rotate-180 text-white/80" : ""}`} />
         </button>
@@ -363,14 +363,14 @@ export default function WorkbenchTopNavigation() {
   );
 
   const operationsDesktop = (
-    <nav aria-label={isEn ? "Operations workspace navigation" : "运营部导航"} className="hidden h-full w-full max-w-[900px] min-w-0 items-stretch justify-between xl:flex">
+    <nav aria-label={isEn ? "Operations workspace navigation" : "运营部导航"} className="hidden h-full w-full max-w-[900px] min-w-0 items-stretch justify-between min-[1536px]:flex">
       {operationsMenus.map((item) => {
         if (item.href) return <Link key={item.href} href={item.href} className={linkClasses(item.href)}>{isEn ? item.labelEn : t(item.label)}</Link>;
         const menuKey = `ops-${item.label}`;
         const active = item.children?.some((child) => pathname === child.href || pathname.startsWith(`${child.href}/`));
         return (
           <div key={item.label} className="relative h-full" onMouseEnter={() => open(menuKey)} onMouseLeave={scheduleClose}>
-            <button type="button" onClick={() => setOpenMenu((current) => current === menuKey ? null : menuKey)} className={`group relative flex h-full items-center gap-1.5 rounded-lg px-3.5 text-sm font-medium transition-all after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all hover:-translate-y-px hover:bg-white/[0.05] hover:text-white hover:after:scale-x-100 hover:after:opacity-60 ${active || openMenu === menuKey ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}>
+            <button type="button" onClick={() => setOpenMenu((current) => current === menuKey ? null : menuKey)} className={`group relative flex h-full items-center gap-[clamp(0.25rem,0.4vw,0.375rem)] rounded-lg px-[clamp(0.55rem,0.65vw,0.875rem)] text-[clamp(0.75rem,0.78vw,0.875rem)] font-medium transition-all after:absolute after:bottom-0 after:left-3 after:right-3 after:h-[2px] after:origin-center after:rounded-t-full after:bg-gradient-to-r after:from-cyan-300 after:to-emerald-200 after:transition-all hover:-translate-y-px hover:bg-white/[0.05] hover:text-white hover:after:scale-x-100 hover:after:opacity-60 ${active || openMenu === menuKey ? "text-white after:scale-x-100 after:opacity-100" : "text-white/50 after:scale-x-0 after:opacity-0"}`}>
               {isEn ? item.labelEn : t(item.label)}<ChevronDown className={`h-3.5 w-3.5 text-white/35 transition-all group-hover:text-white/75 ${openMenu === menuKey ? "rotate-180 text-white/80" : ""}`} />
             </button>
             {openMenu === menuKey ? (
@@ -396,10 +396,10 @@ export default function WorkbenchTopNavigation() {
     : operationsMenus.flatMap((item) => item.href ? [{ label: item.label, labelEn: item.labelEn, href: item.href }] : (item.children ?? []).map((child) => ({ ...child, labelEn: child.label })));
 
   return createPortal(
-    <div className="relative flex h-full min-w-0 flex-1 items-center justify-center gap-4 px-3">
+    <div className="relative flex h-full min-w-0 flex-1 items-center justify-center gap-[clamp(0.25rem,0.75vw,1rem)] px-[clamp(0.25rem,0.6vw,0.75rem)]">
       {isGeneral ? generalDesktop : operationsDesktop}
       {isGeneral ? (
-        <form onSubmit={submitToolSearch} role="search" className="relative hidden w-[260px] shrink-0 xl:block 2xl:w-[300px]">
+        <form onSubmit={submitToolSearch} role="search" className="relative block min-w-20 w-[clamp(96px,11vw,240px)] shrink">
           <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
           <input
             value={toolSearch}
@@ -410,11 +410,11 @@ export default function WorkbenchTopNavigation() {
           />
         </form>
       ) : null}
-      <button type="button" onClick={() => setMobileOpen((current) => !current)} aria-expanded={mobileOpen} aria-label={isEn ? "Open navigation" : "打开导航"} className="ml-auto flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 text-slate-300 hover:bg-white/5 xl:hidden">
+      <button type="button" onClick={() => setMobileOpen((current) => !current)} aria-expanded={mobileOpen} aria-label={isEn ? "Open navigation" : "打开导航"} className="ml-auto flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-white/10 text-slate-300 hover:bg-white/5 min-[1536px]:hidden">
         {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
       </button>
       {mobileOpen ? (
-        <div className="fixed inset-x-3 top-[5.15rem] z-[100] max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(16,17,22,.985),rgba(6,8,12,.99))] p-3 shadow-[0_28px_90px_rgba(0,0,0,.68)] backdrop-blur-2xl xl:hidden">
+        <div className="fixed inset-x-[2%] top-[5.15rem] z-[100] max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[linear-gradient(145deg,rgba(16,17,22,.985),rgba(6,8,12,.99))] p-3 shadow-[0_28px_90px_rgba(0,0,0,.68)] backdrop-blur-2xl min-[1536px]:hidden">
           {isGeneral ? (
             <form onSubmit={submitToolSearch} role="search" className="relative mb-2">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
